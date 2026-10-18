@@ -1,0 +1,18 @@
+Optimus contains independently authored maintenance implementations.
+
+UI theme, header transition and holographic orb components are adapted from
+AngeronaSuite (https://github.com/Ag3nt47/AngeronaSuite), copyright 2026
+Angerona contributors, under the MIT license reproduced in LICENSE.
+Only presentation components are used; Angerona security/AI services are not included.
+
+PySide6 and Qt are distributed under their respective LGPL/GPL/commercial
+licenses. The portable build uses dynamically loaded Qt libraries. License
+texts accompany the bundled packages; see https://doc.qt.io/qtforpython-6/licenses.html
+and https://code.qt.io/pyside/pyside-setup for corresponding source.
+psutil uses the BSD 3-Clause license: https://github.com/giampaolo/psutil .
+PyInstaller has its GPL license with its bootloader distribution exception:
+https://pyinstaller.org/en/stable/license.html .
+
+CCleaner is a third-party product. Optimus does not include CCleaner executable
+code, icons, rule databases, license keys, subscription checks or service access.
+Feature comparisons document observed interfaces, not a claim of affiliation.

@@ -1,0 +1,297 @@
+"""Application services consumed by the Qt interface."""
+from __future__ import annotations
+import ctypes
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from .bridge import PowerShellBridge
+from .cleaner import Cleaner
+from .sampler import ResourceSampler
+from .workflow import Preferences, Workflow
+from . import performance
+
+class Backend:
+    def __init__(self, data_dir: Path | None = None):
+        self.data_dir = Path(data_dir or Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Optimus')
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.bridge = PowerShellBridge(self.data_dir / 'engine')
+        self.cleaner = Cleaner(self.data_dir)
+        self.sampler = ResourceSampler()
+        self.preference_store = Preferences(self.data_dir)
+        self.performance_controller = performance.PerformanceController(self.data_dir / 'suspended-processes.json')
+        self.workflow = Workflow(self)
+        from .browser_privacy import BrowserPrivacy
+        self.browser_privacy_engine = BrowserPrivacy(self.data_dir)
+        from .cloud_drive import CloudDrive
+        self.cloud = CloudDrive(self.data_dir)
+        from .maintenance import Maintenance
+        self.maintenance = Maintenance(self.bridge, self.data_dir)
+        self.last_audit = None
+
+    @staticmethod
+    def _list(value):
+        return [] if value is None else value if isinstance(value, list) else [value]
+
+    def elevate(self):
+        executable = sys.executable
+        arguments = [] if getattr(sys, 'frozen', False) else ['-B', str(Path(__file__).parents[2] / 'launch.py')]
+        result = ctypes.windll.shell32.ShellExecuteW(None, 'runas', executable, subprocess.list2cmdline(arguments), None, 1)
+        if result <= 32:
+            raise RuntimeError('Administrator relaunch was not completed.')
+        return {'started': True, 'note': 'The administrator window is a separate process. Your current window remains open.'}
+
+    def source_root(self):
+        if os.environ.get('OPTIMUS_ORIGINAL_SOURCE'):
+            return Path(os.environ['OPTIMUS_ORIGINAL_SOURCE'])
+        return Path(sys.executable).parent / 'source' if getattr(sys, 'frozen', False) else Path(__file__).parents[2]
+
+    def preferences(self):
+        return self.preference_store.load()
+
+    def save_preferences(self, settings):
+        return self.preference_store.save(settings)
+
+    def optimize(self, settings=None, progress_callback=None, cancel_event=None):
+        return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event)
+
+    def audit(self):
+        self.last_audit = self.bridge.request('audit')
+        return self.last_audit
+
+    def processes(self):
+        return performance.list_performance_candidates()
+
+    def set_priority(self, record, priority='High'):
+        return self.performance_controller.set_process_priority(record, priority)
+
+    def sleep_process(self, record):
+        return self.performance_controller.sleep_process(record)
+
+    def wake_process(self, record):
+        return self.performance_controller.wake_process(record)
+
+    def wake_all(self):
+        return self.performance_controller.wake_all()
+
+    def suspended(self):
+        return self.performance_controller.list_suspended()
+
+    def codex_profile(self, priority='High'):
+        return self.performance_controller.performance_profile(priority=priority)
+
+    def analysis_start(self, interval=5):
+        return self.sampler.start(interval)
+
+    def analysis_stop(self):
+        return self.sampler.stop()
+
+    def analysis_status(self):
+        return self.sampler.status()
+
+    def set_affinity(self, record, cores):
+        return self.performance_controller.set_affinity(record, cores)
+
+    def process_details(self, record):
+        local = performance.get_process_details(record)
+        local['launch_evidence'] = self.bridge.request('process_details', record=record)
+        return local
+
+    def cleanup_categories(self):
+        return self.cleaner.categories()
+
+    def cleanup_scan(self, category_ids=None, min_age_days=7):
+        if category_ids is None:
+            category_ids = ['user-temp']
+        return self.cleaner.scan(list(category_ids), int(min_age_days))
+
+    def cleanup_apply(self, plan):
+        return self.cleaner.apply(plan)
+
+    def storage_scan(self, root):
+        return self.bridge.request('storage_scan', root=str(root), timeout=120)
+
+    def duplicate_scan(self, root):
+        return self.bridge.request('duplicate_scan', root=str(root), timeout=120)
+
+    def duplicate_recycle(self, record):
+        return self.bridge.request('duplicate_recycle', record=record)
+
+    def startup_list(self):
+        return self._list(self.bridge.request('startup_list'))
+
+    def startup_set(self, record, enabled):
+        return self.bridge.request('startup_set', record=record, enabled=bool(enabled))
+
+    def startup_remove(self, record):
+        return self.bridge.request('startup_remove', record=record)
+
+    def services(self):
+        return self._list(self.bridge.request('services'))
+
+    def service_set(self, record, action):
+        return self.bridge.request('service_set', record=record, action=action)
+
+    def installed_apps(self):
+        return self._list(self.bridge.request('installed_apps'))
+
+    def uninstall(self, record):
+        current = self.installed_apps()
+        if not any(item.get('Identity') == record.get('Identity') and item.get('Name') == record.get('Name') for item in current):
+            raise ValueError('The installed-program selection changed. Refresh first.')
+        os.startfile('ms-settings:appsfeatures')
+        return {'opened': 'Windows Installed apps', 'search': record.get('Name'), 'note': 'Use the registered Windows uninstall action for this application.'}
+
+    def updates_scan(self):
+        return self.maintenance.updates_scan()
+
+    def update_app(self, package_id):
+        return self.maintenance.updates_apply(package_id, confirmed=True)
+
+    def drivers_list(self):
+        return self._list(self.bridge.request('drivers_list'))
+
+    def driver_updates_scan(self):
+        return self.bridge.request('driver_updates_scan', timeout=300)
+
+    def driver_update_apply(self, record):
+        return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'], timeout=900)
+
+    def backup_drivers(self, destination):
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run([str(Path(os.environ['SystemRoot']) / 'System32/pnputil.exe'), '/export-driver', '*', str(destination)],
+                                capture_output=True, text=True, errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), timeout=300)
+        return {'exit_code': result.returncode, 'output': result.stdout + result.stderr, 'destination': str(destination)}
+
+    def debloat_actions(self):
+        return self.maintenance.debloat_actions()
+
+    def debloat_preview(self, action):
+        return self.maintenance.debloat_preview(action)
+
+    def debloat_apply(self, plan):
+        return self.maintenance.debloat_apply(plan)
+
+    def changes(self):
+        return self._list(self.bridge.request('changes')) + self.performance_controller.allocation_history()
+
+    def restore(self, change):
+        if change.get('source') == 'python-allocation':
+            return self.performance_controller.restore_allocation(change.get('Id') or change.get('id'))
+        return self.bridge.request('restore', change=change)
+
+    def registry_scan(self):
+        return self.bridge.request('registry_scan')
+
+    def registry_remove(self, record):
+        return self.bridge.request('registry_remove', record=record)
+
+    def registry_restore(self, change):
+        return self.bridge.request('registry_restore', change=change)
+
+    def power_plans(self):
+        return self._list(self.bridge.request('power_plans'))
+
+    def set_power_plan(self, guid):
+        return self.bridge.request('set_power_plan', guid=guid)
+
+    def schedule_list(self):
+        return self.maintenance.schedules_list()
+
+    def create_schedule(self, name='Daily audit', time='18:00', mode='audit'):
+        if mode != 'audit':
+            raise ValueError('Scheduled jobs currently run read-only audits.')
+        hour, minute = map(int, time.split(':'))
+        return self.maintenance.schedule_create(hour=hour, minute=minute, confirmed=True)
+
+    def remove_schedule(self, name):
+        return self.maintenance.schedule_delete(name, confirmed=True)
+
+    def cloud_status(self):
+        return self.cloud.status()
+
+    def cloud_configure(self, client_id, tenant='consumers'):
+        return self.cloud.configure(client_id, tenant)
+
+    def cloud_connect(self):
+        return self.cloud.begin_connect()
+
+    def cloud_poll(self, session_id):
+        return self.cloud.poll_connect(session_id)
+
+    def cloud_logout(self):
+        return self.cloud.logout()
+
+    def cloud_scan(self, folder_id='root'):
+        return self.cloud.scan(folder_id)
+
+    def cloud_recycle(self, plan):
+        return self.cloud.recycle(plan)
+
+    def privacy_profiles(self):
+        return self.browser_privacy_engine.profiles()
+
+    def privacy_scan(self, profile_id, categories=None, keep_domains=None):
+        return self.browser_privacy_engine.scan(profile_id, categories=categories or [], keep_domains=keep_domains or [])
+
+    def privacy_apply(self, plan):
+        return self.browser_privacy_engine.apply(plan)
+
+    def privacy_backups(self):
+        return self.browser_privacy_engine.list_backups()
+
+    def privacy_restore(self, backup_id, confirmed=False):
+        return self.browser_privacy_engine.restore_backup(backup_id, confirmed=confirmed)
+
+    def browser_privacy(self, browser_id='edge'):
+        # Browser-native clearing preserves choices about passwords, logins and history.
+        browsers = {
+            'edge': ([Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Microsoft/Edge/Application/msedge.exe', Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Microsoft/Edge/Application/msedge.exe'], 'edge://settings/clearBrowserData'),
+            'chrome': ([Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Google/Chrome/Application/chrome.exe', Path(os.environ['LOCALAPPDATA']) / 'Google/Chrome/Application/chrome.exe'], 'chrome://settings/clearBrowserData'),
+            'brave': ([Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'BraveSoftware/Brave-Browser/Application/brave.exe'], 'brave://settings/clearBrowserData'),
+            'firefox': ([Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Mozilla Firefox/firefox.exe'], 'about:preferences#privacy'),
+        }
+        if browser_id not in browsers:
+            raise ValueError('Unknown browser.')
+        candidates, url = browsers[browser_id]
+        executable = next((path for path in candidates if path.is_file()), None)
+        if not executable:
+            raise RuntimeError('This browser was not found in its standard installation locations.')
+        subprocess.Popen([str(executable), url])
+        return {'opened': str(executable), 'page': url}
+
+    def system_tool(self, tool_id):
+        aliases = {'installed-apps': 'apps', 'windows-update': 'updates', 'device-manager': 'devices', 'task-scheduler': 'tasks', 'defrag': 'drives'}
+        tool_id = aliases.get(tool_id, tool_id)
+        settings = {'storage': 'ms-settings:storagesense', 'updates': 'ms-settings:windowsupdate', 'startup': 'ms-settings:startupapps',
+                    'apps': 'ms-settings:appsfeatures', 'recovery': 'ms-settings:recovery', 'privacy': 'ms-settings:privacy-general', 'optional-updates': 'ms-settings:windowsupdate-optionalupdates'}
+        programs = {'resource-monitor': 'System32/resmon.exe', 'drives': 'System32/dfrgui.exe', 'services': 'System32/services.msc',
+                    'tasks': 'System32/taskschd.msc', 'devices': 'System32/devmgmt.msc', 'system-restore': 'System32/rstrui.exe'}
+        if tool_id in settings:
+            os.startfile(settings[tool_id])
+        elif tool_id in programs:
+            os.startfile(str(Path(os.environ['SystemRoot']) / programs[tool_id]))
+        else:
+            raise ValueError('Unknown Windows tool.')
+        return {'opened': tool_id}
+
+    def export_report(self, destination):
+        snapshot = self.audit()
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / 'audit.json').write_text(json.dumps(snapshot, indent=2), encoding='utf-8')
+        return {'path': str(destination / 'audit.json')}
+
+    def close(self):
+        self.sampler.stop()
+        self.bridge.close()
+
+
+
+
+
+
+

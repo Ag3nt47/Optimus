@@ -1,0 +1,64 @@
+name: Windows build
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-build.txt
+      - run: python -m pip install -e "." --no-deps
+      - run: python -m pytest -q
+      - name: PowerShell engine fixture tests
+        shell: powershell
+        run: |
+          & tests/Test-FileTools.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-Maintenance.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-RegistryTools.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-RegistryIntegration.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: python -m PyInstaller --noconfirm --windowed --onedir --name Optimus --icon src/optimus/assets/optimus.ico --paths src --collect-all optimus --collect-submodules psutil --add-data "LICENSE;." --add-data "NOTICE;." launch.py
+      - run: python tools/package_source.py --source . --destination dist/Optimus/source
+      - run: python tools/package_licenses.py --source . --destination dist/Optimus
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Optimus-Windows
+          path: dist/Optimus/
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Optimus-Windows
+          path: Optimus
+      - run: Compress-Archive -Path Optimus -DestinationPath Optimus-Windows.zip
+      - name: Publish release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME 2>$null
+          if ($LASTEXITCODE -ne 0) { gh release create $env:GITHUB_REF_NAME --generate-notes }
+          $assets = gh release view $env:GITHUB_REF_NAME --json assets --jq '.assets[].name'
+          if ($assets -notcontains 'Optimus-Windows.zip') { gh release upload $env:GITHUB_REF_NAME Optimus-Windows.zip }
+
+
+
