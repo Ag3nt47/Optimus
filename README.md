@@ -56,9 +56,12 @@ To build the portable executable:
 
 ```powershell
 .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed --onedir --name Optimus --icon src/optimus/assets/optimus.ico --paths src --collect-all optimus --collect-submodules psutil --add-data "LICENSE;." --add-data "NOTICE;." launch.py
+.\.venv\Scripts\python.exe tools/normalize_bundle.py --bundle dist/Optimus
 .\.venv\Scripts\python.exe tools/package_source.py --source . --destination dist/Optimus/source
 .\.venv\Scripts\python.exe tools/package_licenses.py --source . --destination dist/Optimus
 ```
+
+The build normalization step checks Qt's required Windows ICU symbols and removes only a recognized conflicting ICU library collected from the build PATH. It refuses unknown dependencies and never changes Windows system files.
 
 The `source` folder is required for the Sandbox editor. Saved source executes with the current Windows account's permissions after an explicit restart; the editor is a source workspace, not an operating-system isolation boundary.
 
@@ -71,5 +74,6 @@ No runtime reports, browser databases, machine inventories, credentials or propr
 ## License
 
 MIT for Optimus and the adapted Angerona presentation code. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party licenses. PySide6/Qt retain their own licenses.
+
 
 

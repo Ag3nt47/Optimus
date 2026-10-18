@@ -31,8 +31,16 @@ jobs:
           & tests/Test-RegistryIntegration.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python -m PyInstaller --noconfirm --windowed --onedir --name Optimus --icon src/optimus/assets/optimus.ico --paths src --collect-all optimus --collect-submodules psutil --add-data "LICENSE;." --add-data "NOTICE;." launch.py
+      - run: python tools/normalize_bundle.py --bundle dist/Optimus
       - run: python tools/package_source.py --source . --destination dist/Optimus/source
       - run: python tools/package_licenses.py --source . --destination dist/Optimus
+      - name: Verify packaged interface
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $app = Start-Process -FilePath dist/Optimus/Optimus.exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $app.WaitForExit(45000)) { Stop-Process -Id $app.Id -Force; throw 'Packaged interface did not finish its smoke test.' }
+          if ($app.ExitCode -ne 0) { throw 'Packaged interface failed its smoke test.' }
       - uses: actions/upload-artifact@v4
         with:
           name: Optimus-Windows
@@ -59,6 +67,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { gh release create $env:GITHUB_REF_NAME --generate-notes }
           $assets = gh release view $env:GITHUB_REF_NAME --json assets --jq '.assets[].name'
           if ($assets -notcontains 'Optimus-Windows.zip') { gh release upload $env:GITHUB_REF_NAME Optimus-Windows.zip }
+
+
 
 
 
