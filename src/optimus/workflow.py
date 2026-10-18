@@ -68,17 +68,21 @@ class Workflow:
         self.backend = backend
         self.lock = threading.Lock()
         self.active = False
+        self.last_report = None
 
     def run(self, settings, progress_callback, cancel_event=None):
         configuration = Preferences.validate(settings)
         if not self.lock.acquire(blocking=False):
             raise RuntimeError('An optimization run is already active.')
         self.active = True
-        run_id = uuid.uuid4().hex
-        log_path = self.backend.data_dir / 'runs' / (run_id + '.json')
-        report = {'id': run_id, 'started_at': time.time(), 'settings': configuration, 'stages': [], 'cancelled': False,
-                  'note': 'Percent completion measures completed stages, not elapsed time. Resource snapshots fluctuate.'}
+        report = None
+        log_path = None
         try:
+            run_id = uuid.uuid4().hex
+            log_path = self.backend.data_dir / 'runs' / (run_id + '.json')
+            report = {'id': run_id, 'started_at': time.time(), 'settings': configuration, 'stages': [], 'cancelled': False,
+                      'status': 'running', 'note': 'Percent completion measures completed stages, not elapsed time. Resource snapshots fluctuate.'}
+            self.last_report = report
             atomic_json(log_path, report)
             stages = [('Inspect current resource usage', 'Reading running programs, memory, storage, startup entries and services.', self.backend.audit)]
             age = configuration['cleanup_age_days']
@@ -143,8 +147,21 @@ class Workflow:
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(item['status'] == 'failed' for item in report['stages'])
             report['log_path'] = str(log_path)
+            report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] else 'completed'
             atomic_json(log_path, report)
             return report
+        except Exception as error:
+            if report is None:
+                report = {'settings': configuration, 'stages': [], 'cancelled': False}
+            report.update({'status': 'failed', 'error': str(error), 'finished_at': time.time()})
+            if log_path is not None:
+                report['log_path'] = str(log_path)
+                try:
+                    atomic_json(log_path, report)
+                except Exception as journal_error:
+                    report['journal_error'] = str(journal_error)
+            self.last_report = report
+            raise
         finally:
             self.active = False
             self.lock.release()

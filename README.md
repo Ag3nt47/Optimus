@@ -12,6 +12,8 @@ Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Opti
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
+**Version 0.1.1** fixes workflow startup when Windows redirects AppData to another drive. Operation journals use the resolved data location, and a journal creation failure releases the workflow lock so the app can recover.
+
 ## Three controls
 
 - **1 click Optimize and debloat** runs the modules selected in Settings. A live window shows actual completed-stage percentages, the current operation, process information and a detailed activity log. Cancellation stops at a safe boundary.
@@ -74,6 +76,7 @@ No runtime reports, browser databases, machine inventories, credentials or propr
 ## License
 
 MIT for Optimus and the adapted Angerona presentation code. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party licenses. PySide6/Qt retain their own licenses.
+
 
 
 

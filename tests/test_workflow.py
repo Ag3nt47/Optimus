@@ -8,6 +8,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest.mock import patch
 
 module_path = Path(__file__).parents[1] / 'src' / 'optimus' / 'workflow.py'
 sys.path.insert(0, str(module_path.parents[1]))
@@ -154,6 +155,33 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(self.workflow.active)
         result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False), lambda event: None)
         self.assertEqual(result['failed_stages'], 0)
+
+    def test_initial_journal_failure_releases_lock_and_reports_failed(self):
+        failure = OSError(17, 'Synthetic cross-volume journal failure')
+        with patch.object(workflow_module, 'atomic_json', side_effect=failure):
+            with self.assertRaisesRegex(OSError, 'Synthetic cross-volume'):
+                self.workflow.run(self.config(), lambda event: None)
+        self.assertEqual(self.backend.calls, [])
+        self.assertFalse(self.workflow.active)
+        self.assertFalse(self.workflow.lock.locked())
+        self.assertEqual(self.workflow.last_report['status'], 'failed')
+        self.assertIn('Synthetic cross-volume', self.workflow.last_report['journal_error'])
+        result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False), lambda event: None)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(len(result['stages']), 2)
+
+    def test_preparation_failure_after_lock_acquire_releases_lock(self):
+        previous = self.backend.data_dir
+        self.backend.data_dir = None
+        try:
+            with self.assertRaises(TypeError):
+                self.workflow.run(self.config(), lambda event: None)
+        finally:
+            self.backend.data_dir = previous
+        self.assertFalse(self.workflow.active)
+        self.assertFalse(self.workflow.lock.locked())
+        self.assertEqual(self.workflow.last_report['status'], 'failed')
+        self.assertEqual(self.backend.calls, [])
 
     def test_concurrent_run_is_refused(self):
         self.workflow.lock.acquire()
