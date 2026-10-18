@@ -25,10 +25,14 @@ class PowerShellBridge:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         executable = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
         self._replies = queue.Queue()
+        # This host is Windows PowerShell 5.1. A PS7/Codex parent can export Core
+        # modules with the same names; restrict this child to its own OS modules.
+        child_environment = {key: value for key, value in os.environ.items() if key.casefold() != 'psmodulepath'}
+        child_environment['PSModulePath'] = str(executable.parent / 'Modules')
         process = subprocess.Popen([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                                     '-File', str(self.script), '-DataRoot', str(self.data_dir)], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
-                                   bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                                   bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), env=child_environment)
         self._process = process
         target_queue = self._replies
         def read_output():

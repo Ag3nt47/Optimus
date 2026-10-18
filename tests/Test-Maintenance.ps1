@@ -55,5 +55,27 @@ Assert-OptimusTest ($script:Launches[0].Arguments -notmatch 'IncludeWebView2|Inc
 $script:FixtureHash='A'*64;$blocked=$false
 try{Start-OptimusDesktopEdgeScript -Target $external|Out-Null}catch{$blocked=$true}
 Assert-OptimusTest ($blocked -and $script:Launches.Count -eq 1) 'changed external script blocks launch'
+# Retained Bing Wallpaper must be excluded from every current/future-user group.
+foreach($action in @('consumer-apps','m365','outlook')) {
+    foreach($name in @('Microsoft.BingWallpaper','Microsoft.BingWallpaper.Stable','Microsoft.Microsoft365BingWallpaper','Microsoft.Bing-Wallpaper')) {
+        Assert-OptimusTest (-not(Test-OptimusOptionalPackage $name $action)) ('Bing Wallpaper retained '+$action+' '+$name)
+    }
+}
+Assert-OptimusTest (Test-OptimusOptionalPackage 'Microsoft.BingWeather' 'consumer-apps') 'Weather remains independently optional'
+Assert-OptimusTest (Test-OptimusOptionalPackage 'Microsoft.BingNews' 'consumer-apps') 'News remains independently optional'
+$script:Packages=@(
+ [pscustomobject]@{Name='Microsoft.BingWallpaper';PackageFullName='Microsoft.BingWallpaper_1.1.469.0_x86__8wekyb3d8bbwe';Version='1.1.469.0';NonRemovable=$false;IsFramework=$false;IsResourcePackage=$false},
+ [pscustomobject]@{Name='Microsoft.Microsoft365BingWallpaper';PackageFullName='Microsoft.Microsoft365BingWallpaper_1.0_x64__fixture';Version='1.0';NonRemovable=$false;IsFramework=$false;IsResourcePackage=$false}
+)
+function Test-OptimusMaintenanceAdmin {return $true}
+function Get-AppxProvisionedPackage {param([switch]$Online,$ErrorAction) return @([pscustomobject]@{DisplayName='Microsoft.BingWallpaper';PackageName='Microsoft.BingWallpaper_1.1.469.0_neutral_fixture';Version='1.1.469.0'},[pscustomobject]@{DisplayName='Microsoft.Microsoft365BingWallpaper';PackageName='Microsoft.Microsoft365BingWallpaper_1.0_neutral_fixture';Version='1.0'})}
+foreach($action in @('consumer-apps','m365','outlook')) {
+    Assert-OptimusTest (@(Get-OptimusMaintenanceTargets -Action $action -IncludeProvisioned $true).Count -eq 0) ('retained package absent from installed and provisioned '+$action)
+}
+$legacyFingerprint=Get-OptimusMaintenanceHash ('Microsoft.BingWallpaper|Microsoft.BingWallpaper_1.1.469.0_x86__8wekyb3d8bbwe|current-user')
+$legacy=[pscustomobject]@{id=('appx-'+$legacyFingerprint.Substring(0,20));fingerprint=$legacyFingerprint;name='Microsoft.BingWallpaper'}
+$beforeCalls=$script:Calls.Count;$blocked=$false
+try{Invoke-OptimusMaintenanceRequest -Operation maintenance_apply -Arguments @{action='consumer-apps';targets=@($legacy);confirmation='REMOVE'}|Out-Null}catch{$blocked=$true}
+Assert-OptimusTest ($blocked -and $script:Calls.Count -eq $beforeCalls) 'stale pre-protection Bing plan cannot remove retained package'
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealAppRemovals=0;RealExternalProgramsLaunched=0;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress
 

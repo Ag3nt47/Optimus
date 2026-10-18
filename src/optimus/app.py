@@ -7,6 +7,13 @@ import os
 import sys
 from pathlib import Path
 
+def _resume_saved_analysis(backend):
+    """Resume only a previously saved opt-in; never change preferences."""
+    preferences = backend.preferences()
+    if preferences.get('background_analysis_enabled') is True:
+        return backend.analysis_start(preferences.get('analysis_interval', 5))
+    return None
+
 def parser():
     result = argparse.ArgumentParser(prog='Optimus', description='Optimus: Computer optimization tool')
     result.add_argument('--audit', action='store_true', help='Save a read-only audit without opening the interface.')
@@ -47,6 +54,11 @@ def main(argv=None):
     if args.no_orb:
         window.setProperty('disable_orb', True)
     window.show()
+    if not args.smoke_test:
+        try:
+            _resume_saved_analysis(backend)
+        except Exception as error:
+            window.status.setText('Background analysis could not resume: ' + str(error))
     if args.restart_ready_file:
         marker = args.restart_ready_file.resolve()
         allowed = (backend.data_dir / 'Sandbox' / 'restart').resolve()
@@ -75,6 +87,7 @@ def main(argv=None):
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
 
 
 

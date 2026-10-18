@@ -22,7 +22,7 @@ Optimus implements independent Windows maintenance tools. This table explains th
 | Driver inventory and updates | Windows integration | Installed signed-driver inventory, Windows Update Agent candidate scan, confirmed individual update installation, and third-party driver-package export with pnputil. No independent all-vendor catalog or blanket driver replacement. |
 | Disk analysis | Direct | Bounded selected-folder scans with large files/folders, file-type totals, incomplete/error reporting and reparse/placeholder exclusions. Logical sizes are not guaranteed reclaim estimates. |
 | Local duplicate finding | Direct | SHA-256 content groups and confirmed single-file recycling with identity/retained-copy checks. Matching contents alone do not make a file disposable. |
-| Curated Windows debloat | Direct/Windows integration | Concrete preview and per-target selection for curated consumer apps, Microsoft 365 consumer packages, Outlook, Edge and desktop Office workflows. Recovery varies by action. Frameworks, security components, Store support and WebView2 are preserved by curated groups. |
+| Curated Windows debloat | Direct/Windows integration | Concrete preview and per-target selection for curated consumer apps, Microsoft 365 consumer packages, Outlook, Edge and desktop Office workflows. Recovery varies by action. Bing Wallpaper, frameworks, security components, Store support and WebView2 are preserved by curated groups. |
 | Existing Desktop Edge script | Optional external integration | Available only when the recognized user-provided script exists. Preview and script identity checks precede its own visible elevated/typed-confirmation workflow. It is not silently run by the normal Edge action. |
 | Registry review and selective repair | Direct, narrowly scoped | Missing local executable targets in supported current-user App Paths registrations. Reviewed single-key removal retains raw value types and security descriptors for guarded restore. No HKLM, COM/CLSID, shared-DLL, installer or wholesale registry cleaning. |
 | Personal OneDrive duplicate review | Optional external integration | User-registered public-client device-code sign-in, encrypted current-user token storage, bounded metadata scan and confirmed one-file recycling. Provider hash/size matches are candidates, not downloaded byte comparisons. Restore uses OneDrive's website bin. |
@@ -37,6 +37,8 @@ Optimus implements independent Windows maintenance tools. This table explains th
 
 A scan is a preview or observation. An apply operation has its own confirmation, validation and recovery route. Reparse points, access failures, active applications, expired plans and changed identities can cause exclusions or refusal. A bounded scan must not be interpreted as a complete disk/account inventory.
 
+Packaged maintenance operations use the native Windows PowerShell module search path to avoid module-loading failures from an inherited host environment.
+
 Windows Update, WinGet, the Microsoft Graph connection and external scripts can require network access, agreements, permission changes or a restart. Local analysis, cache scanning and source editing do not require a cloud connection. No account is contacted merely by constructing the Cloud panel.
 
 Core behavior is covered by disposable local fixtures, mocked external services and review-UI payload tests. Those tests do not establish successful live driver installation, real-account cloud authorization, every vendor uninstaller, or every Windows/hardware combination. Actual operations return logs and per-item results so their outcome can be assessed.
@@ -44,3 +46,4 @@ Core behavior is covered by disposable local fixtures, mocked external services 
 ## Implementation map
 
 The public source includes the [desktop UI](../src/optimus/ui.py), [cleanup engine](../src/optimus/cleaner.py), [browser privacy engine](../src/optimus/browser_privacy.py), [resource controls](../src/optimus/performance.py), [workflow and preferences](../src/optimus/workflow.py), [maintenance coordination](../src/optimus/maintenance.py), [personal OneDrive integration](../src/optimus/cloud_drive.py), [source workspace](../src/optimus/source_workspace.py) and [PowerShell engines](../src/optimus/engine/). Operation-specific instructions are in the [user guide](USER_GUIDE.md).
+

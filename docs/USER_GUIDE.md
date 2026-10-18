@@ -48,7 +48,9 @@ The Startup tools also include **Services** for supported third-party services. 
 
 **Duplicate finder** compares eligible local file contents using SHA-256. It offers a confirmed single-file Recycle Bin action, with identity and retained-copy checks. Equal contents do not establish that a file is unnecessary. Protected application/system locations and hardlinked names have additional restrictions.
 
-**Debloat** provides curated optional-app actions. Preview an action, read its scope and recovery information, and check only the concrete targets you want. Nothing is selected by default. The apply step uses a typed confirmation and only the checked IDs from that preview. Microsoft 365 consumer apps, desktop Office, new Outlook, Edge and an optional existing Desktop Edge script are separate actions with different effects. An external script keeps its own visible administrator and typed-confirmation flow. Store components, security software, frameworks and shared WebView2 are preserved by the curated app groups.
+**Debloat** provides curated optional-app actions. Preview an action, read its scope and recovery information, and check only the concrete targets you want. Nothing is selected by default. The apply step uses a typed confirmation and only the checked IDs from that preview. Microsoft 365 consumer apps, desktop Office, new Outlook, Edge and an optional existing Desktop Edge script are separate actions with different effects. An external script keeps its own visible administrator and typed-confirmation flow. Bing Wallpaper is protected from debloat. Store components, security software, frameworks and shared WebView2 are also preserved by the curated app groups.
+
+Packaged maintenance uses native Windows PowerShell module locations, so a host application's inherited module path does not prevent Windows security modules from loading. This does not change your system or user environment settings.
 
 **Registry review** is limited to supported current-user App Paths registrations whose local executable target is missing. Scan, inspect one concrete entry, and use the selected-entry removal only if you recognize it as obsolete. A missing target is evidence, not proof that the registration is unused. The tool revalidates a fresh preview and saves raw value types and security descriptors before removal. Supported restoration is available through History. It does not perform wholesale registry cleaning or remove system-wide COM, installer or shared-DLL registrations.
 
@@ -83,6 +85,7 @@ The release source and the working copy remain separate. Restoring an original f
 Settings, reports, operation logs, supported backups and Sandbox history live under `%LOCALAPPDATA%\Optimus`. Keep this data private: reports can contain executable paths, startup commands, device details and account/profile metadata. A browser rollback copy contains browser data and needs the same care as the profile it backs up.
 
 Optimus does not promise a fixed performance gain. Use the measured results to choose what to change, then compare your normal workload. See [feature coverage](FEATURES.md) for the direct engines, Windows integrations and unsupported areas.
+
 
 
 

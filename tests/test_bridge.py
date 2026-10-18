@@ -79,6 +79,34 @@ class BridgeTests(unittest.TestCase):
             if time.monotonic() >= deadline: self.fail('Mock transport condition timed out')
             time.sleep(0.005)
 
+    def test_windows_child_uses_only_matching_os_module_path(self):
+        inherited = {'SystemRoot': r'C:\Windows', 'PSMODULEPATH': r'C:\Codex\PS7\Modules',
+                     'PSModulePath': r'C:\Core\Modules', 'psmodulepath': r'C:\User\Modules',
+                     'OPTIMUS_TEST_MARKER': 'preserved'}
+        original = dict(inherited)
+        with patch.object(bridge_module.os, 'environ', inherited):
+            self.bridge._start()
+        child = self.popen_mock.call_args.kwargs['env']
+        matching = [key for key in child if key.casefold() == 'psmodulepath']
+        self.assertEqual(matching, ['PSModulePath'])
+        self.assertEqual(Path(child['PSModulePath']), Path(r'C:\Windows') / 'System32/WindowsPowerShell/v1.0/Modules')
+        self.assertNotIn('Codex', child['PSModulePath'])
+        self.assertNotIn('Core', child['PSModulePath'])
+        self.assertEqual(child['OPTIMUS_TEST_MARKER'], 'preserved')
+        self.assertEqual(inherited, original)
+        self.assertIsNot(child, inherited)
+
+    def test_child_environment_cannot_mutate_parent_environment(self):
+        inherited = {'SystemRoot': r'C:\Windows', 'PSMODULEPATH': r'C:\Host\Modules', 'PATH': 'fixture-path'}
+        with patch.object(bridge_module.os, 'environ', inherited):
+            self.bridge._start()
+        child = self.popen_mock.call_args.kwargs['env']
+        child['PATH'] = 'child-only-value'
+        child['PSModulePath'] = 'child-only-modules'
+        self.assertEqual(inherited['PATH'], 'fixture-path')
+        self.assertEqual(inherited['PSMODULEPATH'], r'C:\Host\Modules')
+        self.assertNotIn('PSModulePath', inherited)
+
     def test_timeout_remains_pending_and_close_never_terminates(self):
         with self.assertRaises(TimeoutError):
             self.bridge.request('driver_update_apply', timeout=0.01, id='fixture-update')

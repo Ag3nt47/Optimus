@@ -12,7 +12,7 @@ Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Opti
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
-**Version 0.1.1** fixes workflow startup when Windows redirects AppData to another drive. Operation journals use the resolved data location, and a journal creation failure releases the workflow lock so the app can recover.
+**Version 0.1.2** protects Bing Wallpaper from debloat and fixes packaged Windows PowerShell module loading for maintenance operations. It retains the redirected-AppData journal and workflow recovery fixes from 0.1.1.
 
 ## Three controls
 
@@ -20,7 +20,7 @@ Windows 10/11, 64-bit. Start normally; administrator mode is available inside Se
 - **Settings** contains Low/Standard/High cleanup presets, individual removal choices, priority/affinity controls, optional background analysis, the full maintenance tools and appearance settings.
 - **Sandbox** opens an editable working copy of the full source. Save, version history, Revert and Original version are available. **Restart Optimus** validates the saved Python source and starts that version; the current app remains open if the new interface does not report ready.
 
-The default one-click configuration cleans old temporary files and caches of closed browsers. App removals, browser history/cookie deletion, Codex priority changes and background analysis require your choices. Existing Codex priority watchers are left unchanged.
+The default one-click configuration cleans old temporary files and caches of closed browsers. App removals, browser history/cookie deletion, Codex priority changes and background analysis require your choices. Existing Codex priority watchers are left unchanged. If you previously enabled background analysis in the saved configuration, it resumes at that saved interval when the interface reopens. Scheduled/command-line audits do not start background analysis.
 
 ## Tools
 
@@ -35,7 +35,7 @@ The default one-click configuration cleans old temporary files and caches of clo
 - Bounded disk scans, SHA256 duplicate finding and confirmed single-file recycling.
 - Selective stale HKCU App Paths review with backed-up removal and conflict-checked restoration.
 - Optional personal OneDrive metadata duplicate review, using your own Microsoft app registration and a DPAPI-protected local sign-in.
-- Curated consumer-app, Microsoft 365, Outlook and Edge removal plans. Store, security components, frameworks and WebView2 are preserved by the curated debloat actions.
+- Curated consumer-app, Microsoft 365, Outlook and Edge removal plans. Bing Wallpaper, Store, security components, frameworks and WebView2 are preserved by the curated debloat actions.
 - Optional integration with an existing Desktop `Specialized Computer Management/Remove-Edge.ps1`: preview and exact script-hash verification, followed by its own visible administrator/typed-confirmation flow.
 - Read-only scheduled reports, local history and supported setting restoration.
 
@@ -76,6 +76,8 @@ No runtime reports, browser databases, machine inventories, credentials or propr
 ## License
 
 MIT for Optimus and the adapted Angerona presentation code. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party licenses. PySide6/Qt retain their own licenses.
+
+
 
 
 

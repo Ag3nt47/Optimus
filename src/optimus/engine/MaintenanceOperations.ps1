@@ -11,14 +11,20 @@ function Get-OptimusMaintenanceHash {
     try { return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))).Replace('-','').ToLowerInvariant() }
     finally { $hash.Dispose() }
 }
+function Test-OptimusPreservedPackage {
+    param([string]$Name)
+    # Bing Wallpaper is explicitly retained, including name/publisher variants.
+    # Bing News and Weather remain independent optional selections.
+    return (($Name -replace '[^A-Za-z0-9]','') -match '(?i)BingWallpaper')
+}
 function Test-OptimusOptionalPackage {
     param([string]$Name,[string]$Action)
-    if ($Name -match '[*?\\/]') { return $false }
+    if ($Name -match '[*?\\/]' -or (Test-OptimusPreservedPackage -Name $Name)) { return $false }
     if ($Action -eq 'm365') { return ($Name -in @('Microsoft.MicrosoftOfficeHub','Microsoft.M365Companions') -or $Name -like 'Microsoft.Microsoft365*') }
     if ($Action -eq 'outlook') { return $Name -eq 'Microsoft.OutlookForWindows' }
     if ($Action -ne 'consumer-apps') { return $false }
     return $Name -in @(
-        'Microsoft.BingNews','Microsoft.BingWeather','Microsoft.BingWallpaper','Microsoft.Getstarted',
+        'Microsoft.BingNews','Microsoft.BingWeather','Microsoft.Getstarted',
         'Microsoft.MicrosoftSolitaireCollection','Microsoft.Microsoft3DViewer','Microsoft.Print3D',
         'Microsoft.MixedReality.Portal','Microsoft.People','Microsoft.WindowsMaps',
         'Microsoft.WindowsFeedbackHub','Microsoft.549981C3F5F10','Microsoft.SkypeApp',
@@ -65,14 +71,14 @@ function Get-OptimusMaintenanceTargets {
     }
     $targets=@()
     foreach ($package in @(Get-AppxPackage -ErrorAction Stop)) {
-        if (-not (Test-OptimusOptionalPackage -Name $package.Name -Action $Action) -or $package.NonRemovable -or $package.IsFramework -or $package.IsResourcePackage) { continue }
+        if ((Test-OptimusPreservedPackage -Name ($package.Name+'|'+$package.PackageFullName)) -or -not (Test-OptimusOptionalPackage -Name $package.Name -Action $Action) -or $package.NonRemovable -or $package.IsFramework -or $package.IsResourcePackage) { continue }
         $fingerprint=Get-OptimusMaintenanceHash ($package.Name+'|'+$package.PackageFullName+'|current-user')
         $targets += [pscustomobject]@{id=('appx-'+$fingerprint.Substring(0,20));name=$package.Name;version=[string]$package.Version;scope='current-user';kind='appx';packageFullName=$package.PackageFullName;fingerprint=$fingerprint;selected=$false;admin=$false;recovery='Reinstall this app from Microsoft Store. Removed app-local data is not restored by Optimus.'}
     }
     if ($IncludeProvisioned) {
         if (-not (Test-OptimusMaintenanceAdmin)) { throw 'Administrator rights are required to review and remove provisioning for future new accounts.' }
         foreach ($package in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop)) {
-            if (-not (Test-OptimusOptionalPackage -Name $package.DisplayName -Action $Action)) { continue }
+            if ((Test-OptimusPreservedPackage -Name ($package.DisplayName+'|'+$package.PackageName)) -or -not (Test-OptimusOptionalPackage -Name $package.DisplayName -Action $Action)) { continue }
             $fingerprint=Get-OptimusMaintenanceHash ($package.DisplayName+'|'+$package.PackageName+'|future-users')
             $targets += [pscustomobject]@{id=('provisioned-'+$fingerprint.Substring(0,20));name=$package.DisplayName;version=[string]$package.Version;scope='future-users';kind='provisioned';packageFullName=$package.PackageName;fingerprint=$fingerprint;selected=$false;admin=$true;recovery='Requires the original signed package, dependencies and license to re-provision; a normal Store reinstall affects the current user only.'}
         }
@@ -162,6 +168,7 @@ function Invoke-OptimusMaintenanceRequest {
         $current=@($fresh | Where-Object { $_.id -ceq $id -and $_.fingerprint -ceq [string]$expected.fingerprint })
         if ($current.Count -ne 1) { throw 'An installed package, publisher, version or uninstall method changed. Preview again; nothing was removed.' }
         if ($current[0].admin -and -not (Test-OptimusMaintenanceAdmin)) { throw 'Administrator rights are required for the selected target.' }
+        if (Test-OptimusPreservedPackage -Name ($current[0].name+'|'+$current[0].packageFullName)) { throw 'Bing Wallpaper is protected and will not be removed.' }
         $selected+=$current[0]
     }
     # Revalidation for every selected target completes before the first mutation.

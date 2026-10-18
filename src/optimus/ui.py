@@ -1029,7 +1029,7 @@ class DetailedSettingsWindow(QMainWindow):
         split.setStretchFactor(0,1)
         split.setStretchFactor(1,1)
         layout.addWidget(split,1)
-        self._note(layout,'No target is selected by default. Review package names, scope, recovery and restart requirements before applying only your checked selection. Some removals require reinstallation.')
+        self._note(layout,'Bing Wallpaper is protected from debloat. No target is selected by default. Review package names, scope, recovery and restart requirements before applying only your checked selection. Some removals require reinstallation.')
 
     def load_debloat_actions(self):
         self._run('debloat_actions',done=self._debloat_actions_ready)
@@ -1840,6 +1840,7 @@ class OptimusWindow(QMainWindow):
 
 def create_window(backend, *, smoke_test=False):
     return OptimusWindow(backend, smoke_test=smoke_test)
+
 
 
 
