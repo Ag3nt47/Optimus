@@ -12,7 +12,7 @@ Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Opti
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
-**Version 0.1.2** protects Bing Wallpaper from debloat and fixes packaged Windows PowerShell module loading for maintenance operations. It retains the redirected-AppData journal and workflow recovery fixes from 0.1.1.
+**Version 0.2.0** adds first-start setup questions and opt-in automatic maintenance. Choose each module, cleanup scope, approved software package IDs and timing before saving. Existing users see setup once after upgrading; their previous choices remain available. Bing Wallpaper protection and the packaged Qt/PowerShell/AppData fixes are retained.
 
 ## Three controls
 
@@ -21,6 +21,20 @@ Windows 10/11, 64-bit. Start normally; administrator mode is available inside Se
 - **Sandbox** opens an editable working copy of the full source. Save, version history, Revert and Original version are available. **Restart Optimus** validates the saved Python source and starts that version; the current app remains open if the new interface does not report ready.
 
 The default one-click configuration cleans old temporary files and caches of closed browsers. App removals, browser history/cookie deletion, Codex priority changes and background analysis require your choices. Existing Codex priority watchers are left unchanged. If you previously enabled background analysis in the saved configuration, it resumes at that saved interval when the interface reopens. Scheduled/command-line audits do not start background analysis.
+
+## First-start questions and automatic maintenance
+
+![Optimus first-start questions](docs/optimus-setup.png)
+
+The setup opens on the first normal GUI launch. It covers Health Check, Custom Clean, Uninstaller/debloat, Duplicate Finder, personal OneDrive review, Performance Optimizer, Startup Manager, Software Updater and Driver Updater. Cancel keeps your existing settings. **Save choices** stores the reviewed selections; **Run selected maintenance now** is a separate opt-in. Rerun the questions from Settings at any time.
+
+Choose manual operation, each Optimus startup, daily while Optimus is open, or weekly while Optimus is open. Daily/weekly timing is measured from the last attempt, including failures, to avoid repeated installer attempts. These modes do not install a background Windows service or run when Optimus is closed. The existing Task Scheduler feature remains a separate read-only audit.
+
+Your selected cleanup, curated removals and Codex priority profile can apply automatically. The software updater can silently update only the exact WinGet package IDs you list, with separate consent for package/source agreements. A fresh recognized update scan must still match the package and source. Vendor installers may require administrator permission or close applications; Optimus does not request automatic reboots.
+
+Other modules generate current review results: installed programs, startup entries, performance candidates, chosen duplicate folders, connected personal OneDrive metadata and Windows Update driver candidates. Individual file recycling, startup/service changes, arbitrary app uninstalls and driver installation remain available in Settings with their normal target selection. Automatic scanning does not make every matching file disposable or every startup entry unnecessary. Cloud scans require a connection you initiate in Settings.
+
+The completion window records actual per-stage results, exclusions and failures. Pause automatic maintenance by choosing **Manual** in setup. Background resource sampling has its own saved On/Off choice.
 
 ## Tools
 
@@ -76,9 +90,3 @@ No runtime reports, browser databases, machine inventories, credentials or propr
 ## License
 
 MIT for Optimus and the adapted Angerona presentation code. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party licenses. PySide6/Qt retain their own licenses.
-
-
-
-
-
-

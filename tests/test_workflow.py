@@ -30,7 +30,7 @@ class MockBackend:
         if self.audit_callback: self.audit_callback()
         return {'fixture': True}
     def cleanup_categories(self):
-        return [{'id': 'mock-browser-cache', 'process_names': ['FixtureBrowser.exe'], 'available': True}]
+        return [{'id': 'mock-browser-cache', 'process_names': ['FixtureBrowser.exe'], 'available': True}, {'id': 'mock-extra', 'available': True}]
     def cleanup_scan(self, category_ids, age):
         self.calls.append(('cleanup_scan', list(category_ids), age))
         if self.scan_callback: self.scan_callback()
@@ -47,6 +47,29 @@ class MockBackend:
     def debloat_apply(self, plan):
         self.calls.append(('debloat_apply', plan))
         return {'fixture': True}
+    def installed_apps(self):
+        self.calls.append(('installed_apps',)); return [{'Name': 'Fixture'}]
+    def processes(self):
+        self.calls.append(('processes',)); return [{'pid': 123, 'memory_rss': 1024}]
+    def startup_list(self):
+        self.calls.append(('startup_list',)); return [{'Name': 'Fixture'}]
+    def duplicate_scan(self, root):
+        self.calls.append(('duplicate_scan', root)); return {'Groups': []}
+    def cloud_status(self):
+        self.calls.append(('cloud_status',)); return {'connected': getattr(self, 'cloud_connected', False)}
+    def cloud_scan(self):
+        self.calls.append(('cloud_scan',)); return {'groups': []}
+    def driver_updates_scan(self):
+        self.calls.append(('driver_updates_scan',)); return getattr(self, 'driver_result', {'resultCode': 2, 'updates': []})
+    def updates_scan(self):
+        self.calls.append(('updates_scan',)); return copy.deepcopy(getattr(self, 'update_scan', {'structured': True, 'exitCode': 0, 'updates': [
+            {'id': 'Fixture.One', 'package_id': 'Fixture.One', 'source': 'winget', 'version': '1.0', 'available': '2.0'},
+            {'id': 'Fixture.Two', 'package_id': 'Fixture.Two', 'source': 'winget', 'version': '1.0', 'available': '2.0'}]}))
+    def update_app_unattended(self, identity):
+        self.calls.append(('update_app_unattended', identity))
+        if getattr(self, 'update_callback', None): self.update_callback(identity)
+        if getattr(self, 'update_timeout', False): raise RuntimeError('Vendor installer timed out and may still be running')
+        return {'id': identity, 'exitCode': getattr(self, 'update_exit_code', 0)}
     def codex_profile(self, priority):
         self.calls.append(('codex_profile', priority))
         return {'fixture': True}
@@ -81,7 +104,7 @@ class WorkflowTests(unittest.TestCase):
         saved = preferences.save(self.config(cleanup_enabled=False, analysis_interval=8))
         self.assertEqual(preferences.load(), saved)
         preferences.path.write_text('{broken', encoding='utf-8')
-        self.assertEqual(preferences.load(), workflow_module.DEFAULTS)
+        self.assertEqual(preferences.load(), workflow_module.Preferences.safe_defaults())
         self.assertEqual(preferences.path.read_text(), '{broken')
 
     def test_progress_corresponds_to_completed_stages_and_log(self):
@@ -199,6 +222,143 @@ class WorkflowTests(unittest.TestCase):
         self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False, codex_priority_enabled=True, background_analysis_enabled=True, analysis_interval=8), lambda event: None)
         self.assertIn(('codex_profile', 'High'), self.backend.calls)
         self.assertIn(('analysis_start', 8), self.backend.calls)
+
+
+    def test_old_settings_migrate_without_automatic_opt_in(self):
+        old = {'cleanup_enabled': False, 'background_analysis_enabled': True}
+        result = workflow_module.Preferences.validate(old)
+        self.assertEqual(result['setup_version'], 0)
+        self.assertEqual(result['automation_mode'], 'manual')
+        for key in ('applications_review_enabled', 'performance_review_enabled', 'startup_review_enabled', 'duplicates_enabled', 'cloud_review_enabled', 'software_updates_enabled', 'driver_updates_enabled'):
+            self.assertFalse(result[key])
+        self.assertTrue(result['background_analysis_enabled'])
+
+    def test_new_preferences_strict_validation_and_no_disabled_update_consent(self):
+        bad = [{'setup_version': True}, {'automation_mode': 'hourly'}, {'duplicate_roots': r'C:\Users\Example'},
+               {'duplicate_roots': ['C:/']}, {'duplicate_roots': ['relative']}, {'duplicate_roots': [r'\\server\share\folder']},
+               {'software_update_ids': ['--all']}, {'software_update_ids': ['Fixture.One', 'fixture.one']},
+               {'cleanup_category_ids': ['unknown command;']}, {'driver_updates_enabled': 1},
+               {'software_updates_enabled': True, 'software_update_policy': 'selected', 'software_update_ids': ['Fixture.One']},
+               {'software_updates_enabled': True, 'software_update_policy': 'selected', 'software_update_agreements_accepted': True}]
+        for value in bad:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError): workflow_module.Preferences.validate(value)
+        valid = workflow_module.Preferences.validate({'software_updates_enabled': False, 'software_update_policy': 'selected'})
+        self.assertFalse(valid['software_update_agreements_accepted'])
+
+    def test_review_stages_never_call_mutation_methods(self):
+        self.backend.cloud_connected = True
+        result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False,
+            applications_review_enabled=True, performance_review_enabled=True, startup_review_enabled=True,
+            duplicates_enabled=True, duplicate_roots=[r'C:\Users\Example\Documents'], cloud_review_enabled=True, driver_updates_enabled=True), lambda event: None)
+        self.assertEqual(result['failed_stages'], 0)
+        self.assertEqual([call[0] for call in self.backend.calls], ['audit', 'installed_apps', 'processes', 'startup_list', 'duplicate_scan', 'cloud_status', 'cloud_scan', 'driver_updates_scan', 'audit'])
+        self.assertTrue(all(stage['result']['review_only'] for stage in result['stages'][1:-1]))
+
+    def test_unconnected_cloud_and_empty_folders_are_truthful_skips(self):
+        result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False, cloud_review_enabled=True, duplicates_enabled=True), lambda event: None)
+        self.assertFalse(any(call[0] in ('cloud_scan', 'duplicate_scan') for call in self.backend.calls))
+        self.assertTrue(all(stage['result']['skipped'] for stage in result['stages'][1:-1]))
+
+    def test_selected_extra_cleanup_runs_independently_of_user_temp(self):
+        self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False, cleanup_category_ids=['mock-extra', 'missing-category']), lambda event: None)
+        scans = [call for call in self.backend.calls if call[0] == 'cleanup_scan']
+        self.assertEqual(scans, [('cleanup_scan', ['mock-extra'], 7)])
+
+    def software_config(self, **updates):
+        return self.config(cleanup_enabled=False, browser_cache_enabled=False, software_updates_enabled=True,
+            software_update_policy='selected', software_update_agreements_accepted=True,
+            software_update_ids=updates.pop('software_update_ids', ['Fixture.Two', 'Fixture.Absent']), **updates)
+
+    def test_unattended_updates_apply_only_configured_fresh_ids_and_emit_item_progress(self):
+        events = []
+        result = self.workflow.run(self.software_config(), events.append)
+        self.assertEqual([call for call in self.backend.calls if call[0] == 'update_app_unattended'], [('update_app_unattended', 'Fixture.Two')])
+        stage = next(item for item in result['stages'] if 'software' in item['title'])
+        self.assertEqual(stage['result']['not_available_ids'], ['Fixture.Absent'])
+        self.assertTrue(any(event.get('items') == 1 for event in events))
+        self.assertEqual(result['failed_stages'], 0)
+
+    def test_review_policy_never_installs_software(self):
+        self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False, software_updates_enabled=True), lambda event: None)
+        self.assertFalse(any(call[0] == 'update_app_unattended' for call in self.backend.calls))
+
+    def test_ambiguous_unrecognized_or_wrong_source_updates_never_apply(self):
+        base = self.backend.updates_scan()
+        self.backend.calls.clear()
+        scans = [dict(base, structured=False), dict(base, exitCode=5),
+                 dict(base, updates=[dict(base['updates'][0], source='msstore')]),
+                 dict(base, updates=[base['updates'][0], base['updates'][0]]),
+                 dict(base, updates=[dict(base['updates'][0], version='Unknown')])]
+        for scan in scans:
+            with self.subTest(scan=scan):
+                self.backend.update_scan = scan
+                self.backend.calls.clear()
+                self.workflow.run(self.software_config(software_update_ids=['Fixture.One']), lambda event: None)
+                self.assertFalse(any(call[0] == 'update_app_unattended' for call in self.backend.calls))
+
+    def test_cancel_between_software_items_does_not_apply_remaining_or_claim_100(self):
+        event = threading.Event()
+        self.backend.update_callback = lambda identity: event.set()
+        progress = []
+        result = self.workflow.run(self.software_config(software_update_ids=['Fixture.One', 'Fixture.Two']), progress.append, event)
+        self.assertEqual([call for call in self.backend.calls if call[0] == 'update_app_unattended'], [('update_app_unattended', 'Fixture.One')])
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertLess(max(item['percentage'] for item in progress), 100)
+
+    def test_software_nonzero_results_and_driver_scan_failure_are_failed_stages(self):
+        self.backend.update_exit_code = 5
+        self.backend.driver_result = {'resultCode': 4, 'updates': []}
+        result = self.workflow.run(self.software_config(driver_updates_enabled=True), lambda event: None)
+        self.assertEqual(result['failed_stages'], 2)
+        self.assertEqual(result['status'], 'completed_with_errors')
+        stage = next(item for item in result['stages'] if 'software' in item['title'])
+        self.assertEqual(stage['result']['items'][0]['result']['exitCode'], 5)
+
+    def test_installer_timeout_defers_remaining_selected_ids(self):
+        self.backend.update_timeout = True
+        result = self.workflow.run(self.software_config(software_update_ids=['Fixture.One', 'Fixture.Two']), lambda event: None)
+        self.assertEqual([call for call in self.backend.calls if call[0] == 'update_app_unattended'], [('update_app_unattended', 'Fixture.One')])
+        stage = next(item for item in result['stages'] if 'software' in item['title'])
+        self.assertEqual(stage['result']['deferred_ids'], ['Fixture.Two'])
+        self.assertEqual(result['failed_stages'], 1)
+
+    def test_configured_run_records_attempt_and_completion_without_changing_preferences(self):
+        from optimus.automation import load_attempt
+        config = self.config(cleanup_enabled=False, browser_cache_enabled=False, setup_version=1, automation_mode='daily')
+        result = self.workflow.run(config, lambda event: None)
+        state = load_attempt(self.backend.data_dir)
+        self.assertEqual(state['status'], 'completed')
+        self.assertEqual(state['run_id'], result['id'])
+        self.assertLessEqual(state['attempted_at'], state['finished_at'])
+        self.assertFalse((self.backend.data_dir / 'preferences.json').exists())
+
+    def test_nested_uninstall_refusal_remains_visible_as_failed_stage(self):
+        self.backend.debloat_apply = lambda plan: {'results': [{'id': 'mock-target', 'removed': False, 'status': 'Removal was not verified'}]}
+        report = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False, consumer_debloat_enabled=True), lambda event: None)
+        self.assertEqual(report['failed_stages'], 1)
+        self.assertEqual(report['status'], 'completed_with_errors')
+        stage = report['stages'][1]
+        self.assertEqual(stage['status'], 'failed')
+        self.assertFalse(stage['result']['results'][0]['removed'])
+
+    def test_failed_configured_run_postpones_daily_retry_with_original_attempt_time(self):
+        from optimus.automation import due, load_attempt
+        self.backend.driver_result = {'resultCode': 4, 'updates': []}
+        config = self.config(cleanup_enabled=False, browser_cache_enabled=False, setup_version=1, automation_mode='daily', driver_updates_enabled=True)
+        report = self.workflow.run(config, lambda event: None)
+        state = load_attempt(self.backend.data_dir)
+        self.assertEqual(report['failed_stages'], 1)
+        self.assertEqual(state['status'], 'failed')
+        self.assertFalse(due(config, state, now=state['finished_at'] + 10))
+
+    def test_separate_workflow_objects_cannot_overlap_same_data_directory(self):
+        from optimus.automation import RunLease
+        with RunLease(self.backend.data_dir):
+            with self.assertRaisesRegex(RuntimeError, 'Another Optimus'):
+                self.workflow.run(self.config(), lambda event: None)
+        self.assertFalse(self.workflow.active)
+        self.assertEqual(self.backend.calls, [])
 
 
 if __name__ == '__main__':

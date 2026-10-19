@@ -85,7 +85,15 @@ The release source and the working copy remain separate. Restoring an original f
 Settings, reports, operation logs, supported backups and Sandbox history live under `%LOCALAPPDATA%\Optimus`. Keep this data private: reports can contain executable paths, startup commands, device details and account/profile metadata. A browser rollback copy contains browser data and needs the same care as the profile it backs up.
 
 Optimus does not promise a fixed performance gain. Use the measured results to choose what to change, then compare your normal workload. See [feature coverage](FEATURES.md) for the direct engines, Windows integrations and unsupported areas.
+## First-start setup (0.2.0)
 
+1. Open Optimus using its Desktop shortcut. The setup questions appear once, including after upgrading from a version without setup.
+2. Choose manual, every app startup, daily while open or weekly while open. Daily and weekly maintenance requires Optimus to remain running; it does not wake a closed app.
+3. Answer the module questions. Previous saved values are shown for existing installations. Bing Wallpaper stays protected.
+4. For duplicate finding, choose the folders to scan. Personal OneDrive review requires a separate connection in the Cloud panel. These scans prepare results for review.
+5. Software updates default to reporting. To authorize automatic installation, choose the listed-package mode, enter exact WinGet IDs and explicitly allow package/source agreements. Unknown, ambiguous, unavailable or differently sourced packages are skipped or refused. Driver updates remain individually reviewed.
+6. Read the final summary. Save choices without starting maintenance, or explicitly select Run selected maintenance now.
 
+Cancelling setup does not save configuration or run maintenance. You can reopen the questions using Run setup questions again in Settings. Existing manual tool panels remain available. The three main buttons are unchanged.
 
-
+Automatic attempts use the same progress window, cancellation boundaries and operation journal as the main Optimize button. A failed or cancelled attempt counts toward the selected interval; it is not automatically replayed every timer tick. Setup, open review windows, the source editor and active operations defer automatic starts. Choosing Manual disables automatic runs while retaining your module selections.

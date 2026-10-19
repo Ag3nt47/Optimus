@@ -67,6 +67,18 @@ def main(argv=None):
         marker.parent.mkdir(parents=True, exist_ok=True)
         QTimer.singleShot(750, lambda: marker.write_text(json.dumps({'ready': True, 'pid': os.getpid()}), encoding='utf-8'))
     app.aboutToQuit.connect(backend.close)
+    if not args.smoke_test:
+        from .gui_startup import SetupAutomationController
+        controller = SetupAutomationController(backend, window, modal_active=lambda: app.activeModalWidget() is not None)
+        window._automation_controller = controller
+        timer = QTimer(window)
+        timer.setInterval(30000)
+        timer.timeout.connect(controller.tick)
+        app.aboutToQuit.connect(controller.stop)
+        app.aboutToQuit.connect(timer.stop)
+        timer.start()
+        window._automation_timer = timer
+        QTimer.singleShot(1500, controller.tick)
     if args.smoke_test:
         def inspect():
             try:
@@ -87,7 +99,3 @@ def main(argv=None):
 
 if __name__ == '__main__':
     raise SystemExit(main())
-
-
-
-

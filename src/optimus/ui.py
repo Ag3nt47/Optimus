@@ -1525,6 +1525,7 @@ class OptimusWindow(QMainWindow):
         self._quitting = False
         self._settings_window = None
         self._sandbox_window = None
+        self._setup_wizard = None
         self._worker = None
         self._progress_window = None
         self._cancel = threading.Event()
@@ -1602,7 +1603,66 @@ class OptimusWindow(QMainWindow):
         method = getattr(self.backend, 'preferences', None)
         return method() if callable(method) else {}
 
+    def open_initial_setup(self, checked=False, *, first_run=False):
+        if self.busy or (self._settings_window is not None and self._settings_window.busy):
+            self.status.setText('Wait for the current operation before opening setup questions.')
+            return False
+        if self._setup_wizard is not None:
+            self._setup_wizard.show()
+            self._setup_wizard.raise_()
+            self._setup_wizard.activateWindow()
+            return False
+        from .onboarding import InitialSetupWizard
+        wizard = InitialSetupWizard(self.backend, self, preferences=self._settings(), first_run=first_run)
+        self._setup_wizard = wizard
+        accepted, run_now = False, False
+        try:
+            accepted = wizard.exec() == QDialog.Accepted
+            if accepted:
+                self.workflow_settings = dict(wizard.saved_preferences)
+                run_now = bool(wizard.run_now)
+                analysis_error = None
+                # Apply only the explicitly saved read-only sampler choice here.
+                method = getattr(self.backend, 'analysis_start' if self.workflow_settings.get('background_analysis_enabled') else 'analysis_stop', None)
+                if callable(method):
+                    try:
+                        if self.workflow_settings.get('background_analysis_enabled'):
+                            method(self.workflow_settings.get('analysis_interval', 5))
+                        else:
+                            method()
+                    except Exception as error:
+                        analysis_error = str(error)
+                settings_window = self._settings_window
+                for key, control in getattr(settings_window, 'workflow_controls', {}).items():
+                    if key not in self.workflow_settings:
+                        continue
+                    previous = control.blockSignals(True)
+                    try:
+                        value = self.workflow_settings[key]
+                        if isinstance(control, QCheckBox):
+                            control.setChecked(bool(value))
+                        elif isinstance(control, QSpinBox):
+                            control.setValue(int(value))
+                        elif isinstance(control, QComboBox):
+                            control.setCurrentText(str(value))
+                    finally:
+                        control.blockSignals(previous)
+                message = 'Setup choices saved. ' + ('Starting the maintenance you selected.' if run_now else 'Maintenance will follow your saved cadence; no run was started now.')
+                if analysis_error:
+                    message += ' Background analysis could not be updated: ' + analysis_error
+                self.status.setText(message)
+        finally:
+            self._setup_wizard = None
+            wizard.setParent(None)
+            wizard.deleteLater()
+        if accepted and run_now:
+            self.start_optimization()
+        return accepted
+
     def open_settings(self, checked=False, page=None):
+        if self._setup_wizard is not None:
+            self.status.setText('Finish or cancel the setup questions first.')
+            return
         if self.busy:
             self.status.setText('Wait for the active workflow or request cancellation in its progress window.')
             return
@@ -1687,9 +1747,12 @@ class OptimusWindow(QMainWindow):
         note.setWordWrap(True)
         layout.addWidget(note)
         intensity.currentTextChanged.connect(lambda value: age.setValue({'Low':30,'Standard':7,'High':1}[value]))
+        setup_button=QPushButton('Run setup questions again')
+        setup_button.clicked.connect(self.open_initial_setup)
+        layout.addWidget(setup_button)
         save=QPushButton('Save one-click configuration')
         def save_configuration():
-            value=dict(settings)
+            value=dict(self._settings())
             for key,control in controls.items():
                 value[key]=control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentText()
             def saved(result):
@@ -1723,6 +1786,9 @@ class OptimusWindow(QMainWindow):
         self.setStyleSheet(self._qss())
 
     def open_sandbox(self, checked=False):
+        if self._setup_wizard is not None:
+            self.status.setText('Finish or cancel the setup questions before opening Sandbox.')
+            return
         if self.busy:
             self.status.setText('Wait for the active workflow before opening the Sandbox.')
             return
@@ -1749,6 +1815,12 @@ class OptimusWindow(QMainWindow):
             settings = self._settings()
         except Exception as exc:
             QMessageBox.warning(self, 'Optimus configuration', str(exc))
+            return
+        if self._setup_wizard is not None:
+            self.status.setText('Finish or cancel the setup questions first.')
+            return
+        if int(settings.get('setup_version', 0)) < 1:
+            self.open_initial_setup(first_run=True)
             return
         if not callable(getattr(self.backend, 'optimize', None)):
             QMessageBox.warning(self, 'Optimus', 'The workflow engine is unavailable. No action was taken.')
@@ -1811,10 +1883,15 @@ class OptimusWindow(QMainWindow):
             self.status.setText('The workflow is still active. Cancel from its progress window and wait for the current stage.')
             event.ignore()
         else:
-            self.quit_application()
-            event.accept()
+            if self.quit_application():
+                event.accept()
+            else:
+                event.ignore()
 
     def quit_application(self):
+        if self._setup_wizard is not None:
+            self.status.setText('Finish or cancel the setup questions before exiting.')
+            return False
         if self.busy or (self._settings_window is not None and self._settings_window.busy):
             self.status.setText('An operation is active. Wait for completion or cancel at a workflow stage boundary before exiting.')
             if self._progress_window is not None:
@@ -1840,9 +1917,3 @@ class OptimusWindow(QMainWindow):
 
 def create_window(backend, *, smoke_test=False):
     return OptimusWindow(backend, smoke_test=smoke_test)
-
-
-
-
-
-

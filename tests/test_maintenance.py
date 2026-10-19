@@ -98,7 +98,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError): self.tool.updates_apply('Vendor.Example')
             with self.assertRaises(ValueError): self.tool.updates_apply('Other.Package', confirmed=True)
             self.tool.updates_apply('Vendor.Example', confirmed=True)
-            self.assertEqual(run.call_args.args[0], ['winget-fixture.exe', 'upgrade', '--id', 'Vendor.Example', '--exact', '--disable-interactivity'])
+            self.assertEqual(run.call_args.args[0], ['winget-fixture.exe', 'upgrade', '--id', 'Vendor.Example', '--exact', '--source', 'winget', '--disable-interactivity'])
     def test_11_task_scope_and_no_implicit_creation(self):
         with patch.object(Maintenance, '_run') as run:
             with self.assertRaises(ValueError): self.tool.schedule_create()

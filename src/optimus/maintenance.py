@@ -50,6 +50,8 @@ class Maintenance:
         self.plan_dir = self.data_dir / "MaintenancePlans"
         self.log_dir = self.data_dir / "MaintenanceHistory"
         self._last_update_ids: set[str] = set()
+        self._last_update_packages: dict[str, dict[str, str]] = {}
+        self._last_update_scan = 0.0
 
     @staticmethod
     def debloat_actions() -> list[dict[str, Any]]:
@@ -196,7 +198,7 @@ class Maintenance:
 
     @staticmethod
     def _run(arguments: list[str], *, timeout: float = 120) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(arguments, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     @staticmethod
     def _winget() -> str:
@@ -205,36 +207,103 @@ class Maintenance:
             raise RuntimeError("Windows Package Manager is not available. Install or update Microsoft App Installer from Microsoft Store.")
         return executable
 
-    def updates_scan(self) -> dict[str, Any]:
-        """Use installed winget; source agreements are never accepted silently."""
-        result = self._run([self._winget(), "upgrade", "--disable-interactivity"])
-        output = _ANSI.sub("", result.stdout or "").replace("\r", "")
-        rows: list[dict[str, str]] = []
-        lines = output.splitlines()
-        # English winget column output is parsed only when its complete header is recognized.
-        header = next((line for line in lines if re.search(r"\bName\s+Id\s+Version\s+Available\b", line)), "")
-        if header:
-            columns = [(key, header.index(key)) for key in ("Name", "Id", "Version", "Available")]
-            source_start = header.find("Source")
-            for line in lines[lines.index(header) + 1:]:
-                if len(line) <= columns[-1][1] or set(line.strip()) <= {"-", " "}:
-                    continue
-                values = {}
-                for index, (key, start) in enumerate(columns):
-                    end = columns[index + 1][1] if index + 1 < len(columns) else (source_start if source_start >= 0 else len(line))
-                    values[key.lower()] = line[start:end].strip()
-                if _PACKAGE_ID.fullmatch(values.get("id", "")) and values.get("available"):
-                    rows.append(values)
-        self._last_update_ids = {row["id"] for row in rows}
-        return {"updates": rows, "text": output, "stderr": _ANSI.sub("", result.stderr or ""), "exitCode": result.returncode, "structured": bool(header), "source": "Installed Windows Package Manager", "note": "Localized or changed output remains available as text. Do not infer that no updates exist from an empty parsed list."}
+    @staticmethod
+    def _parse_update_table(output: str) -> tuple[list[dict[str, str]], bool, list[str]]:
+        """Accept only complete identities from the recognized English CLI table.
 
-    def updates_apply(self, package_id: str, *, confirmed: bool = False) -> dict[str, Any]:
+        WinGet does not document JSON output for upgrade/list. Unknown layouts
+        stay text; fixed column boundaries plus explicit source prevent guessing.
+        """
+        lines = output.splitlines()
+        headers = [(index, line) for index, line in enumerate(lines)
+                   if re.fullmatch(r"Name +Id +Version +Available +Source *", line)]
+        if len(headers) != 1:
+            return [], False, ["Unsupported, missing or repeated update-table header."]
+        index, header = headers[0]
+        if index + 1 >= len(lines) or not re.fullmatch(r"-{10,}", lines[index + 1].strip()):
+            return [], False, ["Update-table separator was not recognized."]
+        starts = [header.index(key) for key in ("Name", "Id", "Version", "Available", "Source")]
+        rows: list[dict[str, str]] = []
+        skipped: list[str] = []
+        counts: dict[str, int] = {}
+        version_pattern = re.compile(r"[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}")
+        for line in lines[index + 2:]:
+            if not line.strip():
+                continue
+            values = [line[start:starts[position + 1] if position < 4 else len(line)].strip()
+                      for position, start in enumerate(starts)]
+            name, package_id, version, available, source = values
+            # Footers/progress are not data. IDs, versions and source must be
+            # complete and aligned; truncated names are harmless display text.
+            if not _PACKAGE_ID.fullmatch(package_id) or package_id.endswith(".") or "..." in package_id or not name:
+                continue
+            if source != "winget":
+                skipped.append("A row without the exact winget source was excluded.")
+                continue
+            key = package_id.casefold()
+            counts[key] = counts.get(key, 0) + 1
+            if (not version_pattern.fullmatch(version) or not version_pattern.fullmatch(available)
+                    or version.endswith(".") or available.endswith(".") or ".." in version or ".." in available):
+                skipped.append("A package with unknown, truncated or unsupported versions was excluded.")
+                continue
+            if version.casefold() == available.casefold():
+                skipped.append("A package without a distinct available version was excluded.")
+                continue
+            rows.append({"name": name, "id": package_id, "package_id": package_id,
+                         "version": version, "available": available, "source": source})
+        duplicates = {key for key, count in counts.items() if count != 1}
+        if duplicates:
+            skipped.append("Ambiguous repeated package IDs were excluded.")
+            rows = [row for row in rows if row["id"].casefold() not in duplicates]
+        return rows, True, skipped
+
+    def updates_scan(self) -> dict[str, Any]:
+        """Read the winget source only; never accept agreements during a scan."""
+        self._last_update_ids = set()
+        self._last_update_packages = {}
+        self._last_update_scan = 0.0
+        result = self._run([self._winget(), "upgrade", "--source", "winget", "--disable-interactivity"])
+        output = _ANSI.sub("", result.stdout or "").replace("\r", "")
+        rows, structured, skipped = self._parse_update_table(output)
+        if result.returncode != 0:
+            rows, structured = [], False
+            skipped.append("WinGet returned a nonzero status; no automatic candidates are trusted.")
+        self._last_update_ids = {row["id"] for row in rows}
+        self._last_update_packages = {row["id"]: dict(row) for row in rows}
+        self._last_update_scan = time.time() if structured else 0.0
+        return {"updates": rows, "packages": [dict(row) for row in rows], "text": output, "output": output,
+                "stderr": _ANSI.sub("", result.stderr or ""), "exitCode": result.returncode,
+                "structured": structured, "source": "winget", "excluded": skipped,
+                "note": "Only recognized complete winget-source rows are selectable. Localized or changed output remains text; an empty parsed list does not establish that no updates exist."}
+
+    def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False) -> dict[str, Any]:
         if confirmed is not True:
             raise ValueError("Confirm the selected software update before installing it.")
-        if not _PACKAGE_ID.fullmatch(package_id) or package_id not in self._last_update_ids:
-            raise ValueError("Select an exact package from a fresh update scan.")
-        result = self._run([self._winget(), "upgrade", "--id", package_id, "--exact", "--disable-interactivity"], timeout=1800)
-        return {"id": package_id, "exitCode": result.returncode, "text": _ANSI.sub("", result.stdout or ""), "stderr": _ANSI.sub("", result.stderr or ""), "note": "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically."}
+        if type(unattended) is not bool:
+            raise ValueError("Choose an explicit unattended mode.")
+        if not isinstance(package_id, str) or not _PACKAGE_ID.fullmatch(package_id):
+            raise ValueError("Select an exact package ID from a fresh update scan.")
+        current = self._last_update_packages.get(package_id)
+        age = time.time() - self._last_update_scan
+        if (package_id not in self._last_update_ids or not current or current.get("source") != "winget"
+                or self._last_update_scan <= 0 or age < 0 or age > 900):
+            raise ValueError("Select an unambiguous winget package from a fresh update scan.")
+        arguments = [self._winget(), "upgrade", "--id", package_id, "--exact", "--source", "winget"]
+        if unattended:
+            arguments += ["--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
+        else:
+            arguments += ["--disable-interactivity"]
+        try:
+            result = self._run(arguments, timeout=1800)
+        except subprocess.TimeoutExpired:
+            # The vendor child can outlive WinGet. Never retry or replay here.
+            raise RuntimeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
+        return {"id": package_id, "package_id": package_id, "source": "winget", "exitCode": result.returncode,
+                "status": "completed" if result.returncode == 0 else "failed", "unattended": unattended,
+                "restartNeeded": True if result.returncode == 3010 else None,
+                "text": _ANSI.sub("", result.stdout or ""), "stderr": _ANSI.sub("", result.stderr or ""),
+                "note": ("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."
+                         if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")}
 
     @staticmethod
     def windows_update_open() -> dict[str, str]:

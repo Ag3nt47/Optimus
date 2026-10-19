@@ -152,6 +152,10 @@ class Backend:
     def update_app(self, package_id):
         return self.maintenance.updates_apply(package_id, confirmed=True)
 
+    def update_app_unattended(self, package_id):
+        """Called only after the saved automatic-maintenance agreement/ID choices."""
+        return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True)
+
     def drivers_list(self):
         return self._list(self.bridge.request('drivers_list'))
 
@@ -290,10 +294,3 @@ class Backend:
     def close(self):
         self.sampler.stop()
         self.bridge.close()
-
-
-
-
-
-
-
