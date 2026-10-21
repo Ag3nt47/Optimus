@@ -12,7 +12,7 @@ import time
 import uuid
 from .filesystem import replace_with_retry
 
-CURRENT_SETUP_VERSION = 1
+CURRENT_SETUP_VERSION = 2
 SESSION_ID = uuid.uuid4().hex
 MODES = frozenset(('manual', 'startup', 'daily', 'weekly'))
 _STATE_LOCK = threading.RLock()

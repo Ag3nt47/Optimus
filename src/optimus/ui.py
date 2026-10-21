@@ -1819,7 +1819,8 @@ class OptimusWindow(QMainWindow):
         if self._setup_wizard is not None:
             self.status.setText('Finish or cancel the setup questions first.')
             return
-        if int(settings.get('setup_version', 0)) < 1:
+        from .automation import CURRENT_SETUP_VERSION
+        if int(settings.get('setup_version', 0)) < CURRENT_SETUP_VERSION:
             self.open_initial_setup(first_run=True)
             return
         if not callable(getattr(self.backend, 'optimize', None)):

@@ -284,8 +284,15 @@ function Move-SCMFileToRecycleBin {
     if (-not $survivor) { throw 'No other unchanged matching copy remains from this scan. The last verified copy will not be recycled.' }
     # Recheck after sibling hashing, immediately before the shell recycle request.
     if ((Get-SCMFileToolVerifiedHash -Record ([pscustomobject]$approved) -Budget $budget -MaxSeconds 120) -ne $approved.Fingerprint) { throw 'The selected file changed during verification.' }
-    Add-Type -AssemblyName Microsoft.VisualBasic
-    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($canonicalFile, [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin, [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)
+    $automaticProperty = $Record.PSObject.Properties['AutomaticApproved']
+    if ($automaticProperty) {
+        if ($automaticProperty.Value -isnot [bool] -or $automaticProperty.Value -ne $true) { throw 'Automatic recycling requires an explicit boolean saved-policy request.' }
+        if (-not (Get-Command -Name Invoke-SCMSafeRecycleFile -CommandType Function -ErrorAction SilentlyContinue)) { throw 'The unattended Recycle Bin engine is unavailable; no alternate delete was attempted.' }
+        $null = Invoke-SCMSafeRecycleFile -Path $canonicalFile
+    } else {
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($canonicalFile, [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin, [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)
+    }
     if ([IO.File]::Exists($canonicalFile)) { throw 'The recycle request did not remove the selected file.' }
     $approved.Recycled = $true
     [pscustomobject]@{ FilePath=$canonicalFile; ScanId=$scanId; Recycled=$true; TimeUtc=[datetime]::UtcNow.ToString('o'); Note='Sent to Windows Recycle Bin. Restore it from Recycle Bin if needed; this function has no permanent-delete fallback.' }
@@ -299,4 +306,124 @@ function Get-SCMDriverInventory {
         if ($_.DriverDate) { try { $date=([datetime]$_.DriverDate).ToUniversalTime().ToString('o') } catch { $date=[string]$_.DriverDate } }
         [pscustomobject]@{ DeviceName=[string]$_.DeviceName; Manufacturer=[string]$_.Manufacturer; DriverVersion=[string]$_.DriverVersion; DriverDate=$date; InfName=[string]$_.InfName; IsSigned=[bool]$_.IsSigned; DeviceId=[string]$_.DeviceID }
     } | Sort-Object DeviceName,DriverVersion)
+}
+
+# Windows Update Agent operations. Loading defines functions; no scan/install runs.
+function Get-SCMWuaProperty {
+    param($Object,[string]$Name,$Default=$null)
+    try { $value=$Object.$Name; if($null -eq $value){return $Default};return $value }
+    catch {return $Default}
+}
+function ConvertTo-SCMDriverUpdateDescriptor {
+    param([Parameter(Mandatory=$true)]$Update)
+    $behavior=Get-SCMWuaProperty $Update 'InstallationBehavior'
+    $canInput=Get-SCMWuaProperty $behavior 'CanRequestUserInput'
+    $reboot=Get-SCMWuaProperty $behavior 'RebootBehavior'
+    $date=Get-SCMWuaProperty $Update 'DriverVerDate' ''
+    if($date){try{$date=([datetime]$date).ToUniversalTime().ToString('o')}catch{$date=[string]$date}}
+    [pscustomobject]@{
+        id=[string]$Update.Identity.UpdateID;revision=[int]$Update.Identity.RevisionNumber;title=[string]$Update.Title
+        downloaded=[bool]$Update.IsDownloaded;eulaAccepted=[bool]$Update.EulaAccepted
+        hardwareId=[string](Get-SCMWuaProperty $Update 'DriverHardwareID' '')
+        provider=[string](Get-SCMWuaProperty $Update 'DriverProvider' '')
+        driverClass=[string](Get-SCMWuaProperty $Update 'DriverClass' '')
+        manufacturer=[string](Get-SCMWuaProperty $Update 'DriverManufacturer' '')
+        model=[string](Get-SCMWuaProperty $Update 'DriverModel' '')
+        driverDate=[string]$date;canRequestUserInput=$canInput;rebootBehavior=$reboot
+    }
+}
+function New-SCMWuaSession { New-Object -ComObject Microsoft.Update.Session }
+function New-SCMWuaCollection { New-Object -ComObject Microsoft.Update.UpdateColl }
+function Test-SCMWuaRebootPending {
+    $system=New-Object -ComObject Microsoft.Update.SystemInfo
+    return [bool]$system.RebootRequired
+}
+function Get-SCMDriverUpdateScan {
+    $session=New-SCMWuaSession
+    $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+    $updates=@(foreach($update in $result.Updates){ConvertTo-SCMDriverUpdateDescriptor -Update $update})
+    [pscustomobject]@{updates=$updates;source='Windows Update';resultCode=[int]$result.ResultCode;note='Exact update identity/revision and available device/provider/class metadata. A hardware or compatible ID can cover multiple devices; matching rules are not a physical device instance identity.'}
+}
+function ConvertTo-SCMDriverDate {
+    param($Value)
+    if(-not $Value){throw 'A driver date is unavailable.'}
+    try{return ([datetime]$Value).ToUniversalTime().Date}catch{
+        try{return [Management.ManagementDateTimeConverter]::ToDateTime([string]$Value).ToUniversalTime().Date}catch{throw 'A driver date could not be verified.'}
+    }
+}
+function Assert-SCMDriverNotOlderThanInstalled {
+    param([Parameter(Mandatory=$true)]$Record,[Parameter(Mandatory=$true)]$Fresh)
+    $candidate=ConvertTo-SCMDriverDate $Fresh.driverDate
+    $floor=ConvertTo-SCMDriverDate $Record.notOlderThanDriverDate
+    if($candidate -lt $floor){throw 'The offered driver predates the approved device-rule date floor.'}
+    $hardware=[string]$Fresh.hardwareId
+    if(-not $hardware){throw 'The offered driver has no exact hardware match metadata.'}
+    $devices=@(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object {
+        (@($_.HardwareID)+@($_.CompatibleID)) -icontains $hardware
+    })
+    if(-not $devices.Count){throw 'The approved hardware/compatible ID could not be matched to current local devices.'}
+    $installed=@(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop)
+    foreach($device in $devices){
+        $identity=if($device.PNPDeviceID){[string]$device.PNPDeviceID}else{[string]$device.DeviceID}
+        $matches=@($installed | Where-Object {$_.DeviceID -ieq $identity})
+        if(-not $identity -or -not $matches.Count){throw 'An installed matching device driver could not be verified.'}
+        foreach($driver in $matches){
+            $date=ConvertTo-SCMDriverDate $driver.DriverDate
+            if($candidate -lt $date){throw 'The offered driver is older than an installed matching device driver. Automatic downgrade was refused.'}
+        }
+    }
+}
+function Invoke-SCMDriverUpdateApply {
+    param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false)
+    if(-not(Test-SCMAdministrator)){throw 'Administrator access is required; no automatic elevation was requested.'}
+    $parsed=[guid]::Empty
+    if(-not [guid]::TryParse([string]$Record.id,[ref]$parsed) -or $Record.revision -isnot [int] -or $Record.revision -lt 0){throw 'Invalid exact Windows Update driver identity or revision.'}
+    $session=New-SCMWuaSession
+    $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+    if([int]$result.ResultCode -ne 2){throw 'Windows Update did not return a complete successful applicability scan.'}
+    $selected=@($result.Updates | Where-Object {$_.Identity.UpdateID -ieq $parsed.ToString() -and $_.Identity.RevisionNumber -eq $Record.revision})
+    if($selected.Count -ne 1){throw 'The exact approved update is changed, ambiguous, installed or no longer applicable.'}
+    $update=$selected[0]
+    $fresh=ConvertTo-SCMDriverUpdateDescriptor -Update $update
+    foreach($field in @('title','hardwareId','provider','driverClass','manufacturer','model','driverDate')){
+        if($Record.PSObject.Properties.Name -contains $field -and [string]$Record.$field -cne [string]$fresh.$field){throw 'The approved driver title, device or publisher metadata changed. Review the update again.'}
+    }
+    if ($Unattended -and [string]$Record.approvalMode -eq 'matching') { Assert-SCMDriverNotOlderThanInstalled -Record $Record -Fresh $fresh }
+    $collection=New-SCMWuaCollection
+    [void]$collection.Add($update)
+    $installer=$session.CreateUpdateInstaller()
+    $installer.Updates=$collection
+    $installer.IsForced=$false
+    if($Unattended){
+        if(-not $AcceptEula){throw 'Saved driver license agreement approval is required for unattended installation.'}
+        if($fresh.canRequestUserInput -ne $false -or $null -eq $fresh.rebootBehavior -or [int]$fresh.rebootBehavior -notin @(0,2)){throw 'Interactive, unknown or mandatory-restart updates are excluded from unattended installation.'}
+        # ForceQuiet belongs to IUpdateInstaller2. Missing support must fail closed.
+        $installer.ForceQuiet=$true
+        $installer.AllowSourcePrompts=$false
+        if($installer.ForceQuiet -ne $true -or $installer.AllowSourcePrompts -ne $false){throw 'Windows Update could not establish quiet installation.'}
+        if($installer.RebootRequiredBeforeInstallation -or (Test-SCMWuaRebootPending)){throw 'A pending Windows restart must be completed before automated driver installation.'}
+    }
+    if($installer.IsBusy){throw 'Another Windows update installation is already running.'}
+    if(-not $update.EulaAccepted){
+        if(-not ($Unattended -and $AcceptEula)){throw 'This driver requires explicit license agreement approval. Use Windows Update or approve this update in setup.'}
+        $update.AcceptEula()
+        if(-not $update.EulaAccepted){throw 'Windows Update did not accept the approved driver license agreement.'}
+    }
+    $downloader=$session.CreateUpdateDownloader()
+    $downloader.Updates=$collection
+    $downloader.IsForced=$false
+    $download=$downloader.Download()
+    $downloadItem=$download.GetUpdateResult(0)
+    if([int]$download.ResultCode -ne 2 -or [int]$downloadItem.ResultCode -ne 2 -or [int]$downloadItem.HResult -ne 0){throw 'Windows Update did not completely download the selected driver.'}
+    if($Unattended -and ($installer.RebootRequiredBeforeInstallation -or (Test-SCMWuaRebootPending))){throw 'A restart became pending before installation. The downloaded update was not installed.'}
+    if($installer.IsBusy){throw 'Another Windows update installation started. The selected driver was not installed.'}
+    $installed=$installer.Install()
+    $item=$installed.GetUpdateResult(0)
+    [pscustomobject]@{
+        id=$fresh.id;revision=$fresh.revision;title=$fresh.title
+        resultCode=[int]$item.ResultCode;aggregateResultCode=[int]$installed.ResultCode
+        restartNeeded=([bool]$installed.RebootRequired -or [bool]$item.RebootRequired)
+        hresult=[int]$item.HResult;aggregateHresult=[int]$installed.HResult
+        unattended=$Unattended;note='Only the selected applicable update was installed. No reboot API or automatic elevation was invoked.'
+    }
 }

@@ -4,13 +4,16 @@ import copy
 import ntpath
 import os
 import re
-from PySide6.QtCore import Qt
+import json
+from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal, Slot
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
     QPlainTextEdit, QPushButton, QRadioButton, QButtonGroup, QScrollArea,
-    QSpinBox, QVBoxLayout, QWidget, QWizard, QWizardPage,
+    QSpinBox, QVBoxLayout, QWidget, QWizard, QWizardPage, QListWidget, QListWidgetItem,
 )
+
+SETUP_VERSION = 2
 
 CADENCES = {
     'manual': 'Manual - only when I click Optimize',
@@ -55,8 +58,29 @@ class QuestionPage(QWizardPage):
             self.on_enter()
 
 
+class ProbeSignals(QObject):
+    result = Signal(object)
+    error = Signal(str)
+    finished = Signal()
+
+
+class InventoryProbe(QRunnable):
+    def __init__(self, operation, args, kwargs):
+        super().__init__()
+        self.operation, self.args, self.kwargs = operation, args, kwargs
+        self.signals = ProbeSignals()
+
+    def run(self):
+        try:
+            self.signals.result.emit(self.operation(*self.args, **self.kwargs))
+        except Exception as error:
+            self.signals.error.emit(str(error))
+        finally:
+            self.signals.finished.emit()
+
+
 class InitialSetupWizard(QWizard):
-    """Collect explicit choices without running a scan, install or cleanup."""
+    """Collect scoped approvals; inventories run only from explicit setup buttons."""
     def __init__(self, backend, parent=None, preferences=None, *, first_run=False):
         super().__init__(parent)
         self.backend = backend
@@ -67,6 +91,15 @@ class InitialSetupWizard(QWizard):
         self.page_ids = {}
         self.category_controls = {}
         self.category_names = {}
+        self.busy = False
+        self._closing = False
+        self._probe_worker = None
+        self._probe_callback = None
+        self._probe_status = None
+        self._cloud_binding = None
+        self._startup_loaded = False
+        self._drivers_loaded = False
+        self._connection_panel = None
         self.setWindowTitle('Optimus - initial setup' if first_run else 'Optimus - setup questions')
         self.setWizardStyle(QWizard.ClassicStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
@@ -91,10 +124,12 @@ class InitialSetupWizard(QWizard):
             QPushButton:default {background:#1f9cff;color:#07111f;border-color:#91ceff;}
             QPushButton:disabled {color:#94a3b8;background:#172231;}
             QCheckBox,QRadioButton {spacing:10px;min-height:25px;}
-            QCheckBox::indicator,QRadioButton::indicator {width:18px;height:18px;border:1px solid #94a3b8;background:#0b111a;}
-            QCheckBox::indicator {border-radius:3px;}
+            QCheckBox::indicator,QRadioButton::indicator,QListView::indicator {width:18px;height:18px;border:1px solid #94a3b8;background:#0b111a;}
+            QCheckBox::indicator,QListView::indicator {border-radius:3px;}
+            QListWidget {background:#0b111a;border:1px solid #52647b;border-radius:4px;}
+            QListWidget::item {padding:6px;}
             QRadioButton::indicator {border-radius:10px;}
-            QCheckBox::indicator:checked,QRadioButton::indicator:checked {background:#1f9cff;border:2px solid #e1ebf7;}
+            QCheckBox::indicator:checked,QRadioButton::indicator:checked,QListView::indicator:checked {background:#1f9cff;border:2px solid #e1ebf7;}
             QCheckBox::indicator:disabled {border-color:#52647b;}
             QCheckBox:disabled {color:#a4b1c2;}
             QScrollBar:vertical {background:#101722;width:12px;}
@@ -126,7 +161,7 @@ class InitialSetupWizard(QWizard):
 
     def _build_cadence(self):
         body = self._page('cadence', '1. When should Optimus run?',
-            'These questions configure the existing Optimize button. Choices start from your saved settings. Nothing is saved or run until you choose Save choices. Cancel leaves your preferences unchanged.')
+            'These questions configure Optimize and its automatic cadence. Existing choices are retained; new automatic file, startup and driver changes need scoped approval. Maintenance choices are saved only at Save choices; account connection/inventory are separate explicit setup actions.')
         self.cadence_group = QButtonGroup(self)
         self.cadence_buttons = {}
         current = self.initial.get('automation_mode', 'manual')
@@ -139,7 +174,7 @@ class InitialSetupWizard(QWizard):
             self.cadence_buttons[mode] = button
             body.addWidget(button)
         body.addWidget(_label('Daily and weekly maintenance require Optimus to stay open. Closing the app stops its timer. Existing Windows scheduled audit tasks are separate and remain read-only.'))
-        warning = _label('At an automatic cadence, the cleanup, removal, priority and selected-package update choices you authorize can run again without reopening this wizard. Choose Manual if you want to start each run yourself.')
+        warning = _label('At the saved cadence, the changes you approve here run without another per-run confirmation. Review policies only scan/report. Choose Manual to start runs yourself; return to setup and switch a tool off or to Review to revoke its automatic changes.')
         warning.setStyleSheet('color:#ffd29c;')
         body.addWidget(warning)
         body.addStretch()
@@ -217,17 +252,25 @@ class InitialSetupWizard(QWizard):
 
     def _build_duplicates(self):
         body = self._page('duplicates', '5. Duplicate Finder',
-            'Compare eligible file contents in the local folders you choose, using a bounded scan. Save/report matching groups for review. This workflow never automatically deletes or recycles duplicate files.')
-        self._check(body, 'duplicates_enabled', 'Scan these folders for duplicate files and save a report')
+            'Choose review-only or automatic recycling within the local folders below. Each duplicate group retains a deterministic oldest/newest copy; only eligible old additional copies are recycled, with identity and retained-copy checks.')
+        self._check(body, 'duplicates_enabled', 'Include Duplicate Finder in maintenance')
         self.duplicate_roots = QPlainTextEdit()
         self.duplicate_roots.setPlaceholderText('One absolute local folder per line, for example C:\\Users\\YourName\\Downloads')
         self.duplicate_roots.setPlainText('\n'.join(self.initial.get('duplicate_roots', [])))
-        self.duplicate_roots.setMinimumHeight(150)
+        self.duplicate_roots.setFixedHeight(115)
         body.addWidget(self.duplicate_roots)
         browse = QPushButton('Add local folder...')
         browse.clicked.connect(self._browse_duplicate_root)
         body.addWidget(browse)
-        body.addWidget(_label('Links, protected locations and cloud placeholders can be excluded. Scans have file/time limits. Identical content does not mean a file is disposable; removal remains a separate reviewed action in Duplicate finder.'))
+        self.duplicate_policy = self._policy(body, 'duplicate_policy')
+        self._limits(body, 'duplicate')
+        self.duplicate_consent = self._consent(body, 'duplicate_changes_approved',
+            'Allow automatic recycling of eligible extra copies in only these folders, without per-run prompts')
+        self.duplicate_roots.textChanged.connect(lambda: self.duplicate_consent.setChecked(False))
+        self.duplicate_policy.currentIndexChanged.connect(lambda: self.duplicate_consent.setChecked(False))
+        for key in ('duplicate_max_recycle','duplicate_min_age_days'):
+            self.controls[key].valueChanged.connect(lambda: self.duplicate_consent.setChecked(False))
+        body.addWidget(_label('Oldest/newest compares each file\'s last-modified date; ties use its path. Equal content does not make a file disposable. Reparse points, cloud placeholders, protected paths and hardlinks are excluded. Limits apply to each run; reports list skips and actual results. Restore local files through the Recycle Bin.'))
         body.addStretch()
 
     def _browse_duplicate_root(self):
@@ -238,10 +281,31 @@ class InitialSetupWizard(QWizard):
 
     def _build_cloud(self):
         body = self._page('cloud', '6. Cloud drive - personal OneDrive',
-            'Optionally include a personal OneDrive metadata duplicate scan/report. An explicit account connection and your own supported Microsoft public-client app registration are required on the Cloud drive page.')
-        self._check(body, 'cloud_review_enabled', 'Scan/report my connected personal OneDrive (no cloud deletion)')
-        body.addWidget(_label('No sign-in is started by this wizard. Without an existing connection, the report explains why the scan was skipped. Metadata hash/size matches are candidates; file contents are not downloaded for comparison.'))
-        body.addWidget(_label('There is no automatic cloud-file deletion. Google Drive, Dropbox, business/shared drives and SharePoint are unsupported. Any later single-file recycle requires a separate review and confirmation.'))
+            'Choose metadata review or scoped automatic recycling in a connected personal OneDrive. Enter owned folder IDs explicitly and verify them against the current connected drive. Empty scope never falls back to the whole drive.')
+        self._cloud_body = body
+        self._check(body, 'cloud_review_enabled', 'Include personal OneDrive in maintenance')
+        self.cloud_folders = QPlainTextEdit()
+        self.cloud_folders.setPlaceholderText('Owned folder item IDs, one per line or comma-separated. Enter root only if you deliberately approve that entire owned drive scope.')
+        self.cloud_folders.setPlainText('\n'.join(self.initial.get('cloud_folder_ids', [])))
+        self.cloud_folders.setFixedHeight(100)
+        body.addWidget(self.cloud_folders)
+        verify = QPushButton('Verify these folders and bind the connected drive')
+        verify.clicked.connect(self.verify_cloud_scope)
+        body.addWidget(verify)
+        self.cloud_scope_status = _label('No drive/folder binding verified in this setup session.')
+        body.addWidget(self.cloud_scope_status)
+        connect = QPushButton('Open OneDrive connection controls here')
+        connect.clicked.connect(self.open_cloud_connection)
+        body.addWidget(connect)
+        self.cloud_policy = self._policy(body, 'cloud_policy')
+        self._limits(body, 'cloud')
+        self.cloud_consent = self._consent(body, 'cloud_changes_approved',
+            'Allow automatic recycling of eligible extra copies in only this verified drive/folder scope, without per-run prompts')
+        self.cloud_folders.textChanged.connect(self._invalidate_cloud_scope)
+        self.cloud_policy.currentIndexChanged.connect(lambda: self.cloud_consent.setChecked(False))
+        for key in ('cloud_max_recycle','cloud_min_age_days'):
+            self.controls[key].valueChanged.connect(lambda: self.cloud_consent.setChecked(False))
+        body.addWidget(_label('Provider hash/size matches are candidates, not downloaded byte comparisons. The engine checks the retained copy and remote identity before recycling. Only owned personal OneDrive folders are supported; shared/business drives, Google Drive and Dropbox are excluded. Restore through the OneDrive website recycle bin. Changing the account or scope requires new approval.'))
         body.addStretch()
 
     def _build_performance(self):
@@ -266,9 +330,22 @@ class InitialSetupWizard(QWizard):
 
     def _build_startup(self):
         body = self._page('startup', '8. Startup Manager',
-            'Include sign-in entry and service inventory in the maintenance report. Review which application owns each entry before changing it in the detailed Startup tools.')
-        self._check(body, 'startup_review_enabled', 'Review/report startup entries and services (no automatic disabling)')
-        body.addWidget(_label('This selection does not disable or remove startup entries, stop services or change their startup modes. Those actions keep their own selected-entry confirmation and supported restore history.'))
+            'Review startup inventory, or automatically disable only the exact sign-in entries selected from a fresh inventory. Services are reported; this policy does not automatically stop services or change their startup modes.')
+        self._check(body, 'startup_review_enabled', 'Include Startup Manager in maintenance')
+        self.startup_policy = self._policy(body, 'startup_policy', [('Review inventory only','review'),('Disable only my approved entries','disable_selected')])
+        load = QPushButton('Load current eligible startup entries')
+        load.clicked.connect(self.load_startup_approvals)
+        body.addWidget(load)
+        self.startup_status = _label('No startup inventory loaded in this setup session.')
+        body.addWidget(self.startup_status)
+        self.startup_targets = QListWidget()
+        self.startup_targets.setMinimumHeight(170)
+        body.addWidget(self.startup_targets)
+        self.startup_consent = self._consent(body, 'startup_changes_approved',
+            'Allow these exact checked entries to be disabled automatically, without per-run prompts')
+        self.startup_targets.itemChanged.connect(lambda: self.startup_consent.setChecked(False))
+        self.startup_policy.currentIndexChanged.connect(lambda: self.startup_consent.setChecked(False))
+        body.addWidget(_label('Command, registry/shortcut identity and fingerprint must still match the saved snapshot. Changed/new entries need a new setup approval; protected/security/system entries and Bing Wallpaper are excluded. Backups and supported Restore/history remain available.'))
         body.addStretch()
 
     def _build_software(self):
@@ -300,10 +377,274 @@ class InitialSetupWizard(QWizard):
 
     def _build_drivers(self):
         body = self._page('drivers', '10. Driver Updater',
-            'Read installed driver information and check Windows Update for available driver candidates. Save results for a later review. Availability and compatibility depend on Windows Update and your hardware.')
-        self._check(body, 'driver_updates_enabled', 'Scan/report driver updates (no automatic driver installation)')
-        body.addWidget(_label('There are no blanket driver changes, automatic driver removals or automatic reboots. To install a candidate later, use Drivers, select its exact update, review it and confirm explicitly. Administrator access may be required.'))
+            'Load fresh Windows Update driver candidates. Review only, approve exact update IDs/revisions, or approve future updates for selected exact hardware/provider/class combinations. No unlisted device or provider is authorized.')
+        self._check(body, 'driver_updates_enabled', 'Include Driver Updater in maintenance')
+        self.driver_policy = self._policy(body, 'driver_policy', [('Scan and report only','review'),('Install my exact approved update revisions','install_approved'),('Install matching future updates for my approved devices','install_matching')])
+        load = QPushButton('Load available Windows Update drivers')
+        load.clicked.connect(self.load_driver_approvals)
+        body.addWidget(load)
+        admin = QPushButton('Restart Optimus as administrator (Windows UAC)')
+        admin.clicked.connect(self.request_administrator)
+        body.addWidget(admin)
+        self.driver_status = _label('No Windows Update driver candidates loaded in this setup session.')
+        body.addWidget(self.driver_status)
+        self.driver_targets = QListWidget()
+        self.driver_targets.setMinimumHeight(180)
+        body.addWidget(self.driver_targets)
+        self.driver_details = QPlainTextEdit()
+        self.driver_details.setReadOnly(True)
+        self.driver_details.setMaximumHeight(110)
+        body.addWidget(self.driver_details)
+        self.driver_consent = self._consent(body, 'driver_changes_approved',
+            'Allow installation of only my checked exact updates or approved matching devices, without per-run prompts')
+        self.driver_agreements = self._consent(body, 'driver_update_agreements_accepted',
+            'Accept the license agreements for these approved driver updates, including future matching updates only in matching-device mode')
+        self.driver_policy.currentIndexChanged.connect(self._driver_policy_changed)
+        self.driver_targets.itemChanged.connect(self._driver_selection_changed)
+        self.driver_targets.currentItemChanged.connect(self._driver_item_details)
+        body.addWidget(_label('Exact mode does not approve a later revision. Matching mode requires complete hardware ID, provider, driver class and a driver-date floor to exclude older offers. A hardware/compatible ID may cover multiple identical devices. New devices/providers need new approval. Interactive, ambiguous or mandatory-immediate-restart offers are skipped. Installation needs an already elevated Optimus process; automatic runs report administrator access needed rather than silently requesting UAC. No blanket driver removal or automatic reboot is requested.'))
         body.addStretch()
+
+    def _policy(self, body, key, choices=None):
+        combo = QComboBox()
+        for text, value in choices or [('Scan and report only','review'),('Recycle extra copies; keep oldest','keep_oldest'),('Recycle extra copies; keep newest','keep_newest')]:
+            combo.addItem(text, value)
+        selected = self.initial.get(key, 'review') if int(self.initial.get('setup_version', 0)) >= SETUP_VERSION else 'review'
+        combo.setCurrentIndex(max(0, combo.findData(selected)))
+        body.addWidget(combo)
+        return combo
+
+    def _consent(self, body, key, text):
+        control = self._check(body, key, text)
+        if int(self.initial.get('setup_version', 0)) < SETUP_VERSION:
+            control.setChecked(False)
+        control.setStyleSheet('color:#ffd29c;')
+        return control
+
+    def _limits(self, body, prefix):
+        row = QHBoxLayout()
+        row.addWidget(_label('Maximum recycled files per run'))
+        maximum = QSpinBox()
+        maximum.setRange(1, 500)
+        maximum.setValue(int(self.initial.get(prefix+'_max_recycle', 25)))
+        self.controls[prefix+'_max_recycle'] = maximum
+        row.addWidget(maximum)
+        row.addWidget(_label('Minimum age'))
+        age = QSpinBox()
+        age.setRange(1, 3650)
+        age.setSuffix(' days')
+        age.setValue(int(self.initial.get(prefix+'_min_age_days', 7)))
+        self.controls[prefix+'_min_age_days'] = age
+        row.addWidget(age)
+        body.addLayout(row)
+
+    def _run(self, operation, *args, done=None, **kwargs):
+        # Existing CloudPanel is embedded in connection-only mode; no file actions.
+        allowed = {'cloud_status','cloud_configure','cloud_connect','cloud_poll','cloud_logout'}
+        if operation not in allowed:
+            self._error('File actions are unavailable in setup connection controls.')
+            return
+        if operation in {'cloud_configure','cloud_connect','cloud_logout'}:
+            self._invalidate_cloud_scope()
+        self._start_probe(getattr(self.backend, operation), args, kwargs, done, self.cloud_scope_status)
+
+    def _error(self, message):
+        self.cloud_scope_status.setText(str(message))
+
+    def _start_probe(self, operation, args, kwargs, callback, status):
+        if self.busy or self._closing:
+            status.setText('Wait for the current inventory/account request to finish.')
+            return
+        self.busy = True
+        self._probe_callback, self._probe_status = callback, status
+        status.setText('Loading current information...')
+        for button in (QWizard.NextButton,QWizard.BackButton,QWizard.FinishButton):
+            self.button(button).setEnabled(False)
+        worker = InventoryProbe(operation, args, kwargs)
+        self._probe_worker = worker
+        worker.signals.result.connect(self._probe_result)
+        worker.signals.error.connect(self._probe_error)
+        worker.signals.finished.connect(self._probe_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(object)
+    def _probe_result(self, result):
+        if not self._closing and self._probe_callback:
+            try:
+                self._probe_callback(result)
+            except Exception as error:
+                self._probe_error(str(error))
+
+    @Slot(str)
+    def _probe_error(self, error):
+        if not self._closing and self._probe_status is not None:
+            self._probe_status.setText('Could not verify inventory: ' + error)
+
+    @Slot()
+    def _probe_finished(self):
+        self.busy = False
+        self._probe_worker = None
+        self._probe_callback = None
+        if not self._closing:
+            for button in (QWizard.NextButton,QWizard.BackButton,QWizard.FinishButton):
+                self.button(button).setEnabled(True)
+
+    def _cloud_inputs(self):
+        return list(dict.fromkeys(value.strip() for value in re.split(r'[\r\n,]+', self.cloud_folders.toPlainText()) if value.strip()))
+
+    def _invalidate_cloud_scope(self):
+        self._cloud_binding = None
+        self.cloud_consent.setChecked(False)
+        self.cloud_scope_status.setText('Scope changed. Verify these exact folders again before approving automatic recycling.')
+
+    def verify_cloud_scope(self):
+        folder_ids = self._cloud_inputs()
+        self._invalidate_cloud_scope()
+        if len(folder_ids) > 20:
+            self.cloud_scope_status.setText('Choose at most 20 explicit folder IDs per approved scope.')
+            return
+        if not folder_ids:
+            self.cloud_scope_status.setText('Enter at least one explicit owned folder ID. An empty scope never selects root.')
+            return
+        def verify():
+            return {'inputs':folder_ids, 'scopes':[self.backend.cloud_approval_scope(value) for value in folder_ids]}
+        self._start_probe(verify, (), {}, self._cloud_scope_ready, self.cloud_scope_status)
+
+    def _cloud_scope_ready(self, response):
+        if response.get('inputs') != self._cloud_inputs():
+            self.cloud_scope_status.setText('Folder IDs changed while loading; verify the edited scope again.')
+            return
+        scopes = response.get('scopes', [])
+        drives = {value.get('drive_id') for value in scopes}
+        if not scopes or len(drives) != 1 or not next(iter(drives)) or any(not value.get('folder_id') or str(value['folder_id']).casefold() == 'root' or value.get('provider') != 'Personal OneDrive' for value in scopes):
+            raise ValueError('All folders must resolve to concrete owned folders in one verified personal OneDrive.')
+        self._cloud_binding = {'drive_id':next(iter(drives)), 'folder_ids':list(dict.fromkeys(value['folder_id'] for value in scopes)), 'inputs':list(response['inputs']), 'drive_name':str(scopes[0].get('drive_name') or ''), 'scope_labels':[str(value.get('scope_label') or value.get('folder_name') or value['folder_id']) for value in scopes]}
+        self.cloud_consent.setChecked(False)
+        self.cloud_scope_status.setText('Verified drive: '+str(scopes[0].get('drive_name') or self._cloud_binding['drive_id'])+' ['+self._cloud_binding['drive_id']+']\nFolders: '+'; '.join(str(value.get('folder_name') or value['folder_id'])+' ['+value['folder_id']+']' for value in scopes))
+
+    def open_cloud_connection(self):
+        self._invalidate_cloud_scope()
+        if self._connection_panel is None:
+            from .widgets.cloud_panel import CloudPanel
+            panel = CloudPanel(self)
+            panel.layout().itemAt(0).widget().setText('Connect personal OneDrive here. Explicit connection settings/sign-in actions are saved separately; Cancel setup leaves maintenance choices unchanged.')
+            def hide_item(item):
+                if item.widget():
+                    item.widget().hide()
+                if item.layout():
+                    for index in range(item.layout().count()):
+                        hide_item(item.layout().itemAt(index))
+            for index in range(6, panel.layout().count()):
+                hide_item(panel.layout().itemAt(index))
+            self._connection_panel = panel
+            self._cloud_body.insertWidget(self._cloud_body.count()-1, panel)
+        self._connection_panel.show()
+        self._connection_panel.refresh()
+
+    def load_startup_approvals(self):
+        self._startup_loaded = False
+        self.startup_consent.setChecked(False)
+        self._start_probe(self.backend.startup_list, (), {}, self._startup_ready, self.startup_status)
+
+    def _startup_ready(self, records):
+        from .automated_system import startup_descriptor
+        self.startup_targets.blockSignals(True)
+        self.startup_targets.clear()
+        approved = self.initial.get('startup_approved_entries', []) if int(self.initial.get('setup_version',0)) >= SETUP_VERSION else []
+        for record in records or []:
+            try:
+                descriptor = startup_descriptor(record)
+            except ValueError:
+                continue
+            name = str(record.get('Name') or record.get('name') or descriptor.get('Name') or descriptor.get('stableId') or 'Startup entry')
+            item = QListWidgetItem(name+' | '+str(record.get('Command') or record.get('command') or ''))
+            item.setData(Qt.UserRole, descriptor)
+            item.setToolTip(json.dumps(descriptor, indent=2))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if descriptor in approved else Qt.Unchecked)
+            self.startup_targets.addItem(item)
+        self.startup_targets.blockSignals(False)
+        self._startup_loaded = True
+        self.startup_consent.setChecked(False)
+        self.startup_status.setText(str(self.startup_targets.count())+' eligible current entries. Check exact entries, then approve below. Protected/ineligible entries were excluded.')
+
+    def load_driver_approvals(self):
+        self._drivers_loaded = False
+        self._driver_selection_changed()
+        self._start_probe(self.backend.driver_updates_scan, (), {}, self._drivers_ready, self.driver_status)
+
+    def _drivers_ready(self, response):
+        from .automated_system import driver_descriptor, driver_device_rule
+        if response.get('resultCode') != 2 or not isinstance(response.get('updates'), list):
+            raise ValueError('Windows Update did not return a complete successful candidate scan; no driver approvals were loaded.')
+        self.driver_targets.blockSignals(True)
+        self.driver_targets.clear()
+        for record in response.get('updates', []):
+            try:
+                descriptor = driver_descriptor(record)
+            except ValueError:
+                continue
+            try:
+                device = driver_device_rule(record)
+            except ValueError:
+                device = None
+            item = QListWidgetItem(str(record.get('title') or descriptor.get('title'))+' | revision '+str(descriptor.get('revision')))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setData(Qt.UserRole, {'descriptor':descriptor,'device':device,'record':record})
+            item.setToolTip(json.dumps(record, indent=2))
+            selected = int(self.initial.get('setup_version',0)) >= SETUP_VERSION and (descriptor in self.initial.get('driver_approved_updates', []) if self.driver_policy.currentData() != 'install_matching' else device is not None and device in self.initial.get('driver_approved_devices', []))
+            item.setCheckState(Qt.Checked if selected else Qt.Unchecked)
+            self.driver_targets.addItem(item)
+        self.driver_targets.blockSignals(False)
+        self._drivers_loaded = True
+        self._driver_policy_changed()
+        self.driver_status.setText(str(self.driver_targets.count())+' current driver candidates. Check exact updates/devices, then approve installation and agreements.')
+
+    def _driver_policy_changed(self, *unused):
+        self._driver_selection_changed()
+        matching = self.driver_policy.currentData() == 'install_matching'
+        self.driver_targets.blockSignals(True)
+        for index in range(self.driver_targets.count()):
+            item = self.driver_targets.item(index)
+            eligible = not matching or item.data(Qt.UserRole).get('device') is not None
+            flags = item.flags() | Qt.ItemIsEnabled
+            if not eligible:
+                flags &= ~Qt.ItemIsEnabled
+                item.setCheckState(Qt.Unchecked)
+                item.setToolTip('Matching mode requires complete hardware ID, provider, driver class and driver date. Use exact revision mode or leave this candidate unapproved.')
+            item.setFlags(flags)
+        self.driver_targets.blockSignals(False)
+
+    def _driver_selection_changed(self, *unused):
+        self.driver_consent.setChecked(False)
+        self.driver_agreements.setChecked(False)
+
+    def _driver_item_details(self, item, previous=None):
+        self.driver_details.setPlainText(json.dumps(item.data(Qt.UserRole), indent=2) if item else '')
+
+    def request_administrator(self):
+        self._start_probe(self.backend.elevate, (), {}, lambda result:self.driver_status.setText('Administrator restart requested. Windows UAC controls consent. Save setup choices in the elevated session.'), self.driver_status)
+
+    @staticmethod
+    def _checked(table):
+        return [copy.deepcopy(table.item(index).data(Qt.UserRole)) for index in range(table.count()) if table.item(index).checkState() == Qt.Checked and table.item(index).flags() & Qt.ItemIsEnabled]
+
+    def _driver_rules(self):
+        rules = {}
+        for item in self._checked(self.driver_targets):
+            rule = item.get('device')
+            if not rule:
+                continue
+            key = tuple(rule[name].casefold() for name in ('hardwareId','provider','class'))
+            if key not in rules or rule['notOlderThanDriverDate'] > rules[key]['notOlderThanDriverDate']:
+                rules[key] = rule
+        return list(rules.values())
+
+    def reject(self):
+        self._closing = True
+        if self._connection_panel is not None:
+            self._connection_panel._timer.stop()
+        super().reject()
 
     def _build_summary(self):
         body = self._page('summary', '11. Review your choices',
@@ -344,7 +685,7 @@ class InitialSetupWizard(QWizard):
                 values.append(value)
         return values
 
-    def collect_choices(self, *, validate=True):
+    def collect_choices(self, *, validate=True, section=None):
         result = copy.deepcopy(self.initial)
         for key, control in self.controls.items():
             if isinstance(control, QCheckBox):
@@ -353,22 +694,54 @@ class InitialSetupWizard(QWizard):
                 result[key] = control.value()
             elif isinstance(control, QComboBox):
                 result[key] = control.currentText()
-        result.update({'setup_version':1, 'automation_mode':next(mode for mode,button in self.cadence_buttons.items() if button.isChecked()),
+        result.update({'setup_version':SETUP_VERSION, 'automation_mode':next(mode for mode,button in self.cadence_buttons.items() if button.isChecked()),
             'cleanup_category_ids':[key for key,control in self.category_controls.items() if control.isChecked()],
             'software_update_policy':self.software_policy.currentData()})
         if validate:
             result['duplicate_roots'] = self._roots()
             result['software_update_ids'] = self._package_ids()
-            if result['duplicates_enabled'] and not result['duplicate_roots']:
+            if section in (None,'duplicates') and result['duplicates_enabled'] and not result['duplicate_roots']:
                 raise ValueError('Add at least one local folder for Duplicate Finder, or turn its scan off.')
             selected = result['software_updates_enabled'] and result['software_update_policy'] == 'selected'
-            if selected and not result['software_update_ids']:
+            if section in (None,'software') and selected and not result['software_update_ids']:
                 raise ValueError('List at least one exact WinGet package ID, or choose scan/report only.')
-            if selected and not result['software_update_agreements_accepted']:
+            if section in (None,'software') and selected and not result['software_update_agreements_accepted']:
                 raise ValueError('Selected-package installation requires your explicit package/source agreement authorization. Choose review-only to avoid accepting agreements.')
         else:
             result['duplicate_roots'] = [entry.strip() for entry in self.duplicate_roots.toPlainText().splitlines() if entry.strip()]
             result['software_update_ids'] = [entry.strip() for entry in re.split(r'[\r\n,]+',self.software_ids.toPlainText()) if entry.strip()]
+        result.update({'duplicate_policy':self.duplicate_policy.currentData(),
+                       'cloud_policy':self.cloud_policy.currentData(),
+                       'startup_policy':self.startup_policy.currentData(),
+                       'driver_policy':self.driver_policy.currentData(),
+                       'cloud_drive_id':self._cloud_binding['drive_id'] if self._cloud_binding else '',
+                       'cloud_folder_ids':list(self._cloud_binding['folder_ids']) if self._cloud_binding else [],
+                       'startup_approved_entries':self._checked(self.startup_targets),
+                       'driver_approved_updates':[item['descriptor'] for item in self._checked(self.driver_targets)],
+                       'driver_approved_devices':self._driver_rules()})
+        if validate:
+            if section in (None,'duplicates') and result['duplicates_enabled'] and result['duplicate_policy'] != 'review' and not result['duplicate_changes_approved']:
+                raise ValueError('Approve automatic duplicate recycling for these exact folders, or choose Review.')
+            if section in (None,'cloud') and result['cloud_review_enabled']:
+                if not self._cloud_binding or self._cloud_binding['inputs'] != self._cloud_inputs():
+                    raise ValueError('Verify an explicit owned OneDrive drive/folder scope, or turn the cloud stage off.')
+                if result['cloud_policy'] != 'review' and not result['cloud_changes_approved']:
+                    raise ValueError('Approve automatic cloud recycling for the verified scope, or choose Review.')
+            if section in (None,'startup') and result['startup_review_enabled'] and result['startup_policy'] != 'review':
+                if not self._startup_loaded or not result['startup_approved_entries'] or not result['startup_changes_approved']:
+                    raise ValueError('Load current startup entries, select exact entries and approve disabling, or choose Review.')
+            if section in (None,'drivers') and result['driver_updates_enabled'] and result['driver_policy'] != 'review':
+                if not self._drivers_loaded or not result['driver_changes_approved'] or not result['driver_update_agreements_accepted']:
+                    raise ValueError('Load fresh drivers, select updates/devices and approve installation plus agreements, or choose Review.')
+                key = 'driver_approved_devices' if result['driver_policy'] == 'install_matching' else 'driver_approved_updates'
+                if not result[key]:
+                    raise ValueError('Select at least one eligible exact driver update or complete matching-device rule.')
+        for enabled, policy, consent in (('duplicates_enabled','duplicate_policy','duplicate_changes_approved'),('cloud_review_enabled','cloud_policy','cloud_changes_approved'),('startup_review_enabled','startup_policy','startup_changes_approved'),('driver_updates_enabled','driver_policy','driver_changes_approved')):
+            if not result[enabled] or result[policy] == 'review':
+                result[consent] = False
+        if not result['driver_changes_approved']:
+            result['driver_update_agreements_accepted'] = False
+
         # Review-only never grants agreement acceptance.
         if result['software_update_policy'] != 'selected' or not result['software_updates_enabled']:
             result['software_update_agreements_accepted'] = False
@@ -393,38 +766,72 @@ class InitialSetupWizard(QWizard):
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'selected':
             actions.append('Install only listed WinGet IDs: ' + (', '.join(settings['software_update_ids']) or '[no IDs entered]'))
             actions.append('Package/source agreements: ' + ('explicitly accepted' if settings['software_update_agreements_accepted'] else 'NOT accepted; Save will be refused'))
+        policy_labels = {'review':'Review only', 'keep_oldest':'Keep oldest modified copy',
+            'keep_newest':'Keep newest modified copy', 'disable_selected':'Disable selected sign-in entries',
+            'install_approved':'Install exact approved update revisions',
+            'install_matching':'Install matching future updates for approved hardware, provider and class'}
+        for enabled, policy, label in (('duplicates_enabled','duplicate_policy','Local duplicate recycling'),('cloud_review_enabled','cloud_policy','OneDrive recycling'),('startup_review_enabled','startup_policy','Startup'),('driver_updates_enabled','driver_policy','Drivers')):
+            if settings.get(enabled) and settings[policy] != 'review':
+                actions.append(label+': '+policy_labels[settings[policy]])
+        if settings.get('duplicates_enabled') and settings['duplicate_policy'] != 'review':
+            actions.append('Local folders: '+ '; '.join(settings['duplicate_roots'])+'; minimum age '+str(settings['duplicate_min_age_days'])+' days; maximum '+str(settings['duplicate_max_recycle'])+' files per run. '+('Recycling approved.' if settings['duplicate_changes_approved'] else 'Approval still required.'))
+        cloud_scope_text = None
+        if settings.get('cloud_review_enabled'):
+            binding = self._cloud_binding or {}
+            drive = (binding.get('drive_name')+' ' if binding.get('drive_name') else '')+'[drive ID: '+(settings['cloud_drive_id'] or 'not verified')+']'
+            names = binding.get('scope_labels', [])
+            folders = [((names[index]+' ') if index<len(names) else '')+'[folder ID: '+identity+']' for index,identity in enumerate(settings['cloud_folder_ids'])]
+            cloud_scope_text = 'OneDrive: '+drive+'; folders: '+('; '.join(folders) or 'none verified')
+            if settings['cloud_policy'] != 'review':
+                actions.append(cloud_scope_text)
+                actions.append('Cloud minimum age '+str(settings['cloud_min_age_days'])+' days; maximum '+str(settings['cloud_max_recycle'])+' files per run. '+('Recycling approved.' if settings['cloud_changes_approved'] else 'Approval still required.'))
+        if settings.get('startup_review_enabled') and settings['startup_policy'] != 'review':
+            for entry in settings['startup_approved_entries']:
+                actions.append('Disable sign-in entry: '+str(entry.get('Name','Unnamed entry'))+'\n  Command: '+str(entry.get('Command',''))+'\n  Source: '+str(entry.get('Source',''))+'\n  Location: '+str(entry.get('Location','')))
+        if settings.get('driver_updates_enabled') and settings['driver_policy'] != 'review':
+            if settings['driver_policy'] == 'install_matching':
+                for device in settings['driver_approved_devices']:
+                    actions.append('Approved driver provider: '+str(device['provider'])+'; class: '+str(device['class'])+'\n  Hardware ID: '+str(device['hardwareId'])+'\n  Driver date must be '+str(device['notOlderThanDriverDate'])+' or later.')
+            else:
+                for update in settings['driver_approved_updates']:
+                    actions.append('Approved driver update: '+str(update['title'])+'; revision '+str(update['revision']))
+            actions.append('Driver installation: '+('approved' if settings['driver_changes_approved'] else 'approval still required')+'; update agreements: '+('accepted' if settings['driver_update_agreements_accepted'] else 'not accepted'))
         reviews = ['Initial and final Health Check/resource reports']
-        for key, text in (('applications_review_enabled','Installed applications inventory'),('performance_review_enabled','Detailed process/resource review'),('startup_review_enabled','Startup/service inventory review'),('duplicates_enabled','Local duplicate scan/report: ' + '; '.join(settings['duplicate_roots'])),('cloud_review_enabled','Connected personal OneDrive metadata scan/report (sign-in required)'),('driver_updates_enabled','Driver update scan/report; no installation')):
+        for key, text in (('applications_review_enabled','Installed applications inventory'),('performance_review_enabled','Detailed process/resource review'),('startup_review_enabled','Startup/service inventory'),('duplicates_enabled','Local duplicate scan/report: ' + '; '.join(settings['duplicate_roots'])),('cloud_review_enabled','Connected personal OneDrive metadata scan/report (sign-in required)'),('driver_updates_enabled','Driver inventory/update scan/report')):
             if settings.get(key):
                 reviews.append(text)
+        if cloud_scope_text and settings['cloud_policy'] == 'review':
+            reviews.append(cloud_scope_text)
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'review':
             reviews.append('Software update scan/report; no agreements accepted or installation')
         lines = ['CADENCE',CADENCES[settings['automation_mode']], '', 'CLEANUP AGE', str(settings.get('cleanup_age_days',7)) + ' days (' + settings.get('intensity','Standard') + ' preset)', '', 'AUTHORIZED CHANGES / PERSISTENT ANALYSIS']
         lines.extend('- ' + text for text in actions or ['None; this configuration is scan/report only.'])
         lines.extend(['', 'SCAN / REPORT ONLY'])
         lines.extend('- ' + text for text in reviews)
-        lines.extend(['', 'ALWAYS PRESERVED / SEPARATE REVIEW', 'Bing Wallpaper is protected. No automatic duplicate/cloud deletion, startup disabling or driver installation. Optional removals may require reinstallation; cleanup is permanent.', '', 'Save does not run maintenance unless Run selected maintenance now is checked.'])
+        lines.extend(['', 'PRESERVATION AND REVOKING APPROVAL', 'Bing Wallpaper is protected. Review policies do not apply changes. Only saved approved scopes can be changed without per-run prompts; turn a tool off or return its policy to Review to revoke approval. Recycle bins, supported startup backups and Windows driver recovery have limits; cleanup is permanent.', '', 'Save does not run maintenance unless Run selected maintenance now is checked.'])
         self.summary.setPlainText('\n'.join(lines))
 
     def validateCurrentPage(self):
         try:
-            if self.currentId() == self.page_ids['duplicates'] and self.controls['duplicates_enabled'].isChecked():
-                if not self._roots():
-                    raise ValueError('Add at least one local folder, or turn Duplicate Finder off.')
-            if self.currentId() == self.page_ids['software']:
-                self.collect_choices()
+            for key in ('duplicates','cloud','startup','software','drivers'):
+                if self.currentId() == self.page_ids[key]:
+                    self.collect_choices(section=key)
+                    break
         except ValueError as error:
             QMessageBox.warning(self, 'Review setup choices', str(error))
             return False
         return super().validateCurrentPage()
 
     def accept(self):
+        if self.busy:
+            self.save_error.setText('Wait for the inventory/account request to finish before saving.')
+            return
         try:
             preferences = self.collect_choices()
             from .automation import save_setup
             saved = save_setup(self.backend.data_dir, preferences, self.backend.save_preferences,
                                run_now=self.run_now_checkbox.isChecked())
-            if not isinstance(saved, dict) or int(saved.get('setup_version', 0)) < 1:
+            if not isinstance(saved, dict) or int(saved.get('setup_version', 0)) < SETUP_VERSION:
                 raise RuntimeError('The settings engine did not retain setup choices. No maintenance was started.')
         except Exception as error:
             self.save_error.setText('Choices were not saved: ' + str(error))

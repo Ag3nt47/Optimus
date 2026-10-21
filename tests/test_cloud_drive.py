@@ -25,7 +25,7 @@ class HTTP:
     return 200,response
    return 200,{'access_token':'private-access-fixture','refresh_token':'private-refresh-fixture','token_type':'Bearer','expires_in':3600,'scope':'Files.ReadWrite User.Read'}
   if path=='/v1.0/me/drive':return 200,copy.deepcopy(self.drive)
-  if path=='/v1.0/me/drive/root':return 200,{'id':'root-item','name':'Fixture root','folder':{},'root':{}}
+  if path in ('/v1.0/me/drive/root','/v1.0/me/drive/items/root-item'):return 200,{'id':'root-item','name':'Fixture root','folder':{},'root':{}}
   if path=='/v1.0/me/drive/items/root-item/children':
    result={'value':copy.deepcopy(list(self.items.values()))}
    if self.next:result['@odata.nextLink']=self.next
@@ -138,10 +138,11 @@ class Tests(unittest.TestCase):
   calls=[]
   def nested(method,url,headers=None,data=None,timeout=10):
    calls.append(url)
+   if urlsplit(url).path.endswith('/root-item'):return 200,{'id':'root-item','name':'Root','folder':{},'root':{}}
    return 200,{'id':'nested-parent','name':'Folder','folder':{},'parentReference':{'id':'root-item','driveId':'drive-fixture'}}
   self.tool.http=nested
   self.tool._scope_check({'parentReference':{'id':'nested-parent'}},{'rootId':'root-item','driveId':'drive-fixture'})
-  self.assertEqual(len(calls),1)
+  self.assertEqual(len(calls),2)
   with self.assertRaises(ValueError):self.tool._scope_check({'parentReference':{'id':'nested-parent'}},{'rootId':'different-root','driveId':'drive-fixture'})
  def test_26_no_config_connect_fails_without_network(self):
   self.tool.config={}

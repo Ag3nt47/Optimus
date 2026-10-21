@@ -12,7 +12,7 @@ Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Opti
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
-**Version 0.2.0** adds first-start setup questions and opt-in automatic maintenance. Choose each module, cleanup scope, approved software package IDs and timing before saving. Existing users see setup once after upgrading; their previous choices remain available. Bing Wallpaper protection and the packaged Qt/PowerShell/AppData fixes are retained.
+**Version 0.3.0** adds saved approvals for duplicate recycling, personal OneDrive recycling, exact startup disabling and quiet driver installation. Approve scopes and rules in the updated first-start questions; later runs revalidate targets without asking for the same approval again. Existing users must review the new setup before automatic maintenance resumes. Bing Wallpaper protection and the earlier packaging fixes are retained.
 
 ## Three controls
 
@@ -32,7 +32,11 @@ Choose manual operation, each Optimus startup, daily while Optimus is open, or w
 
 Your selected cleanup, curated removals and Codex priority profile can apply automatically. The software updater can silently update only the exact WinGet package IDs you list, with separate consent for package/source agreements. A fresh recognized update scan must still match the package and source. Vendor installers may require administrator permission or close applications; Optimus does not request automatic reboots.
 
-Other modules generate current review results: installed programs, startup entries, performance candidates, chosen duplicate folders, connected personal OneDrive metadata and Windows Update driver candidates. Individual file recycling, startup/service changes, arbitrary app uninstalls and driver installation remain available in Settings with their normal target selection. Automatic scanning does not make every matching file disposable or every startup entry unnecessary. Cloud scans require a connection you initiate in Settings.
+Duplicate, cloud, startup and driver modules each offer review mode or a saved apply approval. Local recycling uses your chosen folders, oldest/newest keeper, minimum age and per-run count limit; a retained copy is revalidated before each recycle. Personal OneDrive recycling is bound to the verified drive and concrete folders you approve. It additionally streams candidate contents for SHA256 comparison, limited to 64 MiB per file and 256 MiB per run; unsupported or oversized comparisons are skipped. Files go to the corresponding Recycle Bin; the bins are not emptied.
+
+Startup automation disables only the exact registrations you selected, with their saved command/location/fingerprint still matching; it keeps recovery records. Driver automation can install exact approved update IDs/revisions or future Windows Update drivers matching the approved hardware ID, provider, class and date floor. Compatible hardware IDs can identify multiple devices of the same model. Quiet installation requires an already elevated Optimus session, current metadata and a successful driver export first. Pending-reboot, interactive, changed or unverified candidates are skipped. No automatic reboot is requested.
+
+Each approval is optional and can be revoked by turning its module off or choosing review mode in setup. Revocation stops future changes; it does not restore items already recycled, disabled or installed. Use the Recycle Bin, History/startup restoration, Windows driver rollback or saved driver exports as applicable. Arbitrary app uninstalls and service changes still use their individual tools. Cloud connection is an explicit account action; cancelling the maintenance questions does not undo a connection you initiated.
 
 The completion window records actual per-stage results, exclusions and failures. Pause automatic maintenance by choosing **Manual** in setup. Background resource sampling has its own saved On/Off choice.
 

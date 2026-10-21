@@ -121,6 +121,10 @@ class Backend:
     def duplicate_recycle(self, record):
         return self.bridge.request('duplicate_recycle', record=record)
 
+    def duplicate_recycle_approved(self, record):
+        approved_record = dict(record, AutomaticApproved=True)
+        return self.bridge.request('duplicate_recycle', record=approved_record)
+
     def startup_list(self):
         return self._list(self.bridge.request('startup_list'))
 
@@ -161,6 +165,19 @@ class Backend:
 
     def driver_updates_scan(self):
         return self.bridge.request('driver_updates_scan', timeout=300)
+
+    def is_admin(self):
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+    def driver_backup_automatic(self):
+        import uuid
+        return self.backup_drivers(self.data_dir / 'driver-backups' / uuid.uuid4().hex)
+
+    def driver_update_apply_unattended(self, record, accept_eula=False):
+        if accept_eula is not True:
+            raise ValueError('Saved driver agreement approval is required.')
+        return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
+                                   unattended=True, acceptEula=True, record=record, timeout=900)
 
     def driver_update_apply(self, record):
         return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'], timeout=900)
@@ -233,6 +250,12 @@ class Backend:
 
     def cloud_scan(self, folder_id='root'):
         return self.cloud.scan(folder_id)
+
+    def cloud_approval_scope(self, folder_id='root'):
+        return self.cloud.approval_scope(folder_id)
+
+    def cloud_recycle_approved(self, plan, policy, cancel_event=None, item_callback=None):
+        return self.cloud.recycle_approved(plan, policy, cancel_event=cancel_event, item_callback=item_callback)
 
     def cloud_recycle(self, plan):
         return self.cloud.recycle(plan)

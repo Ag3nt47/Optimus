@@ -7,6 +7,7 @@ $WarningPreference='SilentlyContinue'
 [Console]::InputEncoding=New-Object Text.UTF8Encoding($false)
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 . (Join-Path $PSScriptRoot 'ComputerManager.ps1') -LibraryOnly -OutputPath $DataRoot
+. (Join-Path $PSScriptRoot 'SafeRecycle.ps1')
 . (Join-Path $PSScriptRoot 'FileTools.ps1')
 . (Join-Path $PSScriptRoot 'MaintenanceOperations.ps1')
 . (Join-Path $PSScriptRoot 'RegistryTools.ps1')
@@ -95,28 +96,10 @@ function Invoke-OptimusRequest {
         'power_plans' { @(Get-SCMPowerPlans) }
         'set_power_plan' { Set-SCMPowerPlan -Guid ([string]$arg.guid);@(Get-SCMPowerPlans) }
         'registry_audit' { Get-OptimusRegistryIssues }
-        'driver_updates_scan' {
-            $session=New-Object -ComObject Microsoft.Update.Session
-            $searcher=$session.CreateUpdateSearcher()
-            $result=$searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
-            $updates=@(foreach($update in $result.Updates){[pscustomobject]@{id=$update.Identity.UpdateID;revision=$update.Identity.RevisionNumber;title=$update.Title;downloaded=$update.IsDownloaded;eulaAccepted=$update.EulaAccepted}})
-            [pscustomobject]@{updates=$updates;source='Windows Update';resultCode=$result.ResultCode}
-        }
+        'driver_updates_scan' { Get-SCMDriverUpdateScan }
         'driver_update_apply' {
-            if(-not(Test-SCMAdministrator)){throw 'Run Optimus as administrator to install driver updates.'}
-            $session=New-Object -ComObject Microsoft.Update.Session
-            $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
-            $selected=@($result.Updates | Where-Object {$_.Identity.UpdateID -eq [string]$arg.id -and $_.Identity.RevisionNumber -eq [int]$arg.revision})
-            if($selected.Count -ne 1){throw 'The selected update changed. Scan again.'}
-            if(-not $selected[0].EulaAccepted){throw 'This driver requires a separate license agreement. Install it from Windows Update.'}
-            $collection=New-Object -ComObject Microsoft.Update.UpdateColl
-            [void]$collection.Add($selected[0])
-            $downloader=$session.CreateUpdateDownloader();$downloader.Updates=$collection
-            $download=$downloader.Download()
-            if($download.ResultCode -notin @(2,3)){throw 'Windows Update could not download the selected driver.'}
-            $installer=$session.CreateUpdateInstaller();$installer.Updates=$collection
-            $installed=$installer.Install()
-            [pscustomobject]@{title=$selected[0].Title;resultCode=$installed.ResultCode;restartNeeded=$installed.RebootRequired;hresult=$installed.HResult}
+            $record=if($arg.record){$arg.record}else{[pscustomobject]@{id=[string]$arg.id;revision=[int]$arg.revision}}
+            Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true)
         }
         default { Invoke-OptimusMaintenanceRequest -Operation ([string]$Request.operation) -Arguments $arg }
     }
@@ -131,5 +114,3 @@ while($null -ne ($line=[Console]::ReadLine())) {
     } catch { $response=[ordered]@{id=$request.id;ok=$false;error=$_.Exception.Message} }
     [Console]::WriteLine((ConvertTo-Json -InputObject $response -Depth 24 -Compress))
 }
-
-

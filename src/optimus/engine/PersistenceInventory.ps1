@@ -124,6 +124,7 @@ function Get-SCMStartupRecordById {
 function Get-SCMStartupProtection {
     param([string]$Name, [string]$Command)
     $text=$Name+' '+$Command
+    if (($text -replace '[^A-Za-z0-9]','') -match '(?i)BingWallpaper') { return 'Bing Wallpaper is preserved and its startup entry is protected.' }
     if ($text -match '(?i)anti.?virus|anti.?malware|securityhealth|defend|crowdstrike|sentinel|sophos|eset|kaspersky|bitdefender|malwarebytes|avast|avira|trend.?micro|mcafee|trellix|symantec|norton|cylance|forticlient|check.?point|withsecure|webroot|watchguard|huntress|recovery|backup|bitlocker|encrypt|credential|password|firewall') { return 'Security, recovery, backup, or credential related startup entries are protected.' }
     $exe=Get-SCMExecutableFromCommand -Command $Command
     if ($exe -and $exe.StartsWith(([IO.Path]::GetFullPath($env:SystemRoot).TrimEnd('\')+'\'),[StringComparison]::OrdinalIgnoreCase)) { return 'Startup commands supplied from the Windows directory are protected.' }

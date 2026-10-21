@@ -20,7 +20,7 @@ class AutomationTests(unittest.TestCase):
 
     def config(self, mode='daily'):
         result = copy.deepcopy(DEFAULTS)
-        result.update({'setup_version': 1, 'automation_mode': mode, 'cleanup_enabled': False, 'browser_cache_enabled': False})
+        result.update({'setup_version': automation.CURRENT_SETUP_VERSION, 'automation_mode': mode, 'cleanup_enabled': False, 'browser_cache_enabled': False})
         return result
 
     def test_old_settings_and_manual_mode_never_automatically_run(self):

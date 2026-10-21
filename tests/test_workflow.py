@@ -325,7 +325,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_configured_run_records_attempt_and_completion_without_changing_preferences(self):
         from optimus.automation import load_attempt
-        config = self.config(cleanup_enabled=False, browser_cache_enabled=False, setup_version=1, automation_mode='daily')
+        config = self.config(cleanup_enabled=False, browser_cache_enabled=False, setup_version=workflow_module.CURRENT_SETUP_VERSION, automation_mode='daily')
         result = self.workflow.run(config, lambda event: None)
         state = load_attempt(self.backend.data_dir)
         self.assertEqual(state['status'], 'completed')
@@ -345,7 +345,7 @@ class WorkflowTests(unittest.TestCase):
     def test_failed_configured_run_postpones_daily_retry_with_original_attempt_time(self):
         from optimus.automation import due, load_attempt
         self.backend.driver_result = {'resultCode': 4, 'updates': []}
-        config = self.config(cleanup_enabled=False, browser_cache_enabled=False, setup_version=1, automation_mode='daily', driver_updates_enabled=True)
+        config = self.config(cleanup_enabled=False, browser_cache_enabled=False, setup_version=workflow_module.CURRENT_SETUP_VERSION, automation_mode='daily', driver_updates_enabled=True)
         report = self.workflow.run(config, lambda event: None)
         state = load_attempt(self.backend.data_dir)
         self.assertEqual(report['failed_stages'], 1)

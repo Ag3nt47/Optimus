@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from .filesystem import replace_with_retry
 from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
+from .approval_policy import APPROVAL_DEFAULTS, validate_approvals
 
 DEFAULTS = {
     'intensity': 'Standard', 'cleanup_enabled': True, 'cleanup_age_days': 7,
@@ -27,6 +28,7 @@ DEFAULTS = {
     'software_update_agreements_accepted': False, 'driver_updates_enabled': False,
     'cleanup_category_ids': [],
 }
+DEFAULTS.update(copy.deepcopy(APPROVAL_DEFAULTS))
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _CATEGORY_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
 
@@ -117,7 +119,7 @@ class Preferences:
             raise ValueError('Selected unattended updates require explicit agreement acceptance.')
         if result['software_updates_enabled'] and result['software_update_policy'] == 'selected' and not result['software_update_ids']:
             raise ValueError('Choose at least one exact software ID for unattended updates.')
-        return result
+        return validate_approvals(result)
 
     def save(self, value):
         result = self.validate(value)
@@ -174,7 +176,7 @@ class Workflow:
             run_id = uuid.uuid4().hex
             log_path = self.backend.data_dir / 'runs' / (run_id + '.json')
             report = {'id': run_id, 'started_at': time.time(), 'settings': configuration, 'stages': [], 'cancelled': False,
-                      'status': 'running', 'note': 'Percent completion measures completed stages and selected items, not elapsed time. Daily/weekly automation runs only while Optimus is open. Review stages do not remove apps/files, change startup/process settings, or install drivers.'}
+                      'status': 'running', 'note': 'Percent completion measures completed stages and selected items, not elapsed time. Daily/weekly automation runs only while Optimus is open. Review stages do not make changes. Apply stages require the current setup and saved scope approvals; targets are revalidated on each run.'}
             self.last_report = report
             atomic_json(log_path, report)
             if configuration['setup_version'] >= CURRENT_SETUP_VERSION:
@@ -192,29 +194,62 @@ class Workflow:
                 stages.append(('Review installed applications', 'Collecting installed-program metadata; no uninstaller is launched.', lambda: review(self.backend.installed_apps, 'Review only; no applications were uninstalled.')))
             if configuration['performance_review_enabled']:
                 stages.append(('Review application resource use', 'Measuring readable processes; no processes are suspended or reprioritized.', lambda: review(self.backend.processes, 'Review only; memory use alone does not prove an application is unnecessary.')))
+            def item_progress(title):
+                def emit(state):
+                    state = state if isinstance(state, dict) else {'description': str(state)}
+                    current = state.get('current', state.get('processed', state.get('item', 0)))
+                    total = state.get('total', state.get('items', 0))
+                    fraction = max(0, min(1, current / total)) if type(current) in (int, float) and type(total) in (int, float) and total > 0 else 0
+                    description = str(state.get('description', state.get('item', title)))
+                    progress_callback({'percentage': min(99, int((completed + fraction) * 100 / len(stages))),
+                                       'stage': title, 'description': description,
+                                       'processes': ['Optimus maintenance worker', description],
+                                       'log': str(state.get('log', description)), 'completed': completed, 'total': len(stages)})
+                return emit
+
             if configuration['startup_review_enabled']:
-                stages.append(('Review startup registrations', 'Inspecting sign-in entries; no registration is changed.', lambda: review(self.backend.startup_list, 'Review only; no startup entry was disabled or deleted.')))
+                if configuration['startup_policy'] == 'disable_selected':
+                    from .automated_system import run_startup
+                    stages.append(('Disable approved startup entries', 'Revalidating saved registration identities and disabling only approved matches with recovery records.',
+                                   lambda: run_startup(self.backend, configuration, cancel_event=cancel_event, item_callback=item_progress('Disable approved startup entries'))))
+                else:
+                    stages.append(('Review startup registrations', 'Inspecting sign-in entries; no registration is changed.', lambda: review(self.backend.startup_list, 'Review only; no startup entry was disabled or deleted.')))
             if configuration['duplicates_enabled']:
-                for root in configuration['duplicate_roots']:
-                    stages.append(('Review duplicates: ' + ntpath.basename(root), 'Hashing eligible files in the selected folder with bounded scanning.', lambda root=root: review(lambda: self.backend.duplicate_scan(root), 'Review only; identical-content candidates require separate selected-file review. No file was recycled.')))
-                if not configuration['duplicate_roots']:
-                    stages.append(('Review duplicate configuration', 'No local folder has been selected.', lambda: {'review_only': True, 'skipped': True, 'note': 'Choose a local user folder to scan. No files were read or recycled.'}))
+                if configuration['duplicate_policy'] != 'review':
+                    from .automated_files import run_local
+                    stages.append(('Recycle approved local duplicates', 'Scanning only approved folders; applying the saved keeper, age and per-run limit after current identity checks.',
+                                   lambda: run_local(self.backend, configuration, cancel_event=cancel_event, item_callback=item_progress('Recycle approved local duplicates'))))
+                else:
+                    for root in configuration['duplicate_roots']:
+                        stages.append(('Review duplicates: ' + ntpath.basename(root), 'Hashing eligible files in the selected folder with bounded scanning.', lambda root=root: review(lambda: self.backend.duplicate_scan(root), 'Review only; identical-content candidates require separate selected-file review. No file was recycled.')))
+                    if not configuration['duplicate_roots']:
+                        stages.append(('Review duplicate configuration', 'No local folder has been selected.', lambda: {'review_only': True, 'skipped': True, 'note': 'Choose a local user folder to scan. No files were read or recycled.'}))
             if configuration['cloud_review_enabled']:
-                def cloud_review():
-                    status = self.backend.cloud_status()
-                    if not isinstance(status, dict) or status.get('connected') is not True:
-                        return {'review_only': True, 'skipped': True, 'status': status, 'note': 'Connect the supported personal OneDrive account explicitly before cloud review. No sign-in or cloud change was started.'}
-                    if cancelled():
-                        return {'cancelled': True, 'review_only': True}
-                    return {'review_only': True, 'status': status, 'result': self.backend.cloud_scan(), 'note': 'Metadata review only; no cloud file was recycled or downloaded by this workflow.'}
-                stages.append(('Review connected cloud drive', 'Inspecting existing connection and metadata-only duplicate candidates.', cloud_review))
+                if configuration['cloud_policy'] != 'review':
+                    from .automated_files import run_cloud
+                    stages.append(('Recycle approved cloud duplicates', 'Rechecking the approved personal drive/folders and comparing content before bounded recycling. No sign-in is started automatically.',
+                                   lambda: run_cloud(self.backend, configuration, cancel_event=cancel_event, item_callback=item_progress('Recycle approved cloud duplicates'))))
+                else:
+                    def cloud_review():
+                        status = self.backend.cloud_status()
+                        if not isinstance(status, dict) or status.get('connected') is not True:
+                            return {'review_only': True, 'skipped': True, 'status': status, 'note': 'Connect the supported personal OneDrive account explicitly before cloud review. No sign-in or cloud change was started.'}
+                        if cancelled():
+                            return {'cancelled': True, 'review_only': True}
+                        return {'review_only': True, 'status': status, 'result': self.backend.cloud_scan(), 'note': 'Metadata review only; no cloud file was recycled or downloaded by this workflow.'}
+                    stages.append(('Review connected cloud drive', 'Inspecting existing connection and metadata-only duplicate candidates.', cloud_review))
             if configuration['driver_updates_enabled']:
-                def driver_review():
-                    result = self.backend.driver_updates_scan()
-                    successful = isinstance(result, dict) and type(result.get('resultCode')) is int and result['resultCode'] == 2
-                    return {'review_only': True, 'result': result, 'failed_items': 0 if successful else 1,
-                            'note': 'Review only; no driver was downloaded or installed by this workflow. Windows Update must report a successful completed scan; partial/failed/unknown scan results require review.'}
-                stages.append(('Review available driver updates', 'Checking Windows Update metadata; driver installation requires separate review.', driver_review))
+                if configuration['driver_policy'] != 'review':
+                    from .automated_system import run_drivers
+                    stages.append(('Install approved driver updates', 'Matching current Windows Update candidates to saved update/device approvals, checking elevation and backing up drivers before quiet installation.',
+                                   lambda: run_drivers(self.backend, configuration, cancel_event=cancel_event, item_callback=item_progress('Install approved driver updates'))))
+                else:
+                    def driver_review():
+                        result = self.backend.driver_updates_scan()
+                        successful = isinstance(result, dict) and type(result.get('resultCode')) is int and result['resultCode'] == 2
+                        return {'review_only': True, 'result': result, 'failed_items': 0 if successful else 1,
+                                'note': 'Review only; no driver was downloaded or installed by this workflow. Windows Update must report a successful completed scan; partial/failed/unknown scan results require review.'}
+                    stages.append(('Review available driver updates', 'Checking Windows Update metadata; driver installation requires separate review.', driver_review))
 
             age = max(30, configuration['cleanup_age_days']) if configuration['intensity'] == 'Low' else configuration['cleanup_age_days']
             def clean(category_ids):
