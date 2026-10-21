@@ -24,6 +24,8 @@ jobs:
         run: |
           & tests/Test-FileTools.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-DriverCoverage.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-AutomatedSystem.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-SafeRecycle.ps1 -SkipLive
@@ -71,3 +73,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { gh release create $env:GITHUB_REF_NAME --generate-notes }
           $assets = gh release view $env:GITHUB_REF_NAME --json assets --jq '.assets[].name'
           if ($assets -notcontains 'Optimus-Windows.zip') { gh release upload $env:GITHUB_REF_NAME Optimus-Windows.zip }
+
+

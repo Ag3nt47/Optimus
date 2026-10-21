@@ -1,3 +1,5 @@
+
+
 """Optimus desktop interface; host operations run through the local backend."""
 from __future__ import annotations
 import json
@@ -505,11 +507,12 @@ class DetailedSettingsWindow(QMainWindow):
 
     def _build_cleaner(self):
         layout = self.layouts["Cleaner"]
+        self._note(layout, "Junk and cache cleanup: choose temporary files, error reports, shader caches or inactive-browser caches, then preview the exact files. Documents, downloads, browser history and passwords are not general cleanup targets.")
         bar = self._toolbar(layout)
         self._button(bar, "Refresh categories", self.load_cleanup_categories)
         bar.addWidget(QLabel("Minimum age:"))
         self.clean_age = QSpinBox()
-        self.clean_age.setRange(7, 365)
+        self.clean_age.setRange(1, 3650)
         self.clean_age.setValue(7)
         self.clean_age.setSuffix(" days")
         self.clean_age.valueChanged.connect(self._invalidate_cleanup)
@@ -597,7 +600,11 @@ class DetailedSettingsWindow(QMainWindow):
         self.layouts['Browser privacy'].addWidget(self.privacy_panel)
 
     def _build_performance(self):
-        layout = self.layouts["Performance"]
+        outer = self.layouts['Performance']
+        self.performance_tabs = QTabWidget()
+        controls = QWidget()
+        layout = QVBoxLayout(controls)
+        layout.setContentsMargins(0,0,0,0)
         analysis = self._toolbar(layout)
         self.analysis_toggle = QCheckBox("Background analysis OFF")
         self.analysis_toggle.setChecked(False)
@@ -662,6 +669,58 @@ class DetailedSettingsWindow(QMainWindow):
         self._button(bar, "Apply plan", self.apply_power)
         self._button(bar, "Resource Monitor", lambda: self._run("system_tool", "resource-monitor"))
         self._note(layout, "Pause suspends one verified application process; it can interrupt work and does not reduce committed memory. Higher priority changes CPU scheduling, not total CPU or RAM.")
+
+        self.performance_tabs.addTab(controls, 'Process controls')
+        review = QWidget()
+        report_layout = QVBoxLayout(review)
+        toolbar = self._toolbar(report_layout)
+        self._button(toolbar, 'Measure programs slowing down PC', lambda: self._run('slowdown_report', done=self._slowdown_ready), primary=True)
+        self._button(toolbar, 'View selected program processes', self._slowdown_open_processes)
+        toolbar.addStretch()
+        self.slowdown_summary = self._note(report_layout, 'No measurement collected. This short read-only sample compares CPU, memory and I/O over several snapshots; no program is changed automatically.')
+        self.slowdown_table = DataTable([('Review level',lambda r:{'high':'High resource use','review':'Review','normal':'Normal'}.get(field(r,'severity'),'Review')),
+            ('Program','name'),('CPU %',lambda r:field(r,'cpu_percent') if field(r,'measured_intervals',default=0)>0 else 'Unavailable'),('Peak CPU %',lambda r:field(r,'peak_cpu_percent') if field(r,'measured_intervals',default=0)>0 else 'Unavailable'),
+            ('Memory MB',lambda r:float(field(r,'memory_rss',default=0) or 0)/1048576),
+            ('RAM %','memory_percent'),('Read MB/s',lambda r:float(field(r,'read_bytes_per_second',default=0) or 0)/1048576 if field(r,'io_measured_intervals',default=0)>0 else 'Unavailable'),
+            ('Write MB/s',lambda r:float(field(r,'write_bytes_per_second',default=0) or 0)/1048576 if field(r,'io_measured_intervals',default=0)>0 else 'Unavailable'),('Processes','process_count'),('Program path','exe')])
+        self.slowdown_table.itemSelectionChanged.connect(self._slowdown_selected)
+        report_layout.addWidget(self.slowdown_table,1)
+        self.slowdown_details = QPlainTextEdit()
+        self.slowdown_details.setReadOnly(True)
+        self.slowdown_details.setMaximumHeight(185)
+        report_layout.addWidget(self.slowdown_details)
+        self._note(report_layout, 'Measured resource use identifies programs to review. It does not prove that a program is old, unwanted or the cause of every delay. Shared memory may be counted in several process working sets. Use the existing selected-process controls only after reviewing the program.')
+        self.performance_tabs.addTab(review, 'Programs slowing down PC')
+        outer.addWidget(self.performance_tabs,1)
+
+    def _slowdown_ready(self, report):
+        applications = rows(field(report,'applications',default=[]))
+        self.slowdown_table.populate(applications)
+        weights = {'high':2,'review':1,'normal':0}
+        for index in range(self.slowdown_table.rowCount()):
+            item = self.slowdown_table.item(index,0)
+            item.setData(Qt.UserRole+1, weights.get(field(item.data(Qt.UserRole),'severity'),1))
+        self.slowdown_table.sortItems(0,Qt.DescendingOrder)
+        if applications:
+            self.slowdown_table.selectRow(0)
+        memory = field(report,'memory',default={}) or {}
+        self.slowdown_summary.setText(str(field(report,'sample_count',default=0))+' samples over '+display(field(report,'duration_seconds',default=0))+' seconds. System CPU '+display(field(report,'system_cpu_percent'))+'%; RAM '+display(field(memory,'percent'))+'%. '+('Complete sample.' if field(report,'complete',default=False) else 'Partial/cancelled sample; interpret with care.')+' '+str(field(report,'inaccessible_process_count',default=0))+' inaccessible processes. '+display(field(report,'notes',default=[])))
+        self.performance_tabs.setCurrentIndex(1)
+        self._slowdown_selected()
+
+    def _slowdown_selected(self):
+        record = self.slowdown_table.selected()
+        if not record:
+            self.slowdown_details.clear()
+            return
+        self.slowdown_details.setPlainText('Program: '+display(field(record,'name'))+'\nPath: '+display(field(record,'exe'))+'\nProcesses: '+display(field(record,'pids'))+'\nWhy review: '+display(field(record,'reasons',default=[]))+'\nSuggested next step: '+display(field(record,'recommendation'))+'\nNo application was stopped, suspended or uninstalled by this report.')
+
+    def _slowdown_open_processes(self):
+        record = self.slowdown_table.selected()
+        if record:
+            self.process_search.setText(display(field(record,'exe','name')))
+            self.performance_tabs.setCurrentIndex(0)
+            self.load_processes()
 
     def _analysis_toggled(self, enabled):
         if self.busy:
@@ -831,21 +890,38 @@ class DetailedSettingsWindow(QMainWindow):
         bar = self._toolbar(layout)
         self._button(bar, 'Check software updates', lambda: self._run('updates_scan', done=self._updates_ready), primary=True)
         self._button(bar, 'Windows Update', lambda: self._run('system_tool', 'windows-update'))
+        self._button(bar, 'Microsoft Store updates', lambda: self._run('system_tool', 'store-updates'))
         bar.addStretch()
+        self.updates_summary = self._note(layout, 'No scan loaded. Automatic selected/all-supported policies and exact exclusions are configured in Settings > Run setup questions again.')
+        self.updates_candidates_table = DataTable([('Application','name'),('Package ID','id|package_id'),('Installed','version'),('Available','available'),('Source','source')])
+        self.updates_candidates_table.itemSelectionChanged.connect(self._update_selected)
+        layout.addWidget(self.updates_candidates_table,1)
         self.updates_output = QPlainTextEdit()
         self.updates_output.setReadOnly(True)
-        self.updates_output.setPlaceholderText('Run a check to see Windows Package Manager output. Availability and source agreements can affect results.')
-        layout.addWidget(self.updates_output, 1)
+        self.updates_output.setMaximumHeight(160)
+        self.updates_output.setPlaceholderText('WinGet source output and any unsupported or incomplete results appear here.')
+        layout.addWidget(self.updates_output)
         bar = self._toolbar(layout)
         self.update_id = QLineEdit()
-        self.update_id.setPlaceholderText('Exact package ID from the update result, for example Vendor.Application')
-        bar.addWidget(self.update_id, 1)
-        self._button(bar, 'Update this package', self.update_package)
-        self._note(layout, 'Updates install individually after confirmation. Installers can close applications, request elevation or require a restart. Installed version alone does not establish that an update exists.')
+        self.update_id.setPlaceholderText('Selected or advanced exact package ID, for example Vendor.Application')
+        bar.addWidget(self.update_id,1)
+        self._button(bar,'Update this package',self.update_package)
+        self._note(layout,'This direct action updates one confirmed package. Automatic all-supported scope needs separate saved approval and agreement acceptance; exact exclusions and all WinGet pins are respected. Unknown or ambiguous update identities are not automatically included. Store apps use the Microsoft Store route; unsupported applications need their own updater.')
 
     def _updates_ready(self, result):
-        self.updates_output.setPlainText(display(field(result, 'output', 'Text', default=result)))
+        self.updates_output.setPlainText(display(field(result,'output','text','Text',default=result)))
+        candidates = field(result,'packages','updates',default=[])
+        complete = field(result,'structured',default=False) is True and field(result,'exitCode',default=-1)==0 and isinstance(candidates,list)
+        from .automated_software import fresh_candidates
+        values=[dict(record,id=identity) for identity,record in fresh_candidates(result).items()]
+        self.updates_candidates_table.populate(values)
+        self.updates_summary.setText(str(len(values))+' recognized unique WinGet update candidates. '+('Choose a row to fill its exact ID.' if complete else 'The scan was incomplete or its format unrecognized; no selectable rows were inferred.')+' Exclusions/notes: '+display(field(result,'excluded',default=[])))
         self.loaded_pages.add('Updates')
+
+    def _update_selected(self):
+        record=self.updates_candidates_table.selected()
+        if record and hasattr(self,'update_id'):
+            self.update_id.setText(display(field(record,'id','package_id')))
 
     def update_package(self):
         value = self.update_id.text().strip()
@@ -859,6 +935,7 @@ class DetailedSettingsWindow(QMainWindow):
         layout = self.layouts['Drivers']
         bar = self._toolbar(layout)
         self._button(bar, 'Refresh installed drivers', self.load_drivers)
+        self._button(bar, 'Check all present hardware coverage', lambda: self._run('driver_coverage', done=self._driver_coverage_ready))
         self._button(bar, 'Scan available driver updates', lambda: self._run('driver_updates_scan', done=self._driver_updates_ready), primary=True)
         self.driver_install_button = self._button(bar, 'Install selected update', self.install_driver_update)
         self.driver_install_button.setEnabled(False)
@@ -883,18 +960,74 @@ class DetailedSettingsWindow(QMainWindow):
         available_layout.addWidget(self.driver_updates_table)
         self.driver_tabs.addTab(installed, 'Installed driver inventory')
         self.driver_tabs.addTab(available, 'Windows Update candidates')
+        hardware=QWidget()
+        hardware_layout=QVBoxLayout(hardware)
+        self.driver_coverage_summary=self._note(hardware_layout,'No present-device coverage report loaded. No Windows Update offer does not establish that the installed driver is the latest vendor release.')
+        self.driver_coverage_table=DataTable([('Present device','displayName'),('Class','deviceClass'),('Manufacturer','manufacturer'),('Coverage','statusDescription'),('Problem code','problemCode'),('Windows Update offers',lambda r:len(field(r,'updateOffers',default=[]) or []))])
+        self.driver_coverage_table.itemSelectionChanged.connect(self._driver_coverage_selected)
+        hardware_layout.addWidget(self.driver_coverage_table,1)
+        support=self._toolbar(hardware_layout)
+        support.addWidget(QLabel('Official support:'))
+        self.driver_support_links=QComboBox()
+        support.addWidget(self.driver_support_links,1)
+        self.driver_support_button=self._button(support,'Open selected official support route',self.open_driver_support)
+        self.driver_support_button.setEnabled(False)
+        self.driver_coverage_details=QPlainTextEdit()
+        self.driver_coverage_details.setReadOnly(True)
+        self.driver_coverage_details.setMaximumHeight(200)
+        hardware_layout.addWidget(self.driver_coverage_details)
+        self.driver_tabs.addTab(hardware,'All present hardware coverage')
+        self._driver_coverage_report={}
         layout.addWidget(self.driver_tabs, 1)
-        self.driver_update_note = self._note(layout, 'Available updates are queried through Windows Update Agent. A version number alone does not prove a newer driver exists. Scan is read-only; each driver installation needs your confirmation and administrator access.')
+        self.driver_update_note = self._note(layout, 'Available updates are queried through Windows Update Agent. A version number alone does not prove a newer driver exists. Scanning is read-only. Manual installation asks for confirmation and administrator access; automatic policies reuse only the device/update scope and agreements you saved in setup.')
         self._note(layout, 'Back up third-party driver packages before changing them. Export is handled by Windows pnputil; inbox Windows drivers and device settings may require separate recovery. Hardware-manufacturer tools remain useful for vendor-specific packages.')
 
     def load_drivers(self):
         self._run('drivers_list', done=lambda r: self._page_table_ready('Drivers', self.driver_table, r))
 
     def _driver_updates_ready(self, result):
+        if isinstance(field(result,'coverage',default=None),dict):
+            self._driver_coverage_ready(result['coverage'],activate=False)
         candidates = rows(field(result, 'updates', default=[]))
         self.driver_updates_table.populate(candidates)
         self.driver_tabs.setCurrentIndex(1)
         self.driver_update_note.setText(f'Windows Update returned {len(candidates):,} driver candidates. Source: ' + display(field(result, 'source', default='Windows Update Agent')) + '. Result code: ' + display(field(result, 'resultCode')) + '. Review a title and revision before installation; this query does not cover every manufacturer catalog.')
+
+    def _driver_coverage_ready(self, report, *, activate=True):
+        self._driver_coverage_report=report
+        self.driver_coverage_table.populate(field(report,'devices',default=[]))
+        summary=field(report,'summary',default={}) or {}
+        self.driver_coverage_summary.setText('Present devices: '+display(field(summary,'devices',default=0))+'; Windows Update offers: '+display(field(summary,'offered',default=0))+'; device problems: '+display(field(summary,'deviceProblems',default=0))+'; no offer: '+display(field(summary,'noOffer',default=0))+'. '+('Device inventory complete. ' if field(report,'inventoryComplete',default=False) else 'Device inventory incomplete. ')+('Update scan complete. ' if field(report,'updateScanComplete',default=False) else 'Update scan incomplete. ')+display(field(report,'notes',default=[])))
+        if activate:
+            self.driver_tabs.setCurrentIndex(2)
+        self._driver_coverage_selected()
+
+    def _driver_coverage_selected(self):
+        record=self.driver_coverage_table.selected()
+        self.driver_support_links.clear()
+        links=list(field(record,'supportLinks',default=[]) or [])+list(field(self._driver_coverage_report,'systemSupport',default=[]) or [])
+        seen=set()
+        for link in links:
+            url=display(field(link,'url'))
+            if url and url not in seen:
+                self.driver_support_links.addItem(display(field(link,'label',default='Official support')),url)
+                seen.add(url)
+        self.driver_support_button.setEnabled(bool(seen))
+        if not record:
+            self.driver_coverage_details.clear()
+            return
+        installed=field(record,'installedDrivers',default=[]) or []
+        versions='; '.join(display(field(value,'version','driverVersion','DriverVersion')) for value in installed)
+        offers='; '.join(display(field(value,'title'))+' (revision '+display(field(value,'revision'))+')' for value in field(record,'updateOffers',default=[]) or [])
+        self.driver_coverage_details.setPlainText('Device: '+display(field(record,'displayName'))+'\nCoverage: '+display(field(record,'statusDescription','status'))+'\nDevice ID: '+display(field(record,'deviceId'))+'\nHardware IDs: '+display(field(record,'hardwareIds',default=[]))+'\nInstalled driver versions: '+versions+'\nDevice problem: '+display(field(record,'problem'))+' (code '+display(field(record,'problemCode'))+')\nWindows Update offers: '+(offers or 'None observed. This is not proof that the latest vendor driver is installed.')+'\nOfficial links open the manufacturer support site; vendor tools/manual selection can cover devices not offered by Windows Update.')
+
+    def open_driver_support(self):
+        from .driver_coverage import is_trusted_support_url
+        url=self.driver_support_links.currentData()
+        if not isinstance(url,str) or not is_trusted_support_url(url):
+            self._error('This is not a recognized official vendor support route.')
+            return
+        QDesktopServices.openUrl(QUrl(url))
 
     def _driver_admin(self):
         try:
@@ -1918,3 +2051,4 @@ class OptimusWindow(QMainWindow):
 
 def create_window(backend, *, smoke_test=False):
     return OptimusWindow(backend, smoke_test=smoke_test)
+

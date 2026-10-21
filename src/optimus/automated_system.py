@@ -23,9 +23,9 @@ def _text(value, label, maximum=32768, *, empty=False):
     return value
 
 
-def _list(values, label):
-    if type(values) is not list or len(values) > 100:
-        raise ValueError(label + ' must contain at most 100 exact approvals.')
+def _list(values, label, maximum=100):
+    if type(values) is not list or len(values) > maximum:
+        raise ValueError(label + ' must contain at most ' + str(maximum) + ' exact approvals.')
     if len(json.dumps(values, ensure_ascii=True, allow_nan=False)) > 1024 * 1024:
         raise ValueError(label + ' exceeds its saved approval limit.')
     return values
@@ -127,7 +127,7 @@ def _device_rule(value):
     return result
 
 def validate_driver_devices(values):
-    result=[_device_rule(value) for value in _list(values, 'Driver device rules')]
+    result=[_device_rule(value) for value in _list(values, 'Driver device rules', maximum=2048)]
     if len({tuple(value[key].casefold() for key in ('hardwareId','provider','class')) for value in result})!=len(result):raise ValueError('Duplicate driver device rules are not allowed.')
     return result
 
@@ -241,3 +241,4 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None):
             items.append({'binding':value,'status':'failed','error':str(error),'uncertain':True})
             break
     return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False,backup=backup,deferred=eligible[processed:],note='Only approved applicable update identities or exact device/provider/class rules were used. No automatic reboot or elevation was requested.')
+

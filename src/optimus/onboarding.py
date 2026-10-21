@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 SETUP_VERSION = 2
+DEVICE_RULE_LIMIT = 2048
 
 CADENCES = {
     'manual': 'Manual - only when I click Optimize',
@@ -99,6 +100,7 @@ class InitialSetupWizard(QWizard):
         self._cloud_binding = None
         self._startup_loaded = False
         self._drivers_loaded = False
+        self._hardware_loaded = False
         self._connection_panel = None
         self.setWindowTitle('Optimus - initial setup' if first_run else 'Optimus - setup questions')
         self.setWizardStyle(QWizard.ClassicStyle)
@@ -350,30 +352,99 @@ class InitialSetupWizard(QWizard):
 
     def _build_software(self):
         body = self._page('software', '9. Software Updater',
-            'Use WinGet to check available application updates. Choose review-only reporting, or explicitly authorize installation of only the exact package IDs you enter. This is not permission to update every app or any future unlisted package.')
+            'Load current WinGet application updates and select exact packages, or authorize all supported installed WinGet applications with explicit exclusions. Review only never installs. All-supported approval also covers future matching installed applications.')
         self._check(body, 'software_updates_enabled', 'Include the Software Updater stage')
         self.software_policy = QComboBox()
         self.software_policy.addItem('Scan and report only', 'review')
-        self.software_policy.addItem('Install only the exact package IDs listed below', 'selected')
+        self.software_policy.addItem('Install only my selected/listed exact package IDs', 'selected')
+        self.software_policy.addItem('All supported installed WinGet applications (including future matching applications)', 'all_supported')
         self.software_policy.setCurrentIndex(max(0, self.software_policy.findData(self.initial.get('software_update_policy', 'review'))))
         body.addWidget(self.software_policy)
+        load = QPushButton('Load current WinGet updates to choose packages')
+        load.clicked.connect(self.load_software_candidates)
+        body.addWidget(load)
+        self.software_status = _label('No software scan loaded. Loading the list does not install anything.')
+        body.addWidget(self.software_status)
+        self.software_targets = QListWidget()
+        self.software_targets.setMinimumHeight(135)
+        body.addWidget(self.software_targets)
+        body.addWidget(_label('Advanced: other exact WinGet package IDs, one per line or comma-separated. Checked packages above are included automatically.'))
         self.software_ids = QPlainTextEdit()
-        self.software_ids.setPlaceholderText('Exact WinGet package IDs, one per line or comma-separated. Example: Vendor.Application')
+        self.software_ids.setPlaceholderText('Exact IDs, for example Vendor.Application. Known listed IDs move into the checklist when loaded.')
         self.software_ids.setPlainText('\n'.join(self.initial.get('software_update_ids', [])))
-        self.software_ids.setMinimumHeight(130)
+        self.software_ids.setFixedHeight(80)
         body.addWidget(self.software_ids)
+        body.addWidget(_label('All-supported exclusions: these exact package IDs must never be included by that policy.'))
+        self.software_exclusions = QPlainTextEdit()
+        self.software_exclusions.setPlainText('\n'.join(self.initial.get('software_update_exclude_ids', [])))
+        self.software_exclusions.setFixedHeight(75)
+        body.addWidget(self.software_exclusions)
+        self.software_all_consent = self._check(body, 'software_update_all_approved',
+            'Approve all supported installed WinGet applications, including future matching applications, except my exclusions')
+        self.software_all_consent.setStyleSheet('color:#ffd29c;')
         self.software_agreements = self._check(body, 'software_update_agreements_accepted',
-            'Allow silent installation of my listed packages and accept their package/source agreements')
-        body.addWidget(_label('The installation choice authorizes only these listed IDs. Vendors may require administrator access or closed applications; installers may fail or require a later restart. Optimus does not request an automatic reboot. Review-only does not accept agreements.'))
-        self.software_policy.currentIndexChanged.connect(self._software_controls)
+            'Allow silent installation of my selected packages and accept their package/source agreements')
+        body.addWidget(_label('All-supported mode includes only recognized complete WinGet-source identities. Pins, excluded IDs, unknown/truncated/ambiguous entries and unsupported sources are skipped. Vendors may need administrator access or closed apps. No automatic reboot is requested.'))
+        self.software_policy.currentIndexChanged.connect(self._software_policy_changed)
         self.controls['software_updates_enabled'].toggled.connect(self._software_controls)
+        self.software_targets.itemChanged.connect(lambda: self.software_agreements.setChecked(False))
+        self.software_ids.textChanged.connect(lambda: self.software_agreements.setChecked(False))
+        self.software_exclusions.textChanged.connect(self._software_scope_changed)
         self._software_controls()
         body.addStretch()
 
     def _software_controls(self, *unused):
-        selected = self.controls['software_updates_enabled'].isChecked() and self.software_policy.currentData() == 'selected'
+        enabled = self.controls['software_updates_enabled'].isChecked()
+        selected = enabled and self.software_policy.currentData() == 'selected'
+        all_supported = enabled and self.software_policy.currentData() == 'all_supported'
         self.software_ids.setEnabled(selected)
-        self.software_agreements.setEnabled(selected)
+        self.software_targets.setEnabled(selected)
+        self.software_exclusions.setEnabled(all_supported)
+        self.software_all_consent.setEnabled(all_supported)
+        self.software_agreements.setEnabled(selected or all_supported)
+        self.software_agreements.setText('Allow silent installation of supported WinGet applications and accept their package/source agreements' if all_supported else 'Allow silent installation of my selected/listed packages and accept their package/source agreements')
+
+    def _software_policy_changed(self, *unused):
+        self.software_all_consent.setChecked(False)
+        self.software_agreements.setChecked(False)
+        self._software_controls()
+
+    def _software_scope_changed(self):
+        self.software_all_consent.setChecked(False)
+        self.software_agreements.setChecked(False)
+
+    def load_software_candidates(self):
+        self._start_probe(self.backend.updates_scan, (), {}, self._software_candidates_ready, self.software_status)
+
+    def _software_candidates_ready(self, result):
+        checked_ids = [item['id'] for item in self._checked(self.software_targets)]
+        previous = {value.casefold() for value in checked_ids}
+        tokens = [value.strip() for value in re.split(r'[\r\n,]+', self.software_ids.toPlainText()) if value.strip()]
+        previous.update(value.casefold() for value in tokens)
+        preserved_tokens = list(dict.fromkeys(tokens+checked_ids))
+        self.software_targets.blockSignals(True)
+        self.software_targets.clear()
+        candidates = result.get('packages', result.get('updates', []))
+        complete = result.get('structured') is True and result.get('exitCode') == 0 and isinstance(candidates, list)
+        if not complete:
+            self.software_targets.blockSignals(False)
+            self.software_ids.setPlainText('\n'.join(preserved_tokens))
+            self.software_status.setText('Selected IDs were retained in the advanced field. WinGet did not return a complete recognized update list. No rows can be selected. Review Updates for its output; advanced exact IDs remain available.')
+            return
+        from .automated_software import fresh_candidates
+        accepted = fresh_candidates(result)
+        selectable = {identity.casefold() for identity in accepted}
+        for identifier, record in accepted.items():
+            item = QListWidgetItem(str(record.get('name') or identifier)+' | '+identifier+' | '+str(record.get('version','?'))+' -> '+str(record.get('available','?')))
+            item.setData(Qt.UserRole, dict(record,id=identifier))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if identifier.casefold() in previous else Qt.Unchecked)
+            self.software_targets.addItem(item)
+        self.software_targets.blockSignals(False)
+        self.software_ids.setPlainText('\n'.join(value for value in preserved_tokens if value.casefold() not in selectable))
+        self.software_agreements.setChecked(False)
+        self.software_status.setText(str(self.software_targets.count())+' recognized update candidates. Check exact packages for Selected mode. All-supported mode uses its separately approved scope and exclusions at each run.')
+        self._software_controls()
 
     def _build_drivers(self):
         body = self._page('drivers', '10. Driver Updater',
@@ -382,6 +453,7 @@ class InitialSetupWizard(QWizard):
         self.driver_policy = self._policy(body, 'driver_policy', [('Scan and report only','review'),('Install my exact approved update revisions','install_approved'),('Install matching future updates for my approved devices','install_matching')])
         load = QPushButton('Load available Windows Update drivers')
         load.clicked.connect(self.load_driver_approvals)
+        self.driver_offer_load_button=load
         body.addWidget(load)
         admin = QPushButton('Restart Optimus as administrator (Windows UAC)')
         admin.clicked.connect(self.request_administrator)
@@ -395,13 +467,30 @@ class InitialSetupWizard(QWizard):
         self.driver_details.setReadOnly(True)
         self.driver_details.setMaximumHeight(110)
         body.addWidget(self.driver_details)
+        self.hardware_load_button=QPushButton('Load installed hardware for future matching updates')
+        self.hardware_load_button.clicked.connect(self.load_hardware_approvals)
+        body.addWidget(self.hardware_load_button)
+        self.hardware_select_button=QPushButton('Select all eligible present devices (maximum 2048 unique approval rules)')
+        self.hardware_select_button.clicked.connect(self.select_all_hardware)
+        body.addWidget(self.hardware_select_button)
+        self.hardware_status=_label('Present-device approvals allow future matching updates even when Windows Update has no offer now. Only known installed provider/class/date metadata is eligible.')
+        body.addWidget(self.hardware_status)
+        self.hardware_targets=QListWidget()
+        self.hardware_targets.setMinimumHeight(145)
+        body.addWidget(self.hardware_targets)
+
         self.driver_consent = self._consent(body, 'driver_changes_approved',
             'Allow installation of only my checked exact updates or approved matching devices, without per-run prompts')
         self.driver_agreements = self._consent(body, 'driver_update_agreements_accepted',
             'Accept the license agreements for these approved driver updates, including future matching updates only in matching-device mode')
         self.driver_policy.currentIndexChanged.connect(self._driver_policy_changed)
         self.driver_targets.itemChanged.connect(self._driver_selection_changed)
+        self.hardware_targets.itemChanged.connect(self._driver_selection_changed)
         self.driver_targets.currentItemChanged.connect(self._driver_item_details)
+        matching = self.driver_policy.currentData()=='install_matching'
+        self.hardware_load_button.setEnabled(matching)
+        self.hardware_select_button.setEnabled(matching)
+        self._driver_visibility()
         body.addWidget(_label('Exact mode does not approve a later revision. Matching mode requires complete hardware ID, provider, driver class and a driver-date floor to exclude older offers. A hardware/compatible ID may cover multiple identical devices. New devices/providers need new approval. Interactive, ambiguous or mandatory-immediate-restart offers are skipped. Installation needs an already elevated Optimus process; automatic runs report administrator access needed rather than silently requesting UAC. No blanket driver removal or automatic reboot is requested.'))
         body.addStretch()
 
@@ -597,12 +686,24 @@ class InitialSetupWizard(QWizard):
             self.driver_targets.addItem(item)
         self.driver_targets.blockSignals(False)
         self._drivers_loaded = True
-        self._driver_policy_changed()
+        self._driver_policy_changed(inventory_refresh=True)
         self.driver_status.setText(str(self.driver_targets.count())+' current driver candidates. Check exact updates/devices, then approve installation and agreements.')
 
-    def _driver_policy_changed(self, *unused):
+    def _driver_policy_changed(self, *unused, inventory_refresh=False):
         self._driver_selection_changed()
         matching = self.driver_policy.currentData() == 'install_matching'
+        self.hardware_load_button.setEnabled(matching)
+        self.hardware_select_button.setEnabled(matching)
+        self.hardware_targets.setEnabled(matching)
+        self._driver_visibility()
+        if not inventory_refresh:
+            self._hardware_loaded=False
+            self.hardware_targets.clear()
+            if matching:
+                self.driver_targets.blockSignals(True)
+                for index in range(self.driver_targets.count()):
+                    self.driver_targets.item(index).setCheckState(Qt.Unchecked)
+                self.driver_targets.blockSignals(False)
         self.driver_targets.blockSignals(True)
         for index in range(self.driver_targets.count()):
             item = self.driver_targets.item(index)
@@ -614,6 +715,13 @@ class InitialSetupWizard(QWizard):
                 item.setToolTip('Matching mode requires complete hardware ID, provider, driver class and driver date. Use exact revision mode or leave this candidate unapproved.')
             item.setFlags(flags)
         self.driver_targets.blockSignals(False)
+
+    def _driver_visibility(self):
+        matching=self.driver_policy.currentData()=='install_matching'
+        for widget in (self.driver_offer_load_button,self.driver_status,self.driver_targets,self.driver_details):
+            widget.setVisible(not matching)
+        for widget in (self.hardware_load_button,self.hardware_select_button,self.hardware_status,self.hardware_targets):
+            widget.setVisible(matching)
 
     def _driver_selection_changed(self, *unused):
         self.driver_consent.setChecked(False)
@@ -629,13 +737,67 @@ class InitialSetupWizard(QWizard):
     def _checked(table):
         return [copy.deepcopy(table.item(index).data(Qt.UserRole)) for index in range(table.count()) if table.item(index).checkState() == Qt.Checked and table.item(index).flags() & Qt.ItemIsEnabled]
 
+    def load_hardware_approvals(self):
+        self._hardware_loaded=False
+        self._driver_selection_changed()
+        self._start_probe(self.backend.driver_devices, (), {}, self._hardware_ready, self.hardware_status)
+
+    def _hardware_ready(self, report):
+        from .automated_system import validate_driver_devices
+        self.hardware_targets.blockSignals(True)
+        self.hardware_targets.clear()
+        saved=self.initial.get('driver_approved_devices',[]) if int(self.initial.get('setup_version',0))>=SETUP_VERSION else []
+        for device in report.get('devices',[]):
+            try:
+                rules=validate_driver_devices(device.get('approvalRules',[]))
+            except ValueError:
+                rules=[]
+            name=str(device.get('displayName') or device.get('deviceId') or 'Device')
+            item=QListWidgetItem(name+(' | '+str(rules[0]['provider'])+' | '+str(rules[0]['class']) if rules else ' | approval unavailable'))
+            item.setData(Qt.UserRole, {'rules':rules,'device':device})
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            if not rules:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setToolTip(str(device.get('approvalUnavailableReason') or 'Known installed hardware/provider/class/date metadata is required.'))
+            else:
+                item.setToolTip('\n'.join(rule['hardwareId']+' | '+rule['provider']+' | '+rule['class']+' | not older than '+rule['notOlderThanDriverDate'] for rule in rules))
+            selected=bool(rules) and all(any(all(rule[key].casefold()==old[key].casefold() for key in ('hardwareId','provider','class')) and rule['notOlderThanDriverDate']>=old['notOlderThanDriverDate'] for old in saved) for rule in rules)
+            item.setCheckState(Qt.Checked if selected else Qt.Unchecked)
+            self.hardware_targets.addItem(item)
+        self.hardware_targets.blockSignals(False)
+        self._hardware_loaded=True
+        self._driver_selection_changed()
+        self.hardware_status.setText(str(self.hardware_targets.count())+' present devices loaded. Unavailable devices remain unchecked. Selecting a device approves only its listed exact hardware/compatible IDs, provider, class and installed date floor.')
+
+    @staticmethod
+    def _rule_key(rule):
+        return tuple(rule[name].casefold() for name in ('hardwareId','provider','class'))
+
+    def select_all_hardware(self):
+        keys={self._rule_key(item['device']) for item in self._checked(self.driver_targets) if item.get('device')}
+        selected,skipped=0,0
+        self.hardware_targets.blockSignals(True)
+        for index in range(self.hardware_targets.count()):
+            item=self.hardware_targets.item(index)
+            rules=item.data(Qt.UserRole).get('rules',[])
+            new={self._rule_key(rule) for rule in rules}
+            eligible=bool(rules) and bool(item.flags() & Qt.ItemIsEnabled) and len(keys|new)<=DEVICE_RULE_LIMIT
+            item.setCheckState(Qt.Checked if eligible else Qt.Unchecked)
+            if eligible:
+                keys|=new;selected+=1
+            else:
+                skipped+=1
+        self.hardware_targets.blockSignals(False)
+        self._driver_selection_changed()
+        self.hardware_status.setText(str(selected)+' devices selected, '+str(len(keys))+' unique rules. '+str(skipped)+' devices remain unapproved because metadata is missing or the 2048-rule limit would be exceeded. Review then approve installation and agreements below.')
+
     def _driver_rules(self):
         rules = {}
-        for item in self._checked(self.driver_targets):
-            rule = item.get('device')
-            if not rule:
-                continue
-            key = tuple(rule[name].casefold() for name in ('hardwareId','provider','class'))
+        selected=[item['device'] for item in self._checked(self.driver_targets) if item.get('device')]
+        for item in self._checked(self.hardware_targets):
+            selected.extend(item.get('rules',[]))
+        for rule in selected:
+            key = self._rule_key(rule)
             if key not in rules or rule['notOlderThanDriverDate'] > rules[key]['notOlderThanDriverDate']:
                 rules[key] = rule
         return list(rules.values())
@@ -673,9 +835,10 @@ class InitialSetupWizard(QWizard):
                 roots.append(value)
         return roots
 
-    def _package_ids(self):
+    @staticmethod
+    def _exact_ids(text):
         values = []
-        for entry in re.split(r'[\r\n,]+', self.software_ids.toPlainText()):
+        for entry in re.split(r'[\r\n,]+', text):
             value = entry.strip()
             if not value:
                 continue
@@ -683,6 +846,15 @@ class InitialSetupWizard(QWizard):
                 raise ValueError('Enter exact WinGet package IDs only, separated by new lines or commas. Do not enter commands, switches or URLs.')
             if value.casefold() not in {item.casefold() for item in values}:
                 values.append(value)
+        if len(values)>100:
+            raise ValueError('Choose at most 100 exact WinGet package IDs.')
+        return values
+
+    def _package_ids(self):
+        values = self._exact_ids(self.software_ids.toPlainText())
+        values.extend(item['id'] for item in self._checked(self.software_targets) if item['id'].casefold() not in {value.casefold() for value in values})
+        if len(values)>100:
+            raise ValueError('Choose at most 100 exact WinGet package IDs across the checklist and advanced list.')
         return values
 
     def collect_choices(self, *, validate=True, section=None):
@@ -700,16 +872,21 @@ class InitialSetupWizard(QWizard):
         if validate:
             result['duplicate_roots'] = self._roots()
             result['software_update_ids'] = self._package_ids()
+            result['software_update_exclude_ids'] = self._exact_ids(self.software_exclusions.toPlainText())
             if section in (None,'duplicates') and result['duplicates_enabled'] and not result['duplicate_roots']:
                 raise ValueError('Add at least one local folder for Duplicate Finder, or turn its scan off.')
             selected = result['software_updates_enabled'] and result['software_update_policy'] == 'selected'
             if section in (None,'software') and selected and not result['software_update_ids']:
                 raise ValueError('List at least one exact WinGet package ID, or choose scan/report only.')
+            if section in (None,'software') and result['software_updates_enabled'] and result['software_update_policy']=='all_supported' and (not result['software_update_all_approved'] or not result['software_update_agreements_accepted']):
+                raise ValueError('All-supported updates require explicit approval of future matching applications and package/source agreements.')
             if section in (None,'software') and selected and not result['software_update_agreements_accepted']:
                 raise ValueError('Selected-package installation requires your explicit package/source agreement authorization. Choose review-only to avoid accepting agreements.')
         else:
             result['duplicate_roots'] = [entry.strip() for entry in self.duplicate_roots.toPlainText().splitlines() if entry.strip()]
             result['software_update_ids'] = [entry.strip() for entry in re.split(r'[\r\n,]+',self.software_ids.toPlainText()) if entry.strip()]
+            result['software_update_ids'] += [item['id'] for item in self._checked(self.software_targets) if item['id'] not in result['software_update_ids']]
+            result['software_update_exclude_ids'] = [entry.strip() for entry in re.split(r'[\r\n,]+',self.software_exclusions.toPlainText()) if entry.strip()]
         result.update({'duplicate_policy':self.duplicate_policy.currentData(),
                        'cloud_policy':self.cloud_policy.currentData(),
                        'startup_policy':self.startup_policy.currentData(),
@@ -731,11 +908,15 @@ class InitialSetupWizard(QWizard):
                 if not self._startup_loaded or not result['startup_approved_entries'] or not result['startup_changes_approved']:
                     raise ValueError('Load current startup entries, select exact entries and approve disabling, or choose Review.')
             if section in (None,'drivers') and result['driver_updates_enabled'] and result['driver_policy'] != 'review':
-                if not self._drivers_loaded or not result['driver_changes_approved'] or not result['driver_update_agreements_accepted']:
+                loaded = self._drivers_loaded if result['driver_policy']=='install_approved' else (self._drivers_loaded or self._hardware_loaded)
+                stale_hardware = bool(self._checked(self.hardware_targets)) and not self._hardware_loaded
+                if not loaded or stale_hardware or not result['driver_changes_approved'] or not result['driver_update_agreements_accepted']:
                     raise ValueError('Load fresh drivers, select updates/devices and approve installation plus agreements, or choose Review.')
                 key = 'driver_approved_devices' if result['driver_policy'] == 'install_matching' else 'driver_approved_updates'
                 if not result[key]:
                     raise ValueError('Select at least one eligible exact driver update or complete matching-device rule.')
+                if len(result['driver_approved_devices'])>DEVICE_RULE_LIMIT:
+                    raise ValueError('Approve at most 2048 unique hardware/provider/class rules; deselect devices or offers to stay within the limit.')
         for enabled, policy, consent in (('duplicates_enabled','duplicate_policy','duplicate_changes_approved'),('cloud_review_enabled','cloud_policy','cloud_changes_approved'),('startup_review_enabled','startup_policy','startup_changes_approved'),('driver_updates_enabled','driver_policy','driver_changes_approved')):
             if not result[enabled] or result[policy] == 'review':
                 result[consent] = False
@@ -743,8 +924,10 @@ class InitialSetupWizard(QWizard):
             result['driver_update_agreements_accepted'] = False
 
         # Review-only never grants agreement acceptance.
-        if result['software_update_policy'] != 'selected' or not result['software_updates_enabled']:
+        if result['software_update_policy'] not in ('selected','all_supported') or not result['software_updates_enabled']:
             result['software_update_agreements_accepted'] = False
+        if result['software_update_policy'] != 'all_supported' or not result['software_updates_enabled']:
+            result['software_update_all_approved'] = False
         return result
 
     def refresh_summary(self):
@@ -766,6 +949,9 @@ class InitialSetupWizard(QWizard):
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'selected':
             actions.append('Install only listed WinGet IDs: ' + (', '.join(settings['software_update_ids']) or '[no IDs entered]'))
             actions.append('Package/source agreements: ' + ('explicitly accepted' if settings['software_update_agreements_accepted'] else 'NOT accepted; Save will be refused'))
+        if settings.get('software_updates_enabled') and settings['software_update_policy']=='all_supported':
+            actions.append('Update all supported installed WinGet applications, including future matching applications. Exclusions: '+(', '.join(settings['software_update_exclude_ids']) or 'none'))
+            actions.append('All-supported scope: '+('approved' if settings['software_update_all_approved'] else 'approval required')+'; package/source agreements: '+('accepted' if settings['software_update_agreements_accepted'] else 'not accepted'))
         policy_labels = {'review':'Review only', 'keep_oldest':'Keep oldest modified copy',
             'keep_newest':'Keep newest modified copy', 'disable_selected':'Disable selected sign-in entries',
             'install_approved':'Install exact approved update revisions',
@@ -840,3 +1026,7 @@ class InitialSetupWizard(QWizard):
         self.saved_preferences = copy.deepcopy(saved)
         self.run_now = self.run_now_checkbox.isChecked()
         super().accept()
+
+
+
+

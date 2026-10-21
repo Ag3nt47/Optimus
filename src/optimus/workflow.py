@@ -25,6 +25,7 @@ DEFAULTS = {
     'startup_review_enabled': False, 'duplicates_enabled': False, 'duplicate_roots': [],
     'cloud_review_enabled': False, 'software_updates_enabled': False,
     'software_update_policy': 'review', 'software_update_ids': [],
+    'software_update_all_approved': False, 'software_update_exclude_ids': [],
     'software_update_agreements_accepted': False, 'driver_updates_enabled': False,
     'cleanup_category_ids': [],
 }
@@ -88,9 +89,9 @@ class Preferences:
             raise ValueError('Unsupported setup version.')
         if result['automation_mode'] not in ('manual', 'startup', 'daily', 'weekly'):
             raise ValueError('Choose manual, startup, daily, or weekly maintenance.')
-        if result['software_update_policy'] not in ('review', 'selected'):
-            raise ValueError('Software updates require review or selected-ID policy.')
-        for key, limit, pattern in (('software_update_ids', 100, _PACKAGE_ID), ('cleanup_category_ids', 50, _CATEGORY_ID)):
+        if result['software_update_policy'] not in ('review', 'selected', 'all_supported'):
+            raise ValueError('Software updates require review, selected IDs, or all-supported policy.')
+        for key, limit, pattern in (('software_update_ids', 100, _PACKAGE_ID), ('software_update_exclude_ids', 100, _PACKAGE_ID), ('cleanup_category_ids', 50, _CATEGORY_ID)):
             items = result[key]
             if type(items) is not list or len(items) > limit:
                 raise ValueError(f'{key} must be a list with at most {limit} entries.')
@@ -115,10 +116,12 @@ class Preferences:
         if len({root.casefold() for root in normalized}) != len(normalized):
             raise ValueError('Duplicate-review folders must be unique.')
         result['duplicate_roots'] = normalized
-        if result['software_updates_enabled'] and result['software_update_policy'] == 'selected' and not result['software_update_agreements_accepted']:
-            raise ValueError('Selected unattended updates require explicit agreement acceptance.')
+        if result['software_updates_enabled'] and result['software_update_policy'] != 'review' and not result['software_update_agreements_accepted']:
+            raise ValueError('Unattended software updates require explicit agreement acceptance.')
         if result['software_updates_enabled'] and result['software_update_policy'] == 'selected' and not result['software_update_ids']:
             raise ValueError('Choose at least one exact software ID for unattended updates.')
+        if result['software_updates_enabled'] and result['software_update_policy'] == 'all_supported' and not result['software_update_all_approved']:
+            raise ValueError('Updating all supported installed applications requires separate explicit scope approval.')
         return validate_approvals(result)
 
     def save(self, value):
@@ -129,33 +132,9 @@ class Preferences:
 
 
 def _fresh_software_candidates(scan):
-    """Only a successful recognized WinGet table can authorize selected updates."""
-    if not isinstance(scan, dict) or scan.get('structured') is not True or type(scan.get('exitCode')) is not int or scan['exitCode'] != 0:
-        return {}
-    items = scan.get('updates', scan.get('packages'))
-    if not isinstance(items, list) or len(items) > 1000:
-        return {}
-    candidates, repeated, seen = {}, set(), set()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        identity = item.get('id', item.get('package_id'))
-        if not isinstance(identity, str) or not _PACKAGE_ID.fullmatch(identity):
-            continue
-        if identity.casefold() in seen:
-            repeated.add(identity.casefold())
-        seen.add(identity.casefold())
-        if item.get('package_id', identity) != identity or item.get('source') != 'winget':
-            continue
-        version, available = item.get('version'), item.get('available')
-        if any(not isinstance(part, str) or not part or part.casefold() in ('unknown', 'n/a', 'not available') or '<' in part or '>' in part or '...' in part or '\u2026' in part for part in (version, available)) or version == available:
-            continue
-        candidates[identity] = item
-    for identity in list(candidates):
-        if identity.casefold() in repeated:
-            candidates.pop(identity, None)
-    return candidates
-
+    """Compatibility helper for fresh scoped software candidates."""
+    from .automated_software import fresh_candidates
+    return fresh_candidates(scan)
 
 class Workflow:
     def __init__(self, backend):
@@ -193,7 +172,7 @@ class Workflow:
             if configuration['applications_review_enabled']:
                 stages.append(('Review installed applications', 'Collecting installed-program metadata; no uninstaller is launched.', lambda: review(self.backend.installed_apps, 'Review only; no applications were uninstalled.')))
             if configuration['performance_review_enabled']:
-                stages.append(('Review application resource use', 'Measuring readable processes; no processes are suspended or reprioritized.', lambda: review(self.backend.processes, 'Review only; memory use alone does not prove an application is unnecessary.')))
+                stages.append(('Identify programs contributing to slowdowns', 'Sampling CPU, memory and disk activity to identify sustained pressure and explain each program.', lambda: review(lambda: self.backend.slowdown_report(cancel_event=cancel_event), 'Measured review only; no process is suspended, killed or reprioritized automatically.')))
             def item_progress(title):
                 def emit(state):
                     state = state if isinstance(state, dict) else {'description': str(state)}
@@ -204,7 +183,8 @@ class Workflow:
                     progress_callback({'percentage': min(99, int((completed + fraction) * 100 / len(stages))),
                                        'stage': title, 'description': description,
                                        'processes': ['Optimus maintenance worker', description],
-                                       'log': str(state.get('log', description)), 'completed': completed, 'total': len(stages)})
+                                       'log': str(state.get('log', description)), 'completed': completed, 'total': len(stages),
+                                       'item': state.get('item', current), 'items': state.get('items', total)})
                 return emit
 
             if configuration['startup_review_enabled']:
@@ -295,40 +275,10 @@ class Workflow:
                         return outcome
                     stages.append((label, 'Applying only the curated package group explicitly enabled in Settings. Bing Wallpaper, Store, security, frameworks and WebView2 are preserved.', remove_group))
             if configuration['software_updates_enabled']:
-                def software_updates():
-                    scan = self.backend.updates_scan()
-                    if not isinstance(scan, dict):
-                        raise RuntimeError('The software update scan returned invalid metadata.')
-                    if configuration['software_update_policy'] == 'review':
-                        return {'review_only': True, 'scan': scan, 'failed_items': 0 if type(scan.get('exitCode')) is int and scan['exitCode'] == 0 else 1, 'note': 'Software update review only; no installer was started. Nonzero or unknown scan exit codes require review.'}
-                    candidates = _fresh_software_candidates(scan)
-                    selected = [identity for identity in configuration['software_update_ids'] if identity in candidates]
-                    results = []
-                    deferred = []
-                    for index, identity in enumerate(selected):
-                        if cancelled():
-                            break
-                        progress_callback({'percentage': min(99, int((completed + index / max(1, len(selected))) * 100 / len(stages))),
-                                           'stage': 'Update configured software', 'description': f'Updating selected package {index + 1}/{len(selected)}: {identity}',
-                                           'processes': ['Optimus workflow worker', 'Windows Package Manager; exact configured package'],
-                                           'log': 'Updating configured ID: ' + identity, 'completed': completed, 'total': len(stages), 'item': index + 1, 'items': len(selected)})
-                        try:
-                            outcome = self.backend.update_app_unattended(identity)
-                            successful = isinstance(outcome, dict) and type(outcome.get('exitCode')) is int and outcome['exitCode'] in (0, 3010, 1641) and outcome.get('success', True) is not False
-                            results.append({'id': identity, 'status': 'completed' if successful else 'failed', 'result': outcome})
-                            if isinstance(outcome, dict) and (outcome.get('running') is True or any(marker in str(outcome.get('status', '')).casefold() for marker in ('timed out', 'timeout', 'still running'))):
-                                deferred = selected[index + 1:]
-                                break
-                        except Exception as error:
-                            results.append({'id': identity, 'status': 'failed', 'error': str(error)})
-                            if isinstance(error, TimeoutError) or any(marker in str(error).casefold() for marker in ('timed out', 'timeout', 'still running')):
-                                deferred = selected[index + 1:]
-                                break
-                    return {'review_only': not bool(selected), 'scan': scan, 'items': results,
-                            'failed_items': sum(item['status'] == 'failed' for item in results) + (0 if type(scan.get('exitCode')) is int and scan['exitCode'] == 0 else 1), 'cancelled': cancelled(), 'deferred_ids': deferred,
-                            'not_available_ids': [identity for identity in configuration['software_update_ids'] if identity not in candidates],
-                            'note': 'Only configured exact IDs from a successful fresh recognized winget-source scan may be updated. Unparsed, ambiguous, unknown-version and unselected packages remain unchanged. Driver installation is separate.'}
-                stages.append(('Review or update configured software', 'Scanning first, then applying only configured exact IDs when selected policy and agreement authorization are enabled.', software_updates))
+                from .automated_software import run_software
+                stages.append(('Review or update configured software', 'Scanning supported installed applications, respecting saved exact IDs/all-supported scope, exclusions and pins.',
+                               lambda: run_software(self.backend, configuration, cancel_event=cancel_event,
+                                                    item_callback=item_progress('Review or update configured software'))))
             if configuration['codex_priority_enabled']:
                 stages.append(('Apply Codex performance profile', 'Applying your selected process priority. Existing external priority watchers remain unchanged.', lambda: self.backend.codex_profile(configuration['codex_priority'])))
             if configuration['background_analysis_enabled']:

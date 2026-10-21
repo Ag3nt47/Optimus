@@ -66,6 +66,10 @@ class Backend:
     def processes(self):
         return performance.list_performance_candidates()
 
+    def slowdown_report(self, cancel_event=None):
+        from .slowdown import analyze_slowdowns
+        return analyze_slowdowns(cancel_event=cancel_event)
+
     def set_priority(self, record, priority='High'):
         return self.performance_controller.set_process_priority(record, priority)
 
@@ -156,15 +160,47 @@ class Backend:
     def update_app(self, package_id):
         return self.maintenance.updates_apply(package_id, confirmed=True)
 
-    def update_app_unattended(self, package_id):
-        """Called only after the saved automatic-maintenance agreement/ID choices."""
-        return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True)
+    def update_app_unattended(self, package_id, *, cancel_event=None):
+        """Saved scope/agreements authorize updates; cancellation still gates installation."""
+        options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+        return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True, **options)
 
     def drivers_list(self):
         return self._list(self.bridge.request('drivers_list'))
 
+    def _driver_updates_scan_raw(self):
+        try:
+            scan = self.bridge.request('driver_updates_scan', timeout=300)
+        except Exception as error:
+            return {'updates': [], 'resultCode': 4, 'source': 'Windows Update', 'error': str(error)}
+        if not isinstance(scan, dict):
+            return {'updates': [], 'resultCode': 4, 'source': 'Windows Update',
+                    'error': 'Windows Update returned no usable scan report.'}
+        return scan
+
     def driver_updates_scan(self):
-        return self.bridge.request('driver_updates_scan', timeout=300)
+        scan = dict(self._driver_updates_scan_raw())
+        scan['coverage'] = self.driver_coverage(scan)
+        return scan
+
+    def driver_devices(self):
+        """Setup inventory only; no online Windows Update scan or changes."""
+        return self.driver_coverage({'updates': [], 'resultCode': None,
+                                     'source': 'Not scanned (device inventory only)'})
+
+
+    def driver_coverage(self, scan=None):
+        """Present devices, device problems and exact WUA matches; no changes."""
+        from .driver_coverage import build_driver_coverage
+        if scan is None:
+            scan = self._driver_updates_scan_raw()
+        try:
+            inventory = self.bridge.request('driver_device_inventory', timeout=120)
+        except Exception as error:
+            inventory = {'complete': False, 'devices': [],
+                         'errors': [{'source': 'Device inventory', 'error': str(error)}]}
+        return build_driver_coverage(inventory, scan)
+
 
     def is_admin(self):
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -296,7 +332,7 @@ class Backend:
         aliases = {'installed-apps': 'apps', 'windows-update': 'updates', 'device-manager': 'devices', 'task-scheduler': 'tasks', 'defrag': 'drives'}
         tool_id = aliases.get(tool_id, tool_id)
         settings = {'storage': 'ms-settings:storagesense', 'updates': 'ms-settings:windowsupdate', 'startup': 'ms-settings:startupapps',
-                    'apps': 'ms-settings:appsfeatures', 'recovery': 'ms-settings:recovery', 'privacy': 'ms-settings:privacy-general', 'optional-updates': 'ms-settings:windowsupdate-optionalupdates'}
+                    'apps': 'ms-settings:appsfeatures', 'recovery': 'ms-settings:recovery', 'privacy': 'ms-settings:privacy-general', 'optional-updates': 'ms-settings:windowsupdate-optionalupdates', 'store-updates': 'ms-windows-store://downloadsandupdates'}
         programs = {'resource-monitor': 'System32/resmon.exe', 'drives': 'System32/dfrgui.exe', 'services': 'System32/services.msc',
                     'tasks': 'System32/taskschd.msc', 'devices': 'System32/devmgmt.msc', 'system-restore': 'System32/rstrui.exe'}
         if tool_id in settings:
@@ -317,3 +353,7 @@ class Backend:
     def close(self):
         self.sampler.stop()
         self.bridge.close()
+
+
+
+

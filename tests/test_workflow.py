@@ -51,6 +51,8 @@ class MockBackend:
         self.calls.append(('installed_apps',)); return [{'Name': 'Fixture'}]
     def processes(self):
         self.calls.append(('processes',)); return [{'pid': 123, 'memory_rss': 1024}]
+    def slowdown_report(self, cancel_event=None):
+        self.calls.append(('processes',)); return {'sampled': True, 'programs': []}
     def startup_list(self):
         self.calls.append(('startup_list',)); return [{'Name': 'Fixture'}]
     def duplicate_scan(self, root):
@@ -65,7 +67,7 @@ class MockBackend:
         self.calls.append(('updates_scan',)); return copy.deepcopy(getattr(self, 'update_scan', {'structured': True, 'exitCode': 0, 'updates': [
             {'id': 'Fixture.One', 'package_id': 'Fixture.One', 'source': 'winget', 'version': '1.0', 'available': '2.0'},
             {'id': 'Fixture.Two', 'package_id': 'Fixture.Two', 'source': 'winget', 'version': '1.0', 'available': '2.0'}]}))
-    def update_app_unattended(self, identity):
+    def update_app_unattended(self, identity, *, cancel_event=None):
         self.calls.append(('update_app_unattended', identity))
         if getattr(self, 'update_callback', None): self.update_callback(identity)
         if getattr(self, 'update_timeout', False): raise RuntimeError('Vendor installer timed out and may still be running')

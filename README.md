@@ -12,7 +12,7 @@ Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Opti
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
-**Version 0.3.0** adds saved approvals for duplicate recycling, personal OneDrive recycling, exact startup disabling and quiet driver installation. Approve scopes and rules in the updated first-start questions; later runs revalidate targets without asking for the same approval again. Existing users must review the new setup before automatic maintenance resumes. Bing Wallpaper protection and the earlier packaging fixes are retained.
+**Version 0.4.0** expands the driver updater with coverage for present hardware and future device approvals even when no update is currently offered. Software Updater can install selected applications or all supported WinGet applications with a separate saved approval and exclusions. Junk Clean adds optional diagnostics and graphics-cache categories. Performance measures application CPU, RAM and I/O across multiple samples and explains potential slowdown contributors. Existing duplicate, OneDrive and startup approvals and Bing Wallpaper protection are retained.
 
 ## Three controls
 
@@ -30,11 +30,11 @@ The setup opens on the first normal GUI launch. It covers Health Check, Custom C
 
 Choose manual operation, each Optimus startup, daily while Optimus is open, or weekly while Optimus is open. Daily/weekly timing is measured from the last attempt, including failures, to avoid repeated installer attempts. These modes do not install a background Windows service or run when Optimus is closed. The existing Task Scheduler feature remains a separate read-only audit.
 
-Your selected cleanup, curated removals and Codex priority profile can apply automatically. The software updater can silently update only the exact WinGet package IDs you list, with separate consent for package/source agreements. A fresh recognized update scan must still match the package and source. Vendor installers may require administrator permission or close applications; Optimus does not request automatic reboots.
+Your selected cleanup, curated removals and Codex priority profile can apply automatically. Software Updater offers review, selected exact WinGet IDs, or all supported installed WinGet applications. All-supported mode needs its own explicit saved approval; excluded IDs remain unchanged. Each apply uses a fresh recognized source-checked scan and verified package identity. Pinned, ambiguous, unknown-version and unsupported applications are skipped. Package/source agreements require consent. Vendor installers may require administrator permission or close applications; Optimus does not request automatic reboots.
 
 Duplicate, cloud, startup and driver modules each offer review mode or a saved apply approval. Local recycling uses your chosen folders, oldest/newest keeper, minimum age and per-run count limit; a retained copy is revalidated before each recycle. Personal OneDrive recycling is bound to the verified drive and concrete folders you approve. It additionally streams candidate contents for SHA256 comparison, limited to 64 MiB per file and 256 MiB per run; unsupported or oversized comparisons are skipped. Files go to the corresponding Recycle Bin; the bins are not emptied.
 
-Startup automation disables only the exact registrations you selected, with their saved command/location/fingerprint still matching; it keeps recovery records. Driver automation can install exact approved update IDs/revisions or future Windows Update drivers matching the approved hardware ID, provider, class and date floor. Compatible hardware IDs can identify multiple devices of the same model. Quiet installation requires an already elevated Optimus session, current metadata and a successful driver export first. Pending-reboot, interactive, changed or unverified candidates are skipped. No automatic reboot is requested.
+Startup automation disables only the exact registrations you selected, with their saved command/location/fingerprint still matching; it keeps recovery records. Driver automation can install exact approved update IDs/revisions or future Windows Update drivers matching the approved hardware ID, provider, class and date floor. Load present hardware in matching mode to approve eligible devices even when no update is currently offered. Hardware coverage distinguishes available offers, device problems, incomplete scans and no offer; no offer does not establish that the installed driver is the newest available from the manufacturer. Compatible hardware IDs can identify multiple devices of the same model. Quiet installation requires an already elevated Optimus session, current metadata and a successful driver export first. Pending-reboot, interactive, changed or unverified candidates are skipped. No automatic reboot is requested.
 
 Each approval is optional and can be revoked by turning its module off or choosing review mode in setup. Revocation stops future changes; it does not restore items already recycled, disabled or installed. Use the Recycle Bin, History/startup restoration, Windows driver rollback or saved driver exports as applicable. Arbitrary app uninstalls and service changes still use their individual tools. Cloud connection is an explicit account action; cancelling the maintenance questions does not undo a connection you initiated.
 
@@ -42,14 +42,14 @@ The completion window records actual per-stage results, exclusions and failures.
 
 ## Tools
 
-- System health and application-family CPU/memory reports.
+- System health and measured application-family CPU/memory/I/O reports with explanations and links to process controls.
 - Optional background CPU, memory, disk-I/O and network measurements, with an Off/On control.
 - Individual application priority, CPU affinity, recoverable sleep/wake and allocation history.
-- Allowlisted temporary/cache cleanup with per-file identity checks, age limits and local logs.
+- Junk Clean with allowlisted temporary/cache files, optional user/system error reports, crash dumps and graphics caches; per-file identity checks, age limits and local logs.
 - Chromium/Firefox privacy previews and private SQLite backups; passwords and bookmarks are preserved.
 - Startup entry enable/disable/delete with backed-up restoration; third-party service controls.
 - Installed applications and registered Windows uninstall access.
-- Selected software updates through WinGet; signed-driver inventory and Windows Update driver tools.
+- Selected or explicitly approved all-supported software updates through WinGet, pin protection and exclusions; all-present hardware coverage and Windows Update driver tools.
 - Bounded disk scans, SHA256 duplicate finding and confirmed single-file recycling.
 - Selective stale HKCU App Paths review with backed-up removal and conflict-checked restoration.
 - Optional personal OneDrive metadata duplicate review, using your own Microsoft app registration and a DPAPI-protected local sign-in.
@@ -94,3 +94,4 @@ No runtime reports, browser databases, machine inventories, credentials or propr
 ## License
 
 MIT for Optimus and the adapted Angerona presentation code. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party licenses. PySide6/Qt retain their own licenses.
+

@@ -208,21 +208,26 @@ class Maintenance:
         return executable
 
     @staticmethod
-    def _parse_update_table(output: str) -> tuple[list[dict[str, str]], bool, list[str]]:
+    def _parse_update_table(output: str, *, source_context: str | None = None) -> tuple[list[dict[str, str]], bool, list[str]]:
         """Accept only complete identities from the recognized English CLI table.
 
         WinGet does not document JSON output for upgrade/list. Unknown layouts
         stay text; fixed column boundaries plus explicit source prevent guessing.
+        Source-scoped WinGet versions omit Source: only the native caller that
+        fixed --source winget may supply that narrow four-column context.
         """
         lines = output.splitlines()
         headers = [(index, line) for index, line in enumerate(lines)
-                   if re.fullmatch(r"Name +Id +Version +Available +Source *", line)]
+                   if (re.fullmatch(r"Name +Id +Version +Available +Source *", line)
+                       or source_context == "winget" and re.fullmatch(r"Name {2,}Id {2,}Version {2,}Available *", line))]
         if len(headers) != 1:
             return [], False, ["Unsupported, missing or repeated update-table header."]
         index, header = headers[0]
         if index + 1 >= len(lines) or not re.fullmatch(r"-{10,}", lines[index + 1].strip()):
             return [], False, ["Update-table separator was not recognized."]
-        starts = [header.index(key) for key in ("Name", "Id", "Version", "Available", "Source")]
+        has_source = bool(re.fullmatch(r"Name +Id +Version +Available +Source *", header))
+        columns = ("Name", "Id", "Version", "Available", "Source") if has_source else ("Name", "Id", "Version", "Available")
+        starts = [header.index(key) for key in columns]
         rows: list[dict[str, str]] = []
         skipped: list[str] = []
         counts: dict[str, int] = {}
@@ -230,9 +235,10 @@ class Maintenance:
         for line in lines[index + 2:]:
             if not line.strip():
                 continue
-            values = [line[start:starts[position + 1] if position < 4 else len(line)].strip()
+            values = [line[start:starts[position + 1] if position < len(starts) - 1 else len(line)].strip()
                       for position, start in enumerate(starts)]
-            name, package_id, version, available, source = values
+            name, package_id, version, available = values[:4]
+            source = values[4] if has_source else source_context
             # Footers/progress are not data. IDs, versions and source must be
             # complete and aligned; truncated names are harmless display text.
             if not _PACKAGE_ID.fullmatch(package_id) or package_id.endswith(".") or "..." in package_id or not name:
@@ -264,7 +270,7 @@ class Maintenance:
         self._last_update_scan = 0.0
         result = self._run([self._winget(), "upgrade", "--source", "winget", "--disable-interactivity"])
         output = _ANSI.sub("", result.stdout or "").replace("\r", "")
-        rows, structured, skipped = self._parse_update_table(output)
+        rows, structured, skipped = self._parse_update_table(output, source_context="winget")
         if result.returncode != 0:
             rows, structured = [], False
             skipped.append("WinGet returned a nonzero status; no automatic candidates are trusted.")
@@ -276,7 +282,64 @@ class Maintenance:
                 "structured": structured, "source": "winget", "excluded": skipped,
                 "note": "Only recognized complete winget-source rows are selectable. Localized or changed output remains text; an empty parsed list does not establish that no updates exist."}
 
-    def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False) -> dict[str, Any]:
+    @staticmethod
+    def _parse_pins(output: str) -> tuple[list[dict[str, str]], bool]:
+        """Recognize English pin output; missing or partial output is never no pins.
+
+        Installed-version pins use product/family keys rather than repository IDs.
+        Their full names conservatively protect matching installed applications.
+        """
+        lines = [line for line in output.splitlines() if line.strip()]
+        if len(lines) == 1 and lines[0].strip() == 'There are no pins configured.':
+            return [], True
+        headers = [(index, line) for index, line in enumerate(lines)
+                   if re.fullmatch(r'Name +Id +Version +Source +Pin type +Pinned version *', line)]
+        if len(headers) != 1:
+            return [], False
+        index, header = headers[0]
+        if index + 1 >= len(lines) or not re.fullmatch(r'-{10,}', lines[index + 1].strip()):
+            return [], False
+        labels = ('Name', 'Id', 'Version', 'Source', 'Pin type', 'Pinned version')
+        starts = [header.index(label) for label in labels]
+        rows = []
+        for line in lines[index + 2:]:
+            values = [line[start:starts[position + 1] if position < 5 else len(line)].strip()
+                      for position, start in enumerate(starts)]
+            name, identity, version, source, kind, pinned_version = values
+            if not identity or not source or not kind or any('...' in part or '\u2026' in part for part in values):
+                return [], False
+            if source == 'Installed' and not name:
+                return [], False
+            if source != 'Installed' and (not _PACKAGE_ID.fullmatch(identity) or identity.endswith('.')):
+                return [], False
+            rows.append({'name': name, 'id': identity, 'version': version,
+                         'source': source, 'kind': kind, 'pinned_version': pinned_version})
+        # An empty table can hide orphaned pin records; only the explicit message
+        # proves there were no configured pins.
+        return rows, bool(rows)
+
+    def _pin_status(self, package: dict[str, str]) -> tuple[bool, str, bool]:
+        """A fresh check covers ordinary pins exact WinGet upgrades can bypass."""
+        try:
+            result = self._run([self._winget(), 'pin', 'list', '--disable-interactivity'])
+        except (OSError, subprocess.TimeoutExpired):
+            return False, 'The current WinGet pin inventory could not be read; no installer was started.', True
+        if result.returncode != 0:
+            return False, 'The current WinGet pin inventory failed; no installer was started.', True
+        rows, recognized = self._parse_pins(_ANSI.sub('', result.stdout or '').replace('\r', ''))
+        if not recognized:
+            return False, 'The current WinGet pin inventory is unrecognized or incomplete; no installer was started.', True
+        for row in rows:
+            if row['id'].casefold() == package['id'].casefold():
+                return False, 'This application has a WinGet pin; Optimus preserves it.', False
+            if row['source'] == 'Installed':
+                name = package.get('name', '')
+                if not name or '...' in name or '\u2026' in name:
+                    return False, 'An installed-version pin cannot be compared with this truncated application name.', True
+                if row['name'].casefold() == name.casefold():
+                    return False, 'This application has an installed-version WinGet pin; Optimus preserves it.', False
+        return True, '', False
+    def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False, cancel_event=None) -> dict[str, Any]:
         if confirmed is not True:
             raise ValueError("Confirm the selected software update before installing it.")
         if type(unattended) is not bool:
@@ -288,20 +351,64 @@ class Maintenance:
         if (package_id not in self._last_update_ids or not current or current.get("source") != "winget"
                 or self._last_update_scan <= 0 or age < 0 or age > 900):
             raise ValueError("Select an unambiguous winget package from a fresh update scan.")
+        expected = dict(current)
+        def cancelled_result():
+            if cancel_event is not None and cancel_event.is_set():
+                return {"id": package_id, "package_id": package_id, "source": "winget", "status": "cancelled",
+                        "cancelled": True, "skipped": True, "exitCode": None, "unattended": unattended,
+                        "from_version": (current or expected).get("version"), "to_version": (current or expected).get("available"),
+                        "note": "Cancelled during update safety checks; no installer was started."}
+            return None
+        if (interrupted := cancelled_result()) is not None:
+            return interrupted
+        if unattended:
+            # Scan again before applying: another updater or earlier installer
+            # may have changed the installed/available pair since this run began.
+            self.updates_scan()
+            current = self._last_update_packages.get(package_id)
+            if (interrupted := cancelled_result()) is not None:
+                return interrupted
+            if not current or any(current.get(field) != expected.get(field) for field in ('id', 'version', 'available', 'source')):
+                return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
+                        "exitCode": None, "unattended": True, "failureKind": "version_changed",
+                        "from_version": (current or expected).get("version"), "to_version": (current or expected).get("available"),
+                        "note": "The installed or available version changed during revalidation; no installer was started."}
+            unpinned, reason, needs_review = self._pin_status(current)
+            if (interrupted := cancelled_result()) is not None:
+                return interrupted
+            if not unpinned:
+                return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
+                        "exitCode": None, "unattended": True, "note": reason, "requiresReview": needs_review,
+                        "failureKind": "pin_inventory_untrusted" if needs_review else "pinned",
+                        "from_version": current["version"], "to_version": current["available"]}
         arguments = [self._winget(), "upgrade", "--id", package_id, "--exact", "--source", "winget"]
         if unattended:
-            arguments += ["--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
+            arguments += ["--version", current["available"], "--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
         else:
             arguments += ["--disable-interactivity"]
         try:
+            if (interrupted := cancelled_result()) is not None:
+                return interrupted
             result = self._run(arguments, timeout=1800)
         except subprocess.TimeoutExpired:
             # The vendor child can outlive WinGet. Never retry or replay here.
             raise RuntimeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
+        output = _ANSI.sub("", result.stdout or "")
+        stderr = _ANSI.sub("", result.stderr or "")
+        native_code = result.returncode & 0xffffffff
+        # WinGet can translate an installer's 3010 into successful exit 0 while
+        # reporting the required restart as text. Recognize that documented case.
+        restart = (native_code in (3010, 1641, 0x8A150109, 0x8A15010A, 0x8A15010B)
+                   or any(message in (output + '\n' + stderr).casefold() for message in (
+                       'restart your pc to finish installation.', 'your pc will restart to finish installation.',
+                       'installation failed. restart your pc then try again.')))
+        installer_running = (native_code in (1618, 0x8A150102)
+                             or 'another installation is already in progress.' in (output + '\n' + stderr).casefold())
         return {"id": package_id, "package_id": package_id, "source": "winget", "exitCode": result.returncode,
-                "status": "completed" if result.returncode == 0 else "failed", "unattended": unattended,
-                "restartNeeded": True if result.returncode == 3010 else None,
-                "text": _ANSI.sub("", result.stdout or ""), "stderr": _ANSI.sub("", result.stderr or ""),
+                "status": "completed" if result.returncode in (0, 3010, 1641) else "failed", "unattended": unattended,
+                "restartNeeded": True if restart else None, "running": installer_running,
+                "from_version": current["version"], "to_version": current["available"],
+                "text": output, "stderr": stderr,
                 "note": ("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."
                          if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")}
 

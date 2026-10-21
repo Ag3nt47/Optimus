@@ -97,6 +97,7 @@ function Invoke-OptimusRequest {
         'set_power_plan' { Set-SCMPowerPlan -Guid ([string]$arg.guid);@(Get-SCMPowerPlans) }
         'registry_audit' { Get-OptimusRegistryIssues }
         'driver_updates_scan' { Get-SCMDriverUpdateScan }
+        'driver_device_inventory' { Get-SCMDeviceCoverageInventory }
         'driver_update_apply' {
             $record=if($arg.record){$arg.record}else{[pscustomobject]@{id=[string]$arg.id;revision=[int]$arg.revision}}
             Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true)
@@ -114,3 +115,4 @@ while($null -ne ($line=[Console]::ReadLine())) {
     } catch { $response=[ordered]@{id=$request.id;ok=$false;error=$_.Exception.Message} }
     [Console]::WriteLine((ConvertTo-Json -InputObject $response -Depth 24 -Compress))
 }
+

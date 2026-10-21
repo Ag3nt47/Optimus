@@ -309,6 +309,66 @@ function Get-SCMDriverInventory {
 }
 
 # Windows Update Agent operations. Loading defines functions; no scan/install runs.
+function Get-SCMDeviceCoverageInventory {
+    # Read-only. Never invokes a device rescan, enable/disable or installer.
+    $errors=New-Object 'Collections.Generic.List[object]'
+    $devices=@();$drivers=@();$pnpComplete=$false;$driversComplete=$false
+    try{$devices=@(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop);$pnpComplete=$true}
+    catch{$errors.Add([pscustomobject]@{source='Win32_PnPEntity';error=$_.Exception.Message})}
+    try{$drivers=@(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop);$driversComplete=$true}
+    catch{$errors.Add([pscustomobject]@{source='Win32_PnPSignedDriver';error=$_.Exception.Message})}
+    $byDevice=@{}
+    foreach($driver in $drivers){
+        $key=[string]$driver.DeviceID
+        if(-not $key){continue}
+        if(-not $byDevice.ContainsKey($key)){$byDevice[$key]=New-Object 'Collections.Generic.List[object]'}
+        $date=Get-SCMWuaProperty $driver 'DriverDate' ''
+        if($date){try{$date=([datetime]$date).ToUniversalTime().ToString('o')}catch{$date=[string]$date}}
+        $byDevice[$key].Add([pscustomobject]@{
+            version=[string]$driver.DriverVersion;date=[string]$date;inf=[string]$driver.InfName
+            signed=(Get-SCMWuaProperty $driver 'IsSigned')
+            provider=[string]$driver.DriverProviderName;manufacturer=[string]$driver.Manufacturer
+            deviceClass=[string]$driver.DeviceClass
+        })
+    }
+    $excluded=0
+    $rows=@(foreach($device in $devices){
+        $present=Get-SCMWuaProperty $device 'Present'
+        if($null -ne $present -and $present -eq $false){$excluded++;continue}
+        $identity=[string]$device.PNPDeviceID
+        if(-not $identity){$identity=[string]$device.DeviceID}
+        $installed=@()
+        if($identity -and $byDevice.ContainsKey($identity)){$installed=@($byDevice[$identity].ToArray())}
+        $class=[string](Get-SCMWuaProperty $device 'PNPClass' '')
+        if(-not $class -and $installed.Count){$class=[string]$installed[0].deviceClass}
+        if(-not $class){$class=[string](Get-SCMWuaProperty $device 'ClassGuid' '')}
+        [pscustomobject]@{
+            deviceId=$identity;displayName=[string]$device.Name;deviceClass=$class
+            manufacturer=[string]$device.Manufacturer;present=$present
+            problemCode=(Get-SCMWuaProperty $device 'ConfigManagerErrorCode')
+            deviceStatus=[string]$device.Status;service=[string]$device.Service
+            hardwareIds=@($device.HardwareID | Where-Object {$_})
+            compatibleIds=@($device.CompatibleID | Where-Object {$_})
+            installedDrivers=@($installed)
+        }
+    })
+    $system=[pscustomobject]@{manufacturer='';model='';baseboardManufacturer='';baseboardModel=''}
+    try{
+        $computer=@(Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop)
+        if($computer.Count){$system.manufacturer=[string]$computer[0].Manufacturer;$system.model=[string]$computer[0].Model}
+    }catch{$errors.Add([pscustomobject]@{source='Win32_ComputerSystem';error=$_.Exception.Message})}
+    try{
+        $board=@(Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction Stop)
+        if($board.Count){$system.baseboardManufacturer=[string]$board[0].Manufacturer;$system.baseboardModel=[string]$board[0].Product}
+    }catch{$errors.Add([pscustomobject]@{source='Win32_BaseBoard';error=$_.Exception.Message})}
+    [pscustomobject]@{
+        capturedUtc=[datetime]::UtcNow.ToString('o');complete=($pnpComplete -and $driversComplete)
+        pnpComplete=$pnpComplete;driversComplete=$driversComplete;devices=@($rows)
+        excludedNotPresent=$excluded;system=$system;errors=@($errors.ToArray())
+    }
+}
+
+
 function Get-SCMWuaProperty {
     param($Object,[string]$Name,$Default=$null)
     try { $value=$Object.$Name; if($null -eq $value){return $Default};return $value }
@@ -330,6 +390,7 @@ function ConvertTo-SCMDriverUpdateDescriptor {
         manufacturer=[string](Get-SCMWuaProperty $Update 'DriverManufacturer' '')
         model=[string](Get-SCMWuaProperty $Update 'DriverModel' '')
         driverDate=[string]$date;canRequestUserInput=$canInput;rebootBehavior=$reboot
+        optional=(Get-SCMWuaProperty $Update 'BrowseOnly');autoSelected=(Get-SCMWuaProperty $Update 'AutoSelectOnWebSites')
     }
 }
 function New-SCMWuaSession { New-Object -ComObject Microsoft.Update.Session }
@@ -342,7 +403,7 @@ function Get-SCMDriverUpdateScan {
     $session=New-SCMWuaSession
     $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
     $updates=@(foreach($update in $result.Updates){ConvertTo-SCMDriverUpdateDescriptor -Update $update})
-    [pscustomobject]@{updates=$updates;source='Windows Update';resultCode=[int]$result.ResultCode;note='Exact update identity/revision and available device/provider/class metadata. A hardware or compatible ID can cover multiple devices; matching rules are not a physical device instance identity.'}
+    [pscustomobject]@{updates=$updates;source='Windows Update';resultCode=[int]$result.ResultCode;includesOptional=$true;note='Exact update identity/revision and available device/provider/class metadata. A hardware or compatible ID can cover multiple devices; matching rules are not a physical device instance identity.'}
 }
 function ConvertTo-SCMDriverDate {
     param($Value)
@@ -427,3 +488,4 @@ function Invoke-SCMDriverUpdateApply {
         unattended=$Unattended;note='Only the selected applicable update was installed. No reboot API or automatic elevation was invoked.'
     }
 }
+

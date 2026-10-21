@@ -47,6 +47,13 @@ class Cleaner:
             Category('error-queue', 'Windows error report queue', Path(os.environ.get('ProgramData', r'C:\ProgramData')) / 'Microsoft/Windows/WER/ReportQueue', 'Old pending error reports; review before deletion.', requires_admin=True),
             Category('crash-dumps', 'Application crash dumps', local / 'CrashDumps', 'Old application crash dumps; these can be useful for troubleshooting.', suffixes=('.dmp',)),
             Category('shader-cache', 'DirectX shader cache', local / 'D3DSCache', 'Shaders rebuild when needed and may cause temporary stutter after clearing.'),
+            Category('user-error-archive', 'User Windows error report archive', local / 'Microsoft/Windows/WER/ReportArchive', 'Old archived application diagnostics for this user. Removes previous troubleshooting details.'),
+            Category('user-error-queue', 'User Windows error report queue', local / 'Microsoft/Windows/WER/ReportQueue', 'Old pending application diagnostics for this user. Review before deletion.'),
+            Category('windows-minidumps', 'Windows crash minidumps', windows / 'Minidump', 'Old crash diagnostics; keep these when investigating blue screens. Administrator rights may be required.', requires_admin=True, suffixes=('.dmp',)),
+            Category('nvidia-dx-cache', 'NVIDIA DirectX shader cache', local / 'NVIDIA/DXCache', 'Optional rebuildable graphics cache. Clearing it can temporarily increase game loading time or shader stutter.'),
+            Category('nvidia-gl-cache', 'NVIDIA OpenGL shader cache', local / 'NVIDIA/GLCache', 'Optional rebuildable graphics cache; locked or changed files are skipped.'),
+            Category('amd-dx-cache', 'AMD DirectX shader cache', local / 'AMD/DxCache', 'Optional rebuildable graphics cache. Clearing it can temporarily increase game loading time or shader stutter.'),
+            Category('amd-dxc-cache', 'AMD shader compiler cache', local / 'AMD/DxcCache', 'Optional rebuildable graphics cache; locked or changed files are skipped.'),
         ]
         chromium = [
             ('edge', 'Microsoft Edge', local / 'Microsoft/Edge/User Data', ('msedge.exe',)),
@@ -295,5 +302,6 @@ class Cleaner:
         result['log_path'] = str(log_path)
         log_path.write_text(json.dumps({'state': 'completed', 'plan_id': plan['id'], 'result': result}, indent=2), encoding='utf-8')
         return result
+
 
 
