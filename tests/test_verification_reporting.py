@@ -78,3 +78,30 @@ def test_invalid_native_audit_is_not_reported_success(invalid):
     backend=Backend.__new__(Backend);backend.bridge=Mock();backend.bridge.request.return_value=invalid
     with pytest.raises(RuntimeError,match='no usable report'):
         backend.audit()
+
+
+def test_apply_refusal_is_reported_instead_of_clean_success(tmp_path):
+    backend=MockBackend(tmp_path)
+    backend.cleanup_apply=Mock(return_value={'deleted_count':0,'deleted_bytes':0,'skipped_count':1,'errors':['File changed after preview.']})
+    config=copy.deepcopy(workflow_module.DEFAULTS);config['browser_cache_enabled']=False
+    report=workflow_module.Workflow(backend).run(config,lambda _:None)
+    stage=next(stage for stage in report['stages'] if stage['title']=='Clean old temporary files')
+    assert stage['status']=='failed'
+    assert stage['result']['failed_items']==1
+    assert stage['result']['partial'] is True
+    assert stage['result']['preview_summary']['complete'] is True
+    assert stage['result']['result']['deleted_count']==0
+    assert report['status']=='completed_with_errors'
+
+
+def test_expected_unavailable_or_busy_category_note_remains_a_safe_skip(tmp_path):
+    backend=MockBackend(tmp_path)
+    backend.cleanup_scan=Mock(return_value={'files':[],'total_bytes':0,'complete':True,'errors':[],'skipped':['Browser cache: close the browser first.']})
+    backend.cleanup_apply=Mock()
+    config=copy.deepcopy(workflow_module.DEFAULTS);config['browser_cache_enabled']=False
+    report=workflow_module.Workflow(backend).run(config,lambda _:None)
+    stage=next(stage for stage in report['stages'] if stage['title']=='Clean old temporary files')
+    assert stage['status']=='completed'
+    assert stage['result']['partial'] is False
+    assert stage['result']['preview_summary']['skipped']
+    backend.cleanup_apply.assert_not_called()
