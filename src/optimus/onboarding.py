@@ -92,6 +92,8 @@ class InitialSetupWizard(QWizard):
         self.page_ids = {}
         self.category_controls = {}
         self.category_names = {}
+        self.browser_controls = {}
+        self.selection_actions = {}
         self.busy = False
         self._closing = False
         self._probe_worker = None
@@ -161,6 +163,75 @@ class InitialSetupWizard(QWizard):
         layout.addWidget(checkbox)
         return checkbox
 
+    def _selection_buttons(self, body, key, select, clear):
+        group = QWidget()
+        row = QHBoxLayout(group)
+        row.setContentsMargins(0, 0, 0, 0)
+        select_button, clear_button = QPushButton('Select all'), QPushButton('Clear all')
+        select_button.setAccessibleName('Select all ' + key + ' choices')
+        clear_button.setAccessibleName('Clear all ' + key + ' choices')
+        select_button.clicked.connect(lambda: select() if not self.busy else None)
+        clear_button.clicked.connect(lambda: clear() if not self.busy else None)
+        row.addWidget(select_button)
+        row.addWidget(clear_button)
+        row.addStretch()
+        body.addWidget(group)
+        self.selection_actions[key] = {'select': select_button, 'clear': clear_button, 'group': group}
+        return group
+
+    def _checkbox_actions(self, body, key, controls):
+        def change(checked):
+            for control in controls():
+                if control.isEnabled():
+                    control.setChecked(checked)
+        self._selection_buttons(body, key, lambda: change(True), lambda: change(False))
+
+    @staticmethod
+    def _selectable(item):
+        return bool(item.flags() & Qt.ItemIsEnabled and item.flags() & Qt.ItemIsUserCheckable)
+
+    def _set_list_checks(self, key, table, checked, status, *, reserved_ids=()):
+        if not table.isEnabled() or self.busy:
+            return
+        keys = {value.casefold() for value in reserved_ids}
+        selected = skipped = 0
+        for index in range(table.count()):
+            item = table.item(index)
+            if not self._selectable(item):
+                continue
+            identity = item.data(Qt.UserRole).get('id', str(index)) if key == 'software' else str(index)
+            identity = identity.casefold()
+            include = checked and len(keys | {identity}) <= 100
+            item.setCheckState(Qt.Checked if include else Qt.Unchecked)
+            if include:
+                keys.add(identity)
+                selected += 1
+            elif checked:
+                skipped += 1
+        message = str(selected) + ' eligible choices selected.' if checked else 'Eligible choices cleared.'
+        if skipped:
+            message += ' ' + str(skipped) + ' additional choices were left unchecked because the 100-entry approval limit would be exceeded.'
+        status.setText(message + ' Review the selection and any separate authorization below, then Save choices.')
+
+    def _select_all_software(self):
+        try:
+            reserved = self._exact_ids(self.software_ids.toPlainText())
+        except ValueError as error:
+            self.software_status.setText(str(error))
+            return
+        self._set_list_checks('software', self.software_targets, True, self.software_status, reserved_ids=reserved)
+
+    def _sync_selection_actions(self):
+        tables = {'startup': self.startup_targets, 'software': self.software_targets,
+                  'drivers': self.driver_targets, 'hardware': self.hardware_targets}
+        for key, actions in self.selection_actions.items():
+            table = tables.get(key)
+            enabled = not self.busy and (table is None or table.isEnabled() and any(self._selectable(table.item(index)) for index in range(table.count())))
+            if key == 'drivers' and self.driver_policy.currentData() == 'install_matching':
+                enabled = False
+            for name in ('select', 'clear'):
+                actions[name].setEnabled(enabled)
+
     def _build_cadence(self):
         body = self._page('cadence', '1. When should Optimus run?',
             'These questions configure Optimize and its automatic cadence. Existing choices are retained; new automatic file, startup and driver changes need scoped approval. Maintenance choices are saved only at Save choices; account connection/inventory are separate explicit setup actions.')
@@ -193,9 +264,28 @@ class InitialSetupWizard(QWizard):
 
     def _build_cleanup(self):
         body = self._page('cleanup', '3. Custom Clean',
-            'Choose the cleanup stages you authorize. Eligible cache/temporary files are permanently deleted during a configured maintenance run, after age, path, identity and active-process checks. Browser history, cookies, passwords and bookmarks are outside cache cleanup.')
+            'Choose temporary files, browser caches and optional browser records to clean. Temporary/cache files use the minimum age below. Selected history, cookies and download-list records are cleared across the selected browsers\' recognized profiles, regardless of age; private database backups are required. Passwords, bookmarks and downloaded files are preserved.')
+        self._checkbox_actions(body, 'cleanup', lambda: [*(self.controls[key] for key in ('cleanup_enabled', 'browser_cache_enabled', 'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')), *self.category_controls.values(), *self.browser_controls.values()])
         self._check(body, 'cleanup_enabled', 'Clean old files in my user temporary folder', default=True)
-        self._check(body, 'browser_cache_enabled', 'Clean recognized caches of closed browsers', default=True)
+        self._check(body, 'browser_cache_enabled', 'Clean recognized browser caches and cached temporary web files', default=True)
+        self._check(body, 'browser_history_enabled', 'Clear browsing history (all ages; private backup retained)')
+        self._check(body, 'browser_cookies_enabled', 'Clear cookies and site sign-ins (can sign me out; private backup retained)')
+        self._check(body, 'browser_download_history_enabled', 'Clear the download list (Chromium browsers only; downloaded files stay)')
+        body.addWidget(_label('Apply those categories to all recognized profiles of the browsers checked below:'))
+        selected_browsers = self.initial.get('browser_cleanup_browsers', ['edge', 'chrome', 'brave', 'vivaldi', 'firefox'])
+        browser_row = QHBoxLayout()
+        for key, name in (('edge', 'Microsoft Edge'), ('chrome', 'Google Chrome'), ('brave', 'Brave'), ('vivaldi', 'Vivaldi'), ('firefox', 'Firefox')):
+            control = QCheckBox(name)
+            control.setChecked(key in selected_browsers)
+            self.browser_controls[key] = control
+            browser_row.addWidget(control)
+        body.addLayout(browser_row)
+        self.browser_keep_domains = QPlainTextEdit()
+        self.browser_keep_domains.setPlaceholderText('Keep cookies for these domains, comma-separated: example.com, another.example')
+        self.browser_keep_domains.setPlainText(', '.join(self.initial.get('browser_keep_domains', [])))
+        self.browser_keep_domains.setFixedHeight(70)
+        body.addWidget(self.browser_keep_domains)
+        body.addWidget(_label('When a selected browser is open, each run asks Yes: close and clean, or No: skip that browser for now. A refusal, cancellation, restart or failed graceful close skips that browser. Cookie exceptions include subdomains. Backups retain original private records until you remove their backup files; this is not secure erasure.'))
         row = QHBoxLayout()
         row.addWidget(_label('Intensity preset'))
         intensity = QComboBox()
@@ -244,6 +334,7 @@ class InitialSetupWizard(QWizard):
     def _build_uninstaller(self):
         body = self._page('uninstaller', '4. Uninstaller and curated debloat',
             'Installed-app review creates an inventory/report. The separate removal choices below authorize curated groups to be removed during maintenance. They can require reinstallation later and do not guarantee recovery of app-local data.')
+        self._checkbox_actions(body, 'uninstaller', lambda: [self.controls['applications_review_enabled'], *(self.controls[key] for key, unused in REMOVALS)])
         self._check(body, 'applications_review_enabled', 'Review installed applications and include a report (no uninstall)')
         for key, label in REMOVALS:
             checkbox = self._check(body, key, label)
@@ -313,6 +404,7 @@ class InitialSetupWizard(QWizard):
     def _build_performance(self):
         body = self._page('performance', '7. Performance Optimizer',
             'Review process CPU/memory and priority/affinity information without closing applications. Optional Codex priority and background sampling are separate choices. Existing external priority watchers are preserved.')
+        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'codex_priority_enabled', 'background_analysis_enabled')])
         self._check(body, 'performance_review_enabled', 'Include a detailed process/resource review report')
         self._check(body, 'codex_priority_enabled', 'Apply the selected Codex priority during maintenance')
         priority = QComboBox()
@@ -342,6 +434,9 @@ class InitialSetupWizard(QWizard):
         body.addWidget(self.startup_status)
         self.startup_targets = QListWidget()
         self.startup_targets.setMinimumHeight(170)
+        self._selection_buttons(body, 'startup',
+            lambda: self._set_list_checks('startup', self.startup_targets, True, self.startup_status),
+            lambda: self._set_list_checks('startup', self.startup_targets, False, self.startup_status))
         body.addWidget(self.startup_targets)
         self.startup_consent = self._consent(body, 'startup_changes_approved',
             'Allow these exact checked entries to be disabled automatically, without per-run prompts')
@@ -367,6 +462,8 @@ class InitialSetupWizard(QWizard):
         body.addWidget(self.software_status)
         self.software_targets = QListWidget()
         self.software_targets.setMinimumHeight(135)
+        self._selection_buttons(body, 'software', self._select_all_software,
+            lambda: self._set_list_checks('software', self.software_targets, False, self.software_status))
         body.addWidget(self.software_targets)
         body.addWidget(_label('Advanced: other exact WinGet package IDs, one per line or comma-separated. Checked packages above are included automatically.'))
         self.software_ids = QPlainTextEdit()
@@ -403,6 +500,8 @@ class InitialSetupWizard(QWizard):
         self.software_all_consent.setEnabled(all_supported)
         self.software_agreements.setEnabled(selected or all_supported)
         self.software_agreements.setText('Allow silent installation of supported WinGet applications and accept their package/source agreements' if all_supported else 'Allow silent installation of my selected/listed packages and accept their package/source agreements')
+        if hasattr(self, 'hardware_targets'):
+            self._sync_selection_actions()
 
     def _software_policy_changed(self, *unused):
         self.software_all_consent.setChecked(False)
@@ -430,6 +529,7 @@ class InitialSetupWizard(QWizard):
             self.software_targets.blockSignals(False)
             self.software_ids.setPlainText('\n'.join(preserved_tokens))
             self.software_status.setText('Selected IDs were retained in the advanced field. WinGet did not return a complete recognized update list. No rows can be selected. Review Updates for its output; advanced exact IDs remain available.')
+            self._sync_selection_actions()
             return
         from .automated_software import fresh_candidates
         accepted = fresh_candidates(result)
@@ -462,6 +562,9 @@ class InitialSetupWizard(QWizard):
         body.addWidget(self.driver_status)
         self.driver_targets = QListWidget()
         self.driver_targets.setMinimumHeight(180)
+        self._selection_buttons(body, 'drivers',
+            lambda: self._set_list_checks('drivers', self.driver_targets, True, self.driver_status),
+            lambda: self._set_list_checks('drivers', self.driver_targets, False, self.driver_status))
         body.addWidget(self.driver_targets)
         self.driver_details = QPlainTextEdit()
         self.driver_details.setReadOnly(True)
@@ -470,13 +573,13 @@ class InitialSetupWizard(QWizard):
         self.hardware_load_button=QPushButton('Load installed hardware for future matching updates')
         self.hardware_load_button.clicked.connect(self.load_hardware_approvals)
         body.addWidget(self.hardware_load_button)
-        self.hardware_select_button=QPushButton('Select all eligible present devices (maximum 2048 unique approval rules)')
-        self.hardware_select_button.clicked.connect(self.select_all_hardware)
-        body.addWidget(self.hardware_select_button)
         self.hardware_status=_label('Present-device approvals allow future matching updates even when Windows Update has no offer now. Only known installed provider/class/date metadata is eligible.')
         body.addWidget(self.hardware_status)
         self.hardware_targets=QListWidget()
         self.hardware_targets.setMinimumHeight(145)
+        self._selection_buttons(body, 'hardware', self.select_all_hardware, self.clear_all_hardware)
+        self.hardware_select_button = self.selection_actions['hardware']['select']
+        self.hardware_select_button.setToolTip('Select all eligible present devices, up to 2048 unique approval rules.')
         body.addWidget(self.hardware_targets)
 
         self.driver_consent = self._consent(body, 'driver_changes_approved',
@@ -490,7 +593,9 @@ class InitialSetupWizard(QWizard):
         matching = self.driver_policy.currentData()=='install_matching'
         self.hardware_load_button.setEnabled(matching)
         self.hardware_select_button.setEnabled(matching)
+        self.hardware_targets.setEnabled(matching)
         self._driver_visibility()
+        self._sync_selection_actions()
         body.addWidget(_label('Exact mode does not approve a later revision. Matching mode requires complete hardware ID, provider, driver class and a driver-date floor to exclude older offers. A hardware/compatible ID may cover multiple identical devices. New devices/providers need new approval. Interactive, ambiguous or mandatory-immediate-restart offers are skipped. Installation needs an already elevated Optimus process; automatic runs report administrator access needed rather than silently requesting UAC. No blanket driver removal or automatic reboot is requested.'))
         body.addStretch()
 
@@ -545,6 +650,7 @@ class InitialSetupWizard(QWizard):
             status.setText('Wait for the current inventory/account request to finish.')
             return
         self.busy = True
+        self._sync_selection_actions()
         self._probe_callback, self._probe_status = callback, status
         status.setText('Loading current information...')
         for button in (QWizard.NextButton,QWizard.BackButton,QWizard.FinishButton):
@@ -572,6 +678,7 @@ class InitialSetupWizard(QWizard):
     @Slot()
     def _probe_finished(self):
         self.busy = False
+        self._sync_selection_actions()
         self._probe_worker = None
         self._probe_callback = None
         if not self._closing:
@@ -656,6 +763,7 @@ class InitialSetupWizard(QWizard):
         self._startup_loaded = True
         self.startup_consent.setChecked(False)
         self.startup_status.setText(str(self.startup_targets.count())+' eligible current entries. Check exact entries, then approve below. Protected/ineligible entries were excluded.')
+        self._sync_selection_actions()
 
     def load_driver_approvals(self):
         self._drivers_loaded = False
@@ -681,7 +789,7 @@ class InitialSetupWizard(QWizard):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setData(Qt.UserRole, {'descriptor':descriptor,'device':device,'record':record})
             item.setToolTip(json.dumps(record, indent=2))
-            selected = int(self.initial.get('setup_version',0)) >= SETUP_VERSION and (descriptor in self.initial.get('driver_approved_updates', []) if self.driver_policy.currentData() != 'install_matching' else device is not None and device in self.initial.get('driver_approved_devices', []))
+            selected = int(self.initial.get('setup_version',0)) >= SETUP_VERSION and self.driver_policy.currentData() != 'install_matching' and descriptor in self.initial.get('driver_approved_updates', [])
             item.setCheckState(Qt.Checked if selected else Qt.Unchecked)
             self.driver_targets.addItem(item)
         self.driver_targets.blockSignals(False)
@@ -715,12 +823,13 @@ class InitialSetupWizard(QWizard):
                 item.setToolTip('Matching mode requires complete hardware ID, provider, driver class and driver date. Use exact revision mode or leave this candidate unapproved.')
             item.setFlags(flags)
         self.driver_targets.blockSignals(False)
+        self._sync_selection_actions()
 
     def _driver_visibility(self):
         matching=self.driver_policy.currentData()=='install_matching'
-        for widget in (self.driver_offer_load_button,self.driver_status,self.driver_targets,self.driver_details):
+        for widget in (self.driver_offer_load_button,self.driver_status,self.driver_targets,self.driver_details,self.selection_actions['drivers']['group']):
             widget.setVisible(not matching)
-        for widget in (self.hardware_load_button,self.hardware_select_button,self.hardware_status,self.hardware_targets):
+        for widget in (self.hardware_load_button,self.hardware_status,self.hardware_targets,self.selection_actions['hardware']['group']):
             widget.setVisible(matching)
 
     def _driver_selection_changed(self, *unused):
@@ -768,17 +877,23 @@ class InitialSetupWizard(QWizard):
         self._hardware_loaded=True
         self._driver_selection_changed()
         self.hardware_status.setText(str(self.hardware_targets.count())+' present devices loaded. Unavailable devices remain unchecked. Selecting a device approves only its listed exact hardware/compatible IDs, provider, class and installed date floor.')
+        self._sync_selection_actions()
 
     @staticmethod
     def _rule_key(rule):
         return tuple(rule[name].casefold() for name in ('hardwareId','provider','class'))
 
     def select_all_hardware(self):
-        keys={self._rule_key(item['device']) for item in self._checked(self.driver_targets) if item.get('device')}
+        if self.busy or not self.hardware_targets.isEnabled():
+            return
+        keys=set()
         selected,skipped=0,0
         self.hardware_targets.blockSignals(True)
         for index in range(self.hardware_targets.count()):
             item=self.hardware_targets.item(index)
+            if not self._selectable(item):
+                skipped += 1
+                continue
             rules=item.data(Qt.UserRole).get('rules',[])
             new={self._rule_key(rule) for rule in rules}
             eligible=bool(rules) and bool(item.flags() & Qt.ItemIsEnabled) and len(keys|new)<=DEVICE_RULE_LIMIT
@@ -791,9 +906,18 @@ class InitialSetupWizard(QWizard):
         self._driver_selection_changed()
         self.hardware_status.setText(str(selected)+' devices selected, '+str(len(keys))+' unique rules. '+str(skipped)+' devices remain unapproved because metadata is missing or the 2048-rule limit would be exceeded. Review then approve installation and agreements below.')
 
+    def clear_all_hardware(self):
+        if self.busy or not self.hardware_targets.isEnabled():
+            return
+        for index in range(self.hardware_targets.count()):
+            item = self.hardware_targets.item(index)
+            if self._selectable(item):
+                item.setCheckState(Qt.Unchecked)
+        self.hardware_status.setText('Eligible device choices cleared. Review any remaining selections before approving installation and agreements.')
+
     def _driver_rules(self):
         rules = {}
-        selected=[item['device'] for item in self._checked(self.driver_targets) if item.get('device')]
+        selected=[] if self.driver_policy.currentData() == 'install_matching' else [item['device'] for item in self._checked(self.driver_targets) if item.get('device')]
         for item in self._checked(self.hardware_targets):
             selected.extend(item.get('rules',[]))
         for rule in selected:
@@ -868,7 +992,16 @@ class InitialSetupWizard(QWizard):
                 result[key] = control.currentText()
         result.update({'setup_version':SETUP_VERSION, 'automation_mode':next(mode for mode,button in self.cadence_buttons.items() if button.isChecked()),
             'cleanup_category_ids':[key for key,control in self.category_controls.items() if control.isChecked()],
+            'browser_cleanup_browsers':[key for key,control in self.browser_controls.items() if control.isChecked()],
             'software_update_policy':self.software_policy.currentData()})
+        raw_domains = [value.strip() for value in re.split(r'[\r\n,]+', self.browser_keep_domains.toPlainText()) if value.strip()]
+        if validate:
+            from .browser_privacy import _domains
+            result['browser_keep_domains'] = _domains(raw_domains)
+            if section in (None, 'cleanup') and any(result[key] for key in ('browser_cache_enabled', 'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')) and not result['browser_cleanup_browsers']:
+                raise ValueError('Choose at least one browser for the enabled browser cleanup categories.')
+        else:
+            result['browser_keep_domains'] = raw_domains
         if validate:
             result['duplicate_roots'] = self._roots()
             result['software_update_ids'] = self._package_ids()
@@ -908,7 +1041,7 @@ class InitialSetupWizard(QWizard):
                 if not self._startup_loaded or not result['startup_approved_entries'] or not result['startup_changes_approved']:
                     raise ValueError('Load current startup entries, select exact entries and approve disabling, or choose Review.')
             if section in (None,'drivers') and result['driver_updates_enabled'] and result['driver_policy'] != 'review':
-                loaded = self._drivers_loaded if result['driver_policy']=='install_approved' else (self._drivers_loaded or self._hardware_loaded)
+                loaded = self._drivers_loaded if result['driver_policy']=='install_approved' else self._hardware_loaded
                 stale_hardware = bool(self._checked(self.hardware_targets)) and not self._hardware_loaded
                 if not loaded or stale_hardware or not result['driver_changes_approved'] or not result['driver_update_agreements_accepted']:
                     raise ValueError('Load fresh drivers, select updates/devices and approve installation plus agreements, or choose Review.')
@@ -936,7 +1069,14 @@ class InitialSetupWizard(QWizard):
         if settings.get('cleanup_enabled'):
             actions.append('Permanently delete eligible old user temporary files')
         if settings.get('browser_cache_enabled'):
-            actions.append('Permanently delete eligible caches of closed browsers')
+            actions.append('Permanently delete eligible browser-cache files')
+        for key, label in (('browser_history_enabled', 'browsing history'), ('browser_cookies_enabled', 'cookies and site sign-ins'), ('browser_download_history_enabled', 'download-list records (downloaded files stay)')):
+            if settings.get(key):
+                actions.append('Clear selected browsers\' ' + label + ' across all ages, with private local database backups')
+        if any(settings.get(key) for key in ('browser_cache_enabled', 'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')):
+            actions.append('Browsers: ' + (', '.join(settings['browser_cleanup_browsers']) or '[none selected]') + '. Each open browser asks Close and clean or Skip for this run.')
+            if settings['browser_keep_domains']:
+                actions.append('Keep cookies for domains and their subdomains: ' + ', '.join(settings['browser_keep_domains']))
         for identifier in settings.get('cleanup_category_ids', []):
             actions.append('Permanently clean: ' + self.category_names.get(identifier, identifier))
         for key, text in REMOVALS:

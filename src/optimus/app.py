@@ -17,6 +17,7 @@ def _resume_saved_analysis(backend):
 def parser():
     result = argparse.ArgumentParser(prog='Optimus', description='Optimus: Computer optimization tool')
     result.add_argument('--audit', action='store_true', help='Save a read-only audit without opening the interface.')
+    result.add_argument('--process-scan', action='store_true', help='Export a read-only process and launch-evidence report; no actions are applied.')
     result.add_argument('--output', type=Path, help='Audit destination folder.')
     result.add_argument('--smoke-test', action='store_true', help='Build and inspect the interface without changing settings.')
     result.add_argument('--screenshot', type=Path)
@@ -32,11 +33,15 @@ def main(argv=None):
         return 2
     from .backend import Backend
     backend = Backend()
-    if args.audit:
+    if args.audit or args.process_scan:
         from datetime import datetime
         destination = args.output or backend.data_dir / 'reports' / datetime.now().strftime('%Y%m%d-%H%M%S')
         try:
-            print(json.dumps(backend.export_report(destination)))
+            if args.process_scan:
+                report = backend.process_harness_scan()
+                print(json.dumps(backend.process_harness_export(report['id'], destination)))
+            else:
+                print(json.dumps(backend.export_report(destination)))
             return 0
         finally:
             backend.close()

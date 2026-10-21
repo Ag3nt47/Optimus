@@ -16,6 +16,10 @@ from .approval_policy import APPROVAL_DEFAULTS, validate_approvals
 DEFAULTS = {
     'intensity': 'Standard', 'cleanup_enabled': True, 'cleanup_age_days': 7,
     'browser_cache_enabled': True, 'consumer_debloat_enabled': False,
+    'browser_history_enabled': False, 'browser_cookies_enabled': False,
+    'browser_download_history_enabled': False,
+    'browser_cleanup_browsers': ['edge', 'chrome', 'brave', 'vivaldi', 'firefox'],
+    'browser_keep_domains': [],
     'm365_debloat_enabled': False, 'outlook_debloat_enabled': False,
     'edge_debloat_enabled': False, 'codex_priority_enabled': False,
     'codex_priority': 'High', 'background_analysis_enabled': False,
@@ -91,6 +95,15 @@ class Preferences:
             raise ValueError('Choose manual, startup, daily, or weekly maintenance.')
         if result['software_update_policy'] not in ('review', 'selected', 'all_supported'):
             raise ValueError('Software updates require review, selected IDs, or all-supported policy.')
+        browsers = result['browser_cleanup_browsers']
+        if type(browsers) is not list or len(browsers) > 5 or any(not isinstance(item, str) or item not in ('edge', 'chrome', 'brave', 'vivaldi', 'firefox') for item in browsers) or len(set(browsers)) != len(browsers):
+            raise ValueError('Choose unique supported browser identifiers for browser cleanup.')
+        if type(result['browser_keep_domains']) is not list:
+            raise ValueError('Cookie keep domains must be a list of plain host names.')
+        from .browser_privacy import _domains
+        result['browser_keep_domains'] = _domains(result['browser_keep_domains'])
+        if any(result[key] for key in ('browser_cache_enabled', 'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')) and not browsers:
+            raise ValueError('Choose at least one browser for the enabled browser cleanup categories.')
         for key, limit, pattern in (('software_update_ids', 100, _PACKAGE_ID), ('software_update_exclude_ids', 100, _PACKAGE_ID), ('cleanup_category_ids', 50, _CATEGORY_ID)):
             items = result[key]
             if type(items) is not list or len(items) > limit:
@@ -143,7 +156,7 @@ class Workflow:
         self.active = False
         self.last_report = None
 
-    def run(self, settings, progress_callback, cancel_event=None):
+    def run(self, settings, progress_callback, cancel_event=None, *, browser_prompt=None):
         configuration = Preferences.validate(settings)
         if not self.lock.acquire(blocking=False):
             raise RuntimeError('An optimization run is already active.')
@@ -258,11 +271,13 @@ class Workflow:
                         return {'skipped': True, 'note': 'None of the separately selected additional categories is currently available.'}
                     return clean(selected)
                 stages.append(('Clean selected additional categories', 'Applying only the configured categories that are currently available.', additional_cleanup))
-            if configuration['browser_cache_enabled']:
-                def browser_cleanup():
-                    categories = [item['id'] for item in self.backend.cleanup_categories() if item.get('process_names') and item.get('available')]
-                    return clean(categories) if categories else {'skipped': True, 'note': 'No eligible browser-cache category is currently available.'}
-                stages.append(('Clean closed-browser caches', f'Cache files at least {age} days old; passwords, cookies, history and bookmarks are preserved.', browser_cleanup))
+            if any(configuration[key] for key in ('browser_cache_enabled', 'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')):
+                from .browser_cleanup import run_browser_cleanup
+                stages.append(('Clean selected browser data',
+                    'Applying only selected browser categories. Each open browser needs Close and clean permission for this run; No skips that browser. Passwords, bookmarks and downloaded files are preserved.',
+                    lambda: run_browser_cleanup(self.backend, configuration, clean=clean,
+                        browser_prompt=browser_prompt, cancel_event=cancel_event,
+                        item_callback=item_progress('Clean selected browser data'))))
             for key, action, label in (
                 ('consumer_debloat_enabled', 'consumer-apps', 'Remove selected consumer app group'),
                 ('m365_debloat_enabled', 'm365', 'Remove Microsoft 365 consumer packages'),

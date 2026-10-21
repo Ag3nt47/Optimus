@@ -85,16 +85,18 @@ The release source and the working copy remain separate. Restoring an original f
 Settings, reports, operation logs, supported backups and Sandbox history live under `%LOCALAPPDATA%\Optimus`. Keep this data private: reports can contain executable paths, startup commands, device details and account/profile metadata. A browser rollback copy contains browser data and needs the same care as the profile it backs up.
 
 Optimus does not promise a fixed performance gain. Use the measured results to choose what to change, then compare your normal workload. See [feature coverage](FEATURES.md) for the direct engines, Windows integrations and unsupported areas.
-## First-start setup (0.4.0)
+## First-start setup
 
 1. Open Optimus using its Desktop shortcut. The setup questions appear once, including after upgrading from a version without setup.
 2. Choose manual, every app startup, daily while open or weekly while open. Daily and weekly maintenance requires Optimus to remain running; it does not wake a closed app.
-3. Answer the module questions. Previous saved values are shown for existing installations. Bing Wallpaper stays protected.
+3. Answer the module questions. Previous saved values are shown for existing installations. Use Select all or Clear all for cleanup, debloat and performance choices, and for loaded eligible startup, software and driver lists. Custom Clean has independent browser cache, history, cookie and download-list choices, browser-family selections and cookie domain exceptions. Bing Wallpaper stays protected.
 4. Choose review or automatic changes separately for duplicate files, personal OneDrive, startup registrations and drivers. Authorize each apply mode explicitly and read its scope in the final summary.
 5. Software updates default to reporting. To authorize automatic installation, load and select exact WinGet packages, or separately approve all supported installed WinGet applications and set any exact-ID exclusions. Explicitly allow package/source agreements. Pins are preserved; unknown, ambiguous, unavailable or differently sourced packages are skipped or refused. Driver updates use the exact-update or installed-device/provider/date approvals described below.
 6. Read the final summary. Save choices without starting maintenance, or explicitly select Run selected maintenance now.
 
 Cancelling setup does not save configuration or run maintenance. You can reopen the questions using Run setup questions again in Settings. Existing manual tool panels remain available. The three main buttons are unchanged.
+
+Bulk selection affects only the options or list next to its buttons. Software list selection is available in Selected mode; hardware selection is available in matching-device mode. Disabled, protected and informational entries are excluded. Existing approval limits still apply: 100 startup entries, software package IDs (including the advanced field), or exact driver revisions, and 2048 unique hardware/provider/class rules. The status reports when a limit leaves entries unchecked. Clear all clears the eligible checklist without deleting advanced package IDs or changing a policy. Approval and agreement checkboxes remain separate; changing checked entries clears their previous consent. Save choices is still required to store your selections.
 
 Automatic attempts use the same progress window, cancellation boundaries and operation journal as the main Optimize button. A failed or cancelled attempt counts toward the selected interval; it is not automatically replayed every timer tick. Setup, open review windows, the source editor and active operations defer automatic starts. Choosing Manual disables automatic runs while retaining your module selections.
 ## Approve automatic changes once
@@ -111,3 +113,19 @@ Saving without Run selected maintenance now stores the choices and postpones wor
 Loading an inventory or connecting an account is an explicit setup action. Cancelling the questions preserves maintenance preferences; it does not reverse an account connection you separately initiated. Saved approvals are local to your Windows account. New scopes or device/provider identities require new approval; the same unchanged approvals do not produce another confirmation every run.
 
 
+
+## Browser close and clean
+
+Select the desired browser categories in the setup questions, then Save choices. History, cookies and download-list cleanup start off on an upgrade. Selected categories apply to the recognized profiles of the checked browser families. History and cookie records are cleared across all ages; the minimum-file-age setting applies to temporary/cache files. Cookie exceptions include the entered domain and its subdomains. Firefox download-list cleanup uses Firefox's own controls.
+
+When maintenance reaches a selected browser that is running, it asks about that browser only. Yes asks all of its windows to close normally, waits for its processes to exit, and then cleans the chosen data. Save forms and downloads before answering. No skips that browser for this run while other selected browsers and maintenance stages continue. Close failure, cancellation, unknown state or reopening causes a skip; Optimus does not force-kill browsers. A hidden unattended run without a working prompt cannot authorize closure.
+
+Cookies can sign you out. Passwords, bookmarks and downloaded files remain excluded. Privacy database changes require a private local backup and fresh schema, process and database identity checks. Backups retain the original data and consume storage; this is not secure erasure. Supported restore remains in the Browser privacy panel and refuses to overwrite newer browser activity. That panel also offers close/skip before its read-only preview; its separate Clear confirmation remains required.
+
+## Process cleanup harness
+
+Open Settings, Performance, then Process cleanup harness. Run a scan to collect the process list, sampled resource evidence, parent/launch relationships and installed-program/startup matches. Protected and inaccessible processes stay in the report; use the display control to include them in the table. Unknown ownership or launch reasons are labeled honestly. A helper/updater name or high RAM use alone does not prove that it is unnecessary.
+
+After a complete scan, check the exact proposed actions you want and choose Clean up selected. Review the final action list before confirming. The harness can pause eligible current-user processes or disable exact unchanged startup registrations. It does not delete executable files, uninstall applications, stop Windows/security services or act on a new process that reused an old PID. Bing Wallpaper and protected process families are excluded. Pause can make an application unresponsive and does not guarantee its memory is freed; Resume paused apps and startup History provide supported recovery. Use Installed apps for the supported Windows uninstall route after reviewing a program.
+
+Plans expire after 15 minutes and apply at most 25 selected actions. New scans and completed apply attempts require a new selection; incomplete scans cannot authorize cleanup. A journal records attempted and actual results. Export the scan for local review; do not attach private machine inventories to public GitHub issues. Codex can run the packaged application's read-only harness with --process-scan --output followed by a chosen report folder. That command does not pause, disable or uninstall anything.

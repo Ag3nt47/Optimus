@@ -1,6 +1,7 @@
 """Counted browser privacy controls, embedded in the Optimus desktop window."""
 from __future__ import annotations
 import json
+import threading
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,QPushButton,QCheckBox,QLineEdit,QPlainTextEdit,QGroupBox
 
@@ -11,10 +12,13 @@ class PrivacyPanel(QWidget):
         self.window = window
         self._plan = None
         self._backups = []
+        from optimus.browser_prompts import BrowserPromptBridge
+        self._browser_prompts = BrowserPromptBridge(self)
+        self._preview_cancel = threading.Event()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        intro = QLabel("Preview browser record counts, then clear only the data you select. Close the selected browser and its background processes first.")
+        intro = QLabel("Preview browser record counts, then clear only the data you select. If the browser is running, Optimus asks before closing all its windows and profiles normally. Save unfinished work first; No skips this browser. Clearing records still requires the separate reviewed confirmation.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         profile_bar = QHBoxLayout()
@@ -121,6 +125,8 @@ class PrivacyPanel(QWidget):
         self.clear_button.setEnabled(False)
 
     def _preview(self):
+        if getattr(self.window, 'busy', False):
+            return
         item = self.profile.currentData()
         if not isinstance(item, dict):
             self.window._error("Refresh profiles and choose a browser profile first.")
@@ -131,11 +137,20 @@ class PrivacyPanel(QWidget):
             return
         domains = [domain.strip() for domain in self.keep_domains.text().replace("\n", ",").split(",") if domain.strip()]
         self._invalidate()
-        self.window._run("privacy_scan", item["id"], categories=selected, keep_domains=domains, done=self._show_plan)
+        cancel = threading.Event()
+        self._preview_cancel = cancel
+        self.window._run("privacy_scan", item["id"], categories=selected, keep_domains=domains,
+                         browser_prompt=lambda info: self._browser_prompts.request(info, cancel),
+                         cancel_event=cancel, done=self._show_plan)
 
     def _show_plan(self, plan):
         self._plan = plan
         self.clear_button.setEnabled(bool(plan.get("canApply")))
+        if plan.get('skipped'):
+            self._plan = None
+            self.clear_button.setEnabled(False)
+            self.details.setPlainText('Browser preview skipped.\n\n' + str(plan.get('note') or 'No browser data was cleared.'))
+            return
         profile = plan.get("profile", {})
         lines = [f"{profile.get('browser', '')} - {profile.get('name', '')}", ""]
         labels = {"history": "History visits", "cookies": "Cookies selected for removal", "cookiesKept": "Cookies kept for your domains", "downloads": "Download list entries"}
@@ -190,3 +205,7 @@ class PrivacyPanel(QWidget):
         self._invalidate()
         self.details.setPlainText("Private backup restored.\n\n" + json.dumps(result, indent=2, ensure_ascii=False))
         self.refresh_backups()
+
+    def shutdown(self):
+        self._preview_cancel.set()
+        self._browser_prompts.shutdown()

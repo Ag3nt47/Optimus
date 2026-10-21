@@ -692,6 +692,9 @@ class DetailedSettingsWindow(QMainWindow):
         report_layout.addWidget(self.slowdown_details)
         self._note(report_layout, 'Measured resource use identifies programs to review. It does not prove that a program is old, unwanted or the cause of every delay. Shared memory may be counted in several process working sets. Use the existing selected-process controls only after reviewing the program.')
         self.performance_tabs.addTab(review, 'Programs slowing down PC')
+        from optimus.widgets.process_harness_panel import ProcessHarnessPanel
+        self.process_harness_panel = ProcessHarnessPanel(self)
+        self.performance_tabs.addTab(self.process_harness_panel, 'Process cleanup harness')
         outer.addWidget(self.performance_tabs,1)
 
     def _slowdown_ready(self, report):
@@ -1435,6 +1438,10 @@ class DetailedSettingsWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        if hasattr(self, 'privacy_panel'):
+            self.privacy_panel.shutdown()
+        if hasattr(self, 'process_harness_panel'):
+            self.process_harness_panel.shutdown()
         if hasattr(self, '_analysis_timer'):
             self._analysis_timer.stop()
         if getattr(self, '_holographic_orb', None) is not None:
@@ -1548,14 +1555,22 @@ class WorkflowSignals(QObject):
 
 
 class WorkflowWorker(QRunnable):
-    def __init__(self, backend, settings, cancel):
+    def __init__(self, backend, settings, cancel, *, prompt_parent=None):
         super().__init__()
         self.backend, self.settings, self.cancel = backend, settings, cancel
         self.signals = WorkflowSignals()
+        self._browser_prompts = None
+        if settings.get('browser_cache_enabled', True) or any(settings.get(key, False) for key in (
+                'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')):
+            from .browser_prompts import BrowserPromptBridge
+            self._browser_prompts = BrowserPromptBridge(prompt_parent)
 
     def run(self):
         try:
-            result = self.backend.optimize(self.settings, progress_callback=self.signals.progress.emit, cancel_event=self.cancel)
+            kwargs = {'progress_callback': self.signals.progress.emit, 'cancel_event': self.cancel}
+            if self._browser_prompts is not None:
+                kwargs['browser_prompt'] = lambda info: self._browser_prompts.request(info, self.cancel)
+            result = self.backend.optimize(self.settings, **kwargs)
             self.signals.result.emit(result)
         except Exception as exc:
             self.signals.error.emit(str(exc))
@@ -1863,7 +1878,7 @@ class OptimusWindow(QMainWindow):
         grid.addWidget(priority, 3, 1)
         layout.addLayout(grid)
         toggles = QGridLayout()
-        labels = [('cleanup_enabled','Clean reviewed temporary files'),('browser_cache_enabled','Include inactive browser caches'),
+        labels = [('cleanup_enabled','Clean reviewed temporary files'),('browser_cache_enabled','Clean selected browser caches (ask before closing active browsers)'),
             ('consumer_debloat_enabled','Remove selected consumer bloatware'),('m365_debloat_enabled','Run Microsoft 365 debloat'),
             ('outlook_debloat_enabled','Run Outlook debloat'),('edge_debloat_enabled','Run Edge debloat'),
             ('codex_priority_enabled','Apply optional Codex priority profile'),('background_analysis_enabled','Enable background resource analysis'),
@@ -1964,7 +1979,7 @@ class OptimusWindow(QMainWindow):
         self._cancel = threading.Event()
         self._progress_window = OptimizationProgressWindow(self, self._cancel)
         self._progress_window.show()
-        self._worker = WorkflowWorker(self.backend, settings, self._cancel)
+        self._worker = WorkflowWorker(self.backend, settings, self._cancel, prompt_parent=self._progress_window)
         self._worker.signals.progress.connect(self._progress_window.update_progress)
         self._worker.signals.result.connect(self._workflow_result)
         self._worker.signals.error.connect(self._workflow_error)
@@ -1986,6 +2001,10 @@ class OptimusWindow(QMainWindow):
     def _workflow_finished(self):
         self.busy = False
         self.main_buttons[0].setEnabled(True)
+        bridge = getattr(self._worker, '_browser_prompts', None)
+        if bridge is not None:
+            bridge.shutdown()
+            bridge.deleteLater()
         self._worker = None
 
     def _build_tray(self):
@@ -2042,6 +2061,10 @@ class OptimusWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        bridge = getattr(self._worker, '_browser_prompts', None)
+        if bridge is not None:
+            self._cancel.set()
+            bridge.shutdown()
         self.canvas.timer.stop()
         self._holographic_orb.shutdown()
         self._window_reveal.shutdown()

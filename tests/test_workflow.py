@@ -30,7 +30,11 @@ class MockBackend:
         if self.audit_callback: self.audit_callback()
         return {'fixture': True}
     def cleanup_categories(self):
-        return [{'id': 'mock-browser-cache', 'process_names': ['FixtureBrowser.exe'], 'available': True}, {'id': 'mock-extra', 'available': True}]
+        return [{'id': 'chrome:Default:Cache', 'process_names': ['chrome.exe'], 'available': True}, {'id': 'mock-extra', 'available': True}]
+    def browser_cleanup_status(self, browser_id):
+        return {'running': False, 'complete': True, 'can_close': True, 'processes': [], 'errors': []}
+    def browser_cleanup_close(self, browser_id, *, cancel_event=None):
+        raise AssertionError('Closed-browser workflow fixture must not attempt a browser close.')
     def cleanup_scan(self, category_ids, age):
         self.calls.append(('cleanup_scan', list(category_ids), age))
         if self.scan_callback: self.scan_callback()

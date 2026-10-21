@@ -103,6 +103,10 @@ def test_safe_starting_values_and_run_now_off(wizard):
         assert not wizard.controls[key].isChecked()
     assert 'user-temp' not in wizard.category_controls
     assert 'fixture-browser' not in wizard.category_controls
+    assert not any(wizard.controls[key].isChecked() for key in
+                   ('browser_history_enabled','browser_cookies_enabled','browser_download_history_enabled'))
+    assert set(wizard.browser_controls) == {'edge','chrome','brave','vivaldi','firefox'}
+    assert all(control.isChecked() for control in wizard.browser_controls.values())
 
 
 def test_existing_choices_preserved_without_reenabling_others(qapp, tmp_path):
@@ -124,6 +128,56 @@ def test_high_preset_only_changes_age(wizard):
     assert not wizard.controls['consumer_debloat_enabled'].isChecked()
     assert not wizard.controls['edge_debloat_enabled'].isChecked()
     assert not wizard.controls['codex_priority_enabled'].isChecked()
+    assert not any(wizard.controls[key].isChecked() for key in
+                   ('browser_history_enabled','browser_cookies_enabled','browser_download_history_enabled'))
+
+
+def test_browser_scope_and_keep_hosts_are_explicit_and_cancel_preserves_preferences(wizard,backend):
+    initial=backend.preferences()
+    for key in ('browser_history_enabled','browser_cookies_enabled','browser_download_history_enabled'):
+        wizard.controls[key].setChecked(True)
+    wizard.controls['browser_cache_enabled'].setChecked(False)
+    for key,control in wizard.browser_controls.items():
+        control.setChecked(key=='chrome')
+    wizard.browser_keep_domains.setPlainText('.EXAMPLE.com., example.com\nbücher.de')
+    selected=wizard.collect_choices()
+    assert all(selected[key] for key in ('browser_history_enabled','browser_cookies_enabled','browser_download_history_enabled'))
+    assert selected['browser_cache_enabled'] is False
+    assert selected['browser_cleanup_browsers']==['chrome']
+    assert selected['browser_keep_domains']==['example.com','xn--bcher-kva.de']
+    wizard.reject()
+    assert backend.preferences()==initial
+    assert backend.saved==[]
+    backend.optimize.assert_not_called()
+
+
+def test_browser_privacy_summary_names_categories_scope_and_kept_domains(wizard):
+    for key in ('browser_history_enabled','browser_cookies_enabled','browser_download_history_enabled'):
+        wizard.controls[key].setChecked(True)
+    for key,control in wizard.browser_controls.items():
+        control.setChecked(key=='firefox')
+    wizard.browser_keep_domains.setPlainText('EXAMPLE.com')
+    before=wizard.collect_choices()
+    wizard.refresh_summary()
+    text=wizard.summary.toPlainText().casefold()
+    assert all(word in text for word in ('history','cookies','download','firefox','example.com'))
+    assert 'downloaded files stay' in text
+    assert wizard.collect_choices()==before
+
+
+def test_browser_keep_hosts_require_plain_domains_in_setup(wizard):
+    wizard.browser_keep_domains.setPlainText('https://example.com/path')
+    with pytest.raises(ValueError,match='plain domain'):
+        wizard.collect_choices()
+
+
+def test_browser_cleanup_requires_a_selected_browser(wizard):
+    for control in wizard.browser_controls.values():
+        control.setChecked(False)
+    with pytest.raises(ValueError):
+        wizard.collect_choices()
+    wizard.controls['browser_cache_enabled'].setChecked(False)
+    assert wizard.collect_choices()['browser_cleanup_browsers']==[]
 
 
 def test_collect_explicit_categories_roots_and_exact_ids(wizard):
@@ -371,6 +425,16 @@ def driver_fixture(**changes):
     return record
 
 
+def checked_hardware_fixture(wizard, update=None):
+    """Matching approvals come from the visible installed-hardware checklist."""
+    from optimus.automated_system import driver_device_rule
+    update = update or driver_fixture()
+    rule = driver_device_rule(update)
+    wizard._hardware_ready({'devices': [{'displayName': update['title'], 'approvalRules': [rule]}]})
+    wizard.hardware_targets.item(0).setCheckState(Qt.Checked)
+    return rule
+
+
 def cloud_fixture(wizard, *, folder='folder-one', drive='drive-one'):
     wizard.cloud_folders.setPlainText(folder)
     wizard._cloud_scope_ready({'inputs':[folder],'scopes':[{'drive_id':drive,'folder_id':folder,
@@ -516,11 +580,13 @@ def test_exact_driver_identity_revision_and_consent_saved(wizard):
 def test_driver_matching_rule_preserves_provider_class_and_date_floor(wizard):
     from optimus.automated_system import driver_device_rule
     update=driver_fixture()
-    wizard._drivers_ready({'updates':[update,driver_fixture(id='22222222-2222-4222-8222-222222222222',driverDate='')],'resultCode':2})
     wizard.controls['driver_updates_enabled'].setChecked(True)
     wizard.driver_policy.setCurrentIndex(2)
-    assert not wizard.driver_targets.item(1).flags() & Qt.ItemIsEnabled
-    wizard.driver_targets.item(0).setCheckState(Qt.Checked)
+    rule=driver_device_rule(update)
+    wizard._hardware_ready({'devices':[{'displayName':'Fixture display device','approvalRules':[rule]},
+                                       {'displayName':'Unknown installed driver date','approvalRules':[]}]})
+    assert not wizard.hardware_targets.item(1).flags() & Qt.ItemIsEnabled
+    wizard.hardware_targets.item(0).setCheckState(Qt.Checked)
     wizard.driver_consent.setChecked(True)
     wizard.driver_agreements.setChecked(True)
     selected=wizard.collect_choices()
@@ -616,8 +682,7 @@ def test_complete_scoped_payload_passes_backend_preference_validator(wizard):
     wizard.startup_consent.setChecked(True)
     wizard.controls['driver_updates_enabled'].setChecked(True)
     wizard.driver_policy.setCurrentIndex(2)
-    wizard._drivers_ready({'updates':[driver_fixture()],'resultCode':2})
-    wizard.driver_targets.item(0).setCheckState(Qt.Checked)
+    checked_hardware_fixture(wizard)
     wizard.driver_consent.setChecked(True)
     wizard.driver_agreements.setChecked(True)
     selected=wizard.collect_choices()
@@ -636,8 +701,7 @@ def test_summary_is_readable_without_changing_approval_payload(wizard):
     wizard.startup_consent.setChecked(True)
     wizard.controls['driver_updates_enabled'].setChecked(True)
     wizard.driver_policy.setCurrentIndex(2)
-    wizard._drivers_ready({'updates':[driver_fixture()],'resultCode':2})
-    wizard.driver_targets.item(0).setCheckState(Qt.Checked)
+    checked_hardware_fixture(wizard)
     wizard.driver_consent.setChecked(True)
     wizard.driver_agreements.setChecked(True)
     before=wizard.collect_choices()
@@ -651,6 +715,8 @@ def test_summary_is_readable_without_changing_approval_payload(wizard):
     assert 'disable_selected' not in text and 'install_matching' not in text
     assert wizard.collect_choices()==before
     wizard.driver_policy.setCurrentIndex(1)
+    wizard._drivers_ready({'updates':[driver_fixture()],'resultCode':2})
+    wizard.driver_targets.item(0).setCheckState(Qt.Checked)
     wizard.driver_consent.setChecked(True)
     wizard.driver_agreements.setChecked(True)
     wizard.refresh_summary()

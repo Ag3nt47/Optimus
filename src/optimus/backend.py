@@ -27,11 +27,15 @@ class Backend:
         self.workflow = Workflow(self)
         from .browser_privacy import BrowserPrivacy
         self.browser_privacy_engine = BrowserPrivacy(self.data_dir)
+        from .browser_cleanup import BrowserSessionController
+        self.browser_sessions = BrowserSessionController()
         from .cloud_drive import CloudDrive
         self.cloud = CloudDrive(self.data_dir)
         from .maintenance import Maintenance
         self.maintenance = Maintenance(self.bridge, self.data_dir)
         self.last_audit = None
+        from .process_harness import ProcessHarness
+        self.process_harness = ProcessHarness(self)
 
     @staticmethod
     def _list(value):
@@ -56,8 +60,15 @@ class Backend:
     def save_preferences(self, settings):
         return self.preference_store.save(settings)
 
-    def optimize(self, settings=None, progress_callback=None, cancel_event=None):
-        return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event)
+    def optimize(self, settings=None, progress_callback=None, cancel_event=None, *, browser_prompt=None):
+        return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event,
+                                 browser_prompt=browser_prompt)
+
+    def browser_cleanup_status(self, browser_id):
+        return self.browser_sessions.browser_status(browser_id)
+
+    def browser_cleanup_close(self, browser_id, cancel_event=None):
+        return self.browser_sessions.close_browser(browser_id, cancel_event=cancel_event)
 
     def audit(self):
         from . import __version__
@@ -70,6 +81,15 @@ class Backend:
 
     def processes(self):
         return performance.list_performance_candidates()
+
+    def process_harness_scan(self, cancel_event=None):
+        return self.process_harness.scan(cancel_event=cancel_event)
+
+    def process_harness_apply(self, request, cancel_event=None):
+        return self.process_harness.apply(request, cancel_event=cancel_event)
+
+    def process_harness_export(self, plan_id, destination):
+        return self.process_harness.export(plan_id, destination)
 
     def slowdown_report(self, cancel_event=None):
         from .slowdown import analyze_slowdowns
@@ -304,7 +324,34 @@ class Backend:
     def privacy_profiles(self):
         return self.browser_privacy_engine.profiles()
 
-    def privacy_scan(self, profile_id, categories=None, keep_domains=None):
+    def privacy_scan(self, profile_id, categories=None, keep_domains=None, *, browser_prompt=None, cancel_event=None):
+        if browser_prompt is not None:
+            profile = self.browser_privacy_engine._profile(profile_id)
+            identifiers = {'Microsoft Edge': 'edge', 'Google Chrome': 'chrome', 'Brave': 'brave',
+                           'Vivaldi': 'vivaldi', 'Mozilla Firefox': 'firefox'}
+            browser_id = identifiers.get(profile['browser'])
+            if not browser_id:
+                raise ValueError('This browser is not supported by the close-and-clean prompt.')
+            state = self.browser_cleanup_status(browser_id)
+            def skip(note):
+                return {'skipped': True, 'canApply': False,
+                        'profile': {'browser': profile['browser'], 'name': profile['name']},
+                        'counts': {}, 'note': note}
+            if cancel_event is not None and cancel_event.is_set():
+                return skip('Cancelled; this browser was not cleaned.')
+            if state.get('complete') is not True or type(state.get('running')) is not bool:
+                return skip('Browser process status could not be verified; this browser was skipped.')
+            if state['running']:
+                question = {'browser_id': browser_id, 'browser': profile['browser'],
+                            'processes': [{'pid': item.get('pid'), 'name': item.get('name')} for item in state.get('processes', [])],
+                            'categories': list(categories or []), 'profile_count': 1}
+                if browser_prompt(question) is not True:
+                    return skip('You chose to skip this open browser. It was left running and no data was cleaned.')
+                if cancel_event is not None and cancel_event.is_set():
+                    return skip('Cancelled before closing the browser; no data was cleaned.')
+                result = self.browser_cleanup_close(browser_id, cancel_event=cancel_event)
+                if result.get('closed') is not True or result.get('complete') is not True:
+                    return skip('The browser did not close completely; it was skipped without forcing it to exit.')
         return self.browser_privacy_engine.scan(profile_id, categories=categories or [], keep_domains=keep_domains or [])
 
     def privacy_apply(self, plan):
