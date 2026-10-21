@@ -198,3 +198,24 @@ def test_native_cancellation_result_defers_remaining_and_is_not_a_failed_install
     service.update_app_unattended.assert_called_once_with('Vendor.One', cancel_event=stop)
     assert result['cancelled'] and result['failed_items'] == 0
     assert result['items'][0]['status'] == 'cancelled' and result['deferred_ids'] == ['Vendor.Two']
+
+
+@pytest.mark.parametrize('policy', ['review', 'selected', 'all_supported'])
+def test_successful_recognized_empty_scan_completes_without_installer_or_false_failure(policy):
+    service = backend()
+    service.updates_scan.return_value = {'structured': True, 'exitCode': 0,
+        'source': 'winget', 'updates': [], 'no_applicable_upgrades': True,
+        'text': 'No installed package found matching input criteria.\n'}
+    result = run_software(service, configuration(software_update_policy=policy,
+        software_update_ids=['Vendor.One']))
+    assert result['review_only'] is True and result['failed_items'] == 0
+    service.update_app_unattended.assert_not_called()
+
+
+def test_empty_scan_sentinel_cannot_bypass_unsuccessful_native_scan():
+    service = backend()
+    service.updates_scan.return_value = {'structured': False, 'exitCode': 0x8A15002B,
+        'source': 'winget', 'updates': [], 'no_applicable_upgrades': True}
+    result = run_software(service, configuration())
+    assert result['failed_items'] == 1
+    service.update_app_unattended.assert_not_called()

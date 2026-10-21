@@ -325,3 +325,36 @@ def test_backend_passes_optional_cancellation_to_native_updater():
     stop = threading.Event()
     backend.update_app_unattended('Vendor.App', cancel_event=stop)
     backend.maintenance.updates_apply.assert_called_once_with('Vendor.App',confirmed=True,unattended=True,cancel_event=stop)
+
+
+def test_successful_native_empty_listing_is_a_recognized_scoped_noop(updater):
+    scan(updater)  # A previous scan must not leave an actionable cached ID.
+    updater._run = Mock(return_value=subprocess.CompletedProcess([], 0,
+        'No installed package found matching input criteria.\r\n', ''))
+    result = updater.updates_scan()
+    assert result['exitCode'] == 0 and result['structured'] is True
+    assert result['no_applicable_upgrades'] is True
+    assert result['updates'] == result['packages'] == result['excluded'] == []
+    updater._run.reset_mock()
+    with pytest.raises(ValueError):
+        updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    updater._run.assert_not_called()
+
+
+@pytest.mark.parametrize('code,output,stderr', [
+    (0x8A15002B, 'No installed package found matching input criteria.\n', ''),
+    (0x8A150014 - 2**32, 'No installed package found matching input criteria.\n', ''),
+    (5, 'No installed package found matching input criteria.\n', ''),
+    (0, 'No installed package found matching input criteria.\n', 'Source warning'),
+    (0, 'Source warning\nNo installed package found matching input criteria.\n', ''),
+    (0, 'No newer package versions are available from the configured sources.\n', ''),
+    (0, 'No available upgrade found.\n', ''),
+    (0, 'No se ha encontrado ningun paquete instalado.\n', ''),
+    (0, '', ''),
+])
+def test_no_update_recognition_never_masks_failure_warnings_or_unknown_layout(updater, code, output, stderr):
+    updater._run = Mock(return_value=subprocess.CompletedProcess([], code, output, stderr))
+    result = updater.updates_scan()
+    assert result['no_applicable_upgrades'] is False
+    assert result['structured'] is False and result['packages'] == []
+    assert result['exitCode'] == code and result['stderr'] == stderr

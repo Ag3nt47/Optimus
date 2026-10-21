@@ -36,7 +36,7 @@ Optimus implements independent Windows maintenance tools. This table explains th
 
 ## How to assess a result
 
-A scan is a preview or observation. An apply operation has its own confirmation, validation and recovery route. Reparse points, access failures, active applications, expired plans and changed identities can cause exclusions or refusal. A bounded scan must not be interpreted as a complete disk/account inventory.
+A scan is a preview or observation. An apply operation has its own confirmation, validation and recovery route. Reparse points, access failures, active applications, expired plans and changed identities can cause exclusions or refusal. A bounded scan must not be interpreted as a complete disk/account inventory. Cleanup access/read errors are retained and mark the preview incomplete. The workflow records incomplete cleanup scans as partial with errors instead of reporting a clean success. A recognized successful empty WinGet response is a normal no-update result; unknown output remains untrusted. Audit reports record the application version separately from the legacy Windows engine version.
 
 Packaged maintenance operations use the native Windows PowerShell module search path to avoid module-loading failures from an inherited host environment.
 
@@ -47,5 +47,6 @@ Core behavior is covered by disposable local fixtures, mocked external services 
 ## Implementation map
 
 The public source includes the [desktop UI](../src/optimus/ui.py), [cleanup engine](../src/optimus/cleaner.py), [browser privacy engine](../src/optimus/browser_privacy.py), [resource controls](../src/optimus/performance.py), [workflow and preferences](../src/optimus/workflow.py), [maintenance coordination](../src/optimus/maintenance.py), [personal OneDrive integration](../src/optimus/cloud_drive.py), [source workspace](../src/optimus/source_workspace.py) and [PowerShell engines](../src/optimus/engine/). Operation-specific instructions are in the [user guide](USER_GUIDE.md).
+
 
 

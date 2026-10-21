@@ -576,7 +576,8 @@ class DetailedSettingsWindow(QMainWindow):
         size = field(plan, "total_mb", default=0)
         complete = field(plan, "complete", default=False)
         skipped = len(rows(field(plan, "skipped", default=[])))
-        self.clean_summary.setText(f"Preview: {len(files):,} listed files, {size:,.1f} MB. " + ("Scan complete." if complete else "Bounded scan; additional files may exist.") + f" {skipped} skipped notes. Only this list can be applied.")
+        errors = len(rows(field(plan, "errors", default=[])))
+        self.clean_summary.setText(f"Preview: {len(files):,} listed files, {size:,.1f} MB. " + ("Scan complete." if complete and not errors else "Partial scan; some files could not be examined or a limit was reached.") + f" {errors} scan errors; {skipped} skipped notes. Only this list can be applied.")
         self.clean_apply.setEnabled(bool(files))
 
     def apply_cleanup(self):
@@ -2051,4 +2052,5 @@ class OptimusWindow(QMainWindow):
 
 def create_window(backend, *, smoke_test=False):
     return OptimusWindow(backend, smoke_test=smoke_test)
+
 

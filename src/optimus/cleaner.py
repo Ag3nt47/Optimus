@@ -200,14 +200,16 @@ class Cleaner:
                                 plan['files'].append(record)
                                 summary['files'] += 1
                                 summary['bytes'] += info.st_size
-                            except OSError:
-                                continue
+                            except OSError as error:
+                                plan['errors'].append(f'{path}: {error.strerror or type(error).__name__}')
                 except OSError as error:
                     plan['errors'].append(f'{directory}: {error.strerror or type(error).__name__}')
             summary['size_mb'] = round(summary['bytes'] / 1048576, 3)
             plan['categories'].append(summary)
             if not plan['complete']:
                 break
+        if plan['errors']:
+            plan['complete'] = False
         plan['files'].sort(key=lambda item: item['size'], reverse=True)
         plan['total_bytes'] = sum(item['size'] for item in plan['files'])
         plan['total_mb'] = round(plan['total_bytes'] / 1048576, 3)
@@ -302,6 +304,7 @@ class Cleaner:
         result['log_path'] = str(log_path)
         log_path.write_text(json.dumps({'state': 'completed', 'plan_id': plan['id'], 'result': result}, indent=2), encoding='utf-8')
         return result
+
 
 
 

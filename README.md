@@ -12,6 +12,8 @@ Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Opti
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
+**Version 0.4.1** fixes reporting found during an independent verification: successful empty WinGet scans are recognized, inaccessible cleanup files mark the scan incomplete, and audit reports identify the Optimus app version separately from the Windows engine version.
+
 **Version 0.4.0** expands the driver updater with coverage for present hardware and future device approvals even when no update is currently offered. Software Updater can install selected applications or all supported WinGet applications with a separate saved approval and exclusions. Junk Clean adds optional diagnostics and graphics-cache categories. Performance measures application CPU, RAM and I/O across multiple samples and explains potential slowdown contributors. Existing duplicate, OneDrive and startup approvals and Bing Wallpaper protection are retained.
 
 ## Three controls
@@ -94,4 +96,5 @@ No runtime reports, browser databases, machine inventories, credentials or propr
 ## License
 
 MIT for Optimus and the adapted Angerona presentation code. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party licenses. PySide6/Qt retain their own licenses.
+
 

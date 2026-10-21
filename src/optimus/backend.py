@@ -60,7 +60,12 @@ class Backend:
         return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event)
 
     def audit(self):
-        self.last_audit = self.bridge.request('audit')
+        from . import __version__
+        snapshot = self.bridge.request('audit')
+        if not isinstance(snapshot, dict):
+            raise RuntimeError('The Windows audit returned no usable report.')
+        self.last_audit = dict(snapshot, EngineVersion=snapshot.get('ToolVersion'),
+                               ToolVersion=__version__, ApplicationVersion=__version__)
         return self.last_audit
 
     def processes(self):
@@ -353,6 +358,7 @@ class Backend:
     def close(self):
         self.sampler.stop()
         self.bridge.close()
+
 
 
 

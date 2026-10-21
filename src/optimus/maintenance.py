@@ -270,7 +270,16 @@ class Maintenance:
         self._last_update_scan = 0.0
         result = self._run([self._winget(), "upgrade", "--source", "winget", "--disable-interactivity"])
         output = _ANSI.sub("", result.stdout or "").replace("\r", "")
+        stderr = _ANSI.sub("", result.stderr or "")
         rows, structured, skipped = self._parse_update_table(output, source_context="winget")
+        # ReportListResult(true) emits this single line, without a table, when
+        # a successful source-scoped listing has no selectable upgrades. Do not
+        # mistake the normal empty state for an unsupported table or generalize
+        # single-package no-upgrade HRESULTs into successful source scans.
+        no_applicable_upgrades = (result.returncode == 0 and not stderr.strip()
+                                  and output.strip() == "No installed package found matching input criteria.")
+        if no_applicable_upgrades:
+            rows, structured, skipped = [], True, []
         if result.returncode != 0:
             rows, structured = [], False
             skipped.append("WinGet returned a nonzero status; no automatic candidates are trusted.")
@@ -278,8 +287,9 @@ class Maintenance:
         self._last_update_packages = {row["id"]: dict(row) for row in rows}
         self._last_update_scan = time.time() if structured else 0.0
         return {"updates": rows, "packages": [dict(row) for row in rows], "text": output, "output": output,
-                "stderr": _ANSI.sub("", result.stderr or ""), "exitCode": result.returncode,
+                "stderr": stderr, "exitCode": result.returncode,
                 "structured": structured, "source": "winget", "excluded": skipped,
+                "no_applicable_upgrades": no_applicable_upgrades,
                 "note": "Only recognized complete winget-source rows are selectable. Localized or changed output remains text; an empty parsed list does not establish that no updates exist."}
 
     @staticmethod

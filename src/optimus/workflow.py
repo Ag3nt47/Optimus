@@ -237,7 +237,12 @@ class Workflow:
                 if cancelled():
                     return {'cancelled': True, 'reason': 'Cancelled after preview; no files were deleted.'}
                 outcome = self.backend.cleanup_apply(plan) if plan.get('files') else {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0}
-                return {'preview_summary': {'files': len(plan.get('files', [])), 'bytes': plan.get('total_bytes', 0), 'complete': plan.get('complete'), 'skipped': plan.get('skipped')}, 'result': outcome}
+                errors = plan.get('errors', [])
+                partial = plan.get('complete') is not True or bool(errors)
+                return {'preview_summary': {'files': len(plan.get('files', [])), 'bytes': plan.get('total_bytes', 0),
+                                            'complete': plan.get('complete'), 'skipped': plan.get('skipped'), 'errors': errors},
+                        'result': outcome, 'partial': partial, 'failed_items': max(1, len(errors)) if partial else 0,
+                        'note': 'Only individually verified eligible files were considered. The scan was incomplete; review its access errors or limits before treating cleanup as complete.' if partial else 'The preview completed; check the apply result for any changed or locked files that were skipped.'}
             if configuration['cleanup_enabled']:
                 stages.append(('Clean old temporary files', f'Removing approved unlocked temporary files at least {age} days old.', lambda: clean(['user-temp'])))
             if configuration['cleanup_category_ids']:
@@ -348,3 +353,4 @@ class Workflow:
             finally:
                 self.active = False
                 self.lock.release()
+
