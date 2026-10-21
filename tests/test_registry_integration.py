@@ -12,8 +12,8 @@ def qapp():
     yield app
 
 @pytest.fixture
-def window(qapp):
-    value = DetailedSettingsWindow(SimpleNamespace(), smoke_test=True)
+def window(qapp, tmp_path):
+    value = DetailedSettingsWindow(SimpleNamespace(data_dir=tmp_path), smoke_test=True)
     yield value
     value.shutdown()
     value.close()

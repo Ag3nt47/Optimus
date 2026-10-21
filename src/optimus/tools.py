@@ -107,7 +107,7 @@ def free_space_wipe_status(directory) -> dict:
         return {'available': False, 'reason': str(exc), 'media_type': 'Unverified'}
 
 
-def launch_free_space_wipe(directory, *, confirmed: bool = False) -> dict:
+def launch_free_space_wipe(directory, *, confirmed: bool = False, data_dir=None) -> dict:
     if confirmed is not True:
         raise FreeSpaceWipeUnavailable('Explicit confirmation of whole-volume free-space wiping is required.')
     status = free_space_wipe_status(directory)
@@ -118,11 +118,10 @@ def launch_free_space_wipe(directory, *, confirmed: bool = False) -> dict:
     if letter + ':' != status['drive']:
         raise FreeSpaceWipeUnavailable('The selected volume changed.')
     executable = _system_executable('cipher.exe')
-    local_data = os.environ.get('LOCALAPPDATA')
-    if not local_data:
-        raise FreeSpaceWipeUnavailable('The current-user application log directory is unavailable.')
+    from optimus.filesystem import default_data_root, resolve_data_root
+    root = resolve_data_root(Path(data_dir)) if data_dir is not None else default_data_root()
     job_id = uuid.uuid4().hex
-    log = Path(local_data) / 'Optimus' / 'wipe-logs' / (job_id + '.log')
+    log = root / 'wipe-logs' / (job_id + '.log')
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open('xb') as output:
         process = subprocess.Popen([str(executable), '/w:' + str(path)], stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,

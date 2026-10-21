@@ -224,6 +224,8 @@ def test_harness_scan_uses_existing_worker_without_blocking_gui(qapp, tmp_path, 
     seen = []
 
     class Backend:
+        data_dir = tmp_path
+
         def process_harness_scan(self, cancel_event=None):
             seen.append(threading.get_ident())
             if failure:

@@ -179,7 +179,7 @@ class DetailedSettingsWindow(QMainWindow):
         self.loaded_pages = set()
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self.settings_path = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Optimus" / "ui-settings.json"
+        self.settings_path = Path(backend.data_dir) / "ui-settings.json"
         try:
             self.preferences = json.loads(self.settings_path.read_text(encoding="utf-8"))
             if not isinstance(self.preferences, dict):
@@ -1976,7 +1976,7 @@ class OptimusWindow(QMainWindow):
         self._cancel = threading.Event()
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self.preferences_path = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Optimus' / 'ui-settings.json'
+        self.preferences_path = Path(backend.data_dir) / 'ui-settings.json'
         try:
             self.appearance = json.loads(self.preferences_path.read_text(encoding='utf-8'))
         except (OSError, ValueError):

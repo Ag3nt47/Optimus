@@ -14,8 +14,8 @@ def qapp():
 
 
 @pytest.fixture
-def window(qapp):
-    value = DetailedSettingsWindow(SimpleNamespace(), smoke_test=True)
+def window(qapp, tmp_path):
+    value = DetailedSettingsWindow(SimpleNamespace(data_dir=tmp_path), smoke_test=True)
     yield value
     value.shutdown()
     value.close()
@@ -106,8 +106,8 @@ def test_cloud_page_constructs_without_connecting(window):
     assert window.cloud_panel._plan is None
 
 
-def test_primary_window_has_exactly_three_buttons(qapp):
-    value = OptimusWindow(SimpleNamespace(preferences=lambda: {}), smoke_test=True)
+def test_primary_window_has_exactly_three_buttons(qapp, tmp_path):
+    value = OptimusWindow(SimpleNamespace(data_dir=tmp_path, preferences=lambda: {}), smoke_test=True)
     try:
         assert [button.text() for button in value.findChildren(QPushButton)] == ['1 click Optimize and debloat','Settings','Sandbox']
         assert value.windowTitle() == 'Optimus: Computer optimization tool'

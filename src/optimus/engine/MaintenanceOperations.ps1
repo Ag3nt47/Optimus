@@ -134,12 +134,22 @@ function Invoke-OptimusEdgeUninstall {
     } elseif ($Target.method -eq 'microsoft-setup') {
         if ($Target.payload.systemLevel -and -not (Test-OptimusMaintenanceAdmin)) { throw 'Administrator rights are required for this machine Edge installation.' }
         $exe=[string]$Target.payload.path
-        $arguments=@('--uninstall','--force-uninstall','--verbose-logging')
+        $arguments=@('--uninstall','--verbose-logging')
         if ($Target.payload.systemLevel) { $arguments+='--system-level' }
     } else { throw 'Unsupported Edge uninstall method.' }
     $process=Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
     $remaining=@(Get-OptimusEdgeTarget)
-    return [pscustomobject]@{id=$Target.id;name=$Target.name;status=if($process.ExitCode -in @(0,3010) -and -not $remaining.Count){'Removed'}elseif($process.ExitCode -eq 3010){'Restart required; verify after reboot'}else{'Removal was not verified; Windows may restrict Edge removal'};removed=($process.ExitCode -in @(0,3010) -and -not $remaining.Count);exitCode=$process.ExitCode;restartNeeded=($process.ExitCode -eq 3010);note='Windows controls uninstall eligibility. Optimus does not edit region policies, remove shared runtimes, or force-delete browser folders.'}
+    $exitCode=[int]$process.ExitCode
+    $exitCodeHex='0x'+([BitConverter]::ToUInt32([BitConverter]::GetBytes($exitCode),0)).ToString('X8')
+    $verified=($exitCode -in @(0,3010) -and -not $remaining.Count)
+    # APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND is an installed-package
+    # identity miss, not evidence of a Windows region or uninstall restriction.
+    # A signed setup file alone does not authorize a forced or guessed fallback.
+    $noMatchingPackage=($Target.method -eq 'winget' -and $exitCodeHex -ceq '0x8A150014')
+    $reason=if($noMatchingPackage){'winget_no_applications_found'}elseif($verified){'removal_verified'}elseif($exitCode -eq 3010){'restart_required'}elseif($exitCode -eq 0){'edge_still_detected'}else{'uninstaller_error'}
+    $status=if($noMatchingPackage){'WinGet found no matching installed Microsoft.Edge package; removal was not performed'}elseif($verified){'Removed'}elseif($exitCode -eq 3010){'Restart required; verify after reboot'}elseif($exitCode -eq 0){'Uninstaller returned success, but Edge remains detected; removal was not verified'}else{'Edge uninstaller returned an error; removal was not verified'}
+    $note=if($noMatchingPackage){'The installed package identity could not be matched. Review normal uninstall availability in Windows Installed apps. No fallback uninstaller was launched; this result does not establish a Windows uninstall restriction.'}else{'Windows controls uninstall eligibility. Optimus does not edit region policies, remove shared runtimes, force uninstall, or force-delete browser folders.'}
+    return [pscustomobject]@{id=$Target.id;name=$Target.name;status=$status;reason=$reason;removed=$verified;exitCode=$exitCode;exitCodeHex=$exitCodeHex;restartNeeded=($exitCode -eq 3010);requiresReview=(-not $verified);skipped=$noMatchingPackage;remainingDetected=($remaining.Count -gt 0);note=$note}
 }
 function Invoke-OptimusMaintenanceRequest {
     param([Parameter(Mandatory=$true)][string]$Operation,$Arguments)

@@ -171,6 +171,29 @@ class PerformanceTests(unittest.TestCase):
         with self.assertRaises(perf.PerformanceError): perf.set_process_priority(record, 'RealTime')
         with self.assertRaises(perf.PerformanceError): perf.performance_profile('RealTime')
 
+    def test_bing_wallpaper_name_and_installation_helpers_are_preserved(self):
+        variants = (
+            ('BingWallpaper.exe', r'C:\Apps\Wallpaper\BingWallpaper.exe'),
+            ('wallpaper.exe', r'C:\Users\User\Bing Wallpaper\wallpaper.exe'),
+            ('update.exe', r'C:\Apps\Microsoft\BingWallpaper\update.exe'),
+        )
+        for name, executable in variants:
+            with self.subTest(name=name, executable=executable):
+                process = self.add(name=name, exe=executable)
+                record = perf._record(process)
+                self.assertTrue(record['protected'])
+                self.assertFalse(record['can_sleep'])
+                self.assertFalse(record['can_set_priority'])
+                self.assertIn('Bing Wallpaper', record['reason'])
+                # A caller cannot bypass the fresh native-process protection by
+                # changing the inventory flags supplied with an action.
+                record.update(protected=False, can_sleep=True, can_set_priority=True)
+                with self.assertRaises(perf.PerformanceError): self.controller.sleep_process(record)
+                with self.assertRaises(perf.PerformanceError): self.controller.set_process_priority(record, 'High')
+                with self.assertRaises(perf.PerformanceError): self.controller.set_affinity(record, [0])
+                self.assertEqual((process.suspend_calls, process.priority_calls, process.affinity_calls), (0, [], []))
+                self.assertFalse(self.state_path.exists())
+
     def test_explicit_verified_codex_ancestor_priority_allowed_sleep_blocked(self):
         process = self.codex()
         process.priority = 0x100

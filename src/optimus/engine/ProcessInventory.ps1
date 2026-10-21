@@ -64,6 +64,7 @@ function Get-SCMProtectionReason {
     if ($ProcessId -le 4) { return 'Core Windows system process.' }
     if ($SessionId -eq 0) { return 'Session 0 system or service process; manage services separately.' }
     if ([string]::IsNullOrWhiteSpace($Path)) { return 'Executable path cannot be verified; protected conservatively.' }
+    if ((($Name+' '+$Path) -replace '[^A-Za-z0-9]','') -match '(?i)BingWallpaper') { return 'Bing Wallpaper is preserved.' }
     $windowsRoot = [Environment]::GetFolderPath('Windows').TrimEnd('\') + '\'
     if ($windowsRoot -ne '\' -and $Path.StartsWith($windowsRoot, [StringComparison]::OrdinalIgnoreCase)) {
         return 'Executable is inside the Windows directory.'

@@ -137,6 +137,8 @@ def _base_protection(process: Any, *, for_sleep: bool = True) -> str:
             return "Core Windows process."
         if not executable or not username:
             return "Executable or process ownership is inaccessible."
+        if 'bingwallpaper' in re.sub(r'[^a-z0-9]', '', name + ' ' + executable.casefold()):
+            return "Bing Wallpaper is preserved."
         if username != _current_user():
             return "Only applications owned by the current user can be changed."
         session = _session_id(process_id)
@@ -259,8 +261,11 @@ class PerformanceController:
     """Thread-safe single-backend durable suspension ownership and recovery."""
 
     def __init__(self, state_path: str | Path | None = None):
-        local_root = Path(os.environ.get("LOCALAPPDATA") or Path.home())
-        self.state_path = Path(state_path) if state_path else local_root / "Optimus" / "suspended-processes.json"
+        if state_path is None:
+            from .filesystem import default_data_root
+            self.state_path = default_data_root() / "suspended-processes.json"
+        else:
+            self.state_path = Path(state_path)
 
     def _load(self) -> dict[str, Any]:
         if not self.state_path.exists():

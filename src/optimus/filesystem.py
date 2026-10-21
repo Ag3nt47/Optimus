@@ -133,7 +133,13 @@ def canonical_file(path: Path) -> Path:
     return path.parent.resolve() / path.name
 
 
-def replace_with_retry(temporary: Path, destination: Path, attempts: int = 6):
+def replace_with_retry(temporary: Path, destination: Path, attempts: int = 12):
+    """Replace atomically after brief Windows sharing or access conflicts.
+
+    A reader or scanner can temporarily prevent replacing an otherwise writable
+    file. The default retry budget sleeps for at most 3.25 seconds; persistent
+    failures still preserve the previous destination and raise to the caller.
+    """
     if type(attempts) is not int or attempts < 1:
         raise ValueError('Atomic replacement requires at least one attempt.')
     temporary = canonical_file(temporary)
@@ -143,10 +149,10 @@ def replace_with_retry(temporary: Path, destination: Path, attempts: int = 6):
             try:
                 temporary.replace(destination)
                 return
-            except PermissionError:
-                if attempt == attempts - 1:
+            except OSError as error:
+                if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == attempts - 1:
                     raise
-                time.sleep(0.03 * (attempt + 1))
+                time.sleep(min(0.05 * (attempt + 1), 0.5))
     finally:
         if temporary.exists():
             try:

@@ -77,5 +77,40 @@ $legacy=[pscustomobject]@{id=('appx-'+$legacyFingerprint.Substring(0,20));finger
 $beforeCalls=$script:Calls.Count;$blocked=$false
 try{Invoke-OptimusMaintenanceRequest -Operation maintenance_apply -Arguments @{action='consumer-apps';targets=@($legacy);confirmation='REMOVE'}|Out-Null}catch{$blocked=$true}
 Assert-OptimusTest ($blocked -and $script:Calls.Count -eq $beforeCalls) 'stale pre-protection Bing plan cannot remove retained package'
+# Native Edge regression fixtures: every process launch and installed-state
+# query is mocked. These checks never run WinGet or the Microsoft installer.
+$script:EdgeExitCode=-1978335212
+$script:EdgeRemaining=$true
+$script:EdgeAdmin=$true
+$script:EdgeLaunches=@()
+function Get-OptimusEdgeTarget {if($script:EdgeRemaining){return @([pscustomobject]@{id='edge-browser'})};return @()}
+function Test-OptimusMaintenanceAdmin {return $script:EdgeAdmin}
+function Start-Process {param($FilePath,$ArgumentList,$ErrorAction,[switch]$PassThru,$Verb,$WorkingDirectory,$WindowStyle,[switch]$Wait) $script:EdgeLaunches+=[pscustomobject]@{File=$FilePath;Arguments=@($ArgumentList);WindowStyle=$WindowStyle;Wait=$Wait.IsPresent};return [pscustomobject]@{Id=12345;ExitCode=$script:EdgeExitCode}}
+$edge=[pscustomobject]@{id='edge-browser';name='Microsoft Edge browser';method='winget';payload=[pscustomobject]@{executable='C:\OptimusFixture\winget.exe';packageId='Microsoft.Edge'}}
+$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
+Assert-OptimusTest ($edgeResult.exitCode -eq -1978335212 -and $edgeResult.exitCodeHex -ceq '0x8A150014') 'signed native package-not-found exit preserved exactly'
+Assert-OptimusTest ($edgeResult.reason -ceq 'winget_no_applications_found' -and $edgeResult.requiresReview -and $edgeResult.skipped -and -not $edgeResult.removed -and $edgeResult.remainingDetected) 'package identity miss accurately requires review and retains Edge'
+Assert-OptimusTest ($edgeResult.status -notmatch 'Windows may restrict' -and $script:EdgeLaunches.Count -eq 1 -and $script:EdgeLaunches[0].File -ceq 'C:\OptimusFixture\winget.exe') 'package identity miss does not claim a Windows restriction or launch a fallback'
+Assert-OptimusTest (($script:EdgeLaunches[0].Arguments -join '|') -ceq 'uninstall|--id|Microsoft.Edge|--exact|--disable-interactivity') 'only exact stable package uninstall requested in fixture'
+$script:EdgeRemaining=$false
+$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
+Assert-OptimusTest (-not $edgeResult.removed -and -not $edgeResult.remainingDetected -and $edgeResult.requiresReview) 'package-not-found never claims removal even if a concurrent inventory finds no Edge'
+$script:EdgeExitCode=0;$script:EdgeRemaining=$true
+$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
+Assert-OptimusTest (-not $edgeResult.removed -and $edgeResult.reason -ceq 'edge_still_detected') 'successful process exit alone cannot claim removal'
+$script:EdgeRemaining=$false
+$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
+Assert-OptimusTest ($edgeResult.removed -and -not $edgeResult.requiresReview -and $edgeResult.reason -ceq 'removal_verified') 'successful exit plus fresh absent inventory verifies removal'
+$script:EdgeExitCode=3010;$script:EdgeRemaining=$true
+$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
+Assert-OptimusTest (-not $edgeResult.removed -and $edgeResult.restartNeeded -and $edgeResult.reason -ceq 'restart_required') 'restart result remains unverified until inventory confirms absence'
+$edge.method='microsoft-setup';$edge.payload=[pscustomobject]@{path='C:\OptimusFixture\Microsoft\Edge\Installer\setup.exe';systemLevel=$true}
+$script:EdgeExitCode=0
+$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
+$setupLaunch=$script:EdgeLaunches[-1]
+Assert-OptimusTest (($setupLaunch.Arguments -join '|') -ceq '--uninstall|--verbose-logging|--system-level' -and $setupLaunch.WindowStyle -eq 'Hidden' -and $setupLaunch.Wait) 'Microsoft installer route uses normal uninstall without a force flag'
+$script:EdgeAdmin=$false;$beforeLaunches=$script:EdgeLaunches.Count;$blocked=$false
+try{Invoke-OptimusEdgeUninstall -Target $edge|Out-Null}catch{$blocked=$true}
+Assert-OptimusTest ($blocked -and $script:EdgeLaunches.Count -eq $beforeLaunches) 'machine installer remains blocked without administrator permission'
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealAppRemovals=0;RealExternalProgramsLaunched=0;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress
 
