@@ -57,7 +57,9 @@ function Test-Owned($Definition,$Manifest,[string]$Sid) {
     $action=$Definition.Actions.Item(1)
     if($action.Type -ne 0){return $null}
     foreach($launch in @($Manifest.launch,$Manifest.previous_launch)){
-        if($launch -and $action.Path -ieq $launch.executable -and $action.Arguments -ceq $launch.argument_line -and $action.WorkingDirectory -ieq $launch.working_directory){return $launch}
+        # Registered task COM objects return null for an empty argument line.
+        # Normalize that empty representation; nonempty argument text is exact.
+        if($launch -and $action.Path -ieq $launch.executable -and [string]$action.Arguments -ceq $launch.argument_line -and $action.WorkingDirectory -ieq $launch.working_directory){return $launch}
     }
     return $null
 }

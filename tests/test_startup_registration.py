@@ -96,6 +96,21 @@ foreach($principal in $users){foreach($triggerUser in $users){
  if($null -eq (Test-Owned $definition $manifest $sid)){throw 'A verified current-user account representation was rejected.'}
  $checks++
 }}
+$script:fixtureAction=[pscustomobject]@{Type=0;Path=$launch.executable;Arguments=$null;WorkingDirectory=$launch.working_directory}
+$fixtureActions=[pscustomobject]@{Count=1}
+$fixtureActions|Add-Member ScriptMethod Item {param($Index) return $script:fixtureAction}
+$fixtureDefinition=[pscustomobject]@{RegistrationInfo=$definition.RegistrationInfo;Principal=$definition.Principal;Triggers=$definition.Triggers;Actions=$fixtureActions}
+if($null -eq (Test-Owned $fixtureDefinition $manifest $sid)){throw 'Registered COM null arguments did not match the canonical empty line.'};$checks++
+$script:fixtureAction.Arguments='unexpected'
+if($null -ne (Test-Owned $fixtureDefinition $manifest $sid)){throw 'Unexpected nonempty arguments were accepted.'};$checks++
+$launch.argument_line='-B "D:\Optimus ownership fixture\launch.py"'
+$script:fixtureAction.Arguments=$null
+if($null -ne (Test-Owned $fixtureDefinition $manifest $sid)){throw 'Null arguments matched a nonempty source argument line.'};$checks++
+$script:fixtureAction.Arguments=$launch.argument_line
+if($null -eq (Test-Owned $fixtureDefinition $manifest $sid)){throw 'Exact nonempty arguments were rejected.'};$checks++
+$script:fixtureAction.Arguments=$launch.argument_line+' '
+if($null -ne (Test-Owned $fixtureDefinition $manifest $sid)){throw 'Changed nonempty argument whitespace was accepted.'};$checks++
+$launch.argument_line=''
 $definition.Principal.UserId='NT AUTHORITY\SYSTEM';$trigger.UserId=$sid
 if($null -ne (Test-Owned $definition $manifest $sid)){throw 'A foreign principal was accepted.'};$checks++
 $definition.Principal.UserId=$sid;$trigger.UserId='NT AUTHORITY\SYSTEM'
