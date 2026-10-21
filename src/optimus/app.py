@@ -4,7 +4,9 @@ import argparse
 import ctypes
 import json
 import os
+import re
 import sys
+import uuid
 from pathlib import Path
 
 def _resume_saved_analysis(backend):
@@ -16,9 +18,12 @@ def _resume_saved_analysis(backend):
 
 def parser():
     result = argparse.ArgumentParser(prog='Optimus', description='Optimus: Computer optimization tool')
-    result.add_argument('--audit', action='store_true', help='Save a read-only audit without opening the interface.')
-    result.add_argument('--process-scan', action='store_true', help='Export a read-only process and launch-evidence report; no actions are applied.')
-    result.add_argument('--output', type=Path, help='Audit destination folder.')
+    commands = result.add_mutually_exclusive_group()
+    commands.add_argument('--audit', action='store_true', help='Save a read-only audit without opening the interface.')
+    commands.add_argument('--process-scan', action='store_true', help='Export a read-only process and launch-evidence report; no actions are applied.')
+    commands.add_argument('--verify-run', type=_run_identity, metavar='RUN_ID', help='Verify a completed saved workflow without repeating its actions or opening the interface.')
+    commands.add_argument('--startup-mode', choices=('on', 'off', 'status'), help='Configure or inspect this user\'s Windows sign-in launch without running maintenance.')
+    result.add_argument('--output', type=Path, help='Report destination folder.')
     result.add_argument('--smoke-test', action='store_true', help='Build and inspect the interface without changing settings.')
     result.add_argument('--screenshot', type=Path)
     result.add_argument('--source-workspace', type=Path, help=argparse.SUPPRESS)
@@ -26,6 +31,47 @@ def parser():
     result.add_argument('--admin-relaunch', action='store_true', help=argparse.SUPPRESS)
     result.add_argument('--no-orb', action='store_true', help='Use normal Windows close behavior for this session.')
     return result
+
+
+def _run_identity(value):
+    if not re.fullmatch('[0-9a-f]{32}', value):
+        raise argparse.ArgumentTypeError('Use one exact lowercase workflow run ID (32 hexadecimal characters).')
+    return value
+
+
+def _verify_saved_run(backend, run_id, destination=None):
+    """Read one completed owned journal; export evidence without rerunning work."""
+    from .filesystem import _ordinary_data_path
+    path = backend.data_dir / 'runs' / (run_id + '.json')
+    original = _ordinary_data_path(path, file=True)
+    if original is None:
+        raise ValueError('The saved workflow journal is unavailable.')
+    with path.open('rb') as source:
+        opened = os.fstat(source.fileno())
+        if (opened.st_dev, opened.st_ino, opened.st_nlink) != (original.st_dev, original.st_ino, 1):
+            raise ValueError('The saved workflow journal changed identity.')
+        raw = source.read(16 * 1024 * 1024 + 1)
+    if len(raw) > 16 * 1024 * 1024:
+        raise ValueError('The saved workflow exceeds the verification input limit.')
+    current = _ordinary_data_path(path, file=True)
+    if current is None or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns):
+        raise ValueError('The saved workflow journal changed during verification.')
+    report = json.loads(raw.decode('utf-8-sig'))
+    if not isinstance(report, dict) or report.get('id') != run_id:
+        raise ValueError('The saved workflow identity does not match the requested run.')
+    if report.get('status') not in ('completed', 'completed_with_errors') or not report.get('finished_at'):
+        raise ValueError('Wait until this workflow has finished before verifying its saved result.')
+    verification = backend.verify_optimization(report)
+    if not isinstance(verification, dict):
+        raise ValueError('The verification service returned an invalid result.')
+    from .filesystem import resolve_data_root
+    from .workflow import atomic_json
+    folder = resolve_data_root(destination or backend.data_dir / 'VerificationReports')
+    folder.mkdir(parents=True, exist_ok=True)
+    exported = folder / ('verification-' + run_id + '-' + uuid.uuid4().hex + '.json')
+    atomic_json(exported, {'schema': 1, 'source_run_id': run_id, 'verification': verification})
+    return {'read_only': True, 'report': str(exported), 'status': verification.get('status'),
+            'counts': verification.get('counts'), 'coverage_complete': verification.get('coverage_complete')}
 
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
@@ -35,6 +81,21 @@ def main(argv=None):
         return 2
     from .backend import Backend
     backend = Backend()
+    if args.verify_run or args.startup_mode:
+        try:
+            if args.verify_run:
+                result = _verify_saved_run(backend, args.verify_run, args.output)
+            else:
+                if args.startup_mode != 'status':
+                    backend.set_startup_launch(args.startup_mode == 'on')
+                result = backend.startup_launch_status()
+            print(json.dumps(result))
+            return 0
+        except (OSError, ValueError, RuntimeError) as error:
+            print(json.dumps({'status': 'error', 'error': str(error)}), file=sys.stderr)
+            return 2
+        finally:
+            backend.close()
     if args.audit or args.process_scan:
         from datetime import datetime
         destination = args.output or backend.data_dir / 'reports' / datetime.now().strftime('%Y%m%d-%H%M%S')

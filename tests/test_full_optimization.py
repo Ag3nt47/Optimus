@@ -7,6 +7,7 @@ import pytest
 
 from optimus.automation import CURRENT_SETUP_VERSION, due, record_attempt
 from optimus.workflow import CONSUMER_PACKAGE_NAMES, DEFAULTS, Preferences, Workflow, full_optimization_settings
+from test_workflow import mock_verification
 
 
 def test_new_install_selects_full_but_setup_must_be_saved(tmp_path):
@@ -106,7 +107,8 @@ def fixture_backend(tmp_path):
         legacy_patch_review=Mock(return_value={'review_only': True, 'recommendations': []}),
         scan_spyware=Mock(return_value={'status': 'completed', 'failed_items': 0}),
         security_status=Mock(return_value=security), process_harness_scan=Mock(return_value=review),
-        apply_security_recommendation=Mock(), process_harness_apply=Mock(), update_app_unattended=Mock())
+        apply_security_recommendation=Mock(), process_harness_apply=Mock(), update_app_unattended=Mock(),
+        verify_optimization=Mock(side_effect=mock_verification))
     return service, review, security
 
 
@@ -122,7 +124,8 @@ def test_full_workflow_uses_zero_age_and_returns_reviews_without_taking_actions(
     assert result['process_review'] == processes
     assert result['security_review']['recommendations'] == security['recommendations']
     assert len(result['security_review']['update_coverage']) == 3
-    assert result['stages'][-1]['result']['review_only'] is True
+    assert result['stages'][-2]['result']['review_only'] is True
+    assert result['stages'][-1]['result'] == result['final_verification']
     service.apply_system_privacy.assert_called_once()
     service.scan_spyware.assert_called_once()
     service.process_harness_apply.assert_not_called()

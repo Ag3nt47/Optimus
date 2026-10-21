@@ -17,6 +17,14 @@ workflow_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(workflow_module)
 
 
+def mock_verification(report, **kwargs):
+    return {'schema': 1, 'read_only': True, 'status': 'not_applicable',
+            'counts': {'confirmed': 0, 'needs_review': 0, 'unverified': 0, 'not_applicable': len(report['stages'])},
+            'coverage_complete': True, 'failed_items': 0,
+            'stages': [{'title': row['title'], 'status': 'not_applicable', 'checks': []} for row in report['stages']],
+            'summary': 'Fixture outcome verification completed without native system access.'}
+
+
 class MockBackend:
     def __init__(self, data_dir):
         self.data_dir = Path(data_dir)
@@ -25,6 +33,10 @@ class MockBackend:
         self.audit_callback = None
         self.scan_callback = None
         self.fail_cleanup_once = False
+        self.verifications = []
+    def verify_optimization(self, report, **kwargs):
+        self.verifications.append(copy.deepcopy(report['stages']))
+        return mock_verification(report, **kwargs)
     def audit(self):
         self.calls.append(('audit',))
         if self.audit_callback: self.audit_callback()
@@ -116,7 +128,7 @@ class WorkflowTests(unittest.TestCase):
     def test_progress_corresponds_to_completed_stages_and_log(self):
         events = []
         result = self.workflow.run(self.config(), events.append)
-        self.assertEqual(len(result['stages']), 4)
+        self.assertEqual(len(result['stages']), 5)
         self.assertEqual(result['failed_stages'], 0)
         self.assertEqual(events[0]['percentage'], 0)
         self.assertEqual(events[-1]['percentage'], 100)
@@ -175,7 +187,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.workflow.run({'cleanup_age_days': -1}, lambda event: None)
         self.assertFalse(self.workflow.active)
         result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False), lambda event: None)
-        self.assertEqual(len(result['stages']), 2)
+        self.assertEqual(len(result['stages']), 3)
 
     def test_progress_callback_failure_releases_run_lock(self):
         def fail(event): raise RuntimeError('Synthetic UI failure')
@@ -197,7 +209,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('Synthetic cross-volume', self.workflow.last_report['journal_error'])
         result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False), lambda event: None)
         self.assertEqual(result['status'], 'completed')
-        self.assertEqual(len(result['stages']), 2)
+        self.assertEqual(len(result['stages']), 3)
 
     def test_preparation_failure_after_lock_acquire_releases_lock(self):
         previous = self.backend.data_dir
@@ -259,12 +271,12 @@ class WorkflowTests(unittest.TestCase):
             duplicates_enabled=True, duplicate_roots=[r'C:\Users\Example\Documents'], cloud_review_enabled=True, driver_updates_enabled=True), lambda event: None)
         self.assertEqual(result['failed_stages'], 0)
         self.assertEqual([call[0] for call in self.backend.calls], ['audit', 'installed_apps', 'processes', 'startup_list', 'duplicate_scan', 'cloud_status', 'cloud_scan', 'driver_updates_scan', 'audit'])
-        self.assertTrue(all(stage['result']['review_only'] for stage in result['stages'][1:-1]))
+        self.assertTrue(all(stage['result']['review_only'] for stage in result['stages'][1:-2]))
 
     def test_unconnected_cloud_and_empty_folders_are_truthful_skips(self):
         result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False, cloud_review_enabled=True, duplicates_enabled=True), lambda event: None)
         self.assertFalse(any(call[0] in ('cloud_scan', 'duplicate_scan') for call in self.backend.calls))
-        self.assertTrue(all(stage['result']['skipped'] for stage in result['stages'][1:-1]))
+        self.assertTrue(all(stage['result']['skipped'] for stage in result['stages'][1:-2]))
 
     def test_selected_extra_cleanup_runs_independently_of_user_temp(self):
         self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False, cleanup_category_ids=['mock-extra', 'missing-category']), lambda event: None)

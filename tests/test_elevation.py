@@ -17,7 +17,7 @@ def backend(**preferences):
                            preferences=Mock(return_value=preferences))
 
 
-@pytest.mark.parametrize('mode', ('audit', 'process_scan', 'smoke_test', 'restart_ready_file'))
+@pytest.mark.parametrize('mode', ('audit', 'process_scan', 'verify_run', 'startup_mode', 'smoke_test', 'restart_ready_file'))
 def test_noninteractive_or_editor_readiness_start_never_requests_uac(mode):
     service=backend(request_admin_on_startup=True)
     with patch.object(elevation,'request_administrator') as request:

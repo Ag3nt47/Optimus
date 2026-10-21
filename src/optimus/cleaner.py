@@ -299,7 +299,8 @@ class Cleaner:
                 self._delete_exact(record)
                 result['deleted_count'] += 1
                 result['deleted_bytes'] += record['size']
-                result['files'].append({'path': record['path'], 'status': 'deleted'})
+                result['files'].append({'path': record['path'], 'status': 'deleted',
+                                        'identity': {key: record[key] for key in ('device', 'inode', 'size', 'modified_ns', 'created_ns')}})
             except (OSError, ValueError) as error:
                 result['skipped_count'] += 1
                 result['errors'].append(f'{record["path"]}: {error}')

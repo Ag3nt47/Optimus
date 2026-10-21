@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 from optimus.automated_software import fresh_candidates, run_software, is_newer_version
 from optimus.workflow import DEFAULTS, Preferences, Workflow
+from test_workflow import mock_verification
 
 
 def package(identity='Vendor.One', **overrides):
@@ -22,7 +23,8 @@ def configuration(**overrides):
 def backend(*packages):
     return SimpleNamespace(updates_scan=Mock(return_value={'structured': True, 'exitCode': 0,
         'source': 'winget', 'updates': list(packages) or [package(), package('Vendor.Two')]}),
-        update_app_unattended=Mock(return_value={'exitCode': 0}))
+        update_app_unattended=Mock(return_value={'exitCode': 0}),
+        verify_optimization=Mock(side_effect=mock_verification))
 
 
 @pytest.mark.parametrize('installed,available,newer', [

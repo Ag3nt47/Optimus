@@ -1582,10 +1582,14 @@ class WorkflowWorker(QRunnable):
 
 
 class OptimizationProgressWindow(QDialog):
+    resultsAcknowledged = Signal()
+    resultsDismissed = Signal()
+
     def __init__(self, owner, cancel):
         super().__init__(owner)
         self.cancel = cancel
         self.completed = False
+        self._recommendations_ready = False
         self.setWindowTitle('Optimus - optimization progress')
         self.setWindowModality(Qt.WindowModal)
         self.resize(850, 650)
@@ -1607,6 +1611,15 @@ class OptimizationProgressWindow(QDialog):
         self.description = QLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
         self.description.setWordWrap(True)
         layout.addWidget(self.description)
+        self.verification_summary = QLabel()
+        self.verification_summary.setWordWrap(True)
+        self.verification_summary.hide()
+        layout.addWidget(self.verification_summary)
+        self.verification_details = QPlainTextEdit()
+        self.verification_details.setReadOnly(True)
+        self.verification_details.setMaximumHeight(160)
+        self.verification_details.hide()
+        layout.addWidget(self.verification_details)
         layout.addWidget(QLabel('CURRENT PROCESSES / ITEMS'))
         self.processes = QPlainTextEdit()
         self.processes.setReadOnly(True)
@@ -1648,14 +1661,38 @@ class OptimizationProgressWindow(QDialog):
         else:
             cancelled = bool(field(result, 'cancelled', 'canceled', default=False))
             self.stage.setText('CANCELLED AT STAGE BOUNDARY' if cancelled else 'WORKFLOW RETURNED RESULTS')
-            self.description.setText('Review the actual results and any skipped or failed stages below.')
+            verification = field(result, 'final_verification', default=None)
+            if isinstance(verification, dict):
+                labels = {'confirmed': 'Selected checks confirmed', 'needs_review': 'Needs review',
+                          'unverified': 'Not fully verified', 'not_applicable': 'Review or no-change checks only'}
+                counts = verification.get('counts') if isinstance(verification.get('counts'), dict) else {}
+                summary = 'Final verification: ' + labels.get(verification.get('status'), 'Unavailable; outcomes unverified')
+                summary += '. ' + '; '.join(str(counts.get(key, 0)) + ' ' + label for key, label in (
+                    ('confirmed', 'confirmed'), ('needs_review', 'need review'), ('unverified', 'unverified'), ('not_applicable', 'review/no change'))) + '.'
+                self.verification_summary.setText(summary)
+                self.verification_details.setPlainText(json.dumps(verification, indent=2, ensure_ascii=False, default=str))
+            else:
+                self.verification_summary.setText('Final verification was not run because the workflow was cancelled.' if cancelled else 'Final verification is unavailable; optimization outcomes have not been confirmed.')
+                self.verification_details.setPlainText('No final verification report was produced. Review the recorded stage outcomes below.')
+            self.verification_summary.show()
+            self.verification_details.show()
+            self.description.setText('Review the final verification and any skipped or failed stages. Recommendations open only after you continue; closing this window skips those prompts.')
             self.log.appendPlainText(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         self.cancel_button.setText('Close results')
         self.cancel_button.setEnabled(True)
 
+    def set_recommendations_available(self, available):
+        self._recommendations_ready = bool(available)
+        if self.completed:
+            self.cancel_button.setText('Continue to recommendations' if self._recommendations_ready else 'Close results')
+
     def request_close(self):
         if self.completed:
-            self.close()
+            if self._recommendations_ready:
+                self.set_recommendations_available(False)
+                self.resultsAcknowledged.emit()
+            else:
+                self.close()
         else:
             self.cancel.set()
             self.cancel_button.setEnabled(False)
@@ -1663,10 +1700,22 @@ class OptimizationProgressWindow(QDialog):
 
     def closeEvent(self, event):
         if self.completed:
+            if self._recommendations_ready:
+                self.set_recommendations_available(False)
+                self.resultsDismissed.emit()
             event.accept()
         else:
             self.request_close()
             event.ignore()
+
+    def reject(self):
+        if not self.completed:
+            self.request_close()
+            return
+        if self._recommendations_ready:
+            self.set_recommendations_available(False)
+            self.resultsDismissed.emit()
+        super().reject()
 
 
 class PrivacyRestoreDialog(QDialog):
@@ -2209,6 +2258,7 @@ class OptimusWindow(QMainWindow):
         layout.addLayout(grid)
         toggles = QGridLayout()
         labels = [('cleanup_enabled','Clean reviewed temporary files'),('browser_cache_enabled','Clean selected browser caches (ask before closing active browsers)'),
+            ('launch_at_sign_in','Launch Optimus when I sign in to Windows'),
             ('request_admin_on_startup','Ask Windows for administrator access once at app startup (UAC)'),
             ('browser_history_enabled','Clear selected browsers’ history'),('browser_cookies_enabled','Clear selected cookies (can sign me out)'),
             ('browser_download_history_enabled','Clear selected browser download-list records'),
@@ -2236,6 +2286,9 @@ class OptimusWindow(QMainWindow):
             controls[key]=checkbox
             toggles.addWidget(checkbox,index//2,index%2)
         layout.addLayout(toggles)
+        sign_in_note = QLabel('Saving the sign-in option enables or disables the managed Windows startup entry. It starts Optimus as your regular user and is separate from maintenance cadence; existing administrator-startup preferences can still show a Windows UAC prompt. A failed registration leaves the saved preference unchanged.')
+        sign_in_note.setWordWrap(True)
+        layout.addWidget(sign_in_note)
         privacy_layout = QVBoxLayout()
         privacy_layout.addWidget(QLabel('INDIVIDUAL WINDOWS PRIVACY CHOICES'))
         for key, label in (
@@ -2420,6 +2473,8 @@ class OptimusWindow(QMainWindow):
         self._pending_post_review = None
         self._cancel = threading.Event()
         self._progress_window = OptimizationProgressWindow(self, self._cancel)
+        self._progress_window.resultsAcknowledged.connect(self._continue_post_optimization_reviews)
+        self._progress_window.resultsDismissed.connect(self._dismiss_post_optimization_reviews)
         self._progress_window.show()
         self._worker = WorkflowWorker(self.backend, settings, self._cancel, prompt_parent=self._progress_window)
         self._worker.signals.progress.connect(self._progress_window.update_progress)
@@ -2432,9 +2487,13 @@ class OptimusWindow(QMainWindow):
     @Slot(object)
     def _workflow_result(self, result):
         self._progress_window.finish(result)
+        settings = dict(getattr(self._worker, 'settings', {}))
         if isinstance(result, dict) and not result.get('cancelled') and not result.get('canceled'):
-            self._pending_post_review = (result, dict(getattr(self._worker, 'settings', {})))
-        self.status.setText('Workflow returned results. Review completed, skipped and failed stages in the progress window.')
+            security, processes = result.get('security_review'), result.get('process_review')
+            if ((isinstance(security, dict) and security.get('recommendations'))
+                    or settings.get('post_process_review_enabled') and isinstance(processes, dict)):
+                self._pending_post_review = (result, settings)
+        self.status.setText('Workflow returned results. Read the final outcome verification before continuing to recommendations.')
 
     @Slot(str)
     def _workflow_error(self, error):
@@ -2451,10 +2510,24 @@ class OptimusWindow(QMainWindow):
             bridge.shutdown()
             bridge.deleteLater()
         self._worker = None
+        if self._pending_post_review is not None and not self.smoke_test and not self._quitting:
+            self._post_review_active = True
+            self._progress_window.set_recommendations_available(True)
+        else:
+            self._pending_post_review = None
+            self._post_review_active = False
+
+    def _continue_post_optimization_reviews(self):
         pending, self._pending_post_review = self._pending_post_review, None
         if pending is not None and not self.smoke_test and not self._quitting:
-            self._post_review_active = True
             QTimer.singleShot(0, lambda: self._offer_post_optimization_reviews(*pending))
+        else:
+            self._post_review_active = False
+
+    def _dismiss_post_optimization_reviews(self):
+        self._pending_post_review = None
+        self._post_review_active = False
+        self.status.setText('Results are saved. Post-run recommendation prompts were skipped without applying changes.')
 
     def _ask_process_review(self, report):
         actions = report.get('actions', [])

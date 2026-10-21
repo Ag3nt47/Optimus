@@ -312,6 +312,14 @@ def _cache_summary(outcome):
         return {'failed_items': 1, 'reason': 'The cache cleaner returned an invalid result.'}
     summary = {key: native[key] for key in ('deleted_count', 'deleted_bytes', 'skipped_count')
                if type(native.get(key)) is int and native[key] >= 0}
+    # Retain an opaque reference to the existing private deletion journal. The
+    # final verifier can read bounded file identities without duplicating private
+    # paths or raw errors in this compact browser summary.
+    log_path = native.get('log_path')
+    if isinstance(log_path, str):
+        identity = ntpath.basename(log_path).removesuffix('.json')
+        if _HEX32.fullmatch(identity):
+            summary['cleanup_log_id'] = identity
     errors = native.get('errors', [])
     preview = outcome.get('preview_summary', {})
     failed = outcome.get('failed_items', 0)

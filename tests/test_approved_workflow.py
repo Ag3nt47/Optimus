@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import pytest
 from optimus.automation import CURRENT_SETUP_VERSION
 from optimus.workflow import DEFAULTS, Preferences, Workflow
+from test_workflow import mock_verification
 
 
 def configuration(**values):
@@ -26,7 +27,8 @@ def cloud_choices(**values):
 
 
 def backend(tmp_path):
-    return SimpleNamespace(data_dir=tmp_path, bridge=SimpleNamespace(_process=None), audit=Mock(return_value={'fixture': True}))
+    return SimpleNamespace(data_dir=tmp_path, bridge=SimpleNamespace(_process=None), audit=Mock(return_value={'fixture': True}),
+                           verify_optimization=Mock(side_effect=mock_verification))
 
 
 def test_legacy_setup_preserves_review_defaults_without_new_permissions():

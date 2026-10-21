@@ -55,12 +55,50 @@ class Backend:
     def preferences(self):
         return self.preference_store.load()
 
-    def save_preferences(self, settings):
-        return self.preference_store.save(settings)
+    def save_preferences(self, settings, *, _force_startup_launch=False):
+        candidate = self.preference_store.validate(settings)
+        with self.preference_store.lock:
+            previous = self.preferences()
+            receipt = None
+            if _force_startup_launch or candidate.get('launch_at_sign_in', False) != previous.get('launch_at_sign_in', False):
+                receipt = self._startup_launch_service().set_enabled(candidate['launch_at_sign_in'])
+            try:
+                return self.preference_store.save(candidate)
+            except Exception as error:
+                if receipt is not None:
+                    try:
+                        self._startup_launch_service().rollback(receipt)
+                    except Exception as rollback_error:
+                        raise RuntimeError('Settings were not saved and the sign-in task rollback could not be verified. Check sign-in launch status before retrying.') from rollback_error
+                raise error
+
+    def _startup_launch_service(self):
+        from .startup_registration import StartupRegistration
+        if not hasattr(self, '_startup_registration'):
+            self._startup_registration = StartupRegistration(self.data_dir)
+        return self._startup_registration
+
+    def startup_launch_status(self):
+        return self._startup_launch_service().status()
+
+    def set_startup_launch(self, enabled):
+        if type(enabled) is not bool:
+            raise ValueError('Sign-in launch must be on or off.')
+        settings = self.preferences()
+        settings['launch_at_sign_in'] = enabled
+        self.save_preferences(settings, _force_startup_launch=True)
+        return self.startup_launch_status()
 
     def optimize(self, settings=None, progress_callback=None, cancel_event=None, *, browser_prompt=None):
         return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event,
                                  browser_prompt=browser_prompt)
+
+    def verify_optimization(self, report, cancel_event=None, timeout=30):
+        from .verification import OutcomeVerification
+        active = getattr(getattr(self, 'workflow', None), 'last_report', None)
+        same_session = active is report or isinstance(active, dict) and active.get('id') == report.get('id')
+        return OutcomeVerification(self.data_dir, sampler_status=self.sampler.status if same_session else None).verify(
+            report, cancel_event=cancel_event, timeout=timeout)
 
     def _privacy_service(self):
         from .system_privacy import SystemPrivacy

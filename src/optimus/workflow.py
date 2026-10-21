@@ -25,6 +25,7 @@ CONSUMER_PACKAGE_NAMES = (
 DEFAULTS = {
     'optimization_mode': 'custom',
     'request_admin_on_startup': False,
+    'launch_at_sign_in': False,
     'intensity': 'Standard', 'cleanup_enabled': True, 'cleanup_age_days': 7,
     'browser_cache_enabled': True, 'consumer_debloat_enabled': False,
     'consumer_debloat_package_names': list(CONSUMER_PACKAGE_NAMES),
@@ -58,6 +59,15 @@ DEFAULTS = {
 DEFAULTS.update(copy.deepcopy(APPROVAL_DEFAULTS))
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _CATEGORY_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
+FINAL_VERIFICATION_STAGE = 'Verify optimization outcomes'
+
+
+def _unavailable_verification(reason):
+    return {'schema': 1, 'read_only': True, 'status': 'unverified',
+            'counts': {'confirmed': 0, 'needs_review': 0, 'unverified': 1, 'not_applicable': 0},
+            'stages': [], 'coverage_complete': False, 'deadline_reached': False, 'failed_items': 1,
+            'summary': 'The final outcome check could not be completed; outcomes remain unverified.',
+            'errors': [reason]}
 
 
 def full_optimization_settings(settings=None):
@@ -457,6 +467,26 @@ class Workflow:
                             'note': 'Potential background overhead is presented after completion. Pausing, startup changes and program removal require a selected action; memory use alone does not establish that a program is unnecessary.'}
                 stages.append(('Prepare background-program recommendations',
                                'Inspecting every accessible process and its launch evidence; protecting Windows, security software and Bing Wallpaper. No process is stopped or program uninstalled.', process_review))
+            def final_verification():
+                try:
+                    result = self.backend.verify_optimization(report, cancel_event=cancel_event, timeout=30)
+                    statuses = {'confirmed', 'needs_review', 'unverified', 'not_applicable'}
+                    if (not isinstance(result, dict) or type(result.get('schema')) is not int or result['schema'] != 1
+                            or result.get('read_only') is not True or result.get('status') not in statuses
+                            or not isinstance(result.get('counts'), dict)
+                            or any(type(result['counts'].get(key)) is not int or result['counts'][key] < 0 for key in statuses)
+                            or type(result.get('failed_items')) is not int or result['failed_items'] < 0
+                            or not isinstance(result.get('stages'), list) or type(result.get('coverage_complete')) is not bool
+                            or result['status'] == 'confirmed' and (result['counts']['needs_review'] or result['counts']['unverified'])):
+                        raise ValueError('The verifier returned an incomplete or inconsistent outcome report.')
+                except Exception as error:
+                    result = _unavailable_verification('The local final check was unavailable (' + type(error).__name__ + ').')
+                    if cancelled():
+                        result['cancelled'] = True
+                report['final_verification'] = result
+                return result
+            stages.append((FINAL_VERIFICATION_STAGE,
+                           'Checking the selected operations against their saved evidence and fresh local state. Review-only, unknown and failed outcomes stay explicit; no new changes are applied.', final_verification))
             completed = 0
             for title, description, operation in stages:
                 if cancelled():
@@ -486,7 +516,10 @@ class Workflow:
                 percentage = int(completed * 100 / len(stages))
                 if report['cancelled']:
                     percentage = min(99, percentage)
-                progress_callback({'percentage': percentage, 'stage': title, 'description': stage.get('error', f"{title}: {stage['status']}"),
+                description = stage.get('error', f"{title}: {stage['status']}")
+                if title == FINAL_VERIFICATION_STAGE and isinstance(stage.get('result'), dict):
+                    description = str(stage['result'].get('summary') or 'Final verification: ' + str(stage['result'].get('status', 'unverified')).replace('_', ' ') + '. Review the outcome details before recommendations.')
+                progress_callback({'percentage': percentage, 'stage': title, 'description': description,
                                    'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ''), 'completed': completed, 'total': len(stages)})
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(item['status'] == 'failed' for item in report['stages'])
