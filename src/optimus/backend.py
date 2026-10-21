@@ -12,13 +12,12 @@ from .cleaner import Cleaner
 from .sampler import ResourceSampler
 from .workflow import Preferences, Workflow
 from . import performance
+from .filesystem import resolve_data_root
 
 class Backend:
     def __init__(self, data_dir: Path | None = None):
-        self.data_dir = Path(data_dir or Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Optimus')
+        self.data_dir = resolve_data_root(Path(data_dir or Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Optimus'))
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        # Resolve MSIX/Windows app-data redirection before constructing writers.
-        self.data_dir = self.data_dir.resolve(strict=True)
         self.bridge = PowerShellBridge(self.data_dir / 'engine')
         self.cleaner = Cleaner(self.data_dir)
         self.sampler = ResourceSampler()

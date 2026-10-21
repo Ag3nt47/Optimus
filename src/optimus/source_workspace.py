@@ -8,7 +8,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from .filesystem import replace_with_retry
+from .filesystem import replace_with_retry, resolve_data_root
 
 TEXT_SUFFIXES = {'.py', '.ps1', '.toml', '.yml', '.yaml', '.md', '.txt', '.bat', '.json', '.svg', '.qss'}
 ASSET_SUFFIXES = {'.ico', '.png'}
@@ -18,11 +18,7 @@ SKIP_DIRS = {'.git', '.venv', 'venv', '__pycache__', '.pytest_cache', 'build', '
 class SourceWorkspace:
     def __init__(self, source_root: Path, data_root: Path):
         self.source_root = Path(source_root).resolve()
-        supplied_data_root = Path(os.path.abspath(data_root))
-        for part in (supplied_data_root, *supplied_data_root.parents):
-            if part.exists() and (part.is_symlink() or getattr(part.lstat(), 'st_file_attributes', 0) & 0x400):
-                raise ValueError('Indirect source sandbox data folders are not supported.')
-        data_root = supplied_data_root.resolve()
+        data_root = resolve_data_root(data_root)
         self.root = data_root / 'Sandbox' / 'workspace'
         self.history = data_root / 'Sandbox' / 'history'
         for folder in (self.root, self.history):
