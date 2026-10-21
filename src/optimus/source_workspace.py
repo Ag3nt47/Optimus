@@ -8,7 +8,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from .filesystem import replace_with_retry, resolve_data_root
+from .filesystem import replace_with_retry, resolve_data_root, default_data_root
 
 TEXT_SUFFIXES = {'.py', '.ps1', '.toml', '.yml', '.yaml', '.md', '.txt', '.bat', '.json', '.svg', '.qss'}
 ASSET_SUFFIXES = {'.ico', '.png'}
@@ -16,9 +16,9 @@ MAX_ASSET_BYTES = 8 * 1024 * 1024
 SKIP_DIRS = {'.git', '.venv', 'venv', '__pycache__', '.pytest_cache', 'build', 'dist', 'test-artifacts', 'reports', 'private', '.history'}
 
 class SourceWorkspace:
-    def __init__(self, source_root: Path, data_root: Path):
+    def __init__(self, source_root: Path, data_root: Path | None = None):
         self.source_root = Path(source_root).resolve()
-        data_root = resolve_data_root(data_root)
+        data_root = default_data_root() if data_root is None else resolve_data_root(data_root)
         self.root = data_root / 'Sandbox' / 'workspace'
         self.history = data_root / 'Sandbox' / 'history'
         for folder in (self.root, self.history):

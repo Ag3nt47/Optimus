@@ -47,7 +47,7 @@ class MockBackend:
         return {'deleted_count': 1, 'deleted_bytes': 100, 'skipped_count': 0}
     def debloat_preview(self, action):
         self.calls.append(('debloat_preview', action))
-        return {'planId': 'mock-plan', 'targets': [{'id': 'mock-target'}]}
+        return {'planId': 'mock-plan', 'targets': [{'id': 'mock-target', 'name': 'Microsoft.BingNews', 'kind': 'appx', 'scope': 'current-user'}]}
     def debloat_apply(self, plan):
         self.calls.append(('debloat_apply', plan))
         return {'fixture': True}
@@ -101,7 +101,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('unknown', result)
         result['cleanup_enabled'] = False
         self.assertTrue(workflow_module.DEFAULTS['cleanup_enabled'])
-        for invalid in ({'cleanup_enabled': 'yes'}, {'cleanup_age_days': True}, {'cleanup_age_days': 0}, {'analysis_interval': 1}, {'codex_priority': 'RealTime'}, {'intensity': 'Extreme'}):
+        for invalid in ({'cleanup_enabled': 'yes'}, {'cleanup_age_days': True}, {'cleanup_age_days': -1}, {'analysis_interval': 1}, {'codex_priority': 'RealTime'}, {'intensity': 'Extreme'}):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError): workflow_module.Preferences.validate(invalid)
 
@@ -172,7 +172,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(any('FAILED:' in event['log'] for event in events))
 
     def test_invalid_config_does_not_leave_workflow_locked(self):
-        with self.assertRaises(ValueError): self.workflow.run({'cleanup_age_days': 0}, lambda event: None)
+        with self.assertRaises(ValueError): self.workflow.run({'cleanup_age_days': -1}, lambda event: None)
         self.assertFalse(self.workflow.active)
         result = self.workflow.run(self.config(cleanup_enabled=False, browser_cache_enabled=False), lambda event: None)
         self.assertEqual(len(result['stages']), 2)

@@ -43,7 +43,7 @@ def test_incomplete_cleanup_cannot_report_success(tmp_path,complete,errors,files
     backend.cleanup_apply=Mock(return_value={'deleted_count':len(files),'deleted_bytes':100 if files else 0,'skipped_count':0})
     config=copy.deepcopy(workflow_module.DEFAULTS);config['browser_cache_enabled']=False
     report=workflow_module.Workflow(backend).run(config,lambda _:None)
-    stage=next(stage for stage in report['stages'] if stage['title']=='Clean old temporary files')
+    stage=next(stage for stage in report['stages'] if stage['title']=='Clean temporary files')
     assert stage['status']=='failed'
     assert stage['result']['partial'] is True
     assert stage['result']['preview_summary']['errors']==errors
@@ -85,7 +85,7 @@ def test_apply_refusal_is_reported_instead_of_clean_success(tmp_path):
     backend.cleanup_apply=Mock(return_value={'deleted_count':0,'deleted_bytes':0,'skipped_count':1,'errors':['File changed after preview.']})
     config=copy.deepcopy(workflow_module.DEFAULTS);config['browser_cache_enabled']=False
     report=workflow_module.Workflow(backend).run(config,lambda _:None)
-    stage=next(stage for stage in report['stages'] if stage['title']=='Clean old temporary files')
+    stage=next(stage for stage in report['stages'] if stage['title']=='Clean temporary files')
     assert stage['status']=='failed'
     assert stage['result']['failed_items']==1
     assert stage['result']['partial'] is True
@@ -100,7 +100,7 @@ def test_expected_unavailable_or_busy_category_note_remains_a_safe_skip(tmp_path
     backend.cleanup_apply=Mock()
     config=copy.deepcopy(workflow_module.DEFAULTS);config['browser_cache_enabled']=False
     report=workflow_module.Workflow(backend).run(config,lambda _:None)
-    stage=next(stage for stage in report['stages'] if stage['title']=='Clean old temporary files')
+    stage=next(stage for stage in report['stages'] if stage['title']=='Clean temporary files')
     assert stage['status']=='completed'
     assert stage['result']['partial'] is False
     assert stage['result']['preview_summary']['skipped']

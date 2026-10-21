@@ -18,6 +18,7 @@ import tempfile
 import time
 import uuid
 from typing import Any
+from .automated_software import is_newer_version
 
 
 _ACTIONS = (
@@ -252,8 +253,8 @@ class Maintenance:
                     or version.endswith(".") or available.endswith(".") or ".." in version or ".." in available):
                 skipped.append("A package with unknown, truncated or unsupported versions was excluded.")
                 continue
-            if version.casefold() == available.casefold():
-                skipped.append("A package without a distinct available version was excluded.")
+            if not is_newer_version(version, available):
+                skipped.append("A package without a provably newer comparable version was excluded.")
                 continue
             rows.append({"name": name, "id": package_id, "package_id": package_id,
                          "version": version, "available": available, "source": source})
@@ -359,6 +360,7 @@ class Maintenance:
         current = self._last_update_packages.get(package_id)
         age = time.time() - self._last_update_scan
         if (package_id not in self._last_update_ids or not current or current.get("source") != "winget"
+                or not is_newer_version(current.get('version'), current.get('available'))
                 or self._last_update_scan <= 0 or age < 0 or age > 900):
             raise ValueError("Select an unambiguous winget package from a fresh update scan.")
         expected = dict(current)
@@ -371,29 +373,28 @@ class Maintenance:
             return None
         if (interrupted := cancelled_result()) is not None:
             return interrupted
+        # Revalidate both manual and unattended updates. An external updater may
+        # have already installed the offered version since the preview.
+        self.updates_scan()
+        current = self._last_update_packages.get(package_id)
+        if (interrupted := cancelled_result()) is not None:
+            return interrupted
+        if not current or any(current.get(field) != expected.get(field) for field in ('id', 'version', 'available', 'source')):
+            return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
+                    "exitCode": None, "unattended": unattended, "failureKind": "version_changed",
+                    "from_version": (current or expected).get("version"), "to_version": (current or expected).get("available"),
+                    "note": "The installed or available version changed during revalidation; no installer was started."}
+        unpinned, reason, needs_review = self._pin_status(current)
+        if (interrupted := cancelled_result()) is not None:
+            return interrupted
+        if not unpinned:
+            return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
+                    "exitCode": None, "unattended": unattended, "note": reason, "requiresReview": needs_review,
+                    "failureKind": "pin_inventory_untrusted" if needs_review else "pinned",
+                    "from_version": current["version"], "to_version": current["available"]}
+        arguments = [self._winget(), "upgrade", "--id", package_id, "--exact", "--source", "winget", "--version", current['available']]
         if unattended:
-            # Scan again before applying: another updater or earlier installer
-            # may have changed the installed/available pair since this run began.
-            self.updates_scan()
-            current = self._last_update_packages.get(package_id)
-            if (interrupted := cancelled_result()) is not None:
-                return interrupted
-            if not current or any(current.get(field) != expected.get(field) for field in ('id', 'version', 'available', 'source')):
-                return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
-                        "exitCode": None, "unattended": True, "failureKind": "version_changed",
-                        "from_version": (current or expected).get("version"), "to_version": (current or expected).get("available"),
-                        "note": "The installed or available version changed during revalidation; no installer was started."}
-            unpinned, reason, needs_review = self._pin_status(current)
-            if (interrupted := cancelled_result()) is not None:
-                return interrupted
-            if not unpinned:
-                return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
-                        "exitCode": None, "unattended": True, "note": reason, "requiresReview": needs_review,
-                        "failureKind": "pin_inventory_untrusted" if needs_review else "pinned",
-                        "from_version": current["version"], "to_version": current["available"]}
-        arguments = [self._winget(), "upgrade", "--id", package_id, "--exact", "--source", "winget"]
-        if unattended:
-            arguments += ["--version", current["available"], "--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
+            arguments += ["--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
         else:
             arguments += ["--disable-interactivity"]
         try:

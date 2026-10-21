@@ -185,6 +185,11 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None):
         if config.get('driver_changes_approved') is not True or config.get('driver_update_agreements_accepted') is not True:raise ValueError('Driver changes and license agreements require explicit saved approval.')
         if not (approvals if policy=='install_approved' else rules):raise ValueError('Choose exact driver updates or device/provider/class rules before automation.')
         if not backend.is_admin():return _finish(policy,[],skipped=True,reason='Administrator access is required; no elevation or driver action was started.')
+        readiness = getattr(backend, 'update_disk_readiness', None)
+        if callable(readiness):
+            space = readiness()
+            if not isinstance(space, dict) or space.get('ready') is not True:
+                return _finish(policy, [], skipped=True, reason='System-drive installation space is insufficient or unverified; driver updates were deferred.', disk_readiness=space)
     if _cancel(cancel_event):return _finish(policy,[],cancelled=True)
     scan=backend.driver_updates_scan()
     if not isinstance(scan,dict) or type(scan.get('resultCode')) is not int or scan['resultCode']!=2 or not isinstance(scan.get('updates'),list):

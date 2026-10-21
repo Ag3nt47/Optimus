@@ -172,6 +172,7 @@ class DetailedSettingsWindow(QMainWindow):
         self.busy = False
         self._quitting = False
         self._workers = set()
+        self._privacy_restore_dialog = None
         self._callback = None
         self.audit_data, self.process_records = {}, []
         self.cleanup_plan = self.debloat_plan = self.storage_result = None
@@ -1438,6 +1439,8 @@ class DetailedSettingsWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        if self._privacy_restore_dialog is not None:
+            self._privacy_restore_dialog.shutdown()
         if hasattr(self, 'privacy_panel'):
             self.privacy_panel.shutdown()
         if hasattr(self, 'process_harness_panel'):
@@ -1666,6 +1669,296 @@ class OptimizationProgressWindow(QDialog):
             event.ignore()
 
 
+class PrivacyRestoreDialog(QDialog):
+    """Choose one recorded privacy change; restore it only after a fresh Yes."""
+    def __init__(self, window, report):
+        super().__init__(window)
+        self.window = window
+        self._cancel = threading.Event()
+        self._running = False
+        self.setWindowTitle('Optimus — restore privacy settings')
+        self.resize(850, 500)
+        layout = QVBoxLayout(self)
+        note = QLabel('Choose one recorded Windows privacy change to restore. Original values are restored only '
+                      'where the saved record and current state still pass validation. Changed, unavailable or '
+                      'policy-protected settings can be blocked or skipped. No record is selected automatically.')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.choices = QComboBox()
+        self.choices.addItem('Choose one recorded privacy change…', None)
+        for item in report.get('items', []) if isinstance(report, dict) else []:
+            if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']:
+                continue
+            label = str(item.get('created_at') or 'Unknown date') + ' | ' + str(item.get('status') or 'Unknown status')
+            label += ' | ' + str(item.get('changed_count', 0)) + ' changed settings | ' + item['id']
+            self.choices.addItem(label, dict(item))
+        self.choices.currentIndexChanged.connect(self._selection_changed)
+        layout.addWidget(self.choices)
+        self.details = QPlainTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setPlainText(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        layout.addWidget(self.details, 1)
+        self.status = QLabel('Choose a change and review its metadata before restoring.')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        bar = QHBoxLayout()
+        self.restore_button = QPushButton('Restore selected privacy change')
+        self.restore_button.setEnabled(False)
+        self.restore_button.clicked.connect(self.restore_selected)
+        bar.addWidget(self.restore_button)
+        bar.addStretch()
+        self.close_button = QPushButton('Close')
+        self.close_button.clicked.connect(self.reject)
+        bar.addWidget(self.close_button)
+        layout.addLayout(bar)
+        self._timer = QTimer(self)
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self._check_finished)
+
+    def _selection_changed(self, *_):
+        record = self.choices.currentData()
+        self.restore_button.setEnabled(bool(not self._running and isinstance(record, dict)
+                                            and record.get('id') and record.get('changed_count', 0) > 0))
+
+    def _approve_restore(self, record):
+        return QMessageBox.question(self, 'Restore one recorded privacy change',
+            'Restore the original supported settings from this record?\n\n' + str(record['id'])
+            + '\n\nCurrent values must still match the recorded change. Blocked and skipped items are reported. '
+              'No leaves the settings unchanged.', QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def restore_selected(self):
+        if self._running or getattr(self.window, 'busy', False):
+            return
+        record = self.choices.currentData()
+        if not isinstance(record, dict) or not record.get('id') or record.get('changed_count', 0) <= 0:
+            return
+        if not self._approve_restore(record):
+            return
+        self._cancel.clear()
+        self._running = True
+        self.choices.setEnabled(False)
+        self.restore_button.setEnabled(False)
+        self.close_button.setText('Cancel after current step')
+        self.status.setText('Restoring the selected recorded settings. Current values and permissions are being checked.')
+        self.window._run('restore_system_privacy', record['id'], cancel_event=self._cancel, done=self._restored)
+        self._timer.start()
+
+    def _restored(self, result):
+        self._running = False
+        self._timer.stop()
+        self.close_button.setText('Close')
+        self.status.setText('Restore returned results. Review restored, blocked, skipped and failed items below. Reopen history for a fresh list before another restore.')
+        self.details.setPlainText(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+    def _check_finished(self):
+        if self._running and not getattr(self.window, 'busy', False):
+            self._running = False
+            self._timer.stop()
+            self.close_button.setText('Close')
+            message = getattr(self.window, 'last_error', '') or self.window.status.text()
+            self.status.setText('The restore did not return a result. ' + str(message))
+            self.details.appendPlainText('\n' + str(message))
+
+    def reject(self):
+        if self._running:
+            self._cancel.set()
+            self.status.setText('Cancellation requested. Wait for the current restore step to return.')
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._running:
+            self.reject()
+            event.ignore()
+        else:
+            event.accept()
+
+    def shutdown(self):
+        self._cancel.set()
+        self._timer.stop()
+
+
+class SecurityReviewDialog(QDialog):
+    """Apply only individually approved security recommendations on workers."""
+    def __init__(self, backend, report, parent=None):
+        super().__init__(parent)
+        self.backend = backend
+        self.setWindowTitle('Optimus — review security recommendations')
+        self.resize(930, 620)
+        self._cancel = threading.Event()
+        self._queue = []
+        self._worker = None
+        self._active = None
+        self._results = []
+        self._review_data = dict(report) if isinstance(report, dict) else {}
+        self._recommendations = {}
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(1)
+        layout = QVBoxLayout(self)
+        intro = QLabel('Review the Windows security findings below. Nothing is selected automatically. '
+                       'Choose recommendations to consider, then answer Yes or No for each one. '
+                       'Windows security policy and administrator access can prevent a change. '
+                       'Restart recommendations open Windows controls; Optimus does not restart the PC.')
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(['Select', 'Recommendation', 'Why', 'Result'])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 58)
+        self.table.setColumnWidth(1, 230)
+        self.table.setColumnWidth(2, 400)
+        for recommendation in report.get('recommendations', []) if isinstance(report, dict) else []:
+            if not isinstance(recommendation, dict):
+                continue
+            identifier = recommendation.get('id')
+            if not isinstance(identifier, str) or not identifier or identifier in self._recommendations:
+                continue
+            self._recommendations[identifier] = dict(recommendation)
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            selection = QTableWidgetItem()
+            selection.setData(Qt.UserRole, identifier)
+            selection.setFlags(selection.flags() | Qt.ItemIsUserCheckable)
+            selection.setCheckState(Qt.Unchecked)
+            self.table.setItem(row, 0, selection)
+            for column, value in ((1, recommendation.get('title', identifier)), (2, recommendation.get('reason', 'Review this finding.')), (3, 'Not approved')):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                self.table.setItem(row, column, item)
+        self.table.itemChanged.connect(self._selection_changed)
+        layout.addWidget(self.table, 1)
+        self.details = QPlainTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setMaximumHeight(170)
+        self._render_details()
+        layout.addWidget(self.details)
+        self.status = QLabel('No security changes have been approved.')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        bar = QHBoxLayout()
+        self.apply_button = QPushButton('Review selected recommendations')
+        self.apply_button.setEnabled(False)
+        self.apply_button.clicked.connect(self.apply_selected)
+        bar.addWidget(self.apply_button)
+        bar.addStretch()
+        self.close_button = QPushButton('Not now / close')
+        self.close_button.clicked.connect(self.reject)
+        bar.addWidget(self.close_button)
+        layout.addLayout(bar)
+
+    def _selection_changed(self, *_):
+        chosen = any(self.table.item(row, 0).checkState() == Qt.Checked for row in range(self.table.rowCount()))
+        self.apply_button.setEnabled(chosen and self._worker is None and callable(getattr(self.backend, 'apply_security_recommendation', None)))
+
+    def _render_details(self):
+        self.details.setPlainText(json.dumps({'security_review': self._review_data,
+                                             'approved_action_results': self._results}, indent=2, ensure_ascii=False, default=str))
+
+    def _row(self, identifier):
+        for row in range(self.table.rowCount()):
+            if self.table.item(row, 0).data(Qt.UserRole) == identifier:
+                return row
+        return None
+
+    def _set_result(self, identifier, text):
+        row = self._row(identifier)
+        if row is not None:
+            self.table.item(row, 3).setText(str(text))
+            self.table.item(row, 3).setToolTip(str(text))
+
+    def _ask_recommendation(self, recommendation):
+        text = str(recommendation.get('title') or recommendation['id']) + '\n\n' + str(recommendation.get('reason') or '')
+        text += '\n\nAction: ' + str(recommendation.get('action') or 'Apply this supported Windows security recommendation.')
+        if recommendation.get('requires_admin'):
+            text += '\nAdministrator access may be required; a refused or policy-blocked change is reported.'
+        text += '\n\nApply this recommendation now? No leaves this item unchanged.'
+        return QMessageBox.question(self, 'Approve one security recommendation', text,
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def apply_selected(self):
+        if self._worker is not None:
+            return
+        self._queue = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item.checkState() != Qt.Checked:
+                continue
+            identifier = item.data(Qt.UserRole)
+            recommendation = self._recommendations[identifier]
+            self._set_result(identifier, 'Approved for this attempt' if self._ask_recommendation(recommendation) else 'Declined; unchanged')
+            if self.table.item(row, 3).text() == 'Approved for this attempt':
+                self._queue.append(identifier)
+            item.setCheckState(Qt.Unchecked)
+        if not self._queue:
+            self.status.setText('No recommendation was approved. You can close this review and continue to process suggestions.')
+            return
+        self._cancel.clear()
+        self._start_next()
+
+    def _start_next(self):
+        if self._cancel.is_set():
+            self._queue.clear()
+        if not self._queue:
+            self._worker = None
+            self._active = None
+            self.table.setEnabled(True)
+            self.close_button.setEnabled(True)
+            self.close_button.setText('Close review')
+            self._selection_changed()
+            self.status.setText('Security recommendations returned results. Review completed, blocked, failed and manual actions below.')
+            return
+        self._active = self._queue.pop(0)
+        self.table.setEnabled(False)
+        self.apply_button.setEnabled(False)
+        self.status.setText('Working on: ' + str(self._recommendations[self._active].get('title') or self._active))
+        self._set_result(self._active, 'Running')
+        worker = BackendWorker(self.backend.apply_security_recommendation, (self._active,), {'cancel_event': self._cancel})
+        self._worker = worker
+        worker.signals.result.connect(self._item_result)
+        worker.signals.error.connect(self._item_error)
+        worker.signals.finished.connect(self._item_finished)
+        self.pool.start(worker)
+
+    @Slot(object)
+    def _item_result(self, result):
+        self._results.append({'id': self._active, 'result': result})
+        status = result.get('status', 'Returned result') if isinstance(result, dict) else 'Returned result'
+        self._set_result(self._active, status)
+        self._render_details()
+
+    @Slot(str)
+    def _item_error(self, error):
+        self._set_result(self._active, 'Failed: ' + str(error))
+        self._results.append({'id': self._active, 'error': str(error)})
+        self._render_details()
+
+    @Slot()
+    def _item_finished(self):
+        self._worker = None
+        self._start_next()
+
+    def reject(self):
+        if self._worker is not None:
+            self._cancel.set()
+            self._queue.clear()
+            self.close_button.setEnabled(False)
+            self.status.setText('Cancellation requested. Wait for the current Windows operation to return; remaining recommendations will be skipped.')
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._worker is not None:
+            self.reject()
+            event.ignore()
+        else:
+            event.accept()
+
+    def shutdown(self):
+        self._cancel.set()
+        self._queue.clear()
+
+
 class OptimusWindow(QMainWindow):
     def __init__(self, backend, *, smoke_test=False):
         super().__init__()
@@ -1676,6 +1969,9 @@ class OptimusWindow(QMainWindow):
         self._sandbox_window = None
         self._setup_wizard = None
         self._worker = None
+        self._pending_post_review = None
+        self._post_review_active = False
+        self._security_review_dialog = None
         self._progress_window = None
         self._cancel = threading.Event()
         self.pool = QThreadPool(self)
@@ -1793,9 +2089,22 @@ class OptimusWindow(QMainWindow):
                         elif isinstance(control, QSpinBox):
                             control.setValue(int(value))
                         elif isinstance(control, QComboBox):
-                            control.setCurrentText(str(value))
+                            if key in ('optimization_mode', 'automation_mode'):
+                                control.setCurrentIndex(max(0, control.findData(value)))
+                            else:
+                                control.setCurrentText(str(value))
                     finally:
                         control.blockSignals(previous)
+                if settings_window is not None:
+                    settings_window.workflow_mode_overlay = {}
+                    settings_window.workflow_force_keys = set()
+                    for name, control in getattr(settings_window, 'consumer_package_controls', {}).items():
+                        control.setChecked(name in self.workflow_settings.get('consumer_debloat_package_names', []))
+                    settings_window.workflow_control_baseline = {
+                        key: control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox)
+                        else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
+                        for key,control in getattr(settings_window, 'workflow_controls', {}).items()}
+                    settings_window.workflow_consumer_baseline = [name for name,control in getattr(settings_window, 'consumer_package_controls', {}).items() if control.isChecked()]
                 message = 'Setup choices saved. ' + ('Starting the maintenance you selected.' if run_now else 'Maintenance will follow your saved cadence; no run was started now.')
                 if analysis_error:
                     message += ' Background analysis could not be updated: ' + analysis_error
@@ -1839,7 +2148,7 @@ class OptimusWindow(QMainWindow):
         title = QLabel('ONE-CLICK WORKFLOW')
         title.setObjectName('SectionTitle')
         layout.addWidget(title)
-        description = QLabel('The main Optimize button runs the modules enabled here. Application removals are off until you choose them. Existing Codex priority and its watcher stay unchanged unless its optional profile is enabled.')
+        description = QLabel('The main Optimize button uses the saved mode and individual choices below. Full includes your selected consumer packages; other application removals follow their separate choices. Existing Codex priority and its watcher stay unchanged unless its optional profile is enabled.')
         description.setWordWrap(True)
         layout.addWidget(description)
         try:
@@ -1849,6 +2158,26 @@ class OptimusWindow(QMainWindow):
             window.status.setText('Workflow settings unavailable: ' + str(exc))
         self.workflow_settings = settings
         controls = {}
+        window.workflow_mode_overlay = {}
+        window.workflow_force_keys = set()
+        mode = QComboBox()
+        mode.addItem('Full Optimization (individual choices remain editable)', 'full')
+        mode.addItem('Custom - use my individual choices', 'custom')
+        mode.setCurrentIndex(max(0, mode.findData(settings.get('optimization_mode', 'custom'))))
+        controls['optimization_mode'] = mode
+        layout.addWidget(QLabel('OPTIMIZATION MODE'))
+        layout.addWidget(mode)
+        mode_note = QLabel('Selecting Full applies the preset once. Saved changes, browser scopes, cookie exceptions and update exclusions remain in effect on later opens. Package/device installation still needs scoped approval and agreement acceptance in setup. Process and security recommendations are reviewed after completion.')
+        mode_note.setWordWrap(True)
+        layout.addWidget(mode_note)
+        from .onboarding import CADENCES
+        cadence = QComboBox()
+        for value, label in CADENCES.items():
+            cadence.addItem(label, value)
+        cadence.setCurrentIndex(max(0, cadence.findData(settings.get('automation_mode', 'manual'))))
+        controls['automation_mode'] = cadence
+        layout.addWidget(QLabel('Maintenance cadence'))
+        layout.addWidget(cadence)
         grid = QGridLayout()
         intensity = QComboBox()
         intensity.addItems(['Low', 'Standard', 'High'])
@@ -1857,7 +2186,8 @@ class OptimusWindow(QMainWindow):
         grid.addWidget(QLabel('Intensity'), 0, 0)
         grid.addWidget(intensity, 0, 1)
         age = QSpinBox()
-        age.setRange(1,365)
+        age.setRange(0,3650)
+        age.setSpecialValueText('All eligible ages')
         age.setSuffix(' days')
         age.setValue(int(settings.get('cleanup_age_days',7)))
         controls['cleanup_age_days'] = age
@@ -1879,8 +2209,22 @@ class OptimusWindow(QMainWindow):
         layout.addLayout(grid)
         toggles = QGridLayout()
         labels = [('cleanup_enabled','Clean reviewed temporary files'),('browser_cache_enabled','Clean selected browser caches (ask before closing active browsers)'),
+            ('request_admin_on_startup','Ask Windows for administrator access once at app startup (UAC)'),
+            ('browser_history_enabled','Clear selected browsers’ history'),('browser_cookies_enabled','Clear selected cookies (can sign me out)'),
+            ('browser_download_history_enabled','Clear selected browser download-list records'),
             ('consumer_debloat_enabled','Remove selected consumer bloatware'),('m365_debloat_enabled','Run Microsoft 365 debloat'),
             ('outlook_debloat_enabled','Run Outlook debloat'),('edge_debloat_enabled','Run Edge debloat'),
+            ('software_updates_enabled','Check/apply supported software updates under saved approval'),
+            ('legacy_patch_review_enabled','Review known legacy/unofficial support provider paths (no automatic replacement installs)'),
+            ('windows_security_updates_enabled','Check Windows Security/Critical patches'),
+            ('windows_security_updates_install_approved','Approve automatic eligible Windows Security/Critical patch installation'),
+            ('windows_security_update_agreements_accepted','Accept Microsoft agreements for this Windows Security/Critical update scope'),
+            ('driver_updates_enabled','Check/apply driver offers under saved device approval'),
+            ('post_process_review_enabled','Offer process/program review after completion'),
+            ('security_review_enabled','Check Windows security and offer reviewed fixes'),
+            ('spyware_scan_enabled','Run Microsoft Defender quick scan'),
+            ('privacy_advertising_enabled','Apply selected Windows advertising/suggestion privacy preferences'),
+            ('privacy_diagnostics_enabled','Apply selected optional Windows diagnostic preferences'),
             ('codex_priority_enabled','Apply optional Codex priority profile'),('background_analysis_enabled','Enable background resource analysis'),
             ('reduce_motion','Reduce window and starfield motion')]
         for index,(key,label) in enumerate(labels):
@@ -1892,19 +2236,114 @@ class OptimusWindow(QMainWindow):
             controls[key]=checkbox
             toggles.addWidget(checkbox,index//2,index%2)
         layout.addLayout(toggles)
-        note=QLabel('Low: conservative cleanup age (30 days). Standard: 7 days. High: 1 day plus only the modules you select. Security software, blanket driver removal and application deletion are not enabled by an intensity preset.')
+        privacy_layout = QVBoxLayout()
+        privacy_layout.addWidget(QLabel('INDIVIDUAL WINDOWS PRIVACY CHOICES'))
+        for key, label in (
+            ('privacy_disable_advertising_id','Turn off Windows advertising ID'),
+            ('privacy_disable_tailored_experiences','Turn off diagnostic-data tailored experiences'),
+            ('privacy_disable_suggestions','Turn off supported Windows consumer suggestions'),
+            ('privacy_disable_optional_diagnostics','Limit optional diagnostic collection'),
+            ('privacy_disable_app_diagnostics','Turn off supported app diagnostic access')):
+            control = QCheckBox(label)
+            control.setChecked(bool(settings.get(key, True)))
+            controls[key] = control
+            privacy_layout.addWidget(control)
+        layout.addLayout(privacy_layout)
+        security_note = QLabel('Defender and Windows security policy control detections and remediation. Optimus does not identify ordinary apps as spyware from their names or network activity, or block arbitrary app traffic. Privacy preferences affect supported Windows settings; they do not prevent all required diagnostics or third-party data collection. Each selected security fix asks Yes or No after the run.')
+        security_note.setWordWrap(True)
+        layout.addWidget(security_note)
+        privacy_restore = QPushButton('Restore privacy settings')
+        privacy_restore.setAccessibleName('Load recorded Windows privacy changes and restore a selected change')
+        def show_privacy_history(report):
+            dialog = PrivacyRestoreDialog(window, report)
+            window._privacy_restore_dialog = dialog
+            try:
+                dialog.exec()
+            finally:
+                dialog.shutdown()
+                window._privacy_restore_dialog = None
+                dialog.deleteLater()
+        privacy_restore.clicked.connect(lambda: window._run('system_privacy_history', done=show_privacy_history))
+        layout.addWidget(privacy_restore)
+        from .workflow import CONSUMER_PACKAGE_NAMES
+        layout.addWidget(QLabel('CURRENT-USER CONSUMER PACKAGE SCOPE'))
+        consumer_bar = QHBoxLayout()
+        select_consumer, clear_consumer = QPushButton('Select all consumer packages'), QPushButton('Clear all consumer packages')
+        consumer_bar.addWidget(select_consumer)
+        consumer_bar.addWidget(clear_consumer)
+        consumer_bar.addStretch()
+        layout.addLayout(consumer_bar)
+        consumer_controls = {}
+        selected_names = set(settings.get('consumer_debloat_package_names', CONSUMER_PACKAGE_NAMES))
+        for name in CONSUMER_PACKAGE_NAMES:
+            control = QCheckBox(name)
+            control.setChecked(name in selected_names)
+            consumer_controls[name] = control
+            layout.addWidget(control)
+        window.consumer_package_controls = consumer_controls
+        select_consumer.clicked.connect(lambda: [control.setChecked(True) for control in consumer_controls.values()])
+        clear_consumer.clicked.connect(lambda: [control.setChecked(False) for control in consumer_controls.values()])
+        package_note = QLabel('The consumer stage removes only the selected exact current-user package names. Bing Wallpaper, security components, frameworks and shared WebView2 remain protected. Review other application removals separately. Run setup questions to edit browser scopes, cookie exceptions, package exclusions and update/device approvals.')
+        package_note.setWordWrap(True)
+        layout.addWidget(package_note)
+        note=QLabel('Full starts with age 0: all eligible temporary/cache ages. Low selects 30 days, Standard 7 days and High 1 day; an intensity change does not enable other modules. Active, locked and protected files remain excluded.')
         note.setWordWrap(True)
         layout.addWidget(note)
         intensity.currentTextChanged.connect(lambda value: age.setValue({'Low':30,'Standard':7,'High':1}[value]))
+        def change_mode():
+            if mode.currentData() != 'full':
+                window.workflow_mode_overlay['optimization_mode'] = 'custom'
+                return
+            from .workflow import full_optimization_settings
+            current = dict(self._settings())
+            current.update(window.workflow_mode_overlay)
+            for key, control in controls.items():
+                current[key] = control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
+            current['consumer_debloat_package_names'] = [name for name, control in consumer_controls.items() if control.isChecked()]
+            preset = full_optimization_settings(current)
+            window.workflow_force_keys.update(controls)
+            window.workflow_force_keys.add('consumer_debloat_package_names')
+            window.workflow_mode_overlay.update({key:value for key,value in preset.items() if current.get(key) != value})
+            for key, control in controls.items():
+                if key not in preset:
+                    continue
+                blocked = control.blockSignals(True)
+                try:
+                    if isinstance(control,QCheckBox):
+                        control.setChecked(bool(preset[key]))
+                    elif isinstance(control,QSpinBox):
+                        control.setValue(int(preset[key]))
+                    elif key in ('optimization_mode','automation_mode'):
+                        control.setCurrentIndex(max(0, control.findData(preset[key])))
+                    else:
+                        control.setCurrentText(str(preset[key]))
+                finally:
+                    control.blockSignals(blocked)
+            for name, control in consumer_controls.items():
+                control.setChecked(name in preset['consumer_debloat_package_names'])
+        mode.currentIndexChanged.connect(change_mode)
         setup_button=QPushButton('Run setup questions again')
         setup_button.clicked.connect(self.open_initial_setup)
         layout.addWidget(setup_button)
         save=QPushButton('Save one-click configuration')
         def save_configuration():
             value=dict(self._settings())
+            value.update(window.workflow_mode_overlay)
             for key,control in controls.items():
-                value[key]=control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentText()
+                chosen = control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
+                if key in window.workflow_force_keys or chosen != window.workflow_control_baseline.get(key) or key not in value:
+                    value[key] = chosen
+            chosen_consumers = [name for name,control in consumer_controls.items() if control.isChecked()]
+            if 'consumer_debloat_package_names' in window.workflow_force_keys or chosen_consumers != window.workflow_consumer_baseline or 'consumer_debloat_package_names' not in value:
+                value['consumer_debloat_package_names'] = chosen_consumers
+            if value.get('windows_security_updates_enabled') and value.get('windows_security_updates_install_approved') and not value.get('windows_security_update_agreements_accepted'):
+                window._error('Accept Microsoft update agreements for automatic Windows Security/Critical patches, or leave installation approval off. No automatic reboot is requested.')
+                return
             def saved(result):
+                window.workflow_mode_overlay = {}
+                window.workflow_force_keys = set()
+                window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
+                window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
                 self.workflow_settings=result if isinstance(result,dict) else value
                 self.config.ui_motion_enabled=bool(self.appearance.get('motion',True)) and not bool(value.get('reduce_motion',False))
                 self.canvas.motion=motion_allowed(self.config)
@@ -1924,6 +2363,8 @@ class OptimusWindow(QMainWindow):
         tabs.addTab(appearance_scroll,'Appearance and Windows tools')
         outer.addWidget(tabs)
         window.workflow_controls=controls
+        window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
+        window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
 
     def apply_appearance(self, settings):
         self.appearance = settings
@@ -1957,7 +2398,7 @@ class OptimusWindow(QMainWindow):
         if self.smoke_test:
             self.status.setText('Optimization is disabled during a UI smoke test.')
             return
-        if self.busy or (self._settings_window is not None and self._settings_window.busy):
+        if self.busy or self._post_review_active or (self._settings_window is not None and self._settings_window.busy):
             self.status.setText('Wait for the current task before starting optimization.')
             return
         try:
@@ -1976,6 +2417,7 @@ class OptimusWindow(QMainWindow):
             QMessageBox.warning(self, 'Optimus', 'The workflow engine is unavailable. No action was taken.')
             return
         self.busy = True
+        self._pending_post_review = None
         self._cancel = threading.Event()
         self._progress_window = OptimizationProgressWindow(self, self._cancel)
         self._progress_window.show()
@@ -1990,10 +2432,13 @@ class OptimusWindow(QMainWindow):
     @Slot(object)
     def _workflow_result(self, result):
         self._progress_window.finish(result)
+        if isinstance(result, dict) and not result.get('cancelled') and not result.get('canceled'):
+            self._pending_post_review = (result, dict(getattr(self._worker, 'settings', {})))
         self.status.setText('Workflow returned results. Review completed, skipped and failed stages in the progress window.')
 
     @Slot(str)
     def _workflow_error(self, error):
+        self._pending_post_review = None
         self._progress_window.finish(None, error=error)
         self.status.setText('Workflow stopped: ' + error)
 
@@ -2006,6 +2451,57 @@ class OptimusWindow(QMainWindow):
             bridge.shutdown()
             bridge.deleteLater()
         self._worker = None
+        pending, self._pending_post_review = self._pending_post_review, None
+        if pending is not None and not self.smoke_test and not self._quitting:
+            self._post_review_active = True
+            QTimer.singleShot(0, lambda: self._offer_post_optimization_reviews(*pending))
+
+    def _ask_process_review(self, report):
+        actions = report.get('actions', [])
+        count = len(actions) if isinstance(actions, list) else 0
+        return QMessageBox.question(self, 'Optimization complete — review background programs?',
+            f'The final process scan lists {count} optional process/startup choices. Review them now?\n\n'
+            'Yes opens the Process cleanup harness with nothing selected. You decide which applications to pause '
+            'or startup entries to disable. Installed-application review is available there. No continues without those changes. '
+            'RAM use or process age alone does not prove an application is unwanted.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _offer_post_optimization_reviews(self, result, settings):
+        if self.smoke_test or self._quitting:
+            self._post_review_active = False
+            return
+        self._post_review_active = True
+        opened_process_review = False
+        if self._progress_window is not None:
+            self._progress_window.hide()
+        try:
+            security = result.get('security_review')
+            if isinstance(security, dict) and security.get('recommendations'):
+                dialog = None
+                try:
+                    dialog = SecurityReviewDialog(self.backend, security, self)
+                    self._security_review_dialog = dialog
+                    dialog.exec()
+                except Exception as error:
+                    self.status.setText('The security recommendation review could not open: ' + str(error))
+                finally:
+                    self._security_review_dialog = None
+                    if dialog is not None:
+                        dialog.shutdown()
+                        dialog.deleteLater()
+            processes = result.get('process_review')
+            if settings.get('post_process_review_enabled') and isinstance(processes, dict) and self._ask_process_review(processes):
+                self.open_settings(page='Performance')
+                if self._settings_window is not None:
+                    self._settings_window.performance_tabs.setCurrentIndex(2)
+                    self._settings_window.process_harness_panel._scan_ready(processes)
+                    self._settings_window.raise_()
+                    self._settings_window.activateWindow()
+                    opened_process_review = True
+        finally:
+            self._post_review_active = False
+            if not opened_process_review and self._progress_window is not None and not self._quitting:
+                self._progress_window.show()
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
@@ -2043,6 +2539,9 @@ class OptimusWindow(QMainWindow):
                 event.ignore()
 
     def quit_application(self):
+        if self._post_review_active:
+            self.status.setText('Finish or close the post-optimization recommendations before exiting.')
+            return False
         if self._setup_wizard is not None:
             self.status.setText('Finish or cancel the setup questions before exiting.')
             return False
@@ -2061,6 +2560,8 @@ class OptimusWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        if self._security_review_dialog is not None:
+            self._security_review_dialog.shutdown()
         bridge = getattr(self._worker, '_browser_prompts', None)
         if bridge is not None:
             self._cancel.set()

@@ -13,9 +13,21 @@ from .filesystem import replace_with_retry
 from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
 from .approval_policy import APPROVAL_DEFAULTS, validate_approvals
 
+CONSUMER_PACKAGE_NAMES = (
+    'Microsoft.BingNews', 'Microsoft.BingWeather', 'Microsoft.Getstarted',
+    'Microsoft.MicrosoftSolitaireCollection', 'Microsoft.Microsoft3DViewer', 'Microsoft.Print3D',
+    'Microsoft.MixedReality.Portal', 'Microsoft.People', 'Microsoft.WindowsMaps',
+    'Microsoft.WindowsFeedbackHub', 'Microsoft.549981C3F5F10', 'Microsoft.SkypeApp',
+    'Microsoft.Windows.DevHome', 'Microsoft.MicrosoftPCManager', 'MicrosoftCorporationII.Windows365',
+    'MicrosoftCorporationII.MicrosoftFamily', 'Clipchamp.Clipchamp', 'MicrosoftTeams', 'MSTeams', 'Microsoft.Copilot',
+)
+
 DEFAULTS = {
+    'optimization_mode': 'custom',
+    'request_admin_on_startup': False,
     'intensity': 'Standard', 'cleanup_enabled': True, 'cleanup_age_days': 7,
     'browser_cache_enabled': True, 'consumer_debloat_enabled': False,
+    'consumer_debloat_package_names': list(CONSUMER_PACKAGE_NAMES),
     'browser_history_enabled': False, 'browser_cookies_enabled': False,
     'browser_download_history_enabled': False,
     'browser_cleanup_browsers': ['edge', 'chrome', 'brave', 'vivaldi', 'firefox'],
@@ -32,10 +44,64 @@ DEFAULTS = {
     'software_update_all_approved': False, 'software_update_exclude_ids': [],
     'software_update_agreements_accepted': False, 'driver_updates_enabled': False,
     'cleanup_category_ids': [],
+    'post_process_review_enabled': False,
+    'privacy_advertising_enabled': False, 'privacy_diagnostics_enabled': False,
+    'privacy_disable_advertising_id': True, 'privacy_disable_tailored_experiences': True,
+    'privacy_disable_optional_diagnostics': True, 'privacy_disable_app_diagnostics': True,
+    'privacy_disable_suggestions': True,
+    'spyware_scan_enabled': False, 'security_review_enabled': False,
+    'windows_security_updates_enabled': False,
+    'windows_security_updates_install_approved': False,
+    'windows_security_update_agreements_accepted': False,
+    'legacy_patch_review_enabled': False,
 }
 DEFAULTS.update(copy.deepcopy(APPROVAL_DEFAULTS))
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _CATEGORY_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
+
+
+def full_optimization_settings(settings=None):
+    """Select Full once; never reapply a preset over saved changes on opening.
+
+    Preserve exact scopes, exclusions, agreements and cookie exceptions. Full
+    enables update discovery; saved approvals determine whether updates apply.
+    Process removal and security recommendations always require review.
+    """
+    value = copy.deepcopy(DEFAULTS)
+    if settings is not None:
+        value.update(copy.deepcopy(settings))
+    value.update({
+        'optimization_mode': 'full', 'automation_mode': 'startup',
+        'request_admin_on_startup': True,
+        'intensity': 'High', 'cleanup_enabled': True, 'cleanup_age_days': 0,
+        'browser_cache_enabled': True, 'browser_history_enabled': True,
+        'browser_cookies_enabled': True, 'browser_download_history_enabled': True,
+        'applications_review_enabled': True, 'performance_review_enabled': True,
+        'startup_review_enabled': True, 'software_updates_enabled': True,
+        'driver_updates_enabled': True, 'post_process_review_enabled': True,
+        'privacy_advertising_enabled': True, 'privacy_diagnostics_enabled': True,
+        'spyware_scan_enabled': True, 'security_review_enabled': True,
+        'windows_security_updates_enabled': True,
+        'legacy_patch_review_enabled': True,
+        'consumer_debloat_enabled': True,
+    })
+    if not value.get('browser_cleanup_browsers'):
+        value['browser_cleanup_browsers'] = copy.deepcopy(DEFAULTS['browser_cleanup_browsers'])
+    value['cleanup_category_ids'] = list(dict.fromkeys([*value.get('cleanup_category_ids', []), 'windows-temp']))
+    # Selecting the preset is not agreement acceptance or an invented device,
+    # account, file, startup or update approval.
+    if not value.get('software_update_agreements_accepted'):
+        value['software_update_policy'] = 'review'
+    elif value.get('software_update_all_approved'):
+        value['software_update_policy'] = 'all_supported'
+    elif not value.get('software_update_ids'):
+        value['software_update_policy'] = 'review'
+    if not (value.get('driver_changes_approved') and value.get('driver_update_agreements_accepted')
+            and (value.get('driver_approved_updates') or value.get('driver_approved_devices'))):
+        value['driver_policy'] = 'review'
+    # Only the concrete consumer list is selected by this preset. Other removal
+    # groups retain their explicitly saved individual choices.
+    return value
 
 
 def atomic_json(path: Path, value):
@@ -58,7 +124,8 @@ class Preferences:
     @staticmethod
     def safe_defaults():
         value = copy.deepcopy(DEFAULTS)
-        value.update({'cleanup_enabled': False, 'browser_cache_enabled': False})
+        value.update({'cleanup_enabled': False, 'browser_cache_enabled': False,
+                      'automation_mode': 'manual', 'optimization_mode': 'custom'})
         return value
 
     def load(self):
@@ -66,7 +133,7 @@ class Preferences:
             try:
                 return self.validate(json.loads(self.path.read_text(encoding='utf-8')))
             except FileNotFoundError:
-                return copy.deepcopy(DEFAULTS)
+                return full_optimization_settings()
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 # Invalid stored settings never turn on cleanup or automatic work.
                 return self.safe_defaults()
@@ -83,10 +150,12 @@ class Preferences:
                 result[key] = copy.deepcopy(value[key])
         if result['intensity'] not in ('Low', 'Standard', 'High'):
             raise ValueError('Unknown optimization intensity.')
+        if result['optimization_mode'] not in ('full', 'custom'):
+            raise ValueError('Choose Full Optimization or Custom mode.')
         if result['codex_priority'] not in ('Normal', 'AboveNormal', 'High'):
             raise ValueError('Unsupported Codex priority.')
-        if type(result['cleanup_age_days']) is not int or not 1 <= result['cleanup_age_days'] <= 3650:
-            raise ValueError('Cleanup age must be 1 to 3650 days.')
+        if type(result['cleanup_age_days']) is not int or not 0 <= result['cleanup_age_days'] <= 3650:
+            raise ValueError('Cleanup age must be 0 to 3650 days (0 includes all eligible temporary files).')
         if type(result['analysis_interval']) is not int or not 2 <= result['analysis_interval'] <= 60:
             raise ValueError('Analysis interval must be 2 to 60 seconds.')
         if type(result['setup_version']) is not int or not 0 <= result['setup_version'] <= CURRENT_SETUP_VERSION:
@@ -95,6 +164,11 @@ class Preferences:
             raise ValueError('Choose manual, startup, daily, or weekly maintenance.')
         if result['software_update_policy'] not in ('review', 'selected', 'all_supported'):
             raise ValueError('Software updates require review, selected IDs, or all-supported policy.')
+        packages = result['consumer_debloat_package_names']
+        if (type(packages) is not list or len(packages) > len(CONSUMER_PACKAGE_NAMES)
+                or any(not isinstance(item, str) or item not in CONSUMER_PACKAGE_NAMES for item in packages)
+                or len(set(packages)) != len(packages)):
+            raise ValueError('Choose unique exact names from the supported consumer-app removal list.')
         browsers = result['browser_cleanup_browsers']
         if type(browsers) is not list or len(browsers) > 5 or any(not isinstance(item, str) or item not in ('edge', 'chrome', 'brave', 'vivaldi', 'firefox') for item in browsers) or len(set(browsers)) != len(browsers):
             raise ValueError('Choose unique supported browser identifiers for browser cleanup.')
@@ -135,6 +209,9 @@ class Preferences:
             raise ValueError('Choose at least one exact software ID for unattended updates.')
         if result['software_updates_enabled'] and result['software_update_policy'] == 'all_supported' and not result['software_update_all_approved']:
             raise ValueError('Updating all supported installed applications requires separate explicit scope approval.')
+        if (result['windows_security_updates_enabled'] and result['windows_security_updates_install_approved']
+                and not result['windows_security_update_agreements_accepted']):
+            raise ValueError('Automatic Windows Security/Critical updates require explicit Microsoft agreement acceptance.')
         return validate_approvals(result)
 
     def save(self, value):
@@ -262,7 +339,9 @@ class Workflow:
                         'result': outcome, 'partial': partial, 'failed_items': (max(1, len(errors)) if preview_partial else 0) + refusals,
                         'note': note}
             if configuration['cleanup_enabled']:
-                stages.append(('Clean old temporary files', f'Removing approved unlocked temporary files at least {age} days old.', lambda: clean(['user-temp'])))
+                stages.append(('Clean temporary files',
+                               'Removing all eligible unlocked files in the approved temporary-file category.' if age == 0 else f'Removing approved unlocked temporary files at least {age} days old.',
+                               lambda: clean(['user-temp'])))
             if configuration['cleanup_category_ids']:
                 def additional_cleanup():
                     known = {item['id'] for item in self.backend.cleanup_categories() if item.get('available') and isinstance(item.get('id'), str)}
@@ -289,7 +368,13 @@ class Workflow:
                         plan = self.backend.debloat_preview(action)
                         if cancelled():
                             return {'cancelled': True, 'reason': 'Cancelled after preview; no packages were removed.'}
-                        ids = [item['id'] for item in plan.get('targets', []) if item.get('id')]
+                        targets = plan.get('targets', [])
+                        if action == 'consumer-apps':
+                            names = set(configuration['consumer_debloat_package_names'])
+                            targets = [item for item in targets if item.get('name') in names
+                                       and item.get('kind') == 'appx' and item.get('scope') == 'current-user'
+                                       and 'bingwallpaper' not in re.sub(r'[^a-z0-9]', '', str(item.get('name', '')).casefold())]
+                        ids = [item['id'] for item in targets if item.get('id')]
                         if not ids:
                             return {'skipped': True, 'reason': 'No eligible installed targets found.'}
                         outcome = self.backend.debloat_apply({'planId': plan['planId'], 'selectedIds': ids, 'confirmed': True})
@@ -308,7 +393,70 @@ class Workflow:
                 stages.append(('Apply Codex performance profile', 'Applying your selected process priority. Existing external priority watchers remain unchanged.', lambda: self.backend.codex_profile(configuration['codex_priority'])))
             if configuration['background_analysis_enabled']:
                 stages.append(('Enable resource analysis', 'Starting the optional read-only CPU, memory, disk and network sampler.', lambda: self.backend.analysis_start(configuration['analysis_interval'])))
+            if configuration['privacy_advertising_enabled'] or configuration['privacy_diagnostics_enabled']:
+                stages.append(('Apply saved privacy controls',
+                               'Disabling selected Windows advertising and optional diagnostic sharing settings, with recovery records; managed or administrator-only settings may need review.',
+                               lambda: self.backend.apply_system_privacy(configuration, cancel_event=cancel_event)))
+            if configuration['windows_security_updates_enabled']:
+                def security_updates():
+                    result = self.backend.windows_security_updates(configuration, cancel_event=cancel_event,
+                        item_callback=item_progress('Check or install Windows security updates'))
+                    report['windows_security_updates'] = result
+                    return result
+                stages.append(('Check or install Windows security updates',
+                               'Checking applicable Security/Critical patches through the configured Windows Update service; installation uses saved scope and agreement approvals, without an automatic reboot.', security_updates))
+            if configuration['spyware_scan_enabled']:
+                stages.append(('Scan for spyware and malware',
+                               'Running a Microsoft Defender quick scan using its detection and remediation policy; no arbitrary process or application is classified as spyware.',
+                               lambda: self.backend.scan_spyware(cancel_event=cancel_event)))
+            if configuration['security_review_enabled']:
+                def security_review():
+                    result = self.backend.security_status()
+                    if isinstance(result, dict):
+                        result['update_coverage'] = [
+                            {'channel': 'Windows Security/Critical patches', 'enabled': configuration['windows_security_updates_enabled'],
+                             'result': report.get('windows_security_updates'), 'source': 'https://learn.microsoft.com/windows/win32/wua_sdk/portal-client'},
+                            {'channel': 'Third-party application security and maintenance updates', 'enabled': configuration['software_updates_enabled'],
+                             'note': 'WinGet checks supported installed apps for newer vendor versions. Unsupported catalogs and unknown versions require the publisher updater. This does not identify every installed vulnerability.',
+                             'source': 'https://learn.microsoft.com/windows/package-manager/winget/upgrade'},
+                            {'channel': 'OEM drivers, BIOS and device firmware', 'enabled': configuration['driver_updates_enabled'],
+                             'note': 'Windows Update driver coverage and official manufacturer support links are available in Drivers. Vendor-only BIOS/firmware and out-of-band patches require model-specific vendor review; no offer is not proof of newest firmware.'},
+                        ]
+                        if configuration['windows_security_updates_enabled']:
+                            patch_report = report.get('windows_security_updates', {})
+                            patch_scan = patch_report.get('scan', {}) if isinstance(patch_report, dict) else {}
+                            if (isinstance(patch_scan, dict) and patch_scan.get('updates')
+                                    and (patch_report.get('review_only') or patch_report.get('skipped') or patch_report.get('failed_items'))):
+                                recommendations = result.setdefault('recommendations', [])
+                                if not any(item.get('id') == 'review_windows_update' for item in recommendations if isinstance(item, dict)):
+                                    recommendations.append({'id': 'review_windows_update', 'title': 'Review available Windows security patches',
+                                        'reason': 'Applicable patches were reported, but the automatic installation was not completed. Review the scope, agreements, permissions and restart state in Windows Update.',
+                                        'action': 'review_windows_update', 'mitigations': [{'id': 'M1051', 'name': 'Update Software', 'url': 'https://attack.mitre.org/mitigations/M1051/'}]})
+                    report['security_review'] = result
+                    return result
+                stages.append(('Check basic system security',
+                               'Checking protection and firewall status; remaining recommendations are presented for Yes/No decisions afterward.', security_review))
+            if configuration['legacy_patch_review_enabled']:
+                def legacy_review():
+                    security = report.setdefault('security_review', {'recommendations': [], 'review_only': True})
+                    legacy = self.backend.legacy_patch_review(security.get('context') if isinstance(security, dict) else None)
+                    report['legacy_patch_review'] = legacy
+                    if isinstance(security, dict):
+                        security['legacy_patch_review'] = legacy
+                        security.setdefault('recommendations', []).extend(legacy.get('recommendations', []))
+                    return legacy
+                stages.append(('Review vendor-only and legacy patch sources',
+                               'Comparing local inventory to known provider families and official OEM routes. No unofficial package is downloaded or installed, and availability/compatibility remains unverified.', legacy_review))
             stages.append(('Capture final resource report', 'Saving final measurements and the outcome of each operation.', self.backend.audit))
+            if configuration['post_process_review_enabled']:
+                def process_review():
+                    result = self.backend.process_harness_scan(cancel_event=cancel_event)
+                    report['process_review'] = result
+                    return {'review_only': True, 'result': result,
+                            'failed_items': 0 if isinstance(result, dict) and result.get('complete') is True else 1,
+                            'note': 'Potential background overhead is presented after completion. Pausing, startup changes and program removal require a selected action; memory use alone does not establish that a program is unnecessary.'}
+                stages.append(('Prepare background-program recommendations',
+                               'Inspecting every accessible process and its launch evidence; protecting Windows, security software and Bing Wallpaper. No process is stopped or program uninstalled.', process_review))
             completed = 0
             for title, description, operation in stages:
                 if cancelled():

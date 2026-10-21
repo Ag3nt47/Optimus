@@ -4,7 +4,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
-from optimus.automated_software import fresh_candidates, run_software
+from optimus.automated_software import fresh_candidates, run_software, is_newer_version
 from optimus.workflow import DEFAULTS, Preferences, Workflow
 
 
@@ -23,6 +23,56 @@ def backend(*packages):
     return SimpleNamespace(updates_scan=Mock(return_value={'structured': True, 'exitCode': 0,
         'source': 'winget', 'updates': list(packages) or [package(), package('Vendor.Two')]}),
         update_app_unattended=Mock(return_value={'exitCode': 0}))
+
+
+@pytest.mark.parametrize('installed,available,newer', [
+    ('2.0','1.0',False), ('1.0','1.0.0',False), ('v1.0.0','1.0',False),
+    ('1.00.0','1.0',False), ('1.0+build1','1.0+build2',False),
+    ('1.0','1.0-beta1',False), ('1.0-rc2','1.0-rc1',False),
+    ('1.0-preview2','1.0-rc1',False), ('1.0-vendor1','2.0-vendor2',False),
+    ('2025.10','2025.2',False), ('Unknown','2.0',False), ('1.0','Latest',False),
+    ('2.0','10.0',True), ('1.0','1.0.0.1',True), ('V1.2.3','v1.2.4',True),
+    ('1.0-beta1','1.0-beta2',True), ('1.0-alpha2','1.0-beta1',True),
+    ('1.0-rc1','1.0',True), ('1.0-preview1','1.0-preview2',True),
+    ('2025.2','2025.10',True), ('1_0_2','1_0_3',True),
+])
+def test_only_provably_newer_versions_have_forward_order(installed,available,newer):
+    assert is_newer_version(installed,available) is newer
+    scan={'structured':True,'exitCode':0,'updates':[package(version=installed,available=available)]}
+    assert bool(fresh_candidates(scan)) is newer
+
+
+def test_equal_older_or_incomparable_catalog_rows_never_reinstall_in_all_mode():
+    service=backend(package('Vendor.Equal',version='1.0',available='1.0.0'),
+                    package('Vendor.Older',version='2.0',available='1.0'),
+                    package('Vendor.Opaque',version='1.0-vendor',available='2.0-vendor'),
+                    package('Vendor.Newer',version='1.9',available='1.10'))
+    result=run_software(service,configuration())
+    service.update_app_unattended.assert_called_once_with('Vendor.Newer')
+    assert len(result['items'])==1
+
+
+def test_selected_ids_use_case_insensitive_approval_and_current_canonical_id():
+    service=backend(package('Vendor.One'))
+    result=run_software(service,configuration(software_update_policy='selected',software_update_ids=['vendor.one']))
+    service.update_app_unattended.assert_called_once_with('Vendor.One')
+    assert result['not_available_ids']==[]
+
+
+def test_disabled_updater_does_not_even_scan():
+    service=backend()
+    result=run_software(service,configuration(software_updates_enabled=False))
+    assert result['skipped'] is True
+    service.updates_scan.assert_not_called()
+    service.update_app_unattended.assert_not_called()
+
+
+def test_unrecognized_success_exit_review_is_partial_instead_of_clean_success():
+    service=backend()
+    service.updates_scan.return_value={'structured':False,'exitCode':0,'updates':[]}
+    result=run_software(service,configuration(software_update_policy='review'))
+    assert result['failed_items']==1
+    service.update_app_unattended.assert_not_called()
 
 
 def test_old_selected_approval_does_not_expand_to_all_supported():

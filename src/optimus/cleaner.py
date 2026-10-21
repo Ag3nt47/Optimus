@@ -123,8 +123,8 @@ class Cleaner:
         return sorted(result)
 
     def scan(self, category_ids: list[str], min_age_days: int = 7, max_files: int = 20000, max_seconds: int = 35) -> dict:
-        if not 1 <= int(min_age_days) <= 3650:
-            raise ValueError('Minimum age must be between 1 and 3650 days.')
+        if type(min_age_days) is not int or not 0 <= min_age_days <= 3650:
+            raise ValueError('Minimum age must be between 0 and 3650 whole days.')
         choices = {item.id: item for item in self._definitions()}
         unknown = set(category_ids) - choices.keys()
         if unknown:
@@ -187,7 +187,9 @@ class Cleaner:
                                     continue
                                 if category.suffixes and path.suffix.casefold() not in category.suffixes:
                                     continue
-                                if now - max(info.st_mtime, info.st_ctime) < min_age_days * 86400:
+                                # Zero selects all ages. NTFS creation times can
+                                # lead the process clock slightly after a write.
+                                if min_age_days > 0 and now - max(info.st_mtime, info.st_ctime) < min_age_days * 86400:
                                     continue
                                 key = str(path).casefold()
                                 if key in seen or not self._safe_path(path, root):

@@ -20,7 +20,7 @@ if '--source-workspace' in sys.argv:
     helper = importlib.util.module_from_spec(helper_spec)
     helper_spec.loader.exec_module(helper)
     try:
-        authority = helper.resolve_data_root(Path(os.environ['LOCALAPPDATA']) / 'Optimus')
+        authority = helper.default_data_root()
         supplied_workspace = Path(os.path.abspath(sys.argv[option + 1]))
         logical_allowed = authority / 'Sandbox' / 'workspace'
         helper._ordinary_data_path(logical_allowed)

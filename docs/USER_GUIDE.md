@@ -4,7 +4,7 @@ Optimus is a local Windows maintenance application. The main window has three co
 
 ## Start with your configuration
 
-Open **Settings**, select **Settings** in its sidebar, and review **One-click configuration**. The default Standard configuration cleans temporary files and caches of closed browsers that meet the age limit. Consumer-app, Microsoft 365, Outlook and Edge removal are off. Codex priority changes and background analysis are also off.
+Open **Settings**, select **Settings** in its sidebar, and review **One-click configuration**. New installations select Full Optimization and maintenance on each app startup. Review and save setup before the first run. Full chooses age 0 for all eligible temporary files, browser cache/history/cookies/download-list cleanup, the displayed consumer-package list, update checks, Windows privacy preferences, Defender quick scan and final process/security recommendations. Selecting Full applies its preset once; saved exclusions, scopes and later individual changes remain in effect. Microsoft 365, Outlook and Edge keep their own individual controls.
 
 Choose the intensity and the individual modules you want:
 
@@ -19,6 +19,18 @@ The Codex profile is optional. Leaving it off preserves existing process priorit
 Save the configuration, return to the main window, and use **1 click Optimize and debloat**. Its progress window shows the actual current stage, description, worker/process information, log, and completed-stage percentage. A completed percentage does not mean every individual item succeeded: read the returned results, skipped items and failed stages.
 
 **Cancel after current stage** requests a stop at a workflow boundary. A stage already applying changes must finish; cancellation does not roll back earlier stages.
+
+## Security, privacy and legacy support
+
+Full can request administrator access at normal app startup. Approve the Windows UAC prompt once for that session; denial keeps standard access. You can disable the request in setup or Settings. Read-only CLI reports, build smoke checks and source-restart readiness checks never request UAC.
+
+Privacy controls cover advertising ID, tailored experiences, recognized content-delivery/suggested-app preferences, optional diagnostic collection and supported app diagnostic access. Exact prior values are journaled with guarded restore support. Some controls require administrator access or supported Windows editions; missing/version-dependent preferences are reported rather than invented. Required diagnostics, security cloud protection and third-party app/account data sharing are separate. No universal exfiltration-blocking claim is made.
+
+A Defender quick scan requires its verified active provider and administrator access. Results come from Defender; names, memory use and network traffic do not classify ordinary apps as spyware. At completion select security recommendations and answer Yes/No for each supported fix. Antivirus providers are rechecked before changing Defender or firewall state. MITRE ATT&CK links identify limited mitigation mappings (M1049, M1037, M1051), not comprehensive coverage or certification.
+
+Windows Security/Critical patches use the Windows-configured update service. Installation requires saved scope and Microsoft agreement acceptance, administrator access, fresh exact revisions, quiet-install eligibility and no unresolved restart/installer state. Interactive, ambiguous or changed offers are deferred. A reboot-needed result stops further installations; Optimus never reboots Windows automatically. Windows can retain independent update/restart policies.
+
+The vendor/legacy report includes official manufacturer routes and a small reviewed source catalog, including Microsoft Update Catalog, third-party 0patch and community Legacy Update. Product-family matches are hints, not compatible patch offers. 0patch post-end-of-support coverage needs the provider paid license; Optimus does not include it. Unknown apps, discontinued devices, BIOS/firmware and unofficial patches require exact build/hardware/signature/provenance/rollback review. No arbitrary community driver, root certificate, test-signing mode or modified Windows component is installed automatically. No offer is not proof that a device is current or unsupported.
 
 ## Use the detailed tools
 

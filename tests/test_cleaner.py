@@ -111,3 +111,80 @@ def test_hardlinked_file_excluded(tmp_path):
     target.write_text('shared')
     os.link(target, root / 'second.tmp')
     assert old_plan(cleaner)['files'] == []
+
+
+def test_zero_age_preview_includes_newly_created_eligible_cache_files(tmp_path):
+    cleaner,root=engine(tmp_path)
+    target=root/'new-cache.tmp';target.write_bytes(b'owned-disposable-fixture')
+    assert cleaner.scan(['test-cache'],7)['files']==[]
+    plan=cleaner.scan(['test-cache'],0)
+    assert plan['min_age_days']==0
+    assert [item['path'] for item in plan['files']]==[str(target)]
+    assert target.read_bytes()==b'owned-disposable-fixture'
+
+
+@pytest.mark.parametrize('invalid',[-1,3651,True,False,0.5,'0',None])
+def test_cleanup_age_requires_a_bounded_whole_day_count(tmp_path,invalid):
+    cleaner,_=engine(tmp_path)
+    with pytest.raises(ValueError):
+        cleaner.scan(['test-cache'],invalid)
+
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows exclusive locks and guarded deletion.')
+def test_zero_age_cleanup_preserves_locked_readonly_hardlinked_and_outside_files(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+    cleaner,root=engine(tmp_path)
+    eligible=root/'eligible.tmp';eligible.write_text('owned-disposable-fixture')
+    locked=root/'locked.tmp';locked.write_text('locked-fixture')
+    readonly=root/'readonly.tmp';readonly.write_text('read-only-fixture')
+    outside=tmp_path/'outside-personal-fixture.txt';outside.write_text('must remain')
+    os.link(outside,root/'hardlinked.tmp')
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.SetFileAttributesW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD]
+    kernel.SetFileAttributesW.restype=wintypes.BOOL
+    kernel.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+    kernel.CreateFileW.restype=wintypes.HANDLE
+    kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+    assert kernel.SetFileAttributesW(str(readonly),1)
+    handle=None
+    try:
+        plan=cleaner.scan(['test-cache'],0)
+        assert {Path(item['path']).name for item in plan['files']}=={'eligible.tmp','locked.tmp'}
+        # Open after the preview to exercise the apply-time exclusive-open guard.
+        handle=kernel.CreateFileW(str(locked),0x80000000,0,None,3,0x80,None)
+        assert handle!=ctypes.c_void_p(-1).value,ctypes.get_last_error()
+        result=cleaner.apply(plan)
+        assert result['deleted_count']==1,result
+        assert result['skipped_count']==1
+        assert not eligible.exists()
+        assert locked.exists() and readonly.exists()
+        assert outside.read_text()=='must remain'
+        assert (root/'hardlinked.tmp').exists()
+    finally:
+        if handle is not None and handle!=ctypes.c_void_p(-1).value:
+            kernel.CloseHandle(handle)
+        kernel.SetFileAttributesW(str(readonly),0x80)
+
+
+def test_zero_age_apply_still_uses_private_plan_instead_of_caller_paths(tmp_path):
+    cleaner,root=engine(tmp_path)
+    target=root/'approved.tmp';target.write_text('owned-disposable-fixture')
+    outside=tmp_path/'outside.txt';outside.write_text('must remain')
+    plan=cleaner.scan(['test-cache'],0)
+    plan['files'][0]['path']=str(outside)
+    deleted=[]
+    with patch.object(cleaner,'_delete_exact',side_effect=lambda record:deleted.append(record['path'])):
+        result=cleaner.apply(plan)
+    assert deleted==[str(target)]
+    assert result['deleted_count']==1
+    assert outside.read_text()=='must remain'
+
+
+def test_zero_age_disables_age_cutoff_even_when_file_clock_leads_process_clock(tmp_path):
+    cleaner,root=engine(tmp_path)
+    target=root/'clock-leading.tmp';target.write_text('owned-disposable-fixture')
+    ahead=time.time()+2
+    os.utime(target,(ahead,ahead))
+    assert cleaner.scan(['test-cache'],1)['files']==[]
+    assert [row['path'] for row in cleaner.scan(['test-cache'],0)['files']]==[str(target)]

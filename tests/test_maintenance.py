@@ -6,11 +6,14 @@ import subprocess
 import tempfile
 import time
 import types
+import sys
 import unittest
 from unittest.mock import patch
 
 source = Path(__file__).resolve().parents[1] / 'src' / 'optimus' / 'maintenance.py'
+sys.path.insert(0, str(source.parents[1]))
 module = types.ModuleType('optimus_maintenance_isolated')
+module.__package__ = 'optimus'
 exec(compile(source.read_text(encoding='ascii'), str(source), 'exec'), module.__dict__)
 Maintenance = module.Maintenance
 
@@ -92,13 +95,13 @@ class Tests(unittest.TestCase):
         header = f"{'Name':18}{'Id':24}{'Version':14}{'Available':14}Source"
         row = f"{'Example':18}{'Vendor.Example':24}{'1.0':14}{'2.0':14}winget"
         completed = subprocess.CompletedProcess([], 0, header + '\n' + '-'*80 + '\n' + row + '\n', '')
-        with patch.object(Maintenance, '_winget', return_value='winget-fixture.exe'), patch.object(Maintenance, '_run', return_value=completed) as run:
+        with patch.object(Maintenance, '_winget', return_value='winget-fixture.exe'), patch.object(Maintenance, '_run', side_effect=[completed,completed,subprocess.CompletedProcess([],0,'There are no pins configured.',''),subprocess.CompletedProcess([],0,'Fixture updated','')]) as run:
             scan = self.tool.updates_scan()
             self.assertEqual(scan['updates'][0]['id'], 'Vendor.Example')
             with self.assertRaises(ValueError): self.tool.updates_apply('Vendor.Example')
             with self.assertRaises(ValueError): self.tool.updates_apply('Other.Package', confirmed=True)
             self.tool.updates_apply('Vendor.Example', confirmed=True)
-            self.assertEqual(run.call_args.args[0], ['winget-fixture.exe', 'upgrade', '--id', 'Vendor.Example', '--exact', '--source', 'winget', '--disable-interactivity'])
+            self.assertEqual(run.call_args.args[0], ['winget-fixture.exe', 'upgrade', '--id', 'Vendor.Example', '--exact', '--source', 'winget', '--version', '2.0', '--disable-interactivity'])
     def test_11_task_scope_and_no_implicit_creation(self):
         with patch.object(Maintenance, '_run') as run:
             with self.assertRaises(ValueError): self.tool.schedule_create()

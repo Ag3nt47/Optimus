@@ -12,11 +12,11 @@ from .cleaner import Cleaner
 from .sampler import ResourceSampler
 from .workflow import Preferences, Workflow
 from . import performance
-from .filesystem import resolve_data_root
+from .filesystem import resolve_data_root, default_data_root
 
 class Backend:
     def __init__(self, data_dir: Path | None = None):
-        self.data_dir = resolve_data_root(Path(data_dir or Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Optimus'))
+        self.data_dir = resolve_data_root(Path(data_dir)) if data_dir is not None else default_data_root()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.bridge = PowerShellBridge(self.data_dir / 'engine')
         self.cleaner = Cleaner(self.data_dir)
@@ -41,12 +41,11 @@ class Backend:
         return [] if value is None else value if isinstance(value, list) else [value]
 
     def elevate(self):
-        executable = sys.executable
-        arguments = [] if getattr(sys, 'frozen', False) else ['-B', str(Path(__file__).parents[2] / 'launch.py')]
-        result = ctypes.windll.shell32.ShellExecuteW(None, 'runas', executable, subprocess.list2cmdline(arguments), None, 1)
-        if result <= 32:
+        from .elevation import request_administrator
+        result = request_administrator()
+        if result.get('started') is not True:
             raise RuntimeError('Administrator relaunch was not completed.')
-        return {'started': True, 'note': 'The administrator window is a separate process. Your current window remains open.'}
+        return dict(result, note='The administrator window is a separate process. Your current window remains open.')
 
     def source_root(self):
         if os.environ.get('OPTIMUS_ORIGINAL_SOURCE'):
@@ -62,6 +61,57 @@ class Backend:
     def optimize(self, settings=None, progress_callback=None, cancel_event=None, *, browser_prompt=None):
         return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event,
                                  browser_prompt=browser_prompt)
+
+    def _privacy_service(self):
+        from .system_privacy import SystemPrivacy
+        if not hasattr(self, '_system_privacy_service'):
+            self._system_privacy_service = SystemPrivacy(self.data_dir)
+        return self._system_privacy_service
+
+    def apply_system_privacy(self, settings, cancel_event=None):
+        return self._privacy_service().apply_privacy(settings, cancel_event=cancel_event)
+
+    def restore_system_privacy(self, change_id, cancel_event=None):
+        return self._privacy_service().restore_privacy(change_id, cancel_event=cancel_event)
+
+    def system_privacy_history(self):
+        return self._privacy_service().history()
+
+    def scan_spyware(self, cancel_event=None):
+        return self._privacy_service().scan_spyware(cancel_event=cancel_event)
+
+    def security_status(self):
+        return self._privacy_service().security_status()
+
+    def windows_security_updates(self, settings, cancel_event=None, item_callback=None):
+        from .security_updates import SecurityUpdates
+        return SecurityUpdates(self.data_dir).run(settings, cancel_event=cancel_event, item_callback=item_callback)
+
+    def legacy_patch_review(self, context=None):
+        from .legacy_support import review_legacy_support
+        errors = []
+        try:
+            applications = self.installed_apps()
+        except Exception as error:
+            applications = []
+            errors.append('Installed applications could not be read: ' + type(error).__name__)
+        try:
+            devices = self.bridge.request('driver_device_inventory', timeout=120)
+        except Exception as error:
+            devices = {}
+            errors.append('Device inventory could not be read: ' + type(error).__name__)
+        report = review_legacy_support(context, applications, devices)
+        report['errors'] = list(report.get('errors', [])) + errors
+        report['failed_items'] = int(report.get('failed_items', 0)) + len(errors)
+        self._last_legacy_patch_review = report
+        return report
+
+    def apply_security_recommendation(self, recommendation_id, cancel_event=None):
+        if recommendation_id == 'review_legacy_patches':
+            if cancel_event is not None and cancel_event.is_set():
+                return {'cancelled': True, 'review_only': True}
+            return getattr(self, '_last_legacy_patch_review', None) or self.legacy_patch_review()
+        return self._privacy_service().apply_recommendation(recommendation_id, cancel_event=cancel_event)
 
     def browser_cleanup_status(self, browser_id):
         return self.browser_sessions.browser_status(browser_id)
@@ -186,8 +236,24 @@ class Backend:
 
     def update_app_unattended(self, package_id, *, cancel_event=None):
         """Saved scope/agreements authorize updates; cancellation still gates installation."""
+        readiness = self.update_disk_readiness()
+        if readiness['ready'] is not True:
+            return {'skipped': True, 'requiresReview': True, 'exitCode': 0,
+                    'status': 'deferred', 'note': readiness['reason'], 'disk_readiness': readiness}
         options = {'cancel_event': cancel_event} if cancel_event is not None else {}
         return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True, **options)
+
+    def update_disk_readiness(self):
+        """Windows installers need system-drive space even when Optimus is on D:."""
+        import shutil
+        minimum = 2 * 1024 ** 3
+        try:
+            drive = os.environ.get('SystemDrive', 'C:') + os.sep
+            free = shutil.disk_usage(drive).free
+            return {'ready': free >= minimum, 'free_bytes': free, 'minimum_free_bytes': minimum,
+                    'reason': 'System-drive free space is below the 2 GiB installation floor. Free space before retrying updates.' if free < minimum else 'System-drive installation-space floor passed; individual installers can require more.'}
+        except (OSError, ValueError):
+            return {'ready': False, 'reason': 'System-drive free space could not be verified; update installation was deferred.'}
 
     def drivers_list(self):
         return self._list(self.bridge.request('drivers_list'))

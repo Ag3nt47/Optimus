@@ -104,11 +104,45 @@ def test_explicit_confirmation_freshness_and_source_are_required(updater):
 
 def test_manual_mode_still_requires_confirmation_and_accepts_no_agreement(updater):
     scan(updater)
-    updater._run = Mock(return_value=subprocess.CompletedProcess([],5,'fixture failed',''))
+    updater._run = Mock(side_effect=[subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','1.0','2.0','winget')),''),
+        subprocess.CompletedProcess([],0,'There are no pins configured.',''),
+        subprocess.CompletedProcess([],5,'fixture failed','')])
     result = updater.updates_apply('Vendor.App',confirmed=True)
     arguments = updater._run.call_args.args[0]
     assert '--silent' not in arguments and '--accept-package-agreements' not in arguments
     assert '--accept-source-agreements' not in arguments and result['status'] == 'failed'
+    assert arguments[arguments.index('--version')+1]=='2.0'
+
+
+@pytest.mark.parametrize('installed,available',[('2.0','1.0'),('1.0','1.0.0'),('v1.0.0','1.0'),
+                                                ('1.0+build1','1.0+build2'),('1.0-vendor','2.0-vendor')])
+def test_native_catalog_does_not_offer_equal_older_or_uncomparable_versions(updater,installed,available):
+    result=scan(updater,table(('Fixture','Vendor.App',installed,available,'winget')))
+    assert result['packages']==[]
+    updater._run.reset_mock()
+    with pytest.raises(ValueError):
+        updater.updates_apply('Vendor.App',confirmed=True)
+    updater._run.assert_not_called()
+
+
+def test_manual_update_rechecks_and_skips_app_updated_since_preview(updater):
+    scan(updater)
+    updater._run=Mock(return_value=subprocess.CompletedProcess([],0,table(('Fixture','Vendor.App','2.0','2.0','winget')),''))
+    result=updater.updates_apply('Vendor.App',confirmed=True)
+    assert result['skipped'] and result['failureKind']=='version_changed'
+    assert result['unattended'] is False
+    assert updater._run.call_count==1
+    assert '--id' not in updater._run.call_args.args[0]
+
+
+def test_manual_exact_updates_preserve_pins_too(updater):
+    scan(updater)
+    updater._run=Mock(side_effect=[subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','1.0','2.0','winget')),''),
+        subprocess.CompletedProcess([],0,pin_table(('Fixture App','Vendor.App','1.0','winget','Pinning','')),'')])
+    result=updater.updates_apply('Vendor.App',confirmed=True)
+    assert result['skipped'] and result['failureKind']=='pinned'
+    assert result['unattended'] is False
+    assert updater._run.call_count==2
 
 
 def test_timeout_is_reported_without_replaying_command(updater):
@@ -129,6 +163,7 @@ def test_process_stdin_cannot_wait_for_interactive_answers():
 def test_backend_passes_explicit_unattended_confirmation():
     backend = Backend.__new__(Backend)
     backend.maintenance = Mock()
+    backend.update_disk_readiness = Mock(return_value={'ready': True})
     backend.update_app_unattended('Vendor.App')
     backend.maintenance.updates_apply.assert_called_once_with('Vendor.App',confirmed=True,unattended=True)
 
@@ -322,6 +357,7 @@ def test_backend_passes_optional_cancellation_to_native_updater():
     import threading
     backend = Backend.__new__(Backend)
     backend.maintenance = Mock()
+    backend.update_disk_readiness = Mock(return_value={'ready': True})
     stop = threading.Event()
     backend.update_app_unattended('Vendor.App', cancel_event=stop)
     backend.maintenance.updates_apply.assert_called_once_with('Vendor.App',confirmed=True,unattended=True,cancel_event=stop)

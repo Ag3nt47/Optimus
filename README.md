@@ -12,6 +12,10 @@ Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Opti
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
+**Version 0.6.0** makes **Full Optimization** the new-install default. After first-start choices are saved it runs once whenever Optimus opens, until you change the mode or cadence. Full includes eligible temporary files at age 0, browser cleanup with close-or-skip prompts, the selected consumer-app removal list, supported update checks, Windows advertising/optional diagnostics preferences, a Defender quick scan, and final security/process recommendations. Startup can request administrator permission once; Windows still requires the UAC Yes click. Scans and smoke tests never request elevation or apply maintenance.
+
+Software updates require a provably newer offered version; equal, older, equivalent and incomparable versions are skipped. Automatic app/driver/Windows Security/Critical update installation retains separate saved scopes and agreement acceptance. No feature upgrade or reboot is automatically requested. Vendor-only and legacy/community patch reports show source, applicability and licensing gaps; they do not install arbitrary unofficial drivers or promise support where no compatible patch exists.
+
 **Version 0.5.0** adds **Select all / Clear all** to multi-choice setup groups, browser history/cookie/download-list options with per-browser **close and clean / skip** prompts, and a process cleanup harness with explicit, reversible selected actions. Existing saved settings do not enable the new privacy options. The reporting fixes from 0.4.1 remain included.
 
 **Version 0.4.0** expands the driver updater with coverage for present hardware and future device approvals even when no update is currently offered. Software Updater can install selected applications or all supported WinGet applications with a separate saved approval and exclusions. Junk Clean adds optional diagnostics and graphics-cache categories. Performance measures application CPU, RAM and I/O across multiple samples and explains potential slowdown contributors. Existing duplicate, OneDrive and startup approvals and Bing Wallpaper protection are retained.
@@ -22,7 +26,7 @@ Windows 10/11, 64-bit. Start normally; administrator mode is available inside Se
 - **Settings** contains Low/Standard/High cleanup presets, individual removal choices, priority/affinity controls, optional background analysis, the full maintenance tools and appearance settings.
 - **Sandbox** opens an editable working copy of the full source. Save, version history, Revert and Original version are available. **Restart Optimus** validates the saved Python source and starts that version; the current app remains open if the new interface does not report ready.
 
-The default one-click configuration cleans old temporary files and caches of closed browsers. App removals, browser history/cookie deletion, Codex priority changes and background analysis require your choices. Existing Codex priority watchers are left unchanged. If you previously enabled background analysis in the saved configuration, it resumes at that saved interval when the interface reopens. Scheduled/command-line audits do not start background analysis.
+New installations start in Full Optimization. Setup displays the concrete selected consumer packages and browser categories before saving. Bing Wallpaper remains protected. Existing configurations keep their saved individual choices; choosing Full applies its preset once, and later changes are retained. Existing Codex priority watchers are left unchanged. If you previously enabled background analysis in the saved configuration, it resumes at that saved interval when the interface reopens. Scheduled/command-line audits do not start background analysis.
 
 ## First-start questions and automatic maintenance
 
@@ -95,7 +99,7 @@ The `source` folder is required for the Sandbox editor. Saved source executes wi
 
 ## Data and recovery
 
-User settings, reports, operation journals, browser rollback copies and source history stay under `%LOCALAPPDATA%\Optimus`. They are not uploaded by Optimus. Cleanup permanently deletes the previewed cache files; duplicate removal uses the Recycle Bin. Application uninstalls and all debloat operations are not universally reversible. Each removal plan describes its recovery route.
+User settings, reports, operation journals, browser rollback copies and source history use `%LOCALAPPDATA%\Optimus` by default. A relocated installation can place `Optimus.location.json` beside `Optimus.exe`, with exactly `{"schema":1,"data_dir":"D:\\OptimusData"}`. The target must be an ordinary absolute local folder. Invalid, indirect or oversized configuration is rejected; it never silently falls back to another folder. Sandbox restarts use the original installation location too. Machine-specific location files are excluded from public downloads. They are not uploaded by Optimus. Cleanup permanently deletes the previewed cache files; duplicate removal uses the Recycle Bin. Application uninstalls and all debloat operations are not universally reversible. Each removal plan describes its recovery route.
 
 No runtime reports, browser databases, machine inventories, credentials or proprietary CCleaner files are included in this repository. Network access is used by explicitly requested update and cloud operations.
 

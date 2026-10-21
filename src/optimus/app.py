@@ -23,11 +23,13 @@ def parser():
     result.add_argument('--screenshot', type=Path)
     result.add_argument('--source-workspace', type=Path, help=argparse.SUPPRESS)
     result.add_argument('--restart-ready-file', type=Path, help=argparse.SUPPRESS)
+    result.add_argument('--admin-relaunch', action='store_true', help=argparse.SUPPRESS)
     result.add_argument('--no-orb', action='store_true', help='Use normal Windows close behavior for this session.')
     return result
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    actual_arguments = list(sys.argv[1:] if argv is None else argv)
+    args = parser().parse_args(actual_arguments)
     if sys.platform != 'win32':
         print('Optimus currently supports Windows 10/11.', file=sys.stderr)
         return 2
@@ -45,6 +47,11 @@ def main(argv=None):
             return 0
         finally:
             backend.close()
+    from .elevation import startup_administrator
+    elevation = startup_administrator(backend, args, actual_arguments)
+    if elevation.get('started') is True:
+        backend.close()
+        return 0
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QIcon
@@ -64,6 +71,8 @@ def main(argv=None):
             _resume_saved_analysis(backend)
         except Exception as error:
             window.status.setText('Background analysis could not resume: ' + str(error))
+    if elevation.get('note'):
+        window.status.setText(elevation['note'])
     if args.restart_ready_file:
         marker = args.restart_ready_file.resolve()
         allowed = (backend.data_dir / 'Sandbox' / 'restart').resolve()

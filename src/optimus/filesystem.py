@@ -1,9 +1,76 @@
 """Small Windows-friendly atomic file operations for app-owned state."""
 from __future__ import annotations
 import os
+import json
+import ntpath
+import re
 import stat
+import sys
 import time
 from pathlib import Path
+
+LOCATION_FILE = 'Optimus.location.json'
+
+
+def _configuration_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _local_data_path(value) -> Path:
+    if not isinstance(value, str) or not value or len(value) > 1024 or re.search(r'[\x00-\x1f*?<>|"%]', value):
+        raise ValueError('The configured data directory must be an absolute ordinary local-drive folder.')
+    drive, tail = ntpath.splitdrive(value)
+    if not re.fullmatch('[A-Za-z]:', drive) or not tail.startswith(('\\','/')) or ':' in tail:
+        raise ValueError('The configured data directory must use an absolute local drive, not a network or relative path.')
+    parts = [part for part in re.split(r'[\\/]', tail) if part]
+    if not parts or any(part in ('.','..') or part.endswith((' ','.')) for part in parts):
+        raise ValueError('Choose a concrete ordinary data folder below the local drive root.')
+    return Path(ntpath.normpath(value))
+
+
+def default_data_root(installation_root: Path | None = None) -> Path:
+    """Read a bounded installation-owned location file, or use the legacy default.
+
+    A present but invalid configuration never silently selects another directory.
+    Source restarts consult the original installation, never an editable Sandbox
+    configuration. The public download carries no machine-specific location file.
+    """
+    if installation_root is not None:
+        installation = Path(os.path.abspath(installation_root))
+    elif getattr(sys, 'frozen', False):
+        installation = Path(sys.executable).parent
+    else:
+        installation = Path(os.environ.get('OPTIMUS_ORIGINAL_SOURCE') or Path(__file__).parents[2])
+        # The portable bundle keeps its original source directly under App/source.
+        if installation.name.casefold() == 'source' and _configuration_exists(installation.parent / LOCATION_FILE):
+            installation = installation.parent
+    _ordinary_data_path(installation)
+    config = installation / LOCATION_FILE
+    info = _ordinary_data_path(config, file=True)
+    if info is None:
+        return resolve_data_root(Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Optimus')
+    physical = config.resolve(strict=True)
+    physical_info = _ordinary_data_path(physical, file=True)
+    if physical_info is None or (info.st_dev, info.st_ino) != (physical_info.st_dev, physical_info.st_ino):
+        raise ValueError('The installation location file changed during verification.')
+    if physical_info.st_size > 4096:
+        raise ValueError('The installation location file exceeds its 4096-byte limit.')
+    with physical.open('rb') as stream:
+        raw = stream.read(4097)
+    if len(raw) > 4096:
+        raise ValueError('The installation location file exceeds its 4096-byte limit.')
+    try:
+        location = json.loads(raw.decode('utf-8-sig'))
+    except (ValueError, UnicodeError) as error:
+        raise ValueError('The installation location file is not valid UTF-8 JSON.') from error
+    if (not isinstance(location, dict) or set(location) != {'schema','data_dir'}
+            or type(location.get('schema')) is not int or location['schema'] != 1):
+        raise ValueError('Unsupported installation location schema.')
+    return resolve_data_root(_local_data_path(location.get('data_dir')))
 
 
 def _ordinary_data_path(path: Path, *, file=False):

@@ -85,6 +85,7 @@ class InitialSetupWizard(QWizard):
     def __init__(self, backend, parent=None, preferences=None, *, first_run=False):
         super().__init__(parent)
         self.backend = backend
+        self.first_run = bool(first_run)
         self.initial = copy.deepcopy(preferences if preferences is not None else backend.preferences())
         self.saved_preferences = None
         self.run_now = False
@@ -150,6 +151,7 @@ class InitialSetupWizard(QWizard):
         self._build_software()
         self._build_drivers()
         self._build_summary()
+        self.optimization_mode.currentIndexChanged.connect(self._mode_changed)
 
     def _page(self, key, title, description, *, on_enter=None):
         page = QuestionPage(title, description, self, on_enter=on_enter)
@@ -235,6 +237,14 @@ class InitialSetupWizard(QWizard):
     def _build_cadence(self):
         body = self._page('cadence', '1. When should Optimus run?',
             'These questions configure Optimize and its automatic cadence. Existing choices are retained; new automatic file, startup and driver changes need scoped approval. Maintenance choices are saved only at Save choices; account connection/inventory are separate explicit setup actions.')
+        body.addWidget(_label('Optimization mode'))
+        self.optimization_mode = QComboBox()
+        self.optimization_mode.addItem('Full Optimization', 'full')
+        self.optimization_mode.addItem('Custom - keep my individual choices', 'custom')
+        self.optimization_mode.setCurrentIndex(max(0, self.optimization_mode.findData(self.initial.get('optimization_mode', 'custom'))))
+        body.addWidget(self.optimization_mode)
+        body.addWidget(_label('Full selects temporary and browser cleanup, supported update checks, selected consumer-app removal, Windows privacy preferences and security checks, followed by reviewed recommendations. It runs at each app startup after you save. Update installation still needs your existing package/device scopes and agreement approvals. Browser cookie cleanup can sign you out. You can change any choice below; saved choices are retained on later opens.'))
+        self._check(body, 'request_admin_on_startup', 'Ask Windows for administrator access once when Optimus starts (UAC); a denial keeps standard-user mode')
         self.cadence_group = QButtonGroup(self)
         self.cadence_buttons = {}
         current = self.initial.get('automation_mode', 'manual')
@@ -252,6 +262,52 @@ class InitialSetupWizard(QWizard):
         body.addWidget(warning)
         body.addStretch()
 
+    def _mode_changed(self, *_):
+        if self.optimization_mode.currentData() != 'full':
+            self.run_now_checkbox.setChecked(False)
+            self.refresh_summary()
+            return
+        from .workflow import full_optimization_settings
+        current = self.collect_choices(validate=False)
+        for key, loaded in (('startup_approved_entries', self._startup_loaded),
+                            ('driver_approved_updates', self._drivers_loaded),
+                            ('driver_approved_devices', self._hardware_loaded)):
+            if not loaded and not current.get(key):
+                current[key] = copy.deepcopy(self.initial.get(key, []))
+        preset = full_optimization_settings(current)
+        for key, control in self.controls.items():
+            if key not in preset:
+                continue
+            blocked = control.blockSignals(True)
+            try:
+                if isinstance(control, QCheckBox):
+                    control.setChecked(bool(preset[key]))
+                elif isinstance(control, QSpinBox):
+                    control.setValue(int(preset[key]))
+                elif isinstance(control, QComboBox):
+                    control.setCurrentText(str(preset[key]))
+            finally:
+                control.blockSignals(blocked)
+        self.cadence_buttons[preset['automation_mode']].setChecked(True)
+        for key, control in self.browser_controls.items():
+            control.setChecked(key in preset['browser_cleanup_browsers'])
+        names = set(preset.get('consumer_debloat_package_names', []))
+        for key, control in self.consumer_package_controls.items():
+            control.setChecked(key in names)
+        for key, combo in (('software_update_policy', self.software_policy), ('driver_policy', self.driver_policy)):
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(preset[key])))
+            combo.blockSignals(blocked)
+        self._software_controls()
+        matching = self.driver_policy.currentData() == 'install_matching'
+        self.hardware_load_button.setEnabled(matching)
+        self.hardware_targets.setEnabled(matching)
+        self._driver_visibility()
+        self._privacy_controls()
+        self._sync_selection_actions()
+        self.run_now_checkbox.setChecked(True)
+        self.refresh_summary()
+
     def _build_health(self):
         body = self._page('health', '2. Health Check',
             'Each maintenance run reads current CPU, memory, free storage, running programs, startup entries and services. It captures a second resource report afterward. This inspection does not stop programs or change Windows settings.')
@@ -260,7 +316,30 @@ class InitialSetupWizard(QWizard):
         checked.setEnabled(False)
         body.addWidget(checked)
         body.addWidget(_label('Results are measured observations. A high memory reading does not establish that every background program is unnecessary, and no speedup is guaranteed.'))
+        self._check(body, 'post_process_review_enabled', 'After completion, offer process/startup and installed-application review')
+        self._check(body, 'security_review_enabled', 'Check Windows security and offer individually reviewed fixes after completion')
+        self._check(body, 'spyware_scan_enabled', 'Run a Microsoft Defender quick scan for malware and spyware')
+        self._check(body, 'privacy_advertising_enabled', 'Apply my selected Windows advertising and suggestion privacy preferences')
+        self._check(body, 'privacy_diagnostics_enabled', 'Apply my selected optional Windows diagnostic-data preferences')
+        for key, text in (
+            ('privacy_disable_advertising_id', 'Turn off the Windows advertising ID'),
+            ('privacy_disable_tailored_experiences', 'Turn off tailored experiences based on diagnostic data'),
+            ('privacy_disable_suggestions', 'Turn off supported Windows consumer suggestions'),
+            ('privacy_disable_optional_diagnostics', 'Limit optional diagnostic collection through supported Windows policy'),
+            ('privacy_disable_app_diagnostics', 'Turn off supported app diagnostic access')):
+            self._check(body, key, text, default=True)
+        for key in ('privacy_advertising_enabled', 'privacy_diagnostics_enabled'):
+            self.controls[key].toggled.connect(self._privacy_controls)
+        self._privacy_controls()
+        body.addWidget(_label('Microsoft Defender and your Windows security policy control detections and remediation. Optimus does not classify ordinary programs as spyware from their names or network activity, and does not block arbitrary application traffic. Privacy choices affect supported Windows preferences; they do not stop all required diagnostics or third-party data collection. The final security review asks Yes or No for each selected fix. Process pausing, startup changes and application uninstall decisions remain separately reviewed.'))
         body.addStretch()
+
+    def _privacy_controls(self, *_):
+        for master, children in (
+            ('privacy_advertising_enabled', ('privacy_disable_advertising_id', 'privacy_disable_tailored_experiences', 'privacy_disable_suggestions')),
+            ('privacy_diagnostics_enabled', ('privacy_disable_optional_diagnostics', 'privacy_disable_app_diagnostics'))):
+            for key in children:
+                self.controls[key].setEnabled(self.controls[master].isChecked())
 
     def _build_cleanup(self):
         body = self._page('cleanup', '3. Custom Clean',
@@ -295,14 +374,15 @@ class InitialSetupWizard(QWizard):
         row.addWidget(intensity)
         row.addWidget(_label('Minimum file age'))
         age = QSpinBox()
-        age.setRange(1, 3650)
+        age.setRange(0, 3650)
+        age.setSpecialValueText('All eligible ages')
         age.setSuffix(' days')
         age.setValue(int(self.initial.get('cleanup_age_days', 7)))
         self.controls['cleanup_age_days'] = age
         row.addWidget(age)
         body.addLayout(row)
         intensity.currentTextChanged.connect(lambda value: age.setValue({'Low':30,'Standard':7,'High':1}[value]))
-        body.addWidget(_label('Low selects 30 days, Standard 7 days and High 1 day. An intensity preset does not enable app removals, updates or a Codex profile. You can set another age.'))
+        body.addWidget(_label('Full starts with all eligible temporary/cache ages (0 days), while active, locked and protected files remain excluded. Low selects 30 days, Standard 7 days and High 1 day. An intensity change does not enable other modules.'))
         body.addWidget(_label('Additional cleanup categories - off unless already selected:'))
         chosen = set(self.initial.get('cleanup_category_ids', []))
         categories = []
@@ -339,6 +419,16 @@ class InitialSetupWizard(QWizard):
         for key, label in REMOVALS:
             checkbox = self._check(body, key, label)
             checkbox.setStyleSheet('color:#ffd29c;')
+        from .workflow import CONSUMER_PACKAGE_NAMES
+        body.addWidget(_label('Selected consumer packages - only these exact current-user package names can be removed by the consumer-app stage:'))
+        self.consumer_package_controls = {}
+        self._checkbox_actions(body, 'consumer packages', lambda: list(self.consumer_package_controls.values()))
+        chosen = set(self.initial.get('consumer_debloat_package_names', CONSUMER_PACKAGE_NAMES))
+        for name in CONSUMER_PACKAGE_NAMES:
+            control = QCheckBox(name)
+            control.setChecked(name in chosen)
+            self.consumer_package_controls[name] = control
+            body.addWidget(control)
         body.addWidget(_label('Bing Wallpaper is always preserved by Optimus debloat. Store support, security components, frameworks and shared WebView2 are also protected. High intensity does not select removal groups for you.'))
         body.addWidget(_label('These choices do not invoke an existing external Desktop removal script. Use the detailed Debloat page to inspect exact targets and that script\'s separate approval flow.'))
         body.addStretch()
@@ -449,6 +539,11 @@ class InitialSetupWizard(QWizard):
         body = self._page('software', '9. Software Updater',
             'Load current WinGet application updates and select exact packages, or authorize all supported installed WinGet applications with explicit exclusions. Review only never installs. All-supported approval also covers future matching installed applications.')
         self._check(body, 'software_updates_enabled', 'Include the Software Updater stage')
+        self._check(body, 'legacy_patch_review_enabled', 'Review known legacy/unofficial support provider paths (information only; no unverified replacement installation)')
+        self._check(body, 'windows_security_updates_enabled', 'Check available Windows Security and Critical updates')
+        self._check(body, 'windows_security_updates_install_approved', 'Approve automatic installation of eligible Windows Security/Critical updates, including later matching offers')
+        self._check(body, 'windows_security_update_agreements_accepted', 'Accept Microsoft update agreements for this Windows Security/Critical update scope')
+        body.addWidget(_label('Windows security patch installation requires both saved approvals. Feature upgrades are excluded. Administrator access, Windows policy or a pending restart can defer installation. Optimus never requests an automatic reboot.'))
         self.software_policy = QComboBox()
         self.software_policy.addItem('Scan and report only', 'review')
         self.software_policy.addItem('Install only my selected/listed exact package IDs', 'selected')
@@ -940,7 +1035,7 @@ class InitialSetupWizard(QWizard):
         self.summary.setMinimumHeight(300)
         body.addWidget(self.summary, 1)
         self.run_now_checkbox = QCheckBox('Run selected maintenance now')
-        self.run_now_checkbox.setChecked(False)
+        self.run_now_checkbox.setChecked(self.first_run and self.optimization_mode.currentData() == 'full')
         body.addWidget(self.run_now_checkbox)
         self.save_error = _label('')
         self.save_error.setStyleSheet('color:#ffb9a9;')
@@ -990,8 +1085,9 @@ class InitialSetupWizard(QWizard):
                 result[key] = control.value()
             elif isinstance(control, QComboBox):
                 result[key] = control.currentText()
-        result.update({'setup_version':SETUP_VERSION, 'automation_mode':next(mode for mode,button in self.cadence_buttons.items() if button.isChecked()),
+        result.update({'setup_version':SETUP_VERSION, 'optimization_mode':self.optimization_mode.currentData(), 'automation_mode':next(mode for mode,button in self.cadence_buttons.items() if button.isChecked()),
             'cleanup_category_ids':[key for key,control in self.category_controls.items() if control.isChecked()],
+            'consumer_debloat_package_names':[key for key,control in self.consumer_package_controls.items() if control.isChecked()],
             'browser_cleanup_browsers':[key for key,control in self.browser_controls.items() if control.isChecked()],
             'software_update_policy':self.software_policy.currentData()})
         raw_domains = [value.strip() for value in re.split(r'[\r\n,]+', self.browser_keep_domains.toPlainText()) if value.strip()]
@@ -1015,6 +1111,8 @@ class InitialSetupWizard(QWizard):
                 raise ValueError('All-supported updates require explicit approval of future matching applications and package/source agreements.')
             if section in (None,'software') and selected and not result['software_update_agreements_accepted']:
                 raise ValueError('Selected-package installation requires your explicit package/source agreement authorization. Choose review-only to avoid accepting agreements.')
+            if section in (None,'software') and result.get('windows_security_updates_enabled') and result.get('windows_security_updates_install_approved') and not result.get('windows_security_update_agreements_accepted'):
+                raise ValueError('Automatic Windows security updates require explicit Microsoft update agreement acceptance, or leave installation approval off.')
         else:
             result['duplicate_roots'] = [entry.strip() for entry in self.duplicate_roots.toPlainText().splitlines() if entry.strip()]
             result['software_update_ids'] = [entry.strip() for entry in re.split(r'[\r\n,]+',self.software_ids.toPlainText()) if entry.strip()]
@@ -1061,6 +1159,9 @@ class InitialSetupWizard(QWizard):
             result['software_update_agreements_accepted'] = False
         if result['software_update_policy'] != 'all_supported' or not result['software_updates_enabled']:
             result['software_update_all_approved'] = False
+        if not result.get('windows_security_updates_enabled'):
+            result['windows_security_updates_install_approved'] = False
+            result['windows_security_update_agreements_accepted'] = False
         return result
 
     def refresh_summary(self):
@@ -1086,6 +1187,13 @@ class InitialSetupWizard(QWizard):
             actions.append('Set the optional Codex priority to ' + settings['codex_priority'])
         if settings.get('background_analysis_enabled'):
             actions.append('Keep read-only background analysis on at ' + str(settings['analysis_interval']) + '-second intervals')
+        if settings.get('consumer_debloat_enabled'):
+            actions.append('Consumer package scope: ' + (', '.join(settings['consumer_debloat_package_names']) or '[none selected; no consumer packages removed]'))
+        for master, children in (
+            ('privacy_advertising_enabled', ('privacy_disable_advertising_id', 'privacy_disable_tailored_experiences', 'privacy_disable_suggestions')),
+            ('privacy_diagnostics_enabled', ('privacy_disable_optional_diagnostics', 'privacy_disable_app_diagnostics'))):
+            if settings.get(master):
+                actions.extend('Windows privacy: ' + self.controls[key].text() for key in children if settings.get(key))
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'selected':
             actions.append('Install only listed WinGet IDs: ' + (', '.join(settings['software_update_ids']) or '[no IDs entered]'))
             actions.append('Package/source agreements: ' + ('explicitly accepted' if settings['software_update_agreements_accepted'] else 'NOT accepted; Save will be refused'))
@@ -1130,7 +1238,21 @@ class InitialSetupWizard(QWizard):
             reviews.append(cloud_scope_text)
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'review':
             reviews.append('Software update scan/report; no agreements accepted or installation')
-        lines = ['CADENCE',CADENCES[settings['automation_mode']], '', 'CLEANUP AGE', str(settings.get('cleanup_age_days',7)) + ' days (' + settings.get('intensity','Standard') + ' preset)', '', 'AUTHORIZED CHANGES / PERSISTENT ANALYSIS']
+        if settings.get('spyware_scan_enabled'):
+            reviews.append('Microsoft Defender quick scan; Windows policy controls detections/remediation')
+        if settings.get('security_review_enabled'):
+            reviews.append('Basic Windows security review, followed by Yes/No approval for each selected fix')
+        if settings.get('post_process_review_enabled'):
+            reviews.append('Post-completion process/startup and installed-application suggestions; no automatic pausing or uninstall')
+        if settings.get('legacy_patch_review_enabled'):
+            reviews.append('Known legacy/unofficial support-provider paths and catalog coverage; review only, no unverified replacement installation')
+        if settings.get('windows_security_updates_enabled'):
+            if settings.get('windows_security_updates_install_approved'):
+                actions.append('Install eligible Windows Security/Critical patches: scope approved; Microsoft agreements ' + ('accepted' if settings.get('windows_security_update_agreements_accepted') else 'NOT accepted; Save will be refused') + '. No feature upgrades or automatic reboot.')
+            else:
+                reviews.append('Windows Security/Critical update discovery; installation still needs approval, no feature upgrades or automatic reboot')
+        age_text = 'All eligible temporary/cache ages (0 days)' if settings.get('cleanup_age_days') == 0 else str(settings.get('cleanup_age_days',7)) + ' days'
+        lines = ['OPTIMIZATION MODE', 'Full Optimization' if settings.get('optimization_mode') == 'full' else 'Custom', '', 'CADENCE',CADENCES[settings['automation_mode']], '', 'CLEANUP AGE', age_text, '', 'AUTHORIZED CHANGES / PERSISTENT ANALYSIS']
         lines.extend('- ' + text for text in actions or ['None; this configuration is scan/report only.'])
         lines.extend(['', 'SCAN / REPORT ONLY'])
         lines.extend('- ' + text for text in reviews)
