@@ -1,6 +1,7 @@
 """Fresh, scoped WinGet updates; no installer starts without saved permission."""
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -83,7 +84,33 @@ def fresh_candidates(scan: Any) -> dict[str, dict[str, Any]]:
     return {identity: item for identity, item in candidates.items() if identity.casefold() not in repeated}
 
 
-def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=None, item_callback=None) -> dict[str, Any]:
+def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=None, item_callback=None,
+                 prepared_callback=None, before_install=None) -> dict[str, Any]:
+    """Discover now and optionally block before the first native updater call.
+
+    The owner retains its job-wide exclusive installer gate until this returns.
+    Preparing and waiting do not establish that any installer has started.
+    """
+    notified = False
+    def prepared(**values):
+        nonlocal notified
+        if notified:
+            return
+        notified = True
+        state = {'operation': 'software', 'scan_complete': False, 'candidate_count': 0, 'review_only': True}
+        state.update(values)
+        if prepared_callback is not None:
+            prepared_callback(state)
+    try:
+        return _run_software(backend, configuration, cancel_event=cancel_event, item_callback=item_callback,
+                             prepared=prepared, before_install=before_install,
+                             phased=prepared_callback is not None or before_install is not None)
+    finally:
+        prepared()
+
+
+def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, item_callback,
+                  prepared, before_install, phased) -> dict[str, Any]:
     """Apply only a current scan's exact IDs under the saved selected/all scope.
 
     The native updater checks pins again before each installation. No generic
@@ -105,6 +132,7 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
                  or not isinstance(scan_items, list) or len(scan_items) > 1000)
     policy = configuration['software_update_policy']
     if policy == 'review':
+        prepared(scan_complete=not untrusted)
         return {'review_only': True, 'scan': scan, 'failed_items': int(untrusted),
                 'note': 'Software update review only; no installer was started. Failed, incomplete or unrecognized scans require review.'}
     if configuration.get('software_update_agreements_accepted') is not True:
@@ -119,13 +147,66 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
     selected = ([identity for identity in candidates if identity.casefold() not in exclusions]
                 if policy == 'all_supported' else [canonical_ids[identity.casefold()] for identity in configuration['software_update_ids']
                 if identity.casefold() in canonical_ids and identity.casefold() not in exclusions])
-    results, deferred = [], []
+    approved_scope = copy.deepcopy({key: configuration.get(key) for key in ('software_updates_enabled',
+        'software_update_policy', 'software_update_ids', 'software_update_all_approved',
+        'software_update_exclude_ids', 'software_update_agreements_accepted', 'update_compatibility_mode_enabled')})
+    prepared(scan_complete=not untrusted, candidate_count=len(selected), review_only=False)
+    preflight_items = []
+    def defer(reason, *, failed=0, refreshed_scan=None):
+        return {'review_only': False, 'scan': scan if refreshed_scan is None else refreshed_scan,
+                'policy': policy, 'items': [], 'failed_items': failed, 'skipped': True,
+                'deferred_ids': list(selected), 'cancelled': cancelled(), 'stop_reason': reason,
+                'installer_started': False, 'outcomeKnown': True}
+    if selected and not cancelled() and before_install is not None:
+        if before_install({'operation': 'software', 'scan_complete': not untrusted,
+                           'candidate_count': len(selected), 'review_only': False}) is not True:
+            return defer('The maintenance or exclusive installer gate did not permit application updates.')
+    if selected and phased:
+        if cancelled():
+            return defer('Cancelled before the native application updater was started.')
+        if {key: configuration.get(key) for key in approved_scope} != approved_scope:
+            return defer('Saved software approvals changed while waiting; review the current scope before installing.')
+        # The native updater rejects stale discovery caches. Refresh only after
+        # the gate, and retain the exact initially prepared version pairs rather
+        # than enrolling a new application or release partway through the batch.
+        try:
+            refreshed_scan = backend.updates_scan()
+        except Exception as error:
+            return defer('Software revalidation failed before any installer started (' + type(error).__name__ + ').', failed=1)
+        if cancelled():
+            return defer('Cancelled while revalidating application updates.', refreshed_scan=refreshed_scan)
+        refreshed = fresh_candidates(refreshed_scan)
+        if (not isinstance(refreshed_scan, dict) or refreshed_scan.get('structured') is not True
+                or type(refreshed_scan.get('exitCode')) is not int or refreshed_scan['exitCode'] != 0
+                or refreshed_scan.get('source', 'winget') != 'winget'
+                or not isinstance(refreshed_scan.get('updates', refreshed_scan.get('packages')), list)
+                or len(refreshed_scan.get('updates', refreshed_scan.get('packages'))) > 1000):
+            return defer('The fresh software source or candidate inventory could not be verified before installation.', failed=1, refreshed_scan=refreshed_scan)
+        unchanged = []
+        for identity in selected:
+            expected, current = candidates[identity], refreshed.get(identity)
+            if current is None or any(current.get(field) != expected.get(field)
+                                      for field in ('id', 'version', 'available', 'source')):
+                preflight_items.append({'id': identity, 'name': expected.get('name', identity),
+                    'from_version': expected['version'], 'to_version': expected['available'], 'status': 'skipped',
+                    'result': {'skipped': True, 'failureKind': 'version_changed', 'installer_started': False,
+                               'outcomeKnown': True, 'note': 'The prepared package identity or version pair changed while waiting; no installer was started.'}})
+            else:
+                unchanged.append(identity)
+        selected = unchanged
+        candidates = {identity: refreshed[identity] for identity in selected}
+        scan = refreshed_scan
+    results, deferred = preflight_items, []
     restart_needed = False
     interrupted = False
     stop_reason = ''
     for index, identity in enumerate(selected):
         if cancelled():
             deferred = selected[index:]
+            break
+        if phased and {key: configuration.get(key) for key in approved_scope} != approved_scope:
+            deferred = selected[index:]
+            stop_reason = 'Saved software approvals changed; remaining applications require a fresh review.'
             break
         current = candidates[identity]
         if item_callback:
@@ -136,6 +217,10 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
         # Progress handlers can deliver cancellation before a mutation begins.
         if cancelled():
             deferred = selected[index:]
+            break
+        if phased and {key: configuration.get(key) for key in approved_scope} != approved_scope:
+            deferred = selected[index:]
+            stop_reason = 'Saved software approvals changed; remaining applications require a fresh review.'
             break
         try:
             options = {'cancel_event': cancel_event} if cancel_event is not None else {}

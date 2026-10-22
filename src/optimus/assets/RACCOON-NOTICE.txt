@@ -1,0 +1,34 @@
+Third-party decorative loading animation
+======================================
+
+Files: raccoon-cane-dance.gif and raccoon-cane-dance.png
+These audiovisual assets are separate from Optimus's MIT-licensed program code.
+Copyright remains with the respective content owner(s); this notice does not
+grant an MIT license to the GIF or poster and does not claim their ownership.
+
+Title on Tenor: Racoon Dance Cane Dance GIF
+Tenor uploader credited on the source page: Steveo0825
+Source page:
+https://tenor.com/view/racoon-dance-cane-dance-handy-cane-dance-animal-dance-racoon-danxe-gif-18234479
+Media linked by that page:
+https://media1.tenor.com/m/DHV1NwKb7pcAAAAd/racoon-dance-cane-dance.gif
+Tenor content-sharing terms: https://tenor.com/legal-terms
+Retrieved: 2026-10-22
+
+Downloaded source: 525674 bytes, 640 x 586 pixels, 57 frames.
+Source SHA-256:
+42e14d1a0b88ace6e92f4dcd9b823dbe4306497908ad2d0d6136acc71133b53a
+
+Optimus includes a 96 x 88 pixel derivative for inexpensive local decoding.
+Resizing retains the source's 3420 ms total animation time and infinite loop;
+the GIF writer combines identical resized frames, producing 54 frames. The
+static PNG poster uses source frame 37 (zero-based) for reduced-motion display.
+Preparation used Pillow 13.0.0, LANCZOS resizing and GIF disposal mode 2. Pillow
+is an asset-preparation tool and is not an Optimus runtime dependency.
+Included GIF SHA-256:
+751abce658a0c372cc91f784e010724728197efe417e8cef833b3ad96747f321
+
+The animation is bundled locally. Optimus does not contact Tenor during use.
+The unscaled frames total about 1.74 MiB of pixel data; the loader rejects
+assets above a 4 MiB decoded-frame budget before enabling its bounded cache.
+Keep this attribution and source information with these third-party assets.

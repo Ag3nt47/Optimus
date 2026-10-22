@@ -17,3 +17,7 @@ https://pyinstaller.org/en/stable/license.html .
 CCleaner is a third-party product. Optimus does not include CCleaner executable
 code, icons, rule databases, license keys, subscription checks or service access.
 Feature comparisons document observed interfaces, not a claim of affiliation.
+
+The decorative raccoon GIF and poster are separate third-party assets, outside
+the MIT license for Optimus code. Attribution, source and preparation details
+are in src/optimus/assets/RACCOON-NOTICE.txt; retain that notice with the assets.

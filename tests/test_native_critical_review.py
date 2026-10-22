@@ -141,13 +141,14 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'updates-waiting.progress-honesty', 'updates-waiting.cancel-available',
             'updates-waiting.failure-history', 'updates-waiting.cancellation-stable',
             'updates-waiting.foreground-resumes', 'updates-waiting.three-worker-cards',
-            'updates-waiting.driver-handoff'):
+            'updates-waiting.driver-handoff', 'updates-concurrent.discovery',
+            'updates-concurrent.maintenance-gate', 'updates-concurrent.installer-gate'):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed'
     assert by_id['confirmation.negative-default']['status'] == 'passed'
     assert report['screenshots'] and all((reviewer.output / item['file']).is_file() for item in report['screenshots'])
     assert {item['name'] for item in report['screenshots']} >= {
         f'{width}x{height}-{state}' for width, height in bot.VIEWPORTS
-        for state in ('updates-waiting', 'driver-updates-waiting')}
+        for state in ('concurrent-workers', 'updates-waiting', 'driver-updates-waiting')}
     assert {item['area'] for item in report['manual_review']} >= {'GPU', 'CPU and RAM', 'Updates and security'}
     assert all(item['status'] == 'not_exercised' for item in report['skipped_checks'])
     assert {item['source'] for item in report['documentation_comparison']} == {'docs/FEATURES.md', 'docs/PLATFORMS.md'}
@@ -187,6 +188,27 @@ def test_waiting_review_detects_the_reintroduced_regression(reviewer, app, monke
         failure = findings['regression.updates-waiting.' + expected_failure]
         assert failure['status'] == 'failed' and failure['severity'] == 'critical'
         assert (reviewer.output / 'regression-updates-waiting.png').is_file()
+    finally:
+        owner.close()
+        owner.deleteLater()
+        app.processEvents()
+
+
+def test_concurrent_review_rejects_a_blocked_worker_labelled_running(reviewer, app, monkeypatch):
+    from optimus.ui import WorkflowWorkerCard
+    original = WorkflowWorkerCard.update_state
+    def broken(card, state, **kwargs):
+        if state.get('status') in ('waiting_for_maintenance', 'waiting_for_installer'):
+            state = dict(state, status='running')
+        return original(card, state, **kwargs)
+    monkeypatch.setattr(WorkflowWorkerCard, 'update_state', broken)
+    owner = QWidget()
+    try:
+        reviewer.review_update_wait(owner, bot.VIEWPORTS[0], 'regression')
+        findings = {item['id']: item for item in reviewer.report['checks']}
+        for suffix in ('maintenance-gate', 'installer-gate'):
+            failure = findings['regression.updates-concurrent.' + suffix]
+            assert failure['status'] == 'failed' and failure['severity'] == 'critical'
     finally:
         owner.close()
         owner.deleteLater()

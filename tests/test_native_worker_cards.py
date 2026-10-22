@@ -175,7 +175,8 @@ def test_sequential_update_events_populate_the_same_cards_without_invented_count
 
 def test_spinner_stays_inside_progress_window_and_pauses_while_hidden(progress, app, monkeypatch):
     monkeypatch.setattr('optimus.widgets.header_controls.motion_allowed', lambda *args: True)
-    assert progress.spinner.parentWidget() is progress
+    assert progress.isAncestorOf(progress.spinner)
+    assert progress.spinner.window() is progress
     progress.spinner.start('Fixture activity')
     app.processEvents()
     assert progress.spinner._ring._timer.isActive()
@@ -223,6 +224,18 @@ def test_reveal_cleanup_accepts_a_frame_already_destroyed_with_its_dialog(app):
     owner.close()
     owner.deleteLater()
     app.processEvents()
+
+
+def test_queued_window_motion_sync_is_cancelled_when_its_canvas_is_deleted(app, tmp_path):
+    backend = SimpleNamespace(data_dir=tmp_path, preferences=lambda: dict(DEFAULTS))
+    window = OptimusWindow(backend, smoke_test=True)
+    callback = Mock()
+    window.canvas.sync_motion = callback
+    window.changeEvent(QEvent(QEvent.WindowStateChange))
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    callback.assert_not_called()
 
 
 def test_preview_bounds_nested_cyclic_and_long_text_without_mutating_input():

@@ -23,6 +23,7 @@ from optimus.widgets.theme import THEMES, build_qss
 from optimus.widgets.questions import ask_yes_no
 from optimus.widgets.header_controls import HeaderActionButton, install_global_window_reveal, motion_allowed
 from optimus.widgets.wrapping_checkbox import WrappingCheckBox
+from optimus.widgets.local_loading import LocalLoadingAnimation
 
 
 def field(record, *names, default=""):
@@ -1741,12 +1742,20 @@ class WorkflowWorkerCard(QFrame):
         raw_status = str(state.get('status', 'not_started'))
         labels = {'not_started': 'Not started', 'not_run': 'Not run', 'not_selected': 'Not selected', 'pending': 'Queued',
                   'running': 'Running', 'waiting': 'Running; maintenance is waiting',
+                  'scanning': 'Scanning', 'preparing': 'Preparing', 'installing': 'Installing',
+                  'waiting_for_maintenance': 'Waiting for maintenance',
+                  'waiting_for_installer': 'Waiting for installer',
+                  'waiting_for_preparation': 'Waiting for update preparation',
                   'completed': 'Completed', 'completed_with_errors': 'Completed; review findings',
                   'deferred': 'Deferred', 'cancelled': 'Cancelled', 'failed': 'Failed',
                   'needs_review': 'Needs review', 'stopped': 'Stopped'}
         self.status.setText('Waiting for update lane' if maintenance and raw_status == 'waiting' else
                             labels.get(raw_status, raw_status.replace('_', ' ').capitalize()))
         description = display(state.get('description') or 'Waiting for this run to start.')
+        reason = state.get('wait_reason')
+        if isinstance(reason, str) and reason.strip() and reason not in description:
+            description = (reason + ' — ' + description if raw_status.startswith('waiting_for_')
+                           else description + ' — ' + reason)
         package = state.get('current_package')
         if isinstance(package, str) and package.strip() and package not in description:
             description += ' — ' + package
@@ -1766,7 +1775,10 @@ class WorkflowWorkerCard(QFrame):
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
             self.progress.setFormat('Not selected' if raw_status == 'not_selected' else
-                                    'Queued' if raw_status == 'pending' else 'No item count reported')
+                                    'Queued' if raw_status == 'pending' else
+                                    'Waiting' if raw_status.startswith('waiting_for_') else
+                                    'Scanning; total unknown' if raw_status == 'scanning' else
+                                    'Preparing' if raw_status == 'preparing' else 'No item count reported')
         elapsed = state.get('elapsed_seconds')
         if (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
                 and 0 <= elapsed < 3155760000):
@@ -1775,7 +1787,8 @@ class WorkflowWorkerCard(QFrame):
             self._elapsed_base = None
         elif self._elapsed_base is not None and self._elapsed_active and self._elapsed_clock.isValid():
             self._elapsed_base += self._elapsed_clock.elapsed() / 1000
-        self._elapsed_active = raw_status in ('pending', 'running', 'waiting')
+        self._elapsed_active = raw_status in ('pending', 'running', 'waiting', 'scanning', 'preparing', 'installing',
+                                             'waiting_for_maintenance', 'waiting_for_installer', 'waiting_for_preparation')
         self._elapsed_clock.start()
         self.refresh_elapsed()
 
@@ -1816,12 +1829,19 @@ class OptimizationProgressWindow(QDialog):
         self.setWindowModality(Qt.WindowModal)
         self.resize(850, 650)
         layout = QVBoxLayout(self)
+        header = QWidget(self)
+        header_layout = QGridLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setColumnStretch(0, 1)
         self.title = QLabel('OPTIMIZATION IN PROGRESS')
         self.title.setObjectName('PageTitle')
-        layout.addWidget(self.title)
+        header_layout.addWidget(self.title, 0, 0)
         self.spinner = RunSpinner(self)
         self.spinner.start('Preparing')
-        layout.addWidget(self.spinner)
+        header_layout.addWidget(self.spinner, 1, 0)
+        self.loading_animation = LocalLoadingAnimation(self)
+        header_layout.addWidget(self.loading_animation, 0, 1, 2, 1, Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(header)
         self.progress = QProgressBar()
         self.progress.setObjectName('WorkflowProgress')
         self.progress.setRange(0, 100)
@@ -1897,6 +1917,7 @@ class OptimizationProgressWindow(QDialog):
         self._worker_elapsed_timer = QTimer(self)
         self._worker_elapsed_timer.setInterval(1000)
         self._worker_elapsed_timer.timeout.connect(self._refresh_worker_elapsed)
+        self.loading_animation.start()
 
     def _refresh_worker_elapsed(self):
         for card in self.worker_cards.values():
@@ -1978,8 +1999,15 @@ class OptimizationProgressWindow(QDialog):
             description = self._update_cancellation_message()
         self.description.setText(description)
         self.processes.setPlainText(display(field(state, 'processes', default=[])))
-        self.worker_cards['maintenance'].update_state({'status': 'waiting' if waiting_for_updates else 'running',
-            'description': ('Ready for: ' + display(state['next_stage']) if waiting_for_updates and state.get('next_stage') else stage),
+        maintenance_phase = state.get('maintenance_status')
+        if not isinstance(maintenance_phase, str) or not maintenance_phase.strip():
+            maintenance_phase = 'waiting' if waiting_for_updates else 'running'
+        maintenance_details = display(state.get('maintenance_wait_reason'))
+        if not maintenance_details:
+            maintenance_details = (description if maintenance_phase.startswith('waiting_for_') else
+                'Ready for: ' + display(state['next_stage']) if waiting_for_updates and state.get('next_stage') else stage)
+        self.worker_cards['maintenance'].update_state({'status': maintenance_phase,
+            'description': maintenance_details,
             'percentage': percentage, 'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
         jobs = state.get('jobs')
         job_ids = {job.get('id') for job in jobs if isinstance(job, dict)} if isinstance(jobs, list) else set()
@@ -2037,6 +2065,7 @@ class OptimizationProgressWindow(QDialog):
     def finish(self, result, error=None):
         self.completed = True
         self._worker_elapsed_timer.stop()
+        self.loading_animation.stop()
         self._waiting_for_updates = False
         self._title_before_update_wait = None
         self._waiting_update_kind = None
@@ -2104,7 +2133,7 @@ class OptimizationProgressWindow(QDialog):
             card = self.worker_cards[identity]
             if card.status.text() == 'Not started':
                 card.update_state({'status': 'not_run', 'description': 'No update operation was reported for this worker in this run.'})
-            elif error and (card.status.text().startswith('Running') or card.status.text() == 'Queued'):
+            elif error and card._elapsed_active:
                 card.update_state({'status': 'needs_review',
                     'description': 'The run stopped before a final updater status was reported. Review the saved outcome before retrying.'})
         self.cancel_button.setText('Close results')
@@ -2158,6 +2187,7 @@ class OptimizationProgressWindow(QDialog):
         self.set_recommendations_available(False)
         self.clear_auto_continue()
         self.title.setText('APPLYING AVAILABLE FIXES')
+        self.loading_animation.start()
         self.progress.setValue(0)
         self.progress.setFormat('Follow-up %p%')
         self.spinner.start('Preparing available fixes')
@@ -3358,7 +3388,7 @@ class OptimusWindow(QMainWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if hasattr(self, 'canvas'):
-            QTimer.singleShot(0, self.canvas.sync_motion)
+            QTimer.singleShot(0, self.canvas, self.canvas.sync_motion)
 
     def closeEvent(self, event):
         if self._quitting or self.smoke_test:

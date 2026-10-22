@@ -260,7 +260,8 @@ class Workflow:
         attempt_started = False
         try:
             from .parallel_updates import (ProgressMux, ParallelAppUpdates, ParallelInstallerQueue, WINDOWS_SOFTWARE, WINDOWS_DRIVERS,
-                                           independent_stage, BLOCKED_STAGES, installer_barrier,
+                                           WINDOWS_DRIVER_REVIEW, DRIVER_TITLES,
+                                           independent_stage, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_installer_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
@@ -534,7 +535,7 @@ class Workflow:
             parallel_specs = []
             parallel_launch_after = None
             if configuration['parallel_app_updates_enabled']:
-                stages, parallel_specs, parallel_launch_after = parallel_installer_stages(stages, (WINDOWS_SOFTWARE, WINDOWS_DRIVERS))
+                stages, parallel_specs, parallel_launch_after = parallel_installer_stages(stages, (WINDOWS_SOFTWARE, WINDOWS_DRIVERS, WINDOWS_DRIVER_REVIEW))
             total_stages = len(stages) + len(parallel_specs)
             completed = 0
             joined = False
@@ -551,9 +552,29 @@ class Workflow:
                         report['cancelled'] = report['cancelled'] or stage['result'].get('cancelled') is True
                     atomic_json(log_path, report)
 
+            checkpoint_open = False
+            cleanup_barrier = None
+            if parallel_specs:
+                from .automated_software import run_software
+                def background_software(worker, item_callback, prepared_callback, before_install):
+                    return run_software(worker, configuration, cancel_event=parallel_job.cancel_event,
+                        item_callback=item_callback, prepared_callback=prepared_callback, before_install=before_install)
+                def background_drivers(worker, item_callback, prepared_callback, before_install):
+                    from .automated_system import run_drivers
+                    return run_drivers(worker, configuration, cancel_event=parallel_job.cancel_event,
+                        item_callback=item_callback, prepared_callback=prepared_callback, before_install=before_install)
+                operations = [(spec[0], background_drivers if spec[0] in DRIVER_TITLES else background_software)
+                              for spec in parallel_specs]
+                parallel_job = ParallelInstallerQueue(self.backend, run_id, operations, progress_callback,
+                                                     cancel_event=cancel_event, prior_barrier=unresolved_apps)
+                report['stages'].extend(parallel_job.start())
+                atomic_json(log_path, report)
+
             for title, description, operation in stages:
-                if parallel_job is not None and not independent_stage(title):
+                if parallel_job is not None and checkpoint_open and not independent_stage(title):
                     join_updates(title)
+                if parallel_job is not None and title in BEFORE_UPDATES and not checkpoint_open:
+                    cleanup_barrier = cleanup_barrier or parallel_job.wait_prepared()
                 if cancelled():
                     report['cancelled'] = True
                     break
@@ -562,11 +583,16 @@ class Workflow:
                 if process is not None and process.poll() is None:
                     process_lines.append(f'Windows PowerShell engine (PID {process.pid})')
                 progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
-                                   'stage_status': 'running', 'description': description, 'processes': process_lines, 'log': f'Starting: {title}', 'completed': completed, 'total': total_stages})
+                                   'stage_status': 'running', 'maintenance_status': 'scanning' if title == stages[0][0] else 'running',
+                                   'description': description, 'processes': process_lines, 'log': f'Starting: {title}', 'completed': completed, 'total': total_stages})
                 started = time.time()
                 serial_job = None
                 try:
-                    if parallel_barrier and title in BLOCKED_STAGES:
+                    if cleanup_barrier and title in BEFORE_UPDATES:
+                        result = {'skipped': True, 'review_only': True, 'requiresReview': True,
+                                  'failed_items': 0, 'items': [], 'stop_reason': cleanup_barrier,
+                                  'note': 'No cleanup ran while update discovery still owned temporary files.'}
+                    elif parallel_barrier and title in BLOCKED_STAGES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,
                                   'blocked_by_prior_installer': True,
@@ -603,26 +629,20 @@ class Workflow:
                     parallel_barrier = parallel_barrier or installer_barrier(stage.get('result'))
                     if serial_job is None and not (isinstance(stage.get('result'), dict) and stage['result'].get('blocked_by_prior_installer')):
                         record_installer_outcome(self.backend, run_id, title, stage.get('result'))
-                report['stages'].append(stage)
+                if title == stages[0][0]:
+                    report['stages'].insert(0, stage)
+                else:
+                    report['stages'].append(stage)
                 completed += 1
                 atomic_json(log_path, report)
-                if parallel_specs and parallel_job is None and title == parallel_launch_after and not report['cancelled']:
-                    from .automated_software import run_software
-                    from .post_run_fixes import _prior_installer_barrier
-                    prior_barrier = unresolved_apps or _prior_installer_barrier(self.backend, report)
+                if parallel_job is not None and title == parallel_launch_after:
+                    checkpoint_open = True
+                    prior_barrier = unresolved_apps or cleanup_barrier
                     if report['stages'][0]['status'] != 'completed':
-                        prior_barrier = 'The initial before-inventory failed; application updating was deferred.'
-                    def background_software(worker, item_callback):
-                        return run_software(worker, configuration, cancel_event=parallel_job.cancel_event, item_callback=item_callback)
-                    def background_drivers(worker, item_callback):
-                        from .automated_system import run_drivers
-                        return run_drivers(worker, configuration, cancel_event=parallel_job.cancel_event, item_callback=item_callback)
-                    operations = [(spec[0], background_drivers if spec[0] == WINDOWS_DRIVERS else background_software)
-                                  for spec in parallel_specs]
-                    parallel_job = ParallelInstallerQueue(self.backend, run_id, operations, progress_callback,
-                                                         cancel_event=cancel_event, prior_barrier=prior_barrier)
-                    report['stages'].extend(parallel_job.start())
-                    atomic_json(log_path, report)
+                        prior_barrier = 'The initial before-inventory failed; update installation was deferred.'
+                    if report['cancelled']:
+                        parallel_job.cancel()
+                    parallel_job.release_maintenance(prior_barrier)
                 percentage = int(completed * 100 / total_stages)
                 if report['cancelled']:
                     percentage = min(99, percentage)

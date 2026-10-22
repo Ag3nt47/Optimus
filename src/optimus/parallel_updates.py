@@ -1,7 +1,7 @@
-"""A serial background installer lane with independent foreground maintenance.
+"""Concurrent update preparation with a coordinated installer lane.
 
 The workflow owns the global maintenance lease for this worker's entire life.
-Only independent foreground stages overlap; no installer is killed on cancel.
+Discovery overlaps foreground maintenance; no installer is killed on cancel.
 """
 from __future__ import annotations
 
@@ -18,7 +18,11 @@ from .filesystem import _ordinary_data_path
 WINDOWS_SOFTWARE = 'Review or update configured software'
 NATIVE_SOFTWARE = 'Review or install approved native package updates'
 WINDOWS_DRIVERS = 'Install approved driver updates'
+WINDOWS_DRIVER_REVIEW = 'Review available driver updates'
+DRIVER_TITLES = frozenset({WINDOWS_DRIVERS, WINDOWS_DRIVER_REVIEW})
 WAITING_FOR_UPDATES = 'Waiting for background updates'
+ACTIVE_JOB_STATES = frozenset({'pending', 'running', 'waiting', 'scanning', 'preparing',
+                               'waiting_for_maintenance', 'waiting_for_installer', 'installing'})
 BEFORE_UPDATES = frozenset({
     'Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
     'Clean approved native temporary files and caches', 'Clean selected browser data after close or skip choice',
@@ -97,13 +101,13 @@ class ProgressMux:
             processes = list(event.get('processes', []))
             for job_id, job in self.jobs.items():
                 current = dict(job)
-                if job_id in self.item_started and job['status'] in ('pending', 'running', 'waiting'):
+                if job_id in self.item_started and job['status'] in ACTIVE_JOB_STATES:
                     current['elapsed_seconds'] = max(0, time.monotonic() - self.item_started[job_id])
                 event['jobs'].append(current)
-                if job['status'] in ('pending', 'running', 'waiting'):
+                if job['status'] in ACTIVE_JOB_STATES:
                     processes.append(job['description'])
                     event['percentage'] = min(99, event.get('percentage', 0))
-            active = next((job['id'] for job in event['jobs'] if job['status'] == 'running'), None)
+            active = next((job['id'] for job in event['jobs'] if job['status'] in ('running', 'installing')), None)
             if active:
                 event['active_job_id'] = active
             event['processes'] = list(dict.fromkeys(processes))
@@ -153,6 +157,14 @@ class ProgressMux:
             except Exception:
                 pass
             self.foreground.pop('log', None)
+
+    def wait_for_preparation(self):
+        with self.lock:
+            description = 'Waiting for app and driver discovery to finish before cleaning shared temporary files. No installer has started.'
+            self.foreground = dict(self.foreground, maintenance_status='waiting_for_preparation',
+                maintenance_wait_reason=description, description=description,
+                processes=['Optimus maintenance worker: waiting for update discovery'])
+            self.heartbeat()
 
     def heartbeat(self):
         with self.lock:
@@ -294,7 +306,7 @@ class ParallelAppUpdates:
         if not re.fullmatch('[a-f0-9]{32}', str(parent_run_id)):
             raise ValueError('A current workflow identifier is required.')
         self.backend, self.title, self.operation = backend, title, operation
-        self.job_id = ('driver_updates' if title == WINDOWS_DRIVERS else
+        self.job_id = ('driver_updates' if title in DRIVER_TITLES else
                        'windows_updates' if title == 'Check or install Windows security updates' else 'software_updates')
         self.mux = mux.for_job(self.job_id) if hasattr(mux, 'for_job') else mux
         self.isolate_bridge = isolate_bridge
@@ -308,9 +320,12 @@ class ParallelAppUpdates:
                        'note': 'No automatic retry is authorized by this record. An unresolved installer record requires manual review; preserve this evidence until installer state is established.'}
         self.result = None
         self.thread = None
-        self.stage = None
+        self.stage = {'title': self.title, 'name': self.title, 'status': 'running',
+                      'started_at': self.record['started_at'], 'background': True,
+                      'worker_log_path': str(self.path)}
         self.joined = False
         self.stop_event = threading.Event()
+        self.concurrent_preparation = False
         class Cancellation:
             def is_set(inner):
                 return self.stop_event.is_set() or cancel_event is not None and cancel_event.is_set()
@@ -371,7 +386,7 @@ class ParallelAppUpdates:
             self.defer(reason)
             return self.stage
         self.mux.background('pending', {'description': ('Driver updates queued in the background installer lane.'
-                            if self.title == WINDOWS_DRIVERS else 'Application updates queued in the background installer lane.')})
+                            if self.title in DRIVER_TITLES else 'Application updates queued in the background installer lane.')})
         if inline:
             return self.stage
         self.thread = threading.Thread(target=self._run, name='Optimus background updater', daemon=False)
@@ -400,12 +415,12 @@ class ParallelAppUpdates:
         state = state if isinstance(state, dict) else {'description': str(state)}
         if 'id' not in state and isinstance(state.get('binding'), dict):
             state = dict(state, id=state['binding'].get('id'))
-        if self.title == WINDOWS_DRIVERS and type(state.get('current')) is int:
+        if self.title in DRIVER_TITLES and type(state.get('current')) is int:
             state = dict(state, current=max(0, state['current'] - 1))
         self.record['current_item'] = {key: state[key] for key in ('id', 'description', 'current', 'total', 'item') if key in state}
         self.record['installer_prepared'] = True
         self._write()  # Existing sequential helpers emit this before each installer.
-        self.mux.background('running', state)
+        self.mux.background('installing' if self.concurrent_preparation else 'running', state)
 
     def _run(self):
         from .runtime_priority import lower_worker_priority
@@ -415,9 +430,9 @@ class ParallelAppUpdates:
             self.record['status'] = 'running'
             self.record['execution_started_at'] = time.time()
             self._write()
-            self.mux.background('running')
-            self.mux.background('running', {'description': 'Checking approved driver updates.'
-                                if self.title == WINDOWS_DRIVERS else 'Checking approved application updates.'})
+            phase = 'scanning' if self.concurrent_preparation else 'running'
+            self.mux.background(phase, {'description': 'Checking approved driver updates.'
+                                if self.title in DRIVER_TITLES else 'Checking approved application updates.'})
             worker = isolated_backend(self.backend, isolate_bridge=self.isolate_bridge)
             self.result = self.operation(worker, self.item_progress)
             if not isinstance(self.result, dict):
@@ -456,7 +471,7 @@ class ParallelAppUpdates:
                                stop_reason='The application outcome journal could not be saved; verify installer state before continuing.',
                                journal_error=str(error)[:2000])
         self.mux.background('needs_review' if installer_barrier(self.result) or self.result.get('failed_items') else 'completed',
-                            {'description': str(self.result.get('stop_reason') or 'Application update checks completed; item results are ready.'),
+                            {'description': str(self.result.get('stop_reason') or 'Update checks completed; item results are ready.'),
                              'current': len(self.result.get('items', []))})
 
     def join(self, *, next_stage=None):
@@ -480,17 +495,26 @@ class ParallelAppUpdates:
         if status == 'failed':
             self.stage['error'] = 'One or more application update checks failed; review the saved item results.'
         self.mux.background('cancelled' if result.get('cancelled') else 'needs_review' if installer_barrier(result) or result.get('failed_items') else 'completed',
-                            {'description': str(result.get('stop_reason') or 'Application update checks completed; item results are ready.'),
+                            {'description': str(result.get('stop_reason') or 'Update checks completed; item results are ready.'),
                              'current': len(result.get('items', []))})
         return self.stage
 
 
 class ParallelInstallerQueue:
-    """One worker executes app/driver jobs serially; foreground reviews continue."""
+    """Start discovery together; grant mutations after cleanup, one job at a time.
+
+    Operations receive (backend, item_callback, prepared_callback, before_install).
+    The installer slot remains owned until the final outcome is durable, including
+    error handling. Merely preparing or waiting never records installer intent.
+    """
     def __init__(self, backend, parent_run_id, operations, mux, *, cancel_event=None, prior_barrier=None):
         self.backend, self.mux = backend, mux
-        self.thread, self.joined = None, False
+        self.joined = False
         self.prior_barrier = prior_barrier
+        self.barrier = prior_barrier
+        self.condition = threading.Condition()
+        self.maintenance_ready = False
+        self.active_job = None
         self.stop_event = threading.Event()
         queue = self
         class Cancellation:
@@ -498,60 +522,163 @@ class ParallelInstallerQueue:
                 return queue.stop_event.is_set() or cancel_event is not None and cancel_event.is_set()
         self.cancel_event = Cancellation()
         self.jobs = [ParallelAppUpdates(backend, parent_run_id, title, operation, mux,
-                     cancel_event=self.cancel_event, isolate_bridge=title == WINDOWS_DRIVERS)
+                     cancel_event=self.cancel_event, isolate_bridge=True)
                      for title, operation in operations]
         if not self.jobs:
             raise ValueError('Choose at least one configured background update job.')
+        for job in self.jobs:
+            job.concurrent_preparation = True
+            job.prepared = threading.Event()
+            job.will_install = False
+            job.preparation_bridge = None
+            job.gate_refusal = None
+            operation = job.operation
+            def coordinated(worker, item_callback, *, job=job, operation=operation):
+                job.preparation_bridge = getattr(worker, 'bridge', None)
+                return operation(worker, item_callback,
+                    lambda state: self._prepared(job, state),
+                    lambda state: self._before_install(job, state))
+            job.operation = coordinated
 
     def start(self):
         stages = []
-        # Every job is durably prepared before the queue thread can mutate.
-        for index, job in enumerate(self.jobs):
-            stages.append(job.start(inline=True, prior_barrier=self.prior_barrier))
-            if job.result is None and index:
-                job.mux.background('pending', {'description': 'Driver updates queued behind application updates; installers run one at a time.'
-                                   if job.title == WINDOWS_DRIVERS else 'Updates queued behind the current installer job.'})
-        self.thread = threading.Thread(target=self._run, name='Optimus background installer queue', daemon=False)
+        # Every job is durably prepared before ANY worker starts discovery.
         try:
-            self.thread.start()
-        except BaseException:
-            self.thread = None
             for job in self.jobs:
-                job.defer('The background queue could not start; no installer was launched.')
+                stages.append(job.start(inline=True, prior_barrier=self.prior_barrier))
+            for job in self.jobs:
+                if job.result is not None:
+                    job.prepared.set()
+                    continue
+                job.thread = threading.Thread(target=self._run, args=(job,),
+                    name='Optimus ' + job.job_id, daemon=False)
+                try:
+                    job.thread.start()
+                except BaseException:
+                    job.thread = None
+                    raise
+        except BaseException:
+            self.cancel()
+            for job in self.jobs:
+                if job.thread is None and job.result is None:
+                    try:
+                        job.defer('The background worker could not start; no installer was launched.', cancelled=True)
+                    except BaseException:
+                        # A failed preparation write cannot be repaired by
+                        # writing again. The in-memory known no-launch result
+                        # still permits joining safely and releasing the lease.
+                        pass
+                    finally:
+                        job.prepared.set()
+            self.join()
             raise
         return stages
 
-    def _run(self):
-        from .runtime_priority import lower_worker_priority
-        restore_priority = lower_worker_priority()
-        try:
-            barrier = self.prior_barrier
-            for job in self.jobs:
+    def _prepared(self, job, state):
+        state = state if isinstance(state, dict) else {}
+        with self.condition:
+            if job.prepared.is_set():
+                return
+            job.will_install = bool(state.get('candidate_count')) and not state.get('review_only', True)
+            job.prepared.set()
+            self.condition.notify_all()
+        if job.will_install:
+            job.mux.background('waiting_for_maintenance', {
+                'description': 'Update discovery finished; waiting for initial resource checks and selected temporary-file cleanup.',
+                'total': state.get('candidate_count', 0)})
+
+    def _before_install(self, job, state):
+        self._prepared(job, state)
+        phase = None
+        with self.condition:
+            while True:
                 if self.cancel_event.is_set():
-                    job.defer('Cancelled before this background job started; no installer was launched.', cancelled=True)
-                elif barrier:
-                    job.defer(barrier)
-                elif job.result is None:
-                    job._run()
-                barrier = barrier or installer_barrier(job.result)
+                    job.gate_refusal = 'Cancelled before installation; no installer was launched.'
+                    return False
+                if self.barrier:
+                    job.gate_refusal = self.barrier
+                    return False
+                if not self.maintenance_ready:
+                    current = 'waiting_for_maintenance'
+                    description = 'Discovery finished; waiting for initial resource checks and selected temporary-file cleanup.'
+                else:
+                    # If both are ready at the checkpoint, retain app-first
+                    # ordering. A ready driver need not await an app still scanning.
+                    earlier_ready = any(other is not job and other.will_install and other.result is None
+                                        for other in self.jobs[:self.jobs.index(job)])
+                    if self.active_job is None and not earlier_ready:
+                        self.active_job = job
+                        job.mux.background('preparing', {'description': 'Installer slot acquired; rechecking approved scope and current readiness.'})
+                        return True
+                    current = 'waiting_for_installer'
+                    description = 'Discovery finished; waiting for the other update installer and its verified outcome. Maintenance can continue.'
+                if current != phase:
+                    phase = current
+                    job.mux.background(current, {'description': description})
+                self.condition.wait(timeout=0.2)
+
+    def _run(self, job):
+        try:
+            job._run()
         finally:
-            restore_priority()
+            with self.condition:
+                # _run saves the final journal before relinquishing the slot.
+                # A failed save produces an uncertain result and closes the gate.
+                if job.gate_refusal and not self.cancel_event.is_set() and job.result is not None:
+                    job.result.update(blocked_by_prior_installer=True, stop_reason=job.gate_refusal)
+                    job.record['result'] = _journal_result(job.result)
+                    try:
+                        job._write()
+                    except BaseException:
+                        job.result.update(uncertain=True, outcomeKnown=False)
+                self.barrier = self.barrier or installer_barrier(job.result)
+                job.will_install = False
+                job.prepared.set()  # Failures/empty/review paths also unblock cleanup.
+                if self.active_job is job:
+                    self.active_job = None
+                self.condition.notify_all()
+
+    def wait_prepared(self):
+        """Drain discovery before touching its shared TEMP/cache staging area."""
+        if any(not job.prepared.is_set() for job in self.jobs):
+            self.mux.wait_for_preparation()
+        while any(not job.prepared.wait(timeout=0.2) for job in self.jobs):
+            self.mux.heartbeat()
+        # A bridge timeout does not cancel its native request. Do not delete
+        # staging files or start another mutation while that discovery survives.
+        for job in self.jobs:
+            bridge = job.preparation_bridge
+            from .bridge import PowerShellBridge
+            if type(bridge) is PowerShellBridge:
+                with bridge._pending_lock:
+                    if bridge._pending:
+                        return 'Update discovery is still running in its Windows engine after a timeout; temporary-file cleanup and installers were deferred.'
+        return None
+
+    def release_maintenance(self, barrier=None):
+        with self.condition:
+            self.barrier = self.barrier or barrier
+            self.maintenance_ready = True
+            self.condition.notify_all()
 
     def cancel(self):
         self.stop_event.set()
         for job in self.jobs:
             job.cancel()
+        with self.condition:
+            self.condition.notify_all()
 
     def join(self, *, next_stage=None):
         if not self.joined:
-            if self.thread is not None:
-                if self.thread.is_alive():
-                    self.mux.wait_for_updates(next_stage)
-                while self.thread.is_alive():
-                    self.thread.join(timeout=1)
-                    if self.thread.is_alive():
-                        self.mux.heartbeat()
-                self.thread.join()
+            if any(job.thread is not None and job.thread.is_alive() for job in self.jobs):
+                self.mux.wait_for_updates(next_stage)
+            for job in self.jobs:
+                if job.thread is not None:
+                    while job.thread.is_alive():
+                        job.thread.join(timeout=0.5)
+                        if job.thread.is_alive():
+                            self.mux.heartbeat()
+                    job.thread.join()
             self.joined = True
         return [job.join() for job in self.jobs]
 

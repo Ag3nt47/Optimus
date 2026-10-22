@@ -64,7 +64,8 @@ class Backend:
         self.calls.append('update:' + identity)
         # Every mutation has durable prepared/running evidence first.
         records = [json.loads(path.read_text()) for path in (self.data_dir / 'parallel-updates').glob('*.json')]
-        record = next(row for row in records if row['status'] == 'running')
+        record = next(row for row in records if row['status'] == 'running'
+                      and row['title'] in (WINDOWS_SOFTWARE, NATIVE_SOFTWARE))
         assert record['status'] == 'running'
         assert record['current_item']['description']
         self.started.set()
@@ -136,7 +137,7 @@ def test_independent_stage_overlaps_but_queued_stages_and_final_readback_wait(tm
         assert not any(row in service.calls for row in ('drive', 'windows_updates', 'verify'))
         assert workflow.last_report['stages'][1]['status'] == 'running'
         assert all(event.get('percentage', 0) < 100 for event in events)
-        assert any(event.get('jobs', [{}])[0].get('status') == 'running' for event in events)
+        assert any(event.get('jobs', [{}])[0].get('status') == 'installing' for event in events)
     finally:
         service.release.set()
         thread.join(20)
@@ -492,6 +493,32 @@ def driver_settings(**changes):
     return settings(**dict(driver_config(), **changes))
 
 
+@pytest.mark.parametrize('failure', ['first_preparation', 'second_preparation', 'second_thread'])
+def test_partial_concurrent_start_failure_drains_workers_and_releases_lease(tmp_path, failure):
+    service = Backend(tmp_path)
+    service.release.set()
+    enable_fixture_driver(service, Mock(side_effect=AssertionError('No installer before startup completed')))
+    from optimus.speed_enhancements import _private_json
+    original_start = threading.Thread.start
+    def write(path, value):
+        if (value.get('schema') == 1 and value.get('status') == 'prepared'
+                and value.get('title') == (WINDOWS_SOFTWARE if failure == 'first_preparation' else WINDOWS_DRIVERS)
+                and failure != 'second_thread'):
+            raise OSError('Fixture preparation disk failure')
+        return _private_json(path, value)
+    def start(thread):
+        if failure == 'second_thread' and thread.name == 'Optimus driver_updates':
+            raise RuntimeError('Fixture second thread failure')
+        return original_start(thread)
+    with patch('optimus.speed_enhancements._private_json', side_effect=write), patch('optimus.parallel_updates.threading.Thread.start', start):
+        with pytest.raises((OSError, RuntimeError), match='Fixture'):
+            Workflow(service).run(driver_settings(), lambda _: None)
+    assert not any(call.startswith('update:') for call in service.calls)
+    service.driver_update_apply_unattended.assert_not_called()
+    with RunLease(tmp_path):
+        pass
+
+
 def enable_fixture_driver(service, operation):
     from test_automated_system import driver
     service.is_admin = Mock(return_value=True)
@@ -500,10 +527,18 @@ def enable_fixture_driver(service, operation):
     service.driver_update_apply_unattended = operation
 
 
-def test_driver_background_lane_is_serial_with_apps_and_foreground_keeps_working(tmp_path):
+def test_driver_prepares_during_app_install_and_foreground_keeps_working(tmp_path):
     service = Backend(tmp_path)
     driver_started, driver_release, maintenance_during_driver = (threading.Event() for _ in range(3))
     waiting = threading.Event()
+    driver_waiting = threading.Event()
+    apps_prepared = threading.Event()
+    original_audit = service.audit
+    def audit():
+        if not service.audit_count:
+            assert apps_prepared.wait(15)
+        return original_audit()
+    service.audit = audit
     events = []
     def install(record, **kwargs):
         assert 'update:Fixture.Two' in service.calls
@@ -527,23 +562,32 @@ def test_driver_background_lane_is_serial_with_apps_and_foreground_keeps_working
     service._apply_drive_optimization_stage = drive
     def progress(event):
         events.append(event)
+        if any(job['id'] == 'software_updates' and job['status'] == 'waiting_for_maintenance'
+               for job in event.get('jobs', [])):
+            apps_prepared.set()
         if event.get('waiting_for') == 'installer_updates':
             waiting.set()
+        if any(job['id'] == 'driver_updates' and job['status'] == 'waiting_for_installer'
+               for job in event.get('jobs', [])):
+            driver_waiting.set()
     workflow, thread, result, errors = start_workflow(service, driver_settings(
         applications_review_enabled=True, privacy_advertising_enabled=True, drive_optimization_enabled=True), callback=progress)
     try:
         assert service.independent.wait(15)
+        assert driver_waiting.wait(15)
         assert not driver_started.is_set()
         jobs = {job['id']: job for job in events[-1]['jobs']}
-        assert jobs['software_updates']['status'] == 'running'
-        assert jobs['driver_updates']['status'] == 'pending'
-        assert 'queued behind' in jobs['driver_updates']['description']
+        assert jobs['software_updates']['status'] == 'installing'
+        assert jobs['driver_updates']['status'] == 'waiting_for_installer'
+        assert 'other update installer' in jobs['driver_updates']['description']
+        service.driver_updates_scan.assert_called_once()
+        service.driver_backup_automatic.assert_not_called()
         service.release.set()
         assert maintenance_during_driver.wait(15)
         assert waiting.wait(15)
         jobs = {job['id']: job for job in events[-1]['jobs']}
         assert jobs['software_updates']['status'] == 'completed'
-        assert jobs['driver_updates']['status'] == 'running'
+        assert jobs['driver_updates']['status'] == 'installing'
         assert jobs['driver_updates']['current_package']
         assert jobs['driver_updates']['current'] == 0 and jobs['driver_updates']['total'] == 1
         assert 'drive' not in service.calls and 'verify' not in service.calls
@@ -588,6 +632,35 @@ def test_driver_only_background_job_does_not_require_software_scope(tmp_path):
     assert next(row for row in result[0]['stages'] if row['title'] == WINDOWS_DRIVERS)['background']
 
 
+def test_ready_driver_can_install_while_app_discovery_is_still_running(tmp_path):
+    service = Backend(tmp_path)
+    service.release.set()
+    scan_started, scan_release, driver_started = (threading.Event() for _ in range(3))
+    original_scan = service.updates_scan
+    def scan():
+        scan_started.set()
+        assert scan_release.wait(15)
+        return original_scan()
+    service.updates_scan = scan
+    def install(*args, **kwargs):
+        assert scan_started.wait(15)
+        assert not scan_release.is_set()
+        assert service.audit_count == 1
+        driver_started.set()
+        return {'resultCode': 2, 'hresult': 0, 'restartNeeded': False}
+    enable_fixture_driver(service, install)
+    workflow, thread, result, errors = start_workflow(service, driver_settings())
+    try:
+        assert driver_started.wait(15)
+        assert thread.is_alive()
+        assert not any(call.startswith('update:') for call in service.calls)
+    finally:
+        scan_release.set()
+        thread.join(20)
+    assert not errors and result[0]['status'] == 'completed'
+    assert 'update:Fixture.One' in service.calls
+
+
 @pytest.mark.parametrize('parallel', [False, True])
 def test_uncertain_driver_defers_conflicting_mutations_and_survives_next_run(tmp_path, parallel):
     service = Backend(tmp_path)
@@ -622,10 +695,21 @@ def test_uncertain_driver_defers_conflicting_mutations_and_survives_next_run(tmp
 def test_cancel_during_app_does_not_start_queued_driver(tmp_path):
     service = Backend(tmp_path)
     cancel = threading.Event()
+    apps_prepared = threading.Event()
+    original_audit = service.audit
+    def audit():
+        if not service.audit_count:
+            assert apps_prepared.wait(15)
+        return original_audit()
+    service.audit = audit
+    def progress(event):
+        if any(job['id'] == 'software_updates' and job['status'] == 'waiting_for_maintenance'
+               for job in event.get('jobs', [])):
+            apps_prepared.set()
     install = Mock(side_effect=AssertionError('Cancelled queue may not start a driver'))
     enable_fixture_driver(service, install)
     workflow, thread, result, errors = start_workflow(service, driver_settings(
-        applications_review_enabled=True), cancel=cancel)
+        applications_review_enabled=True), cancel=cancel, callback=progress)
     try:
         assert service.independent.wait(15)
         cancel.set()

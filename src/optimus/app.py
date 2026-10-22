@@ -327,6 +327,14 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
             try:
                 if window.windowTitle() != 'Optimus: Computer optimization tool':
                     raise AssertionError('Incorrect application title.')
+                if args.smoke_test:
+                    # Exercise the bundled GIF decoder too: a source-only UI
+                    # test cannot prove the native package contains Qt's plugin.
+                    from .widgets.local_loading import LocalLoadingAnimation
+                    decorative = LocalLoadingAnimation(window)
+                    if not decorative.ready:
+                        raise AssertionError('The bundled decorative loading GIF could not be decoded.')
+                    decorative.deleteLater()
                 if args.screenshot:
                     args.screenshot.parent.mkdir(parents=True, exist_ok=True)
                     if not window.grab().save(str(args.screenshot)):

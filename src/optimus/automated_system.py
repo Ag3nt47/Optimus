@@ -174,7 +174,29 @@ def run_startup(backend,config,cancel_event=None,item_callback=None):
     return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False,note='Only approved unchanged entries were disabled with existing startup backups; no entry was deleted.')
 
 
-def run_drivers(backend,config,cancel_event=None,item_callback=None):
+def run_drivers(backend,config,cancel_event=None,item_callback=None,*,prepared_callback=None,before_install=None):
+    """Discover immediately, then optionally wait before any backup or install.
+
+    The owner keeps its exclusive installer gate until this call returns. The
+    preparation callback fires once, including on read-only/failed paths; neither
+    callback is evidence that an installer has started.
+    """
+    notified=False
+    def prepared(**values):
+        nonlocal notified
+        if notified:return
+        notified=True
+        state={'operation':'driver','scan_complete':False,'candidate_count':0,'review_only':True}
+        state.update(values)
+        if prepared_callback is not None:prepared_callback(state)
+    try:
+        return _run_drivers(backend,config,cancel_event,item_callback,prepared=prepared,
+                            before_install=before_install,phased=prepared_callback is not None or before_install is not None)
+    finally:
+        prepared()
+
+
+def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_install,phased):
     policy=config.get('driver_policy','review')
     if config.get('driver_updates_enabled') is not True:return _finish(policy,[],skipped=True,review_only=True,reason='Driver maintenance is off; saved approvals are inactive.')
     if policy not in ('review','install_approved','install_matching'):raise ValueError('Unsupported driver policy.')
@@ -184,17 +206,23 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None):
     if policy!='review':
         if config.get('driver_changes_approved') is not True or config.get('driver_update_agreements_accepted') is not True:raise ValueError('Driver changes and license agreements require explicit saved approval.')
         if not (approvals if policy=='install_approved' else rules):raise ValueError('Choose exact driver updates or device/provider/class rules before automation.')
-        if not backend.is_admin():return _finish(policy,[],skipped=True,reason='Administrator access is required; no elevation or driver action was started.')
-        readiness = getattr(backend, 'update_disk_readiness', None)
-        if callable(readiness):
-            space = readiness()
-            if not isinstance(space, dict) or space.get('ready') is not True:
-                return _finish(policy, [], skipped=True, reason='System-drive installation space is insufficient or unverified; driver updates were deferred.', disk_readiness=space)
+        if not phased:
+            if not backend.is_admin():return _finish(policy,[],skipped=True,reason='Administrator access is required; no elevation or driver action was started.')
+            readiness = getattr(backend, 'update_disk_readiness', None)
+            if callable(readiness):
+                space = readiness()
+                if not isinstance(space, dict) or space.get('ready') is not True:
+                    return _finish(policy, [], skipped=True, reason='System-drive installation space is insufficient or unverified; driver updates were deferred.', disk_readiness=space)
+    approved_scope=copy.deepcopy({key:config.get(key) for key in ('setup_version','driver_updates_enabled','driver_policy',
+        'driver_changes_approved','driver_update_agreements_accepted','driver_approved_updates','driver_approved_devices')})
     if _cancel(cancel_event):return _finish(policy,[],cancelled=True)
     scan=backend.driver_updates_scan()
     if not isinstance(scan,dict) or type(scan.get('resultCode')) is not int or scan['resultCode']!=2 or not isinstance(scan.get('updates'),list):
-        return _finish(policy,[{'binding':{'stage':'driver-scan'},'status':'failed','error':'Windows Update did not return a complete successful fresh driver scan.','result':scan}],skipped=True,scan=scan)
-    if policy=='review':return _finish(policy,[],review_only=True,scan=scan)
+        return _finish(policy,[{'binding':{'stage':'driver-scan'},'status':'failed','error':'Windows Update did not return a complete successful fresh driver scan.','result':scan,
+            'installer_started':False,'outcomeKnown':True}],skipped=True,scan=scan,installer_started=False,outcomeKnown=True)
+    if policy=='review':
+        prepared(scan_complete=True)
+        return _finish(policy,[],review_only=True,scan=scan)
     fresh=[]
     for value in scan['updates']:
         try:fresh.append(driver_descriptor(value))
@@ -226,15 +254,39 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None):
         if counts[(value['id'],value['revision'])]!=1 or value.get('canRequestUserInput') is not False or value.get('rebootBehavior') not in (0,2):
             items.append({'binding':value,'status':'skipped','reason':'Ambiguous, interactive, unknown, or restart-requiring updates are excluded from unattended installation.'})
         else:eligible.append(value)
-    if not eligible or _cancel(cancel_event):return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False)
+    prepared(scan_complete=True,candidate_count=len(eligible),review_only=False)
+    if not eligible or _cancel(cancel_event):return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False,installer_started=False,outcomeKnown=True)
+    def deferred(reason,**extra):
+        return _finish(policy,items,skipped=True,review_only=False,deferred=eligible,
+            cancelled=_cancel(cancel_event),reason=reason,stop_reason=reason,
+            installer_started=False,outcomeKnown=True,**extra)
+    if before_install is not None:
+        if before_install({'operation':'driver','scan_complete':True,'candidate_count':len(eligible),'review_only':False}) is not True:
+            return deferred('The maintenance or exclusive installer gate did not permit driver changes.')
+    if _cancel(cancel_event):return deferred('Cancelled before driver backup or installation.')
+    if phased:
+        if {key:config.get(key) for key in approved_scope}!=approved_scope:
+            return deferred('Saved driver approvals changed while waiting; review the current scope before installing.')
+        if not backend.is_admin():return deferred('Administrator access is required; no elevation or driver action was started.')
+        readiness=getattr(backend,'update_disk_readiness',None)
+        if callable(readiness):
+            space=readiness()
+            if not isinstance(space,dict) or space.get('ready') is not True:
+                return deferred('System-drive installation space is insufficient or unverified; driver updates were deferred.',disk_readiness=space)
+        if _cancel(cancel_event):return deferred('Cancelled before driver backup or installation.')
+        if {key:config.get(key) for key in approved_scope}!=approved_scope:
+            return deferred('Saved driver approvals changed; review the current scope before installing.')
     backup=backend.driver_backup_automatic()
     if not isinstance(backup,dict) or type(backup.get('exit_code')) is not int or backup['exit_code']!=0 or not isinstance(backup.get('destination'),str) or not backup['destination']:
-        return _finish(policy,items+[{'status':'failed','binding':{'stage':'driver-backup'},'result':backup,'error':'A successful third-party driver backup is required before installation.'}],backup=backup)
+        return _finish(policy,items+[{'status':'failed','binding':{'stage':'driver-backup'},'result':backup,'error':'A successful third-party driver backup is required before installation.',
+            'installer_started':False,'outcomeKnown':True}],backup=backup,installer_started=False,outcomeKnown=True)
     processed=0
     for index,value in enumerate(eligible):
         if _cancel(cancel_event):break
+        if phased and {key:config.get(key) for key in approved_scope}!=approved_scope:break
         if item_callback:item_callback({'operation':'driver','current':index+1,'index':index+1,'total':len(eligible),'description':value['title'],'binding':value})
         if _cancel(cancel_event):break
+        if phased and {key:config.get(key) for key in approved_scope}!=approved_scope:break
         processed=index+1
         try:
             outcome=backend.driver_update_apply_unattended(value,accept_eula=True)
@@ -245,5 +297,7 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None):
         except Exception as error:
             items.append({'binding':value,'status':'failed','error':str(error),'uncertain':True})
             break
-    return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False,backup=backup,deferred=eligible[processed:],note='Only approved applicable update identities or exact device/provider/class rules were used. No automatic reboot or elevation was requested.')
+    lifecycle={'installer_started':False,'outcomeKnown':True} if processed==0 else {}
+    return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False,backup=backup,deferred=eligible[processed:],
+        **lifecycle,note='Only approved applicable update identities or exact device/provider/class rules were used. No automatic reboot or elevation was requested.')
 

@@ -17,7 +17,28 @@ def _cancelled(event):
     return event is not None and event.is_set()
 
 
-def run_native_software(backend, settings, *, cancel_event=None, item_callback=None):
+def run_native_software(backend, settings, *, cancel_event=None, item_callback=None,
+                        prepared_callback=None, before_install=None):
+    notified = False
+    def prepared(state=None):
+        nonlocal notified
+        if not notified:
+            notified = True
+            if prepared_callback:
+                prepared_callback(state or {'operation': 'software', 'scan_complete': False,
+                                            'candidate_count': 0, 'review_only': True})
+    try:
+        return _run_native_software(backend, settings, cancel_event=cancel_event,
+            item_callback=item_callback, prepared_callback=prepared, before_install=before_install)
+    finally:
+        prepared()
+
+
+def _run_native_software(backend, settings, *, cancel_event=None, item_callback=None,
+                         prepared_callback=None, before_install=None):
+    if _cancelled(cancel_event):
+        return {'items': [], 'failed_items': 0, 'cancelled': True,
+                'installer_started': False, 'outcomeKnown': True}
     scan = backend.updates_scan()
     policy = settings.get('software_update_policy', 'review')
     result = {'review_only': policy == 'review', 'scan': scan, 'items': [], 'failed_items': 0,
@@ -26,6 +47,7 @@ def run_native_software(backend, settings, *, cancel_event=None, item_callback=N
         result.update(review_only=True, failed_items=1, note='Package metadata is incomplete; no installer ran.')
         return result
     if policy == 'review':
+        prepared_callback({'operation': 'software', 'scan_complete': True, 'candidate_count': 0, 'review_only': True})
         return result
     if settings.get('setup_version') != CURRENT_SETUP_VERSION or settings.get('software_update_agreements_accepted') is not True:
         raise ValueError('Complete native setup and approve package-update agreements first.')
@@ -36,6 +58,14 @@ def run_native_software(backend, settings, *, cancel_event=None, item_callback=N
     wanted = set(settings.get('software_update_ids', []))
     excluded = set(settings.get('software_update_exclude_ids', []))
     selected = [row for row in scan['updates'] if row['id'] not in excluded and (policy == 'all_supported' or row['id'] in wanted)]
+    state = {'operation': 'software', 'scan_complete': True, 'candidate_count': len(selected), 'review_only': False}
+    prepared_callback(state)
+    if selected and before_install and before_install(state) is not True:
+        result.update(skipped=True, review_only=True, cancelled=_cancelled(cancel_event),
+                      installer_started=False, outcomeKnown=True,
+                      deferred_ids=[row['id'] for row in selected],
+                      note='Approved native updates were deferred at the maintenance/installer checkpoint; no installer ran.')
+        return result
     for index, row in enumerate(selected):
         if _cancelled(cancel_event):
             result['cancelled'] = True
@@ -145,8 +175,8 @@ class NativeWorkflow:
         self.active = True
         report, lease, path, attempted, parallel_job = None, None, None, False, None
         try:
-            from .parallel_updates import (ProgressMux, ParallelAppUpdates, NATIVE_SOFTWARE,
-                                           independent_stage, BLOCKED_STAGES, installer_barrier,
+            from .parallel_updates import (ProgressMux, ParallelAppUpdates, ParallelInstallerQueue, NATIVE_SOFTWARE,
+                                           independent_stage, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
@@ -233,26 +263,45 @@ class NativeWorkflow:
             def join_updates(next_stage=None):
                 nonlocal joined, completed, parallel_barrier
                 if parallel_job is not None and not joined:
-                    stage = parallel_job.join(next_stage=next_stage)
+                    stage = parallel_job.join(next_stage=next_stage)[0]
                     joined = True
                     completed += 1
                     parallel_barrier = parallel_barrier or installer_barrier(stage['result'])
                     report['cancelled'] = report['cancelled'] or stage['result'].get('cancelled') is True
                     atomic_json(path, report)
 
+            checkpoint_open = False
+            cleanup_barrier = None
+            if parallel_spec is not None:
+                def background_software(worker, item_callback, prepared_callback, before_install):
+                    return run_native_software(worker, configuration, cancel_event=parallel_job.cancel_event,
+                        item_callback=item_callback, prepared_callback=prepared_callback, before_install=before_install)
+                parallel_job = ParallelInstallerQueue(self.backend, identifier,
+                    [(NATIVE_SOFTWARE, background_software)], progress_callback,
+                    cancel_event=cancel_event, prior_barrier=unresolved_apps)
+                report['stages'].extend(parallel_job.start())
+                atomic_json(path, report)
+
             for title, operation in stages:
-                if parallel_job is not None and not independent_stage(title):
+                if parallel_job is not None and checkpoint_open and not independent_stage(title):
                     join_updates(title)
+                if parallel_job is not None and title in BEFORE_UPDATES and not checkpoint_open:
+                    cleanup_barrier = cleanup_barrier or parallel_job.wait_prepared()
                 if _cancelled(cancel_event):
                     report['cancelled'] = True
                     break
                 progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
-                                   'stage_status': 'running', 'description': 'Starting: ' + title, 'processes': ['Optimus native maintenance worker'],
+                                   'stage_status': 'running', 'maintenance_status': 'scanning' if title == stages[0][0] else 'running',
+                                   'description': 'Starting: ' + title, 'processes': ['Optimus native maintenance worker'],
                                    'log': 'Starting: ' + title, 'completed': completed, 'total': total_stages})
                 stage = {'name': title, 'title': title, 'started_at': time.time(), 'status': 'completed'}
                 serial_job = None
                 try:
-                    if parallel_barrier and title in BLOCKED_STAGES:
+                    if cleanup_barrier and title in BEFORE_UPDATES:
+                        result = {'skipped': True, 'review_only': True, 'requiresReview': True,
+                                  'failed_items': 0, 'items': [], 'stop_reason': cleanup_barrier,
+                                  'note': 'No cleanup ran while update discovery still owned temporary files.'}
+                    elif parallel_barrier and title in BLOCKED_STAGES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,
                                   'blocked_by_prior_installer': True,
@@ -287,20 +336,20 @@ class NativeWorkflow:
                     if serial_job is None and not (isinstance(stage.get('result'), dict) and stage['result'].get('blocked_by_prior_installer')):
                         record_installer_outcome(self.backend, identifier, title, stage.get('result'))
                 stage['finished_at'] = time.time()
-                report['stages'].append(stage)
+                if title == stages[0][0]:
+                    report['stages'].insert(0, stage)
+                else:
+                    report['stages'].append(stage)
                 completed += 1
                 atomic_json(path, report)
-                if parallel_spec is not None and parallel_job is None and title == parallel_launch_after and not report['cancelled']:
-                    initial_failed = report['stages'][0]['status'] != 'completed'
-                    def background_software(worker, item_callback):
-                        if unresolved_apps or initial_failed:
-                            return {'items': [], 'failed_items': 0, 'review_only': True, 'skipped': True,
-                                    'stop_reason': unresolved_apps or 'The initial before-inventory failed; application updating was deferred.'}
-                        return run_native_software(worker, configuration, cancel_event=parallel_job.cancel_event, item_callback=item_callback)
-                    parallel_job = ParallelAppUpdates(self.backend, identifier, NATIVE_SOFTWARE,
-                                                      background_software, progress_callback, cancel_event=cancel_event)
-                    report['stages'].append(parallel_job.start())
-                    atomic_json(path, report)
+                if parallel_job is not None and title == parallel_launch_after:
+                    checkpoint_open = True
+                    prior_barrier = unresolved_apps or cleanup_barrier
+                    if report['stages'][0]['status'] != 'completed':
+                        prior_barrier = 'The initial before-inventory failed; native update installation was deferred.'
+                    if report['cancelled']:
+                        parallel_job.cancel()
+                    parallel_job.release_maintenance(prior_barrier)
                 progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
                                    'stage_status': stage['status'],
                                    'description': stage.get('error') or title + ': ' + stage['status'],

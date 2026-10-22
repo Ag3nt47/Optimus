@@ -271,20 +271,24 @@ def test_binary_build_assets_seed_and_export_without_text_editing(project, tmp_p
     assets.mkdir()
     icon = b'\x00\x00\x01\x00fixture-icon'
     image = b'\x89PNG\r\nfixture-image'
+    animation = b'GIF89a-fixture-loading-animation'
     (assets / 'optimus.ico').write_bytes(icon)
+    (assets / 'loading.gif').write_bytes(animation)
     (source / 'docs').mkdir()
     (source / 'docs/optimus.png').write_bytes(image)
     (source / 'Build-Windows.bat').write_text('python -m PyInstaller --icon src/optimus/assets/optimus.ico launch.py\n', encoding='utf-8')
     workspace = SourceWorkspace(source, data)
     assert (workspace.root / 'src/optimus/assets/optimus.ico').read_bytes() == icon
+    assert (workspace.root / 'src/optimus/assets/loading.gif').read_bytes() == animation
     assert (workspace.root / 'docs/optimus.png').read_bytes() == image
-    assert not any(name.endswith(('.ico', '.png')) for name in workspace.files())
+    assert not any(name.endswith(('.ico', '.png', '.gif')) for name in workspace.files())
     destination = tmp_path / 'exported'
     report = workspace.export(destination)
     assert (destination / 'src/optimus/assets/optimus.ico').read_bytes() == icon
+    assert (destination / 'src/optimus/assets/loading.gif').read_bytes() == animation
     assert (destination / 'docs/optimus.png').read_bytes() == image
     assert 'src/optimus/assets/optimus.ico' in (destination / 'Build-Windows.bat').read_text()
-    assert report['files'] == len(workspace.files()) + 2
+    assert report['files'] == len(workspace.files()) + 3
 
 
 def test_oversized_and_unsupported_binary_assets_are_not_seeded(project):

@@ -434,6 +434,53 @@ class CriticalReview:
                  'description': 'Approved driver updates are queued behind app updates.',
                  'current': 0, 'total': 2, 'elapsed_seconds': 0}]}
         try:
+            discovery = {'stage': 'Inspect current resource usage', 'maintenance_status': 'scanning',
+                'description': 'Maintenance and both update workers have begun their independent discovery.', 'percentage': 8,
+                'processes': ['In-memory maintenance discovery', 'In-memory application update scan', 'In-memory driver update scan'],
+                'jobs': [{'id': 'software_updates', 'status': 'scanning', 'description': 'Read available application updates',
+                          'current': 0, 'total': 0, 'elapsed_seconds': 3},
+                         {'id': 'driver_updates', 'status': 'scanning', 'description': 'Read available driver updates',
+                          'current': 0, 'total': 0, 'elapsed_seconds': 4}]}
+            progress.update_progress(discovery)
+            self.viewport(progress, dimensions, prefix + '.updates-concurrent')
+            self.buttons(progress, dimensions, prefix + '.updates-concurrent', [progress.cancel_button])
+            self.check(prefix + '.updates-concurrent.discovery',
+                all(card.status.text() == 'Scanning' and card.isVisible()
+                    for card in progress.worker_cards.values()) and progress.progress.value() == 8
+                and 'application update scan' in progress.processes.toPlainText()
+                and 'driver update scan' in progress.processes.toPlainText(),
+                'All three worker cards must show concurrent discovery without claiming that installers have started.')
+            self.screenshot(progress, prefix + '-concurrent-workers')
+            maintenance_gate = dict(discovery, maintenance_status='waiting_for_preparation',
+                maintenance_wait_reason='Waiting for driver preparation before temporary cleanup.',
+                jobs=[{'id': 'software_updates', 'status': 'waiting_for_maintenance',
+                       'description': 'Application update scope is prepared.', 'wait_reason': 'Temporary cleanup must finish first.',
+                       'current': 0, 'total': 2, 'elapsed_seconds': 5},
+                      {'id': 'driver_updates', 'status': 'preparing', 'description': 'Validate the approved driver scope.',
+                       'current': 0, 'total': 1, 'elapsed_seconds': 5}])
+            progress.update_progress(maintenance_gate)
+            cards = progress.worker_cards
+            self.check(prefix + '.updates-concurrent.maintenance-gate',
+                cards['maintenance'].status.text() == 'Waiting for update preparation'
+                and 'driver preparation' in cards['maintenance'].details.text()
+                and cards['software_updates'].status.text() == 'Waiting for maintenance'
+                and 'Temporary cleanup must finish first.' in cards['software_updates'].details.text()
+                and cards['software_updates'].progress.value() == 0
+                and cards['driver_updates'].status.text() == 'Preparing',
+                'Prepared workers must name the maintenance dependency and preserve their real item counters while blocked.')
+            installer_gate = dict(discovery, stage='Review installed applications', maintenance_status='running',
+                jobs=[{'id': 'software_updates', 'status': 'installing', 'description': 'Install approved Fixture.App',
+                       'current': 0, 'total': 2, 'elapsed_seconds': 7},
+                      {'id': 'driver_updates', 'status': 'waiting_for_installer', 'description': 'Driver preparation is complete.',
+                       'wait_reason': 'The application installer owns the mutation lane.',
+                       'current': 0, 'total': 1, 'elapsed_seconds': 7}])
+            progress.update_progress(installer_gate)
+            self.check(prefix + '.updates-concurrent.installer-gate',
+                cards['maintenance'].status.text() == 'Running'
+                and cards['software_updates'].status.text() == 'Installing'
+                and cards['driver_updates'].status.text() == 'Waiting for installer'
+                and 'application installer owns' in cards['driver_updates'].details.text(),
+                'A blocked driver worker must not claim Running or Installing while another installer owns the lane.')
             progress.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 29,
                 'description': 'One or more selected operations or scan checks failed.',
                 'log': 'FAILED: Apply saved privacy controls: fixture result requires review.'})
