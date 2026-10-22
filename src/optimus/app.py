@@ -29,6 +29,9 @@ def parser():
     commands.add_argument('--speed-restore', type=_speed_identity, metavar='RUN_ID', help='Restore one exact recorded speed-enhancement change without opening the interface.')
     commands.add_argument('--windows-compatibility', choices=('status', 'prepare'), help='Inspect or prepare the saved legacy Windows media-Setup CPU policy; no OS upgrade is launched.')
     commands.add_argument('--windows-compatibility-restore', type=_run_identity, metavar='CHANGE_ID', help='Restore one recorded Windows compatibility-policy change.')
+    commands.add_argument('--update-recovery', choices=('status', 'reconcile'), help='Inspect one updater journal or reconcile a verified legacy preflight error; never starts an installer.')
+    result.add_argument('--update-record', type=_run_identity, metavar='JOURNAL_ID', help='Exact updater journal for --update-recovery.')
+    result.add_argument('--recovery-evidence', type=Path, help='Reviewed, hash-bound evidence for an explicit legacy-journal reconciliation.')
     result.add_argument('--output', type=Path, help='Report destination folder.')
     commands.add_argument('--smoke-test', action='store_true', help='Build and inspect the interface without changing settings.')
     result.add_argument('--screenshot', type=Path)
@@ -137,9 +140,38 @@ def _verify_saved_run(backend, run_id, destination=None):
     return {'read_only': True, 'report': str(exported), 'status': verification.get('status'),
             'counts': verification.get('counts'), 'coverage_complete': verification.get('coverage_complete')}
 
+
+def _update_recovery_command(backend, args):
+    from .update_recovery import inspect_legacy_cache_guard, reconcile_legacy_cache_guard
+    if not args.update_record:
+        raise ValueError('Choose one exact updater journal with --update-record.')
+    if args.update_recovery == 'status':
+        if args.recovery_evidence is not None:
+            raise ValueError('Reviewed recovery evidence is accepted only for explicit reconciliation.')
+        result = inspect_legacy_cache_guard(backend.data_dir, args.update_record)
+    else:
+        from .automation import RunLease
+        with RunLease(backend.data_dir) as lease:
+            result = reconcile_legacy_cache_guard(backend.data_dir, args.update_record,
+                lease=lease, reviewed_evidence=args.recovery_evidence)
+    if not isinstance(result, dict):
+        raise ValueError('The update recovery service returned an invalid result.')
+    result = dict(result, maintenance_actions_executed=0, installers_started_by_recovery=0)
+    if args.output is not None:
+        from .filesystem import resolve_data_root
+        from .workflow import atomic_json
+        folder = resolve_data_root(args.output)
+        folder.mkdir(parents=True, exist_ok=True)
+        report = folder / ('update-recovery-' + args.update_record + '-' + uuid.uuid4().hex + '.json')
+        atomic_json(report, result)
+        result = dict(result, report=str(report))
+    return result
+
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(actual_arguments)
+    if (args.update_record or args.recovery_evidence) and not args.update_recovery:
+        parser().error('--update-record and --recovery-evidence require --update-recovery.')
     if sys.platform not in ('win32', 'darwin', 'linux'):
         print('Optimus supports Windows, macOS and Linux.', file=sys.stderr)
         return 2
@@ -149,9 +181,11 @@ def main(argv=None):
         from .native_backend import NativeBackend as Backend
     backend = Backend()
     if (args.verify_run or args.startup_mode or args.speed_enhancements or args.speed_restore
-            or args.windows_compatibility or args.windows_compatibility_restore):
+            or args.windows_compatibility or args.windows_compatibility_restore or args.update_recovery):
         try:
-            if args.verify_run:
+            if args.update_recovery:
+                result = _update_recovery_command(backend, args)
+            elif args.verify_run:
                 result = _verify_saved_run(backend, args.verify_run, args.output)
             elif args.speed_enhancements or args.speed_restore:
                 result = _speed_command(backend, args)
@@ -162,6 +196,8 @@ def main(argv=None):
                     backend.set_startup_launch(args.startup_mode == 'on')
                 result = backend.startup_launch_status()
             print(json.dumps(result))
+            if args.update_recovery == 'reconcile' and result.get('status') not in ('reconciled', 'already_reconciled'):
+                return 2
             return 0
         except (OSError, ValueError, RuntimeError) as error:
             print(json.dumps({'status': 'error', 'error': str(error)}), file=sys.stderr)

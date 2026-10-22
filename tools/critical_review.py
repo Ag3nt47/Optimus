@@ -481,6 +481,40 @@ class CriticalReview:
                 and cards['driver_updates'].status.text() == 'Waiting for installer'
                 and 'application installer owns' in cards['driver_updates'].details.text(),
                 'A blocked driver worker must not claim Running or Installing while another installer owns the lane.')
+            journal = r'D:\FixtureUser\Optimus\Data\parallel-updates\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
+            unresolved = ('A previous update installer has an unresolved outcome; no automatic retry was started. '
+                'Review installer state and the saved record before continuing: ' + journal)
+            progress.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 40,
+                'description': 'The maintenance worker continues applying the saved privacy controls.',
+                'jobs': [{'id': identity, 'status': 'deferred', 'description': unresolved,
+                          'current': 0, 'total': 0, 'elapsed_seconds': 0}
+                         for identity in ('software_updates', 'driver_updates')]})
+            self.viewport(progress, dimensions, prefix + '.updates-deferred')
+            self.buttons(progress, dimensions, prefix + '.updates-deferred', [progress.cancel_button])
+            self.check(prefix + '.updates-deferred.compact-reason',
+                all('Previous installer needs review.' in cards[identity].details.visible_text
+                    and 'No automatic retry started.' in cards[identity].details.visible_text
+                    and cards[identity].details.toolTip() == unresolved
+                    and cards[identity].details.accessibleDescription() == unresolved
+                    for identity in ('software_updates', 'driver_updates'))
+                and progress.background_status.text().count(journal) == 1
+                and journal not in progress.background_status.visible_text
+                and progress.log.toPlainText().count(unresolved) == 1,
+                'Shared unresolved-installer warnings must have short readable captions and preserve one full saved-record reason in the log.')
+            self.check(prefix + '.updates-deferred.layout',
+                all(card.details.geometry().bottom() < card.progress.geometry().top()
+                    and card.progress.geometry().bottom() < card.elapsed.geometry().top()
+                    and len(card.details.visible_text.splitlines()) <= 2
+                    and all(card.details.fontMetrics().horizontalAdvance(line) <= card.details.contentsRect().width()
+                            for line in card.details.visible_text.splitlines())
+                    for card in cards.values()),
+                'Long worker descriptions must stay within two lines and never overlap item counts or elapsed time.')
+            self.check(prefix + '.updates-deferred.honest-state',
+                all(cards[identity].status.text() == 'Deferred' and cards[identity].progress.value() == 0
+                    for identity in ('software_updates', 'driver_updates'))
+                and cards['maintenance'].status.text() == 'Running' and progress.progress.value() == 40,
+                'A deferred updater must not claim Installing or block the independently running maintenance worker.')
+            self.screenshot(progress, prefix + '-deferred-update-details')
             progress.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 29,
                 'description': 'One or more selected operations or scan checks failed.',
                 'log': 'FAILED: Apply saved privacy controls: fixture result requires review.'})

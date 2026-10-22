@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, Slot, QUrl, QElapsedTimer
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, Slot, QUrl, QElapsedTimer, QEvent
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog,
@@ -1702,6 +1702,86 @@ class AvailableFixesWorker(QRunnable):
             self.signals.finished.emit()
 
 
+def _compact_worker_reason(text):
+    """Use a short factual caption for the recurring unresolved-installer guard."""
+    lowered = text.casefold()
+    if ('previous update installer' in lowered and 'unresolved outcome' in lowered
+            and 'no automatic retry was started' in lowered):
+        return 'Previous installer needs review.\nNo automatic retry started.'
+    return text
+
+
+class WorkflowSummaryLabel(QLabel):
+    """Paint at most two fitting lines while retaining complete accessible text."""
+    def __init__(self, text='', parent=None):
+        super().__init__(parent)
+        self._summary = ''
+        self.visible_text = ''
+        self.setTextFormat(Qt.PlainText)
+        self.setWordWrap(False)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * 2 + 4)
+        self.setText(text)
+
+    def setText(self, text):
+        self.set_summary(text, text)
+
+    def clear(self):
+        self.setText('')
+
+    def set_summary(self, summary, full_text):
+        self._summary = '\n'.join(' '.join(line.split()) for line in str(summary).splitlines())
+        full_text = str(full_text)
+        super().setText(full_text)
+        self.setToolTip(full_text)
+        self.setAccessibleDescription(full_text)
+        self.setWhatsThis(full_text)
+        self._fit_summary()
+
+    def _fit_summary(self):
+        text, metrics, width = self._summary, self.fontMetrics(), max(1, self.contentsRect().width())
+        first, separator, rest = text.partition('\n')
+        if separator and metrics.horizontalAdvance(first) <= width:
+            self.visible_text = first + '\n' + metrics.elidedText(' '.join(rest.split()), Qt.ElideRight, width)
+            self.update()
+            return
+        text = ' '.join(text.split())
+        if metrics.horizontalAdvance(text) <= width:
+            self.visible_text = text
+        else:
+            low, high = 0, len(text)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if metrics.horizontalAdvance(text[:middle]) <= width:
+                    low = middle
+                else:
+                    high = middle - 1
+            boundary = text.rfind(' ', 0, low + 1)
+            split = boundary if boundary >= max(1, low // 2) else low
+            if split:
+                self.visible_text = (text[:split].rstrip() + '\n'
+                    + metrics.elidedText(text[split:].lstrip(), Qt.ElideRight, width))
+            else:
+                self.visible_text = metrics.elidedText(text, Qt.ElideRight, width)
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_summary()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, '_summary') and event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self.setFixedHeight(self.fontMetrics().lineSpacing() * 2 + 4)
+            self._fit_summary()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.contentsRect(), Qt.AlignLeft | Qt.AlignVCenter, self.visible_text)
+
+
 class WorkflowWorkerCard(QFrame):
     """A persistent worker status, with observed item counts and no invented ETA."""
     def __init__(self, title, parent=None):
@@ -1718,13 +1798,8 @@ class WorkflowWorkerCard(QFrame):
         self.status = QLabel('Not started')
         self.status.setTextFormat(Qt.PlainText)
         layout.addWidget(self.status)
-        self.details = QLabel('Waiting for this run to start.')
-        self.details.setTextFormat(Qt.PlainText)
-        self.details.setWordWrap(True)
-        self.details.setMinimumWidth(0)
-        self.details.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.details.setMaximumHeight(self.details.fontMetrics().lineSpacing() * 2 + 4)
-        layout.addWidget(self.details, 1)
+        self.details = WorkflowSummaryLabel('Waiting for this run to start.')
+        layout.addWidget(self.details)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
@@ -1759,8 +1834,7 @@ class WorkflowWorkerCard(QFrame):
         package = state.get('current_package')
         if isinstance(package, str) and package.strip() and package not in description:
             description += ' — ' + package
-        self.details.setText(description)
-        self.details.setToolTip(description)
+        self.details.set_summary(_compact_worker_reason(description), description)
         current, total = state.get('current'), state.get('total')
         if maintenance:
             self.progress.setRange(0, 100)
@@ -1821,6 +1895,7 @@ class OptimizationProgressWindow(QDialog):
         self._waiting_update_kind = None
         self._worker_selection = {}
         self._foreground_update_clocks = {}
+        self._logged_update_reasons = set()
         self._maintenance_clock = QElapsedTimer()
         self._maintenance_clock.start()
         self._recommendations_ready = False
@@ -1863,10 +1938,8 @@ class OptimizationProgressWindow(QDialog):
             self.worker_cards[identity] = card
             worker_row.addWidget(card, 1)
         layout.addLayout(worker_row)
-        self.background_status = QLabel()
+        self.background_status = WorkflowSummaryLabel()
         self.background_status.setObjectName('BackgroundStatus')
-        self.background_status.setTextFormat(Qt.PlainText)
-        self.background_status.setWordWrap(True)
         self.background_status.hide()
         layout.addWidget(self.background_status)
         self.insights_summary = QLabel()
@@ -2025,11 +2098,42 @@ class OptimizationProgressWindow(QDialog):
                 'elapsed_seconds': clock.elapsed() / 1000})
         if isinstance(jobs, list):
             descriptions = []
+            compact_descriptions = []
+            reason_groups = {}
+            blocked_statuses = {'deferred', 'needs_review', 'failed', 'waiting_for_maintenance',
+                                'waiting_for_installer', 'waiting_for_preparation'}
+            for job in jobs:
+                if isinstance(job, dict) and job.get('status') in blocked_statuses:
+                    reason = display(job.get('description'))
+                    extra = job.get('wait_reason')
+                    if isinstance(extra, str) and extra.strip() and extra not in reason:
+                        reason += ' — ' + extra
+                    if reason:
+                        reason_groups.setdefault(reason, []).append(job)
+            seen_reasons = set()
             for job in jobs:
                 if not isinstance(job, dict):
                     continue
                 if job.get('id') in ('software_updates', 'driver_updates'):
                     self.worker_cards[job['id']].update_state(job)
+                reason = display(job.get('description'))
+                extra = job.get('wait_reason')
+                if isinstance(extra, str) and extra.strip() and extra not in reason:
+                    reason += ' — ' + extra
+                if job.get('status') in blocked_statuses and reason:
+                    if reason in seen_reasons:
+                        continue
+                    seen_reasons.add(reason)
+                    grouped = reason_groups[reason]
+                    names = '; '.join(({'software_updates': 'App updates', 'driver_updates': 'Driver updates'}
+                        .get(item.get('id'), display(item.get('id')))) + ': '
+                        + str(item.get('status', '')).replace('_', ' ') for item in grouped)
+                    descriptions.append(names + ' — ' + reason)
+                    compact_descriptions.append(names + ' — ' + _compact_worker_reason(reason))
+                    if len(reason) > 150 and reason not in self._logged_update_reasons:
+                        self._logged_update_reasons.add(reason)
+                        self.log.appendPlainText('UPDATE DETAILS — ' + names + '\n' + reason)
+                    continue
                 text = display(job.get('description') or str(job.get('id', '')).replace('_', ' '))
                 package = job.get('current_package')
                 if isinstance(package, str) and package.strip() and package not in text:
@@ -2052,7 +2156,9 @@ class OptimizationProgressWindow(QDialog):
                                     f'{minutes}m {seconds:02d}s' if minutes else f'{seconds}s')
                     text += ' — elapsed ' + elapsed_text
                 descriptions.append(text)
-            self.background_status.setText('Background: ' + '; '.join(descriptions))
+                compact_descriptions.append(text)
+            self.background_status.set_summary('Background: ' + '; '.join(compact_descriptions),
+                                               'Background: ' + '; '.join(descriptions))
             self.background_status.setVisible(bool(descriptions))
         log = field(state, 'log', default='')
         if log:

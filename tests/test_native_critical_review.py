@@ -142,13 +142,14 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'updates-waiting.failure-history', 'updates-waiting.cancellation-stable',
             'updates-waiting.foreground-resumes', 'updates-waiting.three-worker-cards',
             'updates-waiting.driver-handoff', 'updates-concurrent.discovery',
-            'updates-concurrent.maintenance-gate', 'updates-concurrent.installer-gate'):
+            'updates-concurrent.maintenance-gate', 'updates-concurrent.installer-gate',
+            'updates-deferred.compact-reason', 'updates-deferred.layout', 'updates-deferred.honest-state'):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed'
     assert by_id['confirmation.negative-default']['status'] == 'passed'
     assert report['screenshots'] and all((reviewer.output / item['file']).is_file() for item in report['screenshots'])
     assert {item['name'] for item in report['screenshots']} >= {
         f'{width}x{height}-{state}' for width, height in bot.VIEWPORTS
-        for state in ('concurrent-workers', 'updates-waiting', 'driver-updates-waiting')}
+        for state in ('concurrent-workers', 'updates-waiting', 'driver-updates-waiting', 'deferred-update-details')}
     assert {item['area'] for item in report['manual_review']} >= {'GPU', 'CPU and RAM', 'Updates and security'}
     assert all(item['status'] == 'not_exercised' for item in report['skipped_checks'])
     assert {item['source'] for item in report['documentation_comparison']} == {'docs/FEATURES.md', 'docs/PLATFORMS.md'}
@@ -209,6 +210,33 @@ def test_concurrent_review_rejects_a_blocked_worker_labelled_running(reviewer, a
         for suffix in ('maintenance-gate', 'installer-gate'):
             failure = findings['regression.updates-concurrent.' + suffix]
             assert failure['status'] == 'failed' and failure['severity'] == 'critical'
+    finally:
+        owner.close()
+        owner.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('defect', ['raw-caption', 'counter-overlap'])
+def test_deferred_review_detects_long_warning_caption_and_counter_overlap(reviewer, app, monkeypatch, defect):
+    original = bot.OptimizationProgressWindow.update_progress
+    def broken_update(progress, state):
+        original(progress, state)
+        if not state.get('jobs') or state['jobs'][0].get('status') != 'deferred':
+            return
+        card = progress.worker_cards['software_updates']
+        if defect == 'raw-caption':
+            card.details.setText(card.details.text())
+        else:
+            card.layout().setEnabled(False)
+            card.progress.move(card.details.geometry().topLeft())
+    monkeypatch.setattr(bot.OptimizationProgressWindow, 'update_progress', broken_update)
+    owner = QWidget()
+    try:
+        reviewer.review_update_wait(owner, bot.VIEWPORTS[0], 'regression')
+        findings = {item['id']: item for item in reviewer.report['checks']}
+        suffix = 'compact-reason' if defect == 'raw-caption' else 'layout'
+        failure = findings['regression.updates-deferred.' + suffix]
+        assert failure['status'] == 'failed' and failure['severity'] == 'critical'
     finally:
         owner.close()
         owner.deleteLater()

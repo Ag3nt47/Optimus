@@ -18,6 +18,8 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
+Version **0.9.2** keeps deferred-worker messages readable at smaller window sizes and groups repeated installer warnings once. It also adds [audited recovery for a proven legacy update preflight error](docs/UPDATE_RECOVERY.md), preserving the original records and successful installation receipts. Unknown installer outcomes remain blocked; recovery never launches an installer.
+
 Version **0.9.1** starts **Maintenance**, **App updates** and **Driver updates** together on Windows when background updates are enabled. App and driver discovery run in their own workers alongside the initial resource check. Shared temporary-file cleanup waits for discovery; approved installers then share an exclusive slot while independent maintenance continues. Each panel shows its actual scanning, preparation, installation or waiting state. Final verification waits for both update receipts. Native macOS/Linux app discovery also overlaps the initial audit; hardware support remains a read-only native capability. Exact saved approvals, version pairs, cancellation and unresolved-installer protections remain enforced.
 
 Windows can give the interface Above Normal CPU priority, with normal base priority for bulk workers and a saved next-launch toggle. No Real-time or RAM allocation boost is requested.
