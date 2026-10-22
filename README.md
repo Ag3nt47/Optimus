@@ -18,7 +18,7 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
-Version **0.9.3** keeps each update worker's elapsed time through discovery, waiting and completion, and shows the concrete reason for a known pre-install refusal. The progress raccoon is twice as wide. Content windows resize to the available desktop, retain the size you choose during the session, and keep their controls reachable; the Sandbox toolbar wraps as its window narrows.
+Version **0.9.4** keeps each update worker's elapsed time through discovery, waiting and completion, and shows the concrete reason for a known pre-install refusal. The progress raccoon is twice as wide. Content windows resize to the available desktop and retain the size you choose during the session. Cancel and Auto continue remain visible while detailed content scrolls; the Sandbox toolbar wraps as its window narrows.
 
 Version **0.9.2** keeps deferred-worker messages readable at smaller window sizes and groups repeated installer warnings once. It also adds [audited recovery for a proven legacy update preflight error](docs/UPDATE_RECOVERY.md), preserving the original records and successful installation receipts. Unknown installer outcomes remain blocked; recovery never launches an installer.
 

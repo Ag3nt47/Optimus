@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QScrollArea
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QRect
 from PySide6.QtTest import QTest
 
 from optimus.ui import OptimizationProgressWindow
@@ -14,6 +14,16 @@ from optimus.widgets.header_controls import motion_allowed
 from optimus.widgets.theme import build_qss
 from optimus.widgets.wrapping_checkbox import WrappingCheckBox
 from test_native_speed_enhancements_ui import app, window
+
+
+@pytest.fixture(autouse=True)
+def virtual_fixture_desktop(monkeypatch):
+    # These fixtures measure exact 850/1024 client viewports, independently of
+    # the offscreen plugin's artificial 800x800 desktop. Keep the production
+    # fitter active against an explicit virtual screen; genuine small-screen
+    # bounds and DPI behavior are covered by test_native_window_geometry.
+    monkeypatch.setattr('optimus.widgets.window_geometry.available_screen_geometry',
+                        lambda _: QRect(0, 0, 1920, 1080))
 
 
 @pytest.fixture(autouse=True)

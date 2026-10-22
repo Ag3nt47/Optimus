@@ -2002,7 +2002,7 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_button.setObjectName('Primary')
         self.auto_continue_button.setMinimumHeight(36)
         self.auto_continue_button.clicked.connect(self.autoContinueRequested.emit)
-        layout.addWidget(self.auto_continue_button)
+        outer.addWidget(self.auto_continue_button)
         self.clear_auto_continue()
         self.cancel_button = QPushButton('Cancel after current stage')
         self.cancel_button.setMinimumHeight(36)
