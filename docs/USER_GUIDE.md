@@ -16,6 +16,8 @@ Choose the intensity and the individual modules you want:
 
 The Codex profile is optional. Leaving it off preserves existing process priorities and external priority watchers. Higher priority changes CPU scheduling; it does not create more processing capacity or memory.
 
+**Speed enhancements** in Settings can apply eligible native power preferences automatically during Optimize, or run separately with Review, Apply now and recorded Restore controls. Full mode selects it once; existing saved choices remain editable. Windows also provides separate advanced choices for WinGet's non-security compatibility mode and legacy unsupported-CPU media preparation. Their exact behavior and script commands are described in [Speed enhancements and compatibility](SPEED_ENHANCEMENTS.md). A policy change does not mean a patch or OS upgrade was installed.
+
 Save the configuration, return to the main window, and use **1 click Optimize and debloat**. Its progress window shows the actual current stage, description, worker/process information, log, and completed-stage percentage. A completed percentage does not mean every individual item succeeded: read the returned results, skipped items and failed stages.
 
 **Cancel after current stage** requests a stop at a workflow boundary. A stage already applying changes must finish; cancellation does not roll back earlier stages.

@@ -117,11 +117,14 @@ def _status(checks):
 
 
 class OutcomeVerification:
-    def __init__(self, data_dir, *, native_reader=None, process_reader=None, sampler_status=None, clock=None):
+    def __init__(self, data_dir, *, native_reader=None, process_reader=None, sampler_status=None, speed_reader=None, compatibility_reader=None, drive_reader=None, clock=None):
         self.data_dir = Path(data_dir)
         self.native_reader = native_reader or local_snapshot
         self.process_reader = process_reader or _process_state
         self.sampler_status = sampler_status
+        self.speed_reader = speed_reader
+        self.compatibility_reader = compatibility_reader
+        self.drive_reader = drive_reader
         self.clock = clock or time.monotonic
 
     def _owned_json(self, relative, maximum=12*1024*1024):
@@ -263,6 +266,33 @@ class OutcomeVerification:
         if title in ('Clean temporary files', 'Clean selected additional categories'):
             self._clean(value.get('result', {}), checks, title)
         elif title == 'Clean selected browser data': self._browsers(value, report, checks)
+        elif title == 'Apply supported speed enhancements':
+            if self.speed_reader is None:
+                self._add(checks, 'speed_configuration', title, 'unverified', 'No fresh speed-configuration reader was supplied.')
+            else:
+                from .speed_verification import normalized_speed_checks
+                checked = self.speed_reader(value, cancel_event=self.cancel_event,
+                                            timeout=max(.01, self.deadline - self.clock()))
+                for check in normalized_speed_checks(checked):
+                    self._add(checks, 'speed_configuration', check['target'], check['status'], check['reason'])
+        elif title == 'Prepare approved Windows CPU upgrade workaround':
+            if self.compatibility_reader is None:
+                self._add(checks, 'windows_compatibility', title, 'unverified', 'No fresh compatibility-policy reader was supplied.')
+            else:
+                from .speed_verification import normalized_speed_checks
+                checked = self.compatibility_reader(value, cancel_event=self.cancel_event,
+                                                     timeout=max(.01, self.deadline - self.clock()))
+                for check in normalized_speed_checks(checked):
+                    self._add(checks, 'windows_compatibility', check['target'], check['status'], check['reason'])
+        elif title == 'Optimize eligible internal drives':
+            if self.drive_reader is None:
+                self._add(checks, 'drive_optimization', title, 'unverified', 'No independent drive-maintenance reader was supplied.')
+            else:
+                from .speed_verification import normalized_speed_checks
+                checked = self.drive_reader(value, cancel_event=self.cancel_event,
+                                            timeout=max(.01, self.deadline - self.clock()))
+                for check in normalized_speed_checks(checked):
+                    self._add(checks, 'drive_optimization', check['target'], check['status'], check['reason'])
         elif title == 'Apply Codex performance profile': self._priorities(value, checks)
         elif title == 'Apply saved privacy controls': self._privacy(value, checks)
         elif title == 'Review or update configured software': self._software(value, report, checks)

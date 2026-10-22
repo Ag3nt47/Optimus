@@ -18,6 +18,10 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
+Version **0.8.0** adds an automatic **Speed enhancements** package with native power-policy checks, fresh configuration verification and recorded undo. Full mode enables it; existing choices stay editable in Settings. Advanced Windows options add WinGet's non-security compatibility mode and a legacy unsupported-CPU policy for eligible media-Setup cases. The separate Windows-media script scans the selected image before an explicitly requested upgrade. See [Speed enhancements and compatibility](docs/SPEED_ENHANCEMENTS.md) for scope, script commands and limits.
+
+The one-click workflow also offers eligible Windows SSD TRIM/HDD optimization, a saved automatic post-scan continuation choice, and background app updates while independent work continues. The critical-review bot checks fixture UI layouts and workflow behavior during native builds, publishing a report and screenshots. [One-click coverage](docs/ONE_CLICK_COVERAGE.md) explains which actions can be automatic and which still need an explicit scope or decision.
+
 Version **0.7.2** adds **Auto continue — apply available fixes** to completed scan/cleanup results. Review the listed automatic fixes, then click once to apply them as a batch and verify the outcomes. It can apply supported Windows security corrections and retry remaining updates within your saved scopes and licence approvals. Restarts, vendor-only patches and newly suggested program changes stay listed for manual action. Auto continue does not repeat cleanup or debloat, and closing results never approves a fix.
 
 Choose your native download above; Python is not required. **Windows:** extract the entire ZIP and open `Optimus.exe`, keeping `_internal` and `source` beside it. **macOS:** extract the ZIP, move `Optimus.app` to Applications, and open it. **Linux:** extract the tar archive and run `Optimus/Optimus`; keep its supporting files together. The macOS builds are ad-hoc signed, without Apple notarization; use the normal macOS Privacy & Security review if Gatekeeper asks. Do not disable operating-system protections.

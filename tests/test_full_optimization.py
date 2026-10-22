@@ -94,6 +94,10 @@ def fixture_backend(tmp_path):
                                                           'reason': 'Fixture disabled', 'action': 'enable'}]}
     service = SimpleNamespace(data_dir=tmp_path, bridge=SimpleNamespace(_process=None),
         audit=Mock(return_value={}), installed_apps=Mock(return_value=[]),
+        _apply_speed_enhancements_stage=Mock(return_value={'skipped': True, 'failed_items': 0,
+            'note': 'Fixture setup has not authorized native power changes.'}),
+        _apply_drive_optimization_stage=Mock(return_value={'skipped': True, 'failed_items': 0,
+            'note': 'Fixture setup has not authorized native drive changes.'}),
         slowdown_report=Mock(return_value={}), startup_list=Mock(return_value=[]),
         driver_updates_scan=Mock(return_value={'resultCode': 2, 'updates': []}),
         updates_scan=Mock(return_value={'exitCode': 0, 'structured': True, 'updates': []}),

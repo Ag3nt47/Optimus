@@ -31,12 +31,12 @@ SEVERITY_COLOR = {
 # Font stacks — each theme picks either a UI-style or mono-style stack.
 # Segoe UI: Windows system font — crisp, readable, zero-install.
 # Fira Code: beautiful ligature monospace for code / console areas.
-_CYBER_FONT = "'Segoe UI','Helvetica Neue','Arial',sans-serif"
+_CYBER_FONT = "'Segoe UI','Helvetica Neue','Arial','Noto Sans','DejaVu Sans','Liberation Sans',sans-serif"
 _CRT_FONT   = "'Cascadia Mono','Consolas','Courier New',monospace"
 # Slate theme: Segoe UI for the UI surface, Fira Code in code panels.
 # The QSS `font-family` on * sets the default; code-area widgets
 # (CommandConsolePanel, etc.) override with their own QFont/setStyleSheet.
-_SLATE_FONT = "'Segoe UI','Helvetica Neue','Arial',sans-serif"
+_SLATE_FONT = _CYBER_FONT
 
 THEMES = {
     "cyber": {
@@ -163,6 +163,7 @@ def build_qss(name: str = "cyber", accent: str | None = None,
 QMainWindow, QWidget {{ background: {p['bg']}; }}
 /* Labels inherit their panel surface instead of painting dark rectangles. */
 QLabel {{ background: transparent; }}
+QCheckBox, QRadioButton {{ background: transparent; }}
 QScrollArea#DashboardViewport {{ border: none; }}
 
 /* ── Typography helpers ────────────────────────────────────────────────── */
@@ -268,6 +269,27 @@ QPushButton:checked {{
     background: {accent_33};
     border: 1px solid {p['accent']};
 }}
+QPushButton:focus {{ border-color: {p['accent']}; background: {accent_22}; }}
+QPushButton#Primary:focus {{ border: 2px solid {p['text']}; }}
+QPushButton:disabled, QPushButton#Primary:disabled {{
+    background: {p['panel']}; color: {p['dim']}; border-color: {p['border']};
+}}
+QGroupBox {{
+    border: 1px solid {p['border']}; border-radius: {r};
+    margin-top: 12px; padding: 14px 12px 12px 12px; background: {p['panel']};
+}}
+QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px;
+    color: {p['text']}; font-weight: 700; }}
+QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 6px; }}
+QTabBar::tab {{ background: {p['panel']}; color: {p['dim']}; padding: 9px 12px;
+    border-bottom: 2px solid transparent; }}
+QTabBar::tab:selected {{ color: {p['text']}; background: {p['panel2']};
+    border-bottom-color: {p['accent']}; }}
+QProgressBar#WorkflowProgress {{ min-height: 24px; max-height: 24px;
+    text-align: center; font-weight: 700; border-radius: 7px; }}
+QProgressBar#WorkflowProgress::chunk {{ background: {accent_55}; border-radius: 6px; }}
+QLabel#BackgroundStatus {{ color: {p['dim']}; padding: 4px 0; }}
+QScrollArea {{ border: none; }}
 
 /* ── Inputs ────────────────────────────────────────────────────────────── */
 QLineEdit, QComboBox, QPlainTextEdit {{

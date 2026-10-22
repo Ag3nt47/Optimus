@@ -36,7 +36,13 @@ class _SpinRing(QWidget):
         self._timer.timeout.connect(self._tick)
 
     def start(self) -> None:
-        if not self._timer.isActive():
+        from .header_controls import motion_allowed
+        owner = self
+        while owner is not None and not hasattr(owner, 'config'):
+            owner = owner.parentWidget()
+        if not motion_allowed(getattr(owner, 'config', None)):
+            self._timer.stop()
+        elif not self._timer.isActive():
             self._timer.start(33)
         self.show()
 

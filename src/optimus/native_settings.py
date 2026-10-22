@@ -16,6 +16,8 @@ WINDOWS_ONLY = (
     'windows_security_updates_install_approved', 'windows_security_update_agreements_accepted',
     'driver_updates_enabled', 'legacy_patch_review_enabled', 'cloud_review_enabled',
     'codex_priority_enabled',
+    'update_compatibility_mode_enabled', 'windows_cpu_compatibility_enabled',
+    'drive_optimization_enabled',
 )
 PACKAGE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9@+_.:/-]{0,255}\Z')
 

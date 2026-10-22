@@ -101,11 +101,100 @@ class Backend:
         from .post_run_fixes import apply_available_fixes
         return apply_available_fixes(self, report, settings, progress_callback=progress_callback, cancel_event=cancel_event)
 
+    def _speed_enhancements_service(self):
+        if not hasattr(self, '_speed_service'):
+            from .speed_enhancements import SpeedEnhancements
+            self._speed_service = SpeedEnhancements(self)
+        return self._speed_service
+
+    def speed_enhancements_scan(self):
+        return self._speed_enhancements_service().scan()
+
+    def speed_enhancements_history(self):
+        return self._speed_enhancements_service().history()
+
+    def _apply_speed_enhancements_stage(self, settings, *, progress_callback=None, cancel_event=None):
+        # Workflow already owns the global maintenance lease. Standalone callers
+        # enter through apply_speed_enhancements so they cannot overlap a run.
+        return self._speed_enhancements_service().apply(settings, progress_callback=progress_callback,
+                                                       cancel_event=cancel_event)
+
+    def _speed_maintenance(self, operation):
+        from .automation import RunLease
+        if not self.workflow.lock.acquire(blocking=False):
+            raise RuntimeError('Wait for the current optimization or speed operation to finish.')
+        lease = None
+        try:
+            lease = RunLease(self.data_dir).acquire()
+            self.workflow.active = True
+            return operation()
+        finally:
+            try:
+                if lease is not None:
+                    lease.release()
+            finally:
+                self.workflow.active = False
+                self.workflow.lock.release()
+
+    def apply_speed_enhancements(self, settings=None, *, progress_callback=None, cancel_event=None):
+        configuration = self.preference_store.validate(self.preferences() if settings is None else settings)
+        return self._speed_maintenance(lambda: self._apply_speed_enhancements_stage(configuration,
+            progress_callback=progress_callback, cancel_event=cancel_event))
+
+    def restore_speed_enhancements(self, run_id, *, progress_callback=None, cancel_event=None):
+        return self._speed_maintenance(lambda: self._speed_enhancements_service().restore(run_id,
+            progress_callback=progress_callback, cancel_event=cancel_event))
+
+    def verify_speed_enhancements(self, report, *, cancel_event=None, timeout=30):
+        return self._speed_enhancements_service().verify(report, cancel_event=cancel_event, timeout=timeout)
+
+    def _windows_compatibility_service(self):
+        if not hasattr(self, '_windows_compatibility'):
+            from .windows_compatibility import WindowsCompatibility
+            self._windows_compatibility = WindowsCompatibility(self)
+        return self._windows_compatibility
+
+    def _drive_optimization_service(self):
+        if not hasattr(self, '_drive_optimizer'):
+            from .drive_optimization import DriveOptimization
+            self._drive_optimizer = DriveOptimization(self)
+        return self._drive_optimizer
+
+    def drive_optimization_scan(self):
+        return self._drive_optimization_service().scan()
+
+    def _apply_drive_optimization_stage(self, settings, *, cancel_event=None, progress_callback=None):
+        return self._drive_optimization_service().apply(settings, cancel_event=cancel_event,
+                                                        progress_callback=progress_callback)
+
+    def optimize_drives(self, settings=None, *, cancel_event=None, progress_callback=None):
+        configuration = self.preference_store.validate(self.preferences() if settings is None else settings)
+        return self._speed_maintenance(lambda: self._apply_drive_optimization_stage(configuration,
+            cancel_event=cancel_event, progress_callback=progress_callback))
+
+    def verify_drive_optimization(self, report, *, cancel_event=None, timeout=30):
+        return self._drive_optimization_service().verify(report, cancel_event=cancel_event, timeout=timeout)
+
+    def windows_compatibility_status(self):
+        return self._windows_compatibility_service().status()
+
+    def _prepare_windows_compatibility_stage(self, settings, *, cancel_event=None):
+        return self._windows_compatibility_service().apply(settings, cancel_event=cancel_event)
+
+    def prepare_windows_compatibility(self):
+        return self._speed_maintenance(lambda: self._prepare_windows_compatibility_stage(self.preferences()))
+
+    def verify_windows_compatibility(self, report, *, cancel_event=None, timeout=30):
+        return self._windows_compatibility_service().verify(report, cancel_event=cancel_event, timeout=timeout)
+
     def verify_optimization(self, report, cancel_event=None, timeout=30):
         from .verification import OutcomeVerification
         active = getattr(getattr(self, 'workflow', None), 'last_report', None)
         same_session = active is report or isinstance(active, dict) and active.get('id') == report.get('id')
-        return OutcomeVerification(self.data_dir, sampler_status=self.sampler.status if same_session else None).verify(
+        return OutcomeVerification(self.data_dir, sampler_status=self.sampler.status if same_session else None,
+                                   speed_reader=getattr(self, 'verify_speed_enhancements', None),
+                                   compatibility_reader=getattr(self, 'verify_windows_compatibility', None),
+                                   drive_reader=getattr(self, 'verify_drive_optimization', None)).verify(
             report, cancel_event=cancel_event, timeout=timeout)
 
     def _privacy_service(self):
@@ -280,13 +369,29 @@ class Backend:
     def update_app(self, package_id):
         return self.maintenance.updates_apply(package_id, confirmed=True)
 
-    def update_app_unattended(self, package_id, *, cancel_event=None):
+    def update_app_unattended(self, package_id, *, cancel_event=None, compatibility_mode=False):
         """Saved scope/agreements authorize updates; cancellation still gates installation."""
         readiness = self.update_disk_readiness()
         if readiness['ready'] is not True:
             return {'skipped': True, 'requiresReview': True, 'exitCode': 0,
                     'status': 'deferred', 'note': readiness['reason'], 'disk_readiness': readiness}
         options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+        if type(compatibility_mode) is not bool:
+            raise ValueError('Choose an explicit compatibility mode.')
+        if compatibility_mode:
+            from .automation import CURRENT_SETUP_VERSION
+            saved = self.preferences()
+            if saved.get('update_compatibility_mode_enabled') is not True or saved.get('setup_version') != CURRENT_SETUP_VERSION:
+                return {'skipped': True, 'requiresReview': True, 'exitCode': None,
+                        'status': 'deferred', 'note': 'The saved non-security compatibility choice is off or setup is incomplete.'}
+            try:
+                current_security = self.security_status()
+            except Exception:
+                current_security = {}
+            if not isinstance(current_security, dict) or current_security.get('reboot_required') is not False:
+                return {'skipped': True, 'requiresReview': True, 'exitCode': None, 'status': 'deferred',
+                        'note': 'A Windows restart is pending or its state could not be verified. Compatibility mode did not start an installer.'}
+            options['compatibility_mode'] = True
         return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True, **options)
 
     def update_disk_readiness(self):
@@ -371,9 +476,12 @@ class Backend:
         return self.maintenance.debloat_apply(plan)
 
     def changes(self):
-        return self._list(self.bridge.request('changes')) + self.performance_controller.allocation_history()
+        return (self._list(self.bridge.request('changes')) + self.performance_controller.allocation_history()
+                + self._windows_compatibility_service().history())
 
     def restore(self, change):
+        if change.get('source') == 'python-compatibility':
+            return self._speed_maintenance(lambda: self._windows_compatibility_service().restore(change.get('Id') or change.get('id')))
         if change.get('source') == 'python-allocation':
             return self.performance_controller.restore_allocation(change.get('Id') or change.get('id'))
         return self.bridge.request('restore', change=change)

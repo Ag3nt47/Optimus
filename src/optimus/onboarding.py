@@ -159,7 +159,8 @@ class InitialSetupWizard(QWizard):
         return page.body
 
     def _check(self, layout, key, label, *, default=False):
-        checkbox = QCheckBox(label)
+        from .widgets.wrapping_checkbox import WrappingCheckBox
+        checkbox = WrappingCheckBox(label)
         checkbox.setChecked(bool(self.initial.get(key, default)))
         self.controls[key] = checkbox
         layout.addWidget(checkbox)
@@ -496,8 +497,11 @@ class InitialSetupWizard(QWizard):
     def _build_performance(self):
         body = self._page('performance', '7. Performance Optimizer',
             'Review process CPU/memory and priority/affinity information without closing applications. Optional Codex priority and background sampling are separate choices. Existing external priority watchers are preserved.')
-        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'codex_priority_enabled', 'background_analysis_enabled')])
+        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'codex_priority_enabled', 'background_analysis_enabled')])
         self._check(body, 'performance_review_enabled', 'Include a detailed process/resource review report')
+        self._check(body, 'speed_enhancements_enabled', 'Automatically apply supported reversible speed enhancements during Optimize')
+        self._check(body, 'drive_optimization_enabled', 'Optimize eligible internal drives (SSD TRIM / HDD optimization)')
+        body.addWidget(_label('The speed package applies a supported performance power policy only after fresh power, permission and policy checks. Battery, custom/managed and unsupported configurations are deferred. Changes are recorded for restore in Settings. Existing cleanup and resource-analysis choices remain separate; no performance gain is assumed.'))
         self._check(body, 'codex_priority_enabled', 'Apply the selected Codex priority during maintenance')
         priority = QComboBox()
         priority.addItems(['Normal', 'AboveNormal', 'High'])
@@ -541,11 +545,18 @@ class InitialSetupWizard(QWizard):
         body = self._page('software', '9. Software Updater',
             'Load current WinGet application updates and select exact packages, or authorize all supported installed WinGet applications with explicit exclusions. Review only never installs. All-supported approval also covers future matching installed applications.')
         self._check(body, 'software_updates_enabled', 'Include the Software Updater stage')
+        self._check(body, 'parallel_app_updates_enabled', 'Update apps in background while independent steps continue')
+        self._check(body, 'auto_continue_fixes_enabled', 'Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)')
+        body.addWidget(_label('Saving automatic continuation approves supported Defender/firewall fixes and already-approved updates after a completed scan, without another per-run prompt. Process choices, application removal and restarts remain manual. Background app updates keep a single installer lane while independent review and cleanup steps continue.'))
         self._check(body, 'legacy_patch_review_enabled', 'Review known legacy/unofficial support provider paths (information only; no unverified replacement installation)')
         self._check(body, 'windows_security_updates_enabled', 'Check available Windows Security and Critical updates')
         self._check(body, 'windows_security_updates_install_approved', 'Approve automatic installation of eligible Windows Security/Critical updates, including later matching offers')
         self._check(body, 'windows_security_update_agreements_accepted', 'Accept Microsoft update agreements for this Windows Security/Critical update scope')
         body.addWidget(_label('Windows security patch installation requires both saved approvals. Feature upgrades are excluded. Administrator access, Windows policy or a pending restart can defer installation. Optimus never requests an automatic reboot.'))
+        self._check(body, 'update_compatibility_mode_enabled', 'Use WinGet compatibility mode for approved application updates')
+        body.addWidget(_label('Requests the non-security --force option on the initial approved attempt. Exact identity/version, pin, signature/hash and restart checks stay in effect. An unknown installer state never authorizes a repeated attempt.'))
+        self._check(body, 'windows_cpu_compatibility_enabled', 'Prepare unsupported-CPU Windows media upgrades (MoSetup; administrator access)')
+        body.addWidget(_label('This prepares only the supported media-Setup workaround; Installation Assistant may still block the upgrade. Bootability, security, personal-data and free-space checks remain in effect. Saved Windows security/driver scopes are unchanged. The OS upgrade itself is not part of automatic cleanup.'))
         self.software_policy = QComboBox()
         self.software_policy.addItem('Scan and report only', 'review')
         self.software_policy.addItem('Install only my selected/listed exact package IDs', 'selected')
@@ -1191,6 +1202,18 @@ class InitialSetupWizard(QWizard):
                 actions.append(text)
         if settings.get('codex_priority_enabled'):
             actions.append('Set the optional Codex priority to ' + settings['codex_priority'])
+        if settings.get('speed_enhancements_enabled'):
+            actions.append('Automatically apply supported reversible speed enhancements after fresh power and policy checks; review and restore recorded changes in Settings')
+        if settings.get('drive_optimization_enabled'):
+            actions.append('Optimize eligible internal drives through Windows SSD TRIM / HDD optimization after fresh eligibility checks')
+        if settings.get('parallel_app_updates_enabled'):
+            actions.append('Update approved apps in the background while independent steps continue; installer work stays serialized')
+        if settings.get('auto_continue_fixes_enabled'):
+            actions.append('Automatically continue after completed scans with supported Defender/firewall fixes and already-approved updates; process choices, application removal and restarts remain manual')
+        if settings.get('update_compatibility_mode_enabled'):
+            actions.append('Use WinGet compatibility mode (--force, non-security) for the initial approved application-update attempt; retain identity/version, pin, signature/hash and restart checks; do not retry unknown installer outcomes')
+        if settings.get('windows_cpu_compatibility_enabled'):
+            actions.append('Prepare unsupported-CPU Windows media upgrades through MoSetup with administrator access; Installation Assistant may still block; bootability, security, personal-data and free-space checks remain; the OS upgrade itself is not automatic cleanup')
         if settings.get('background_analysis_enabled'):
             actions.append('Keep read-only background analysis on at ' + str(settings['analysis_interval']) + '-second intervals')
         if settings.get('consumer_debloat_enabled'):

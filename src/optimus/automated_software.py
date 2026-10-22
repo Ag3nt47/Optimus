@@ -87,7 +87,8 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
     """Apply only a current scan's exact IDs under the saved selected/all scope.
 
     The native updater checks pins again before each installation. No generic
-    upgrade-all, force, include-unknown, pin override or reboot flag is used.
+    upgrade-all, include-unknown, pin override or reboot flag is used. The
+    separate saved compatibility choice may add the non-security force flag.
     """
     cancelled = lambda: cancel_event is not None and cancel_event.is_set()
     if configuration.get('software_updates_enabled') is not True:
@@ -138,6 +139,8 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
             break
         try:
             options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+            if configuration.get('update_compatibility_mode_enabled') is True:
+                options['compatibility_mode'] = True
             outcome = backend.update_app_unattended(identity, **options)
             known_exit = isinstance(outcome, dict) and type(outcome.get('exitCode')) is int
             skipped = isinstance(outcome, dict) and outcome.get('skipped') is True
@@ -183,4 +186,7 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
             'stop_reason': stop_reason,
             'excluded_ids': [identity for identity in candidates if identity.casefold() in exclusions],
             'not_available_ids': [identity for identity in configuration.get('software_update_ids', []) if identity.casefold() not in canonical_ids],
-            'note': 'Only complete identities with a provably newer version from a successful fresh winget-source scan may be updated. Equal, older or incomparable versions are skipped. Saved exclusions and native pin checks are honored; no force, pin override, unknown-version update or automatic restart is requested. Unsupported applications require their publisher updater.'}
+            'compatibility_mode': configuration.get('update_compatibility_mode_enabled') is True,
+            'note': ('Only complete identities with a provably newer version from a successful fresh winget-source scan may be updated. Equal, older or incomparable versions are skipped. Saved exclusions and native pin checks remain in effect. '
+                     + ('The saved compatibility choice adds WinGet --force for non-security issues; it cannot bypass an installer hard block. ' if configuration.get('update_compatibility_mode_enabled') is True else 'No force option is requested. ')
+                     + 'Hash/signature checks remain enabled; no pin override, unknown-version update, blind retry or automatic restart is requested. Unsupported applications require their publisher updater.')}

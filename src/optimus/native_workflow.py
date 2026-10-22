@@ -42,7 +42,7 @@ def run_native_software(backend, settings, *, cancel_event=None, item_callback=N
             break
         if item_callback:
             item_callback({'description': 'Updating approved native package ' + row['id'],
-                           'current': index, 'total': len(selected)})
+                           'id': row['id'], 'current': index, 'total': len(selected)})
         if _cancelled(cancel_event):
             result['cancelled'] = True
             break
@@ -143,9 +143,14 @@ class NativeWorkflow:
         if not self.lock.acquire(blocking=False):
             raise RuntimeError('An optimization run is already active.')
         self.active = True
-        report, lease, path, attempted = None, None, None, False
+        report, lease, path, attempted, parallel_job = None, None, None, False, None
         try:
+            from .parallel_updates import (ProgressMux, ParallelAppUpdates, NATIVE_SOFTWARE,
+                                           INDEPENDENT, BLOCKED_STAGES, installer_barrier,
+                                           pending_updates_barrier, parallel_stages)
+            progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
+            unresolved_apps = pending_updates_barrier(self.backend)
             identifier = uuid.uuid4().hex
             path = self.backend.data_dir / 'runs' / (identifier + '.json')
             report = {'id': identifier, 'platform': self.backend.system, 'started_at': time.time(),
@@ -175,6 +180,9 @@ class NativeWorkflow:
                 stages.append(('Review installed native applications', lambda: {'review_only': True, 'items': self.backend.installed_apps()}))
             if configuration.get('performance_review_enabled'):
                 stages.append(('Measure applications contributing to pressure', lambda: self.backend.slowdown_report(cancel_event=cancel_event)))
+            if configuration.get('speed_enhancements_enabled'):
+                stages.append(('Apply supported speed enhancements',
+                               lambda: self.backend._apply_speed_enhancements_stage(configuration, cancel_event=cancel_event)))
             if configuration.get('startup_review_enabled'):
                 stages.append(('Review or disable approved user startup entries', lambda: run_native_startup(self.backend, configuration, cancel_event=cancel_event)))
             if configuration.get('duplicates_enabled'):
@@ -203,17 +211,42 @@ class NativeWorkflow:
                 stages.append(('Start requested read-only background analysis', lambda: self.backend.analysis_start(configuration.get('analysis_interval', 5))))
             if configuration.get('post_process_review_enabled'):
                 stages.append(('Prepare optional background-program recommendations', lambda: self.backend.process_harness_scan(cancel_event=cancel_event)))
+            stages.append(('Capture final native resource report', self.backend.audit))
             stages.append(('Verify optimization outcomes', lambda: self.backend.verify_optimization(report, cancel_event=cancel_event)))
-            for index, (title, operation) in enumerate(stages):
+            parallel_spec = None
+            if configuration.get('parallel_app_updates_enabled'):
+                stages, parallel_spec = parallel_stages(stages, NATIVE_SOFTWARE)
+            total_stages = len(stages) + int(parallel_spec is not None)
+            completed, joined = 0, False
+            parallel_barrier = unresolved_apps
+
+            def join_updates():
+                nonlocal joined, completed, parallel_barrier
+                if parallel_job is not None and not joined:
+                    stage = parallel_job.join()
+                    joined = True
+                    completed += 1
+                    parallel_barrier = installer_barrier(stage['result'])
+                    report['cancelled'] = report['cancelled'] or stage['result'].get('cancelled') is True
+                    atomic_json(path, report)
+
+            for title, operation in stages:
+                if parallel_job is not None and title not in INDEPENDENT:
+                    join_updates()
                 if _cancelled(cancel_event):
                     report['cancelled'] = True
                     break
-                progress_callback({'percentage': int(index * 100 / len(stages)), 'stage': title,
+                progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
                                    'description': 'Starting: ' + title, 'processes': ['Optimus native maintenance worker'],
-                                   'log': 'Starting: ' + title, 'completed': index, 'total': len(stages)})
+                                   'log': 'Starting: ' + title, 'completed': completed, 'total': total_stages})
                 stage = {'name': title, 'title': title, 'started_at': time.time(), 'status': 'completed'}
                 try:
-                    result = operation()
+                    if parallel_barrier and title in BLOCKED_STAGES:
+                        result = {'skipped': True, 'review_only': True, 'requiresReview': True,
+                                  'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,
+                                  'note': 'Deferred after application updating: ' + parallel_barrier}
+                    else:
+                        result = operation()
                     stage['result'] = result
                     if isinstance(result, dict):
                         if result.get('failed_items', 0):
@@ -229,16 +262,31 @@ class NativeWorkflow:
                         report['final_verification'] = result
                 except Exception as error:
                     stage.update(status='failed', error=str(error))
+                if title == NATIVE_SOFTWARE and parallel_job is None:
+                    parallel_barrier = installer_barrier(stage.get('result'))
                 stage['finished_at'] = time.time()
                 report['stages'].append(stage)
+                completed += 1
                 atomic_json(path, report)
-                progress_callback({'percentage': int((index + 1) * 100 / len(stages)), 'stage': title,
+                if parallel_spec is not None and parallel_job is None and title == 'Inspect native resources and process identities' and not report['cancelled']:
+                    initial_failed = stage['status'] != 'completed'
+                    def background_software(worker, item_callback):
+                        if unresolved_apps or initial_failed:
+                            return {'items': [], 'failed_items': 0, 'review_only': True, 'skipped': True,
+                                    'stop_reason': unresolved_apps or 'The initial before-inventory failed; application updating was deferred.'}
+                        return run_native_software(worker, configuration, cancel_event=parallel_job.cancel_event, item_callback=item_callback)
+                    parallel_job = ParallelAppUpdates(self.backend, identifier, NATIVE_SOFTWARE,
+                                                      background_software, progress_callback, cancel_event=cancel_event)
+                    report['stages'].append(parallel_job.start())
+                    atomic_json(path, report)
+                progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
                                    'description': stage.get('error') or title + ': ' + stage['status'],
                                    'processes': ['Optimus native maintenance worker'],
                                    'log': stage['status'].upper() + ': ' + title,
-                                   'completed': index + 1, 'total': len(stages)})
+                                   'completed': completed, 'total': total_stages})
                 if report['cancelled']:
                     break
+            join_updates()
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(row['status'] == 'failed' for row in report['stages'])
             report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] else 'completed'
@@ -247,6 +295,9 @@ class NativeWorkflow:
                            run_id=identifier, validator=self.backend.preference_store.validate)
             return report
         except Exception as error:
+            if parallel_job is not None:
+                parallel_job.cancel()
+                parallel_job.join()
             if report is not None:
                 report.update(status='failed', error=str(error), finished_at=time.time())
                 if path is not None:
@@ -256,10 +307,16 @@ class NativeWorkflow:
                                    error=str(error), validator=self.backend.preference_store.validate)
             raise
         finally:
-            if lease is not None:
-                lease.release()
-            self.active = False
-            self.lock.release()
+            try:
+                if parallel_job is not None:
+                    if not parallel_job.joined:
+                        parallel_job.cancel()
+                    parallel_job.join()
+            finally:
+                if lease is not None:
+                    lease.release()
+                self.active = False
+                self.lock.release()
 
 
 def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
@@ -400,6 +457,15 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
                         add(label, 'unverified', 'No valid cache deletion journal was recorded.')
             if not any(row.get('profiles') or row.get('cache') for row in outcome.get('items', [])):
                 add(label, 'not_applicable', 'No browser data was changed; unavailable or declined open browsers were skipped.')
+        elif label == 'Apply supported speed enhancements':
+            try:
+                checked = backend.verify_speed_enhancements(outcome, cancel_event=cancel_event,
+                                                            timeout=max(.01, deadline - time.monotonic()))
+                from .speed_verification import normalized_speed_checks
+                for check in normalized_speed_checks(checked):
+                    add(check['target'], check['status'], check['reason'])
+            except Exception:
+                add(label, 'unverified', 'The fresh speed-configuration readback was unavailable.')
         elif label == 'Start requested read-only background analysis':
             state = backend.analysis_status()
             sample_deadline = min(deadline, time.monotonic() + 2)

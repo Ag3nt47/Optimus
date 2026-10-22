@@ -82,7 +82,7 @@ class NativeSetupWizard(QWizard):
         self._startup_loaded = False
         self.setWindowTitle('Optimus — native setup questions')
         self.setWizardStyle(QWizard.ModernStyle)
-        self.setMinimumSize(880, 700)
+        self.setMinimumSize(850, 650)
         self.setStyleSheet(build_qss('cyber'))
         self.setButtonText(QWizard.FinishButton, 'Save choices')
         self._build_general()
@@ -107,7 +107,8 @@ class NativeSetupWizard(QWizard):
         return layout
 
     def check(self, body, key, text):
-        control = QCheckBox(text)
+        from .widgets.wrapping_checkbox import WrappingCheckBox
+        control = WrappingCheckBox(text)
         control.setChecked(bool(self.initial.get(key)))
         self.controls[key] = control
         body.addWidget(control)
@@ -131,6 +132,11 @@ class NativeSetupWizard(QWizard):
         body.addWidget(self.cadence)
         self.check(body, 'launch_at_sign_in', 'Launch Optimus when I sign in to this desktop account')
         self.check(body, 'background_analysis_enabled', 'Keep background CPU, RAM, disk and network analysis running')
+        self.check(body, 'speed_enhancements_enabled', 'Automatically apply supported reversible speed enhancements during Optimize')
+        self.check(body, 'parallel_app_updates_enabled', 'Update apps in background while independent steps continue')
+        self.check(body, 'auto_continue_fixes_enabled', 'Automatically continue with supported post-scan fixes and approved updates')
+        note(body, 'Automatic continuation uses your saved package scopes and agreements. Native OS/security choices, process actions and restarts remain manual. Background app updates keep one installer lane while independent steps continue.')
+        note(body, 'The speed package changes only a supported power policy after fresh mains-power, permission and policy checks. Battery, custom and unsupported configurations are deferred. Settings provides current review and guarded restore; no speed gain is assumed.')
         self.check(body, 'reduce_motion', 'Reduce animation and starfield motion')
         note(body, 'Raising process priority may need OS permission. It does not create additional CPU or RAM. '
              'Daily and weekly maintenance stop when Optimus exits. Sign-in registration takes effect at the next login.')
@@ -309,6 +315,21 @@ class NativeSetupWizard(QWizard):
     def _build_summary(self, first_run):
         body = self.page_body('Review and save', 'Approvals persist until you change them in Settings.')
         self.check(body, 'security_review_enabled', 'Inspect native security/update status and show recommendations')
+        self.speed_summary = note(body, '')
+        def speed_summary(enabled):
+            self.speed_summary.setText('Automatic reversible speed enhancements: ' + ('enabled. Supported power-policy changes run during Optimize after fresh checks; review and restore are available in Settings.'
+                if enabled else 'disabled. Optimize keeps the existing power policy.'))
+        self.controls['speed_enhancements_enabled'].toggled.connect(speed_summary)
+        speed_summary(self.controls['speed_enhancements_enabled'].isChecked())
+        self.continuation_summary = note(body, '')
+        def continuation_summary(*_):
+            self.continuation_summary.setText('Automatic post-scan fixes: '
+                + ('enabled within saved package scopes and agreements' if self.controls['auto_continue_fixes_enabled'].isChecked() else 'disabled; results wait for your click')
+                + '. Background app updates: ' + ('enabled for independent steps' if self.controls['parallel_app_updates_enabled'].isChecked() else 'disabled')
+                + '. Native OS/security, process actions and restarts remain manual.')
+        for key in ('auto_continue_fixes_enabled', 'parallel_app_updates_enabled'):
+            self.controls[key].toggled.connect(continuation_summary)
+        continuation_summary()
         note(body, 'Native capability information explains what was measured, what is supported and what requires '
              'manual OS controls. Registry cleanup, Windows consumer-app removals, Defender scans and DPAPI-backed '
              'cloud sign-in are Windows-specific. No substitute is presented as an equivalent security fix.')
@@ -430,12 +451,18 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         self._build_native_history()
         self._build_native_capabilities()
 
-    def page(self, name):
+    def page(self, name, *, scroll=True):
         content = QWidget()
         layout = QVBoxLayout(content)
         self.pages[name] = self.tabs.count()
         self.layouts[name] = layout
-        self.tabs.addTab(content, name)
+        if scroll:
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setWidget(content)
+            self.tabs.addTab(area, name)
+        else:
+            self.tabs.addTab(content, name)
         return layout
 
     def action(self, body, text, method, *args, callback=None):
@@ -445,12 +472,15 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         return button
 
     def _build_native_maintenance(self):
-        body = self.page('Maintenance')
+        body = self.page('Maintenance', scroll=True)
         note(body, 'Change the one-click configuration, saved approvals, sign-in launch and background analysis '
              'through the setup questions. Select all / Clear all are available for each multi-selection.')
         configure = QPushButton('Configure one-click optimization and startup')
         configure.clicked.connect(self.owner.open_initial_setup)
         body.addWidget(configure)
+        from .widgets.speed_enhancements_panel import SpeedEnhancementsPanel
+        self.speed_enhancements_panel = SpeedEnhancementsPanel(self, self.owner._settings())
+        body.addWidget(self.speed_enhancements_panel)
         self.action(body, 'Inspect current system health', 'audit')
         self.action(body, 'Check Optimus sign-in launch', 'startup_launch_status')
         self.action(body, 'Show saved configuration', 'preferences')
@@ -681,6 +711,7 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         self._native_shutdown = True
         self.process_harness_panel.shutdown()
         self.privacy_panel.shutdown()
+        self.speed_enhancements_panel.shutdown()
 
 
 class NativeOptimusWindow(OptimusWindow):
@@ -693,6 +724,8 @@ class NativeOptimusWindow(OptimusWindow):
             accepted = wizard.exec() == QDialog.Accepted
             if accepted:
                 self.workflow_settings = wizard.saved_preferences
+                if self._settings_window is not None:
+                    self._settings_window.speed_enhancements_panel.sync_settings(self.workflow_settings)
                 method = self.backend.analysis_start if self.workflow_settings['background_analysis_enabled'] else self.backend.analysis_stop
                 method(self.workflow_settings['analysis_interval']) if self.workflow_settings['background_analysis_enabled'] else method()
                 self.config.ui_motion_enabled = not self.workflow_settings['reduce_motion'] and bool(self.appearance.get('motion', True))

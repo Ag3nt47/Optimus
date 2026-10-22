@@ -45,6 +45,10 @@ jobs:
       - run: python -m pip install -e "." --no-deps
       - name: Native and shared platform regression suites
         run: python tools/test_native.py --junitxml=test-artifacts/pytest.xml
+      - name: Critical fixture UI and workflow review
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tools/critical_review.py --output test-artifacts/critical-review --github-summary
       - name: PowerShell engine fixture tests
         if: runner.os == 'Windows'
         shell: powershell

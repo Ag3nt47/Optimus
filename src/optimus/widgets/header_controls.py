@@ -460,7 +460,7 @@ class PanelRevealOverlay(QWidget):
         self._last_click_global = QPoint()
         self._last_click_at = 0.0
         self._animation = QPropertyAnimation(self, b"revealProgress", self)
-        self._animation.setDuration(360)
+        self._animation.setDuration(240)
         self._animation.setEasingCurve(QEasingCurve.OutCubic)
         self._animation.finished.connect(self._finish)
         self.hide()
@@ -902,7 +902,7 @@ class PanelRevealOverlay(QWidget):
         self._progress = 0.0
         self._mode = "opening"
         self._animation.stop()
-        self._animation.setDuration(360)
+        self._animation.setDuration(240)
         self._animation.setEasingCurve(QEasingCurve.OutCubic)
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
@@ -957,7 +957,7 @@ class PanelRevealOverlay(QWidget):
         if start <= 0.01:
             self._finish()
             return
-        self._animation.setDuration(max(90, round(320 * start)))
+        self._animation.setDuration(max(80, round(180 * start)))
         self._animation.setEasingCurve(QEasingCurve.InCubic)
         self._animation.setStartValue(start)
         self._animation.setEndValue(0.0)

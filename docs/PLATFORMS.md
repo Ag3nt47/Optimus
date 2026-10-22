@@ -1,6 +1,6 @@
 # Native platforms and downloads
 
-Optimus 0.7.2 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.8.0 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
@@ -25,6 +25,8 @@ Native startup registration uses the application's current location. Move the ap
 | Function family | Windows | macOS / Linux |
 | --- | --- | --- |
 | Three-control interface, setup choices, stage progress, cancellation | Native Qt | Native Qt |
+| Automatic speed enhancements and conditional undo | AC-only power mode on supported Windows 11; existing High Performance plan on eligible battery-free desktops | Charger-only Low Power Mode correction on supported macOS when already authorized; offered performance profile on eligible Linux mains-powered desktops. Battery/unknown/managed/unsupported states defer |
+| Advanced update compatibility | Saved WinGet non-security force mode; legacy MoSetup CPU-policy preparation and a separately invoked media-upgrade script | Windows compatibility changes are unavailable; native package and OS requirements remain authoritative |
 | Local allowlisted temporary/cache cleanup | Windows categories and paths | Native per-user temporary/cache paths; no indiscriminate system-folder deletion |
 | Chromium/Firefox cleanup, browser close-or-skip choices | Supported installed browser profiles | Supported native browser profiles; Safari and arbitrary application databases are outside this release's browser cleaner |
 | Process ownership, measured CPU/RAM/I/O and background analysis | Native psutil plus Windows launch evidence | Native psutil; permissions can hide ownership, command lines or counters |

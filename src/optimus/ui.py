@@ -8,19 +8,20 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, Slot, QUrl
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, Slot, QUrl, QElapsedTimer
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter,
+    QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter, QScrollArea,
     QStackedWidget, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget,
     QVBoxLayout, QWidget,
 )
 from optimus.widgets.theme import THEMES, build_qss
 from optimus.widgets.questions import ask_yes_no
 from optimus.widgets.header_controls import HeaderActionButton, install_global_window_reveal, motion_allowed
+from optimus.widgets.wrapping_checkbox import WrappingCheckBox
 
 
 def field(record, *names, default=""):
@@ -190,7 +191,7 @@ class DetailedSettingsWindow(QMainWindow):
         self.config = SimpleNamespace(ui_motion_enabled=self.preferences.get("motion", True))
         self.setWindowTitle("Optimus: Computer optimization tool")
         self.resize(1440, 920)
-        self.setMinimumSize(1080, 720)
+        self.setMinimumSize(850, 650)
         self.setWindowIcon(self._icon())
         self.setStyleSheet(self._qss())
         self._build_shell()
@@ -254,6 +255,16 @@ class DetailedSettingsWindow(QMainWindow):
         tag.setObjectName("Tagline")
         tag.setStyleSheet("font-size:9px;letter-spacing:1px;padding:0 2px 15px 2px;")
         nav.addWidget(tag)
+        navigation_scroll = QScrollArea()
+        navigation_scroll.setWidgetResizable(True)
+        navigation_scroll.setFrameShape(QFrame.NoFrame)
+        navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        navigation_content = QWidget()
+        navigation_layout = QVBoxLayout(navigation_content)
+        navigation_layout.setContentsMargins(0, 0, 0, 0)
+        navigation_layout.setSpacing(3)
+        navigation_scroll.setWidget(navigation_content)
+        nav.addWidget(navigation_scroll, 1)
         group = QButtonGroup(self)
         group.setExclusive(True)
         self.navigation = {}
@@ -263,9 +274,9 @@ class DetailedSettingsWindow(QMainWindow):
             button.setCheckable(True)
             button.clicked.connect(lambda checked=False, n=name: self.select_page(n))
             group.addButton(button)
-            nav.addWidget(button)
+            navigation_layout.addWidget(button)
             self.navigation[name] = button
-        nav.addStretch()
+        navigation_layout.addStretch()
         foot = QLabel("LOCAL TOOLS\nNo subscription required")
         foot.setObjectName("Tagline")
         foot.setStyleSheet("padding:10px 4px;font-size:10px;")
@@ -304,8 +315,12 @@ class DetailedSettingsWindow(QMainWindow):
             layout = QVBoxLayout(page)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(12)
-            self.stack.addWidget(page)
-            self.pages[name], self.layouts[name] = page, layout
+            viewport = QScrollArea()
+            viewport.setWidgetResizable(True)
+            viewport.setFrameShape(QFrame.NoFrame)
+            viewport.setWidget(page)
+            self.stack.addWidget(viewport)
+            self.pages[name], self.layouts[name] = viewport, layout
         body.addWidget(self.stack, 1)
         self.status = QLabel("Ready. Scans are read-only until you confirm an action.")
         self.status.setObjectName("StatusText")
@@ -1454,6 +1469,8 @@ class DetailedSettingsWindow(QMainWindow):
             self.privacy_panel.shutdown()
         if hasattr(self, 'process_harness_panel'):
             self.process_harness_panel.shutdown()
+        if hasattr(self, 'speed_enhancements_panel'):
+            self.speed_enhancements_panel.shutdown()
         if hasattr(self, '_analysis_timer'):
             self._analysis_timer.stop()
         if getattr(self, '_window_reveal', None) is not None:
@@ -1483,6 +1500,7 @@ class StarfieldCanvas(QWidget):
         super().__init__()
         self.motion = bool(motion)
         self.phase = 0.0
+        self._motion_clock = QElapsedTimer()
         rng = random.Random(47)
         self.stars = [(rng.random(), rng.random(), rng.random(), rng.random()) for _ in range(190)]
         self.timer = QTimer(self)
@@ -1491,14 +1509,32 @@ class StarfieldCanvas(QWidget):
         self.setAutoFillBackground(False)
 
     def _tick(self):
-        if not self.motion or not self.isVisible() or self.window().isMinimized():
+        if not self._can_animate():
             self.timer.stop()
             return
-        self.phase += 0.0045
+        elapsed = min(0.1, max(0, self._motion_clock.restart()) / 1000)
+        self.phase += elapsed * 0.12
         self.update()
 
+    def _can_animate(self):
+        owner = self.window()
+        if not self.motion or not self.isVisible() or owner.isMinimized() or getattr(owner, 'busy', False):
+            return False
+        for name in ('_settings_window', '_sandbox_window', '_setup_wizard', '_progress_window', '_security_review_dialog'):
+            child = getattr(owner, name, None)
+            visible = getattr(child, 'isVisible', None)
+            if callable(visible):
+                try:
+                    if visible():
+                        return False
+                except RuntimeError:
+                    continue
+        return True
+
     def sync_motion(self):
-        if self.motion and self.isVisible() and not self.window().isMinimized():
+        if self._can_animate():
+            if not self.timer.isActive():
+                self._motion_clock.start()
             self.timer.start()
         else:
             self.timer.stop()
@@ -1613,6 +1649,9 @@ class OptimizationProgressWindow(QDialog):
 
     def __init__(self, owner, cancel):
         super().__init__(owner)
+        # Cancellation/dismissal must run immediately, before a queued saved
+        # continuation can start; this window keeps its own close guard.
+        self._optimus_reveal_open_only = True
         self.cancel = cancel
         self.completed = False
         self._recommendations_ready = False
@@ -1628,6 +1667,7 @@ class OptimizationProgressWindow(QDialog):
         self.spinner.start('Preparing')
         layout.addWidget(self.spinner)
         self.progress = QProgressBar()
+        self.progress.setObjectName('WorkflowProgress')
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat('%p%')
@@ -1638,6 +1678,12 @@ class OptimizationProgressWindow(QDialog):
         self.description = QLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
         self.description.setWordWrap(True)
         layout.addWidget(self.description)
+        self.background_status = QLabel()
+        self.background_status.setObjectName('BackgroundStatus')
+        self.background_status.setTextFormat(Qt.PlainText)
+        self.background_status.setWordWrap(True)
+        self.background_status.hide()
+        layout.addWidget(self.background_status)
         self.insights_summary = QLabel()
         self.insights_summary.setObjectName('SectionTitle')
         self.insights_summary.setTextFormat(Qt.PlainText)
@@ -1674,10 +1720,13 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_button = QPushButton('Auto continue — apply available fixes')
         self.auto_continue_button.setAutoDefault(False)
         self.auto_continue_button.setDefault(False)
+        self.auto_continue_button.setObjectName('Primary')
+        self.auto_continue_button.setMinimumHeight(36)
         self.auto_continue_button.clicked.connect(self.autoContinueRequested.emit)
         layout.addWidget(self.auto_continue_button)
         self.clear_auto_continue()
         self.cancel_button = QPushButton('Cancel after current stage')
+        self.cancel_button.setMinimumHeight(36)
         self.cancel_button.clicked.connect(self.request_close)
         layout.addWidget(self.cancel_button)
 
@@ -1695,6 +1744,20 @@ class OptimizationProgressWindow(QDialog):
         self.spinner.set_text(stage)
         self.description.setText(display(field(state, 'description')))
         self.processes.setPlainText(display(field(state, 'processes', default=[])))
+        jobs = state.get('jobs')
+        if isinstance(jobs, list):
+            descriptions = []
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                text = display(job.get('description') or str(job.get('id', '')).replace('_', ' '))
+                if job.get('status'):
+                    text += ' — ' + display(job['status']).replace('_', ' ')
+                if isinstance(job.get('total'), (int, float)) and job['total'] > 0:
+                    text += f" ({job.get('current', 0)}/{job['total']})"
+                descriptions.append(text)
+            self.background_status.setText('Background: ' + '; '.join(descriptions))
+            self.background_status.setVisible(bool(descriptions))
         log = field(state, 'log', default='')
         if log:
             self.log.appendPlainText(display(log))
@@ -1705,6 +1768,7 @@ class OptimizationProgressWindow(QDialog):
         self.title.setText('OPTIMIZATION RESULTS')
         self.processes_label.hide()
         self.processes.hide()
+        self.background_status.hide()
         self.clear_auto_continue()
         self.insights_summary.clear()
         self.insights_summary.hide()
@@ -1714,6 +1778,8 @@ class OptimizationProgressWindow(QDialog):
             self.log.appendPlainText('Error: ' + str(error))
         else:
             cancelled = bool(field(result, 'cancelled', 'canceled', default=False))
+            if field(result, 'status') in ('completed', 'completed_with_errors') and not cancelled:
+                self.progress.setValue(100)
             self.stage.setText('CANCELLED AT STAGE BOUNDARY' if cancelled else 'WORKFLOW RETURNED RESULTS')
             verification = field(result, 'final_verification', default=None)
             if isinstance(verification, dict):
@@ -1773,7 +1839,7 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_button.setToolTip('Apply the listed automatic actions once.' if actions
             else 'No automatic fixes are available; use Continue for any remaining recommendations.')
 
-    def begin_auto_continue(self, cancel):
+    def begin_auto_continue(self, cancel, *, automatic=False):
         self.cancel = cancel
         self.completed = False
         self._results_dismissed = False
@@ -1781,6 +1847,7 @@ class OptimizationProgressWindow(QDialog):
         self.clear_auto_continue()
         self.title.setText('APPLYING AVAILABLE FIXES')
         self.progress.setValue(0)
+        self.progress.setFormat('Follow-up %p%')
         self.spinner.start('Preparing available fixes')
         self.stage.setText('Preparing available fixes')
         self.description.setText('Applying the automatic actions you approved. Progress is recorded by stage.')
@@ -1790,7 +1857,7 @@ class OptimizationProgressWindow(QDialog):
         self.processes_label.show()
         self.processes.show()
         self.processes.clear()
-        self.log.appendPlainText('\nAUTO CONTINUE — USER APPROVED AVAILABLE FIXES')
+        self.log.appendPlainText('\nAUTO CONTINUE — ' + ('SAVED AUTOMATIC FIX CHOICE' if automatic else 'USER APPROVED AVAILABLE FIXES'))
         self.cancel_button.setText('Cancel after current stage')
         self.cancel_button.setEnabled(True)
 
@@ -2195,7 +2262,9 @@ class OptimusWindow(QMainWindow):
             button.setCursor(Qt.PointingHandCursor)
             button.setStyleSheet('QPushButton {font-size:16px;font-weight:700;border-radius:10px;padding:14px;'+
                 ('background:#1f9cff;color:#07111f;border:1px solid #6ac0ff;' if primary else 'background:#101925;color:#d6e2f0;border:1px solid #33455d;')+
-                '} QPushButton:hover {background:' + ('#54b4ff' if primary else '#192b40') + ';} QPushButton:pressed {padding-top:17px;}')
+                '} QPushButton:hover {background:' + ('#54b4ff' if primary else '#192b40')
+                + ';} QPushButton:pressed {padding-top:17px;} QPushButton:focus {border:2px solid #d5eaff;}'
+                + ' QPushButton:disabled {background:#152333;color:#8394aa;border:1px solid #283a50;}')
             button.clicked.connect(callback)
             row.addWidget(button)
             row.addStretch()
@@ -2283,6 +2352,8 @@ class OptimusWindow(QMainWindow):
                         else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
                         for key,control in getattr(settings_window, 'workflow_controls', {}).items()}
                     settings_window.workflow_consumer_baseline = [name for name,control in getattr(settings_window, 'consumer_package_controls', {}).items() if control.isChecked()]
+                    if hasattr(settings_window, 'speed_enhancements_panel'):
+                        settings_window.speed_enhancements_panel.sync_settings(self.workflow_settings)
                 message = 'Setup choices saved. ' + ('Starting the maintenance you selected.' if run_now else 'Maintenance will follow your saved cadence; no run was started now.')
                 if analysis_error:
                     message += ' Background analysis could not be updated: ' + analysis_error
@@ -2349,6 +2420,24 @@ class OptimusWindow(QMainWindow):
         mode_note = QLabel('Selecting Full applies the preset once. Saved changes, browser scopes, cookie exceptions and update exclusions remain in effect on later opens. Package/device installation still needs scoped approval and agreement acceptance in setup. Process and security recommendations are reviewed after completion.')
         mode_note.setWordWrap(True)
         layout.addWidget(mode_note)
+        from .widgets.speed_enhancements_panel import SpeedEnhancementsPanel
+        window.speed_enhancements_panel = SpeedEnhancementsPanel(window, settings)
+        controls['speed_enhancements_enabled'] = window.speed_enhancements_panel.enabled
+        layout.addWidget(window.speed_enhancements_panel)
+        layout.addWidget(QLabel('WINDOWS UPDATE COMPATIBILITY — SAVE WITH ONE-CLICK CONFIGURATION'))
+        for key, label, explanation in (
+            ('update_compatibility_mode_enabled', 'Use WinGet compatibility mode for approved application updates',
+             'Uses the non-security --force option on the initial approved attempt. Exact identity/version, pins, signature/hash and restart checks remain in effect; unknown installer state never triggers a repeated attempt.'),
+            ('windows_cpu_compatibility_enabled', 'Prepare unsupported-CPU Windows media upgrades\n(MoSetup; administrator access)',
+             'Prepares the legacy media-Setup policy as a best-effort workaround. Installation Assistant may still block the upgrade. Bootability, security, personal-data and free-space checks remain in effect. Windows security/driver update scopes stay as saved; an OS upgrade is not run by automatic cleanup.')):
+            control = WrappingCheckBox(label)
+            control.setChecked(bool(settings.get(key, False)))
+            controls[key] = control
+            layout.addWidget(control)
+            explanation_label = QLabel(explanation)
+            explanation_label.setTextFormat(Qt.PlainText)
+            explanation_label.setWordWrap(True)
+            layout.addWidget(explanation_label)
         from .onboarding import CADENCES
         cadence = QComboBox()
         for value, label in CADENCES.items():
@@ -2400,6 +2489,9 @@ class OptimusWindow(QMainWindow):
             ('windows_security_updates_install_approved','Approve automatic eligible Windows Security/Critical patch installation'),
             ('windows_security_update_agreements_accepted','Accept Microsoft agreements for this Windows Security/Critical update scope'),
             ('driver_updates_enabled','Check/apply driver offers under saved device approval'),
+            ('drive_optimization_enabled','Optimize eligible internal drives (SSD TRIM / HDD optimization)'),
+            ('parallel_app_updates_enabled','Update apps in background while independent steps continue'),
+            ('auto_continue_fixes_enabled','Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)'),
             ('post_process_review_enabled','Offer process/program review after completion'),
             ('security_review_enabled','Check Windows security and offer reviewed fixes'),
             ('spyware_scan_enabled','Run Microsoft Defender quick scan'),
@@ -2408,14 +2500,17 @@ class OptimusWindow(QMainWindow):
             ('codex_priority_enabled','Apply optional Codex priority profile'),('background_analysis_enabled','Enable background resource analysis'),
             ('reduce_motion','Reduce window and starfield motion')]
         for index,(key,label) in enumerate(labels):
-            checkbox=QCheckBox(label)
+            checkbox=WrappingCheckBox(label)
             checkbox.setChecked(bool(settings.get(key,False)))
             if 'debloat' in key:
                 checkbox.setStyleSheet('color:#ffad73;')
                 checkbox.setToolTip('Opt in to this removal stage. Review the Debloat page and target list before enabling it.')
             controls[key]=checkbox
-            toggles.addWidget(checkbox,index//2,index%2)
+            toggles.addWidget(checkbox,index,0)
         layout.addLayout(toggles)
+        continuation_note = QLabel('Saving automatic continuation approves supported Defender/firewall fixes and updates within your existing saved scopes and agreements after a completed scan. Process choices, application removal and restarts remain manual. Background app updates share a single installer lane while independent steps continue. Drive optimization uses eligible Windows SSD TRIM/HDD operations after fresh checks.')
+        continuation_note.setWordWrap(True)
+        layout.addWidget(continuation_note)
         sign_in_note = QLabel('Saving the sign-in option enables or disables the managed Windows startup entry. Windows starts Optimus as your regular user about one minute after sign-in; maintenance follows its separate cadence. The administrator option requests normal Windows UAC consent once per app launch. Already elevated sessions do not ask again; declining keeps standard access. A failed registration leaves the saved preference unchanged. A startup entry you disable manually stays disabled until you explicitly apply this choice again.')
         sign_in_note.setWordWrap(True)
         layout.addWidget(sign_in_note)
@@ -2461,7 +2556,7 @@ class OptimusWindow(QMainWindow):
             ('privacy_disable_suggestions','Turn off supported Windows consumer suggestions'),
             ('privacy_disable_optional_diagnostics','Limit optional diagnostic collection'),
             ('privacy_disable_app_diagnostics','Turn off supported app diagnostic access')):
-            control = QCheckBox(label)
+            control = WrappingCheckBox(label)
             control.setChecked(bool(settings.get(key, True)))
             controls[key] = control
             privacy_layout.addWidget(control)
@@ -2562,6 +2657,7 @@ class OptimusWindow(QMainWindow):
                 window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
                 window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
                 self.workflow_settings=result if isinstance(result,dict) else value
+                window.speed_enhancements_panel.sync_settings(self.workflow_settings)
                 self.config.ui_motion_enabled=bool(self.appearance.get('motion',True)) and not bool(value.get('reduce_motion',False))
                 self.canvas.motion=motion_allowed(self.config)
                 self.canvas.sync_motion()
@@ -2677,6 +2773,10 @@ class OptimusWindow(QMainWindow):
             self._progress_window.set_auto_continue_plan(plan)
             if isinstance(plan.get('actions'), list) and plan['actions']:
                 self._pending_auto_fixes = (result, settings, plan)
+                if settings.get('auto_continue_fixes_enabled') is True:
+                    self._progress_window.title.setText('CONTINUING OPTIMIZATION')
+                    self._progress_window.stage.setText('SCAN COMPLETE — SAVED FOLLOW-UP QUEUED')
+                    self._progress_window.description.setText('Your saved automatic fix choice continues with the supported actions listed below. Closing these results skips the queued continuation.')
         self.status.setText('Workflow returned results. Review available fixes and final verification before continuing.')
 
     @staticmethod
@@ -2720,8 +2820,25 @@ class OptimusWindow(QMainWindow):
         self._progress_window.set_recommendations_available(self._pending_post_review is not None)
         if self._pending_auto_fixes is not None and not self._auto_continue_attempted:
             self._progress_window.set_auto_continue_plan(self._pending_auto_fixes[2], ready=True)
+            if self._pending_auto_fixes[1].get('auto_continue_fixes_enabled') is True:
+                progress = self._progress_window
+                generation = self._post_review_generation
+                parent = self._pending_auto_fixes[0]
+                self.status.setText('Scan complete. Continuing with your saved automatic fix choice.')
+                QTimer.singleShot(0, lambda: self._continue_saved_fixes(progress, generation, parent))
 
-    def _start_auto_continue(self, progress):
+    def _continue_saved_fixes(self, progress, generation, parent):
+        if (generation != self._post_review_generation or progress is not self._progress_window
+                or self._pending_auto_fixes is None or self._pending_auto_fixes[0] is not parent):
+            return
+        try:
+            enabled = self._settings().get('auto_continue_fixes_enabled') is True
+        except Exception:
+            enabled = False
+        if enabled:
+            self._start_auto_continue(progress, automatic=True)
+
+    def _start_auto_continue(self, progress, *, automatic=False):
         if (self.smoke_test or self._quitting or self.busy or self._auto_continue_attempted
                 or self._pending_auto_fixes is None or progress is not self._progress_window
                 or not progress.isVisible() or not progress.completed
@@ -2738,14 +2855,15 @@ class OptimusWindow(QMainWindow):
         self._post_review_active = False
         self.busy = True
         self._cancel = threading.Event()
-        progress.begin_auto_continue(self._cancel)
+        progress.begin_auto_continue(self._cancel, automatic=automatic)
         self._worker = AvailableFixesWorker(self.backend, report, settings, self._cancel)
         self._worker.signals.progress.connect(progress.update_progress)
         self._worker.signals.result.connect(self._auto_fixes_result)
         self._worker.signals.error.connect(self._auto_fixes_error)
         self._worker.signals.finished.connect(self._auto_fixes_finished)
         self.main_buttons[0].setEnabled(False)
-        self.status.setText('Applying the available fixes you approved. Cancellation is available in the progress window.')
+        self.status.setText('Continuing with your saved automatic fix choice. Cancellation is available in the progress window.'
+            if automatic else 'Applying the available fixes you approved. Cancellation is available in the progress window.')
         self.pool.start(self._worker)
 
     @Slot(object)

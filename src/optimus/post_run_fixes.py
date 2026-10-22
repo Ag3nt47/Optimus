@@ -192,7 +192,7 @@ def _narrow_settings(backend, approved, current):
     for key in ('software_updates_enabled', 'software_update_agreements_accepted', 'software_update_all_approved',
                 'windows_security_updates_enabled', 'windows_security_updates_install_approved',
                 'windows_security_update_agreements_accepted', 'driver_updates_enabled',
-                'driver_changes_approved', 'driver_update_agreements_accepted'):
+                'driver_changes_approved', 'driver_update_agreements_accepted', 'update_compatibility_mode_enabled'):
         effective[key] = approved.get(key) is True and current.get(key) is True
     fold = (lambda value: value) if _native(backend) else str.casefold
     old_policy, new_policy = approved.get('software_update_policy'), current.get('software_update_policy')
@@ -389,7 +389,7 @@ class PostRunFixes:
             result = {'schema': 1, 'id': identifier, 'parent_run_id': source['id'], 'started_at': time.time(),
                       'settings': approved, 'status': 'running', 'stages': [], 'cancelled': False,
                       'manual_items': [], 'counts': {key: 0 for key in _ACTION_STATES},
-                      'log_path': str(path), 'note': 'This button click approves the displayed supported security fixes for one attempt. Update installation remains within saved scopes and agreements. Processes, startup entries, application removal and cleanup are not included.'}
+                      'log_path': str(path), 'note': 'The Auto continue click or saved automatic-follow-up choice authorizes these supported security fixes for one attempt. Update installation remains within saved scopes and agreements. Processes, startup entries, application removal and cleanup are not included.'}
             original_plan = _preview(self.backend, source, approved)
             original_plan['actions'] = [row for row in original_plan['actions'] if row['id'] in reviewed_ids]
             result['reviewed_plan'] = original_plan

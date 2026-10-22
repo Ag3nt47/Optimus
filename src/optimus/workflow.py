@@ -39,6 +39,10 @@ DEFAULTS = {
     'analysis_interval': 5, 'reduce_motion': False,
     'setup_version': 0, 'automation_mode': 'manual',
     'applications_review_enabled': False, 'performance_review_enabled': False,
+    'speed_enhancements_enabled': False,
+    'drive_optimization_enabled': False, 'auto_continue_fixes_enabled': False,
+    'parallel_app_updates_enabled': False,
+    'update_compatibility_mode_enabled': False, 'windows_cpu_compatibility_enabled': False,
     'startup_review_enabled': False, 'duplicates_enabled': False, 'duplicate_roots': [],
     'cloud_review_enabled': False, 'software_updates_enabled': False,
     'software_update_policy': 'review', 'software_update_ids': [],
@@ -87,6 +91,9 @@ def full_optimization_settings(settings=None):
         'browser_cache_enabled': True, 'browser_history_enabled': True,
         'browser_cookies_enabled': True, 'browser_download_history_enabled': True,
         'applications_review_enabled': True, 'performance_review_enabled': True,
+        'speed_enhancements_enabled': True,
+        'drive_optimization_enabled': True, 'auto_continue_fixes_enabled': True,
+        'parallel_app_updates_enabled': True,
         'startup_review_enabled': True, 'software_updates_enabled': True,
         'driver_updates_enabled': True, 'post_process_review_enabled': True,
         'privacy_advertising_enabled': True, 'privacy_diagnostics_enabled': True,
@@ -248,10 +255,15 @@ class Workflow:
         if not self.lock.acquire(blocking=False):
             raise RuntimeError('An optimization run is already active.')
         self.active = True
-        report, log_path, lease = None, None, None
+        report, log_path, lease, parallel_job = None, None, None, None
         attempt_started = False
         try:
+            from .parallel_updates import (ProgressMux, ParallelAppUpdates, WINDOWS_SOFTWARE,
+                                           INDEPENDENT, BLOCKED_STAGES, installer_barrier,
+                                           pending_updates_barrier, parallel_stages)
+            progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
+            unresolved_apps = pending_updates_barrier(self.backend)
             run_id = uuid.uuid4().hex
             log_path = self.backend.data_dir / 'runs' / (run_id + '.json')
             report = {'id': run_id, 'started_at': time.time(), 'settings': configuration, 'stages': [], 'cancelled': False,
@@ -280,13 +292,22 @@ class Workflow:
                     total = state.get('total', state.get('items', 0))
                     fraction = max(0, min(1, current / total)) if type(current) in (int, float) and type(total) in (int, float) and total > 0 else 0
                     description = str(state.get('description', state.get('item', title)))
-                    progress_callback({'percentage': min(99, int((completed + fraction) * 100 / len(stages))),
+                    progress_callback({'percentage': min(99, int((completed + fraction) * 100 / total_stages)),
                                        'stage': title, 'description': description,
                                        'processes': ['Optimus maintenance worker', description],
-                                       'log': str(state.get('log', description)), 'completed': completed, 'total': len(stages),
+                                       'log': str(state.get('log', description)), 'completed': completed, 'total': total_stages,
                                        'item': state.get('item', current), 'items': state.get('items', total)})
                 return emit
 
+            if configuration['speed_enhancements_enabled']:
+                stages.append(('Apply supported speed enhancements',
+                               'Applying eligible native power-performance settings under the saved automatic choice, with recovery records and fresh readback.',
+                               lambda: self.backend._apply_speed_enhancements_stage(configuration, cancel_event=cancel_event,
+                                   progress_callback=item_progress('Apply supported speed enhancements'))))
+            if configuration['windows_cpu_compatibility_enabled']:
+                stages.append(('Prepare approved Windows CPU upgrade workaround',
+                               'Recording and verifying the selected legacy media-Setup compatibility policy. This does not install Windows or bypass storage, bootability or installer security checks.',
+                               lambda: self.backend._prepare_windows_compatibility_stage(configuration, cancel_event=cancel_event)))
             if configuration['startup_review_enabled']:
                 if configuration['startup_policy'] == 'disable_selected':
                     from .automated_system import run_startup
@@ -367,6 +388,11 @@ class Workflow:
                     lambda: run_browser_cleanup(self.backend, configuration, clean=clean,
                         browser_prompt=browser_prompt, cancel_event=cancel_event,
                         item_callback=item_progress('Clean selected browser data'))))
+            if configuration['drive_optimization_enabled']:
+                stages.append(('Optimize eligible internal drives',
+                               'Checking eligible internal drives and running the native SSD TRIM/HDD optimization only when current power, space, health and cadence checks allow it.',
+                               lambda: self.backend._apply_drive_optimization_stage(configuration, cancel_event=cancel_event,
+                                   progress_callback=item_progress('Optimize eligible internal drives'))))
             for key, action, label in (
                 ('consumer_debloat_enabled', 'consumer-apps', 'Remove selected consumer app group'),
                 ('m365_debloat_enabled', 'm365', 'Remove Microsoft 365 consumer packages'),
@@ -396,9 +422,16 @@ class Workflow:
                     stages.append((label, 'Applying only the curated package group explicitly enabled in Settings. Bing Wallpaper, Store, security, frameworks and WebView2 are preserved.', remove_group))
             if configuration['software_updates_enabled']:
                 from .automated_software import run_software
+                def software_updates():
+                    from .post_run_fixes import _prior_installer_barrier
+                    barrier = _prior_installer_barrier(self.backend, report)
+                    if barrier:
+                        return {'skipped': True, 'requiresReview': True, 'review_only': True,
+                                'items': [], 'failed_items': 0, 'stop_reason': barrier, 'note': barrier}
+                    return run_software(self.backend, configuration, cancel_event=cancel_event,
+                                        item_callback=item_progress('Review or update configured software'))
                 stages.append(('Review or update configured software', 'Scanning supported installed applications, respecting saved exact IDs/all-supported scope, exclusions and pins.',
-                               lambda: run_software(self.backend, configuration, cancel_event=cancel_event,
-                                                    item_callback=item_progress('Review or update configured software'))))
+                               software_updates))
             if configuration['codex_priority_enabled']:
                 stages.append(('Apply Codex performance profile', 'Applying your selected process priority. Existing external priority watchers remain unchanged.', lambda: self.backend.codex_profile(configuration['codex_priority'])))
             if configuration['background_analysis_enabled']:
@@ -494,8 +527,27 @@ class Workflow:
                 return result
             stages.append((FINAL_VERIFICATION_STAGE,
                            'Checking the selected operations against their saved evidence and fresh local state. Review-only, unknown and failed outcomes stay explicit; no new changes are applied.', final_verification))
+            parallel_spec = None
+            if configuration['parallel_app_updates_enabled']:
+                stages, parallel_spec = parallel_stages(stages, WINDOWS_SOFTWARE)
+            total_stages = len(stages) + int(parallel_spec is not None)
             completed = 0
+            joined = False
+            parallel_barrier = unresolved_apps
+
+            def join_updates():
+                nonlocal joined, completed, parallel_barrier
+                if parallel_job is not None and not joined:
+                    stage = parallel_job.join()
+                    joined = True
+                    completed += 1
+                    parallel_barrier = installer_barrier(stage['result'])
+                    report['cancelled'] = report['cancelled'] or stage['result'].get('cancelled') is True
+                    atomic_json(log_path, report)
+
             for title, description, operation in stages:
+                if parallel_job is not None and title not in INDEPENDENT:
+                    join_updates()
                 if cancelled():
                     report['cancelled'] = True
                     break
@@ -503,11 +555,18 @@ class Workflow:
                 process = getattr(self.backend.bridge, '_process', None)
                 if process is not None and process.poll() is None:
                     process_lines.append(f'Windows PowerShell engine (PID {process.pid})')
-                progress_callback({'percentage': int(completed * 100 / len(stages)), 'stage': title,
-                                   'description': description, 'processes': process_lines, 'log': f'Starting: {title}', 'completed': completed, 'total': len(stages)})
+                progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
+                                   'description': description, 'processes': process_lines, 'log': f'Starting: {title}', 'completed': completed, 'total': total_stages})
                 started = time.time()
                 try:
-                    result = operation()
+                    if parallel_barrier and title in BLOCKED_STAGES:
+                        result = {'skipped': True, 'review_only': True, 'requiresReview': True,
+                                  'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,
+                                  'note': 'Deferred after application updating: ' + parallel_barrier}
+                        if title == 'Check or install Windows security updates':
+                            report['windows_security_updates'] = result
+                    else:
+                        result = operation()
                     interrupted = cancelled() or (isinstance(result, dict) and result.get('cancelled') is True)
                     status = 'cancelled' if interrupted else 'failed' if isinstance(result, dict) and result.get('failed_items', 0) else 'completed'
                     stage = {'title': title, 'status': status, 'started_at': started, 'finished_at': time.time(), 'result': result}
@@ -517,10 +576,27 @@ class Workflow:
                         report['cancelled'] = True
                 except Exception as error:
                     stage = {'title': title, 'status': 'failed', 'started_at': started, 'finished_at': time.time(), 'error': str(error)}
+                if title == WINDOWS_SOFTWARE and parallel_job is None:
+                    parallel_barrier = installer_barrier(stage.get('result'))
                 report['stages'].append(stage)
                 completed += 1
                 atomic_json(log_path, report)
-                percentage = int(completed * 100 / len(stages))
+                if parallel_spec is not None and parallel_job is None and title == 'Inspect current resource usage' and not report['cancelled']:
+                    from .automated_software import run_software
+                    from .post_run_fixes import _prior_installer_barrier
+                    prior_barrier = unresolved_apps or _prior_installer_barrier(self.backend, report)
+                    if stage['status'] != 'completed':
+                        prior_barrier = 'The initial before-inventory failed; application updating was deferred.'
+                    def background_software(worker, item_callback):
+                        if prior_barrier:
+                            return {'items': [], 'failed_items': 0, 'skipped': True, 'review_only': True,
+                                    'stop_reason': prior_barrier, 'requiresReview': True}
+                        return run_software(worker, configuration, cancel_event=parallel_job.cancel_event, item_callback=item_callback)
+                    parallel_job = ParallelAppUpdates(self.backend, run_id, WINDOWS_SOFTWARE,
+                                                      background_software, progress_callback, cancel_event=cancel_event)
+                    report['stages'].append(parallel_job.start())
+                    atomic_json(log_path, report)
+                percentage = int(completed * 100 / total_stages)
                 if report['cancelled']:
                     percentage = min(99, percentage)
                 description = stage.get('error', f"{title}: {stage['status']}")
@@ -532,7 +608,8 @@ class Workflow:
                 if title == FINAL_VERIFICATION_STAGE and isinstance(stage.get('result'), dict):
                     description = str(stage['result'].get('summary') or 'Final verification: ' + str(stage['result'].get('status', 'unverified')).replace('_', ' ') + '. Review the outcome details before recommendations.')
                 progress_callback({'percentage': percentage, 'stage': title, 'description': description,
-                                   'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': len(stages)})
+                                   'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': total_stages})
+            join_updates()
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(item['status'] == 'failed' for item in report['stages'])
             report['log_path'] = str(log_path)
@@ -543,6 +620,9 @@ class Workflow:
                                error=f"{report['failed_stages']} stages failed" if report['failed_stages'] else None)
             return report
         except Exception as error:
+            if parallel_job is not None:
+                parallel_job.cancel()
+                parallel_job.join()
             if report is None:
                 report = {'settings': configuration, 'stages': [], 'cancelled': False}
             report.update({'status': 'failed', 'error': str(error), 'finished_at': time.time()})
@@ -561,6 +641,10 @@ class Workflow:
             raise
         finally:
             try:
+                if parallel_job is not None:
+                    if not parallel_job.joined:
+                        parallel_job.cancel()
+                    parallel_job.join()
                 if lease is not None:
                     lease.release()
             finally:

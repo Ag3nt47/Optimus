@@ -285,3 +285,57 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
     assert progress.log.isVisible() and progress.verification_details.isVisible()
     for action in value['actions']:
         assert action['title'] in progress.auto_continue_details.toPlainText()
+
+
+def test_saved_automatic_choice_continues_once_without_a_second_click(window, app):
+    settings = dict(window.backend.preferences(), auto_continue_fixes_enabled=True)
+    window.backend.preferences = Mock(return_value=settings)
+    QTest.mouseClick(window.main_buttons[0], Qt.LeftButton)
+    wait_until(app, lambda: window.backend.apply_available_fixes.called and not window.busy)
+    app.processEvents()
+    window.backend.apply_available_fixes.assert_called_once()
+    window.backend.optimize.assert_called_once()
+    window.backend.available_fixes.assert_called_once()
+    assert window._auto_continue_attempted
+    assert 'SAVED AUTOMATIC FIX CHOICE' in window._progress_window.log.toPlainText()
+    assert window._progress_window.progress.format() == 'Follow-up %p%'
+    window._offer_post_optimization_reviews.assert_not_called()
+
+
+def test_saved_opt_out_keeps_available_fixes_as_a_button_only(window, app):
+    window.backend.preferences = Mock(return_value=dict(window.backend.preferences(), auto_continue_fixes_enabled=False))
+    progress = complete_initial(window, app)
+    app.processEvents()
+    assert progress.auto_continue_button.isEnabled()
+    window.backend.apply_available_fixes.assert_not_called()
+
+
+@pytest.mark.parametrize('dismiss', ['close', 'reject'])
+def test_dismiss_before_queued_automatic_continuation_cancels_the_saved_choice(window, app, dismiss):
+    from optimus.ui import OptimizationProgressWindow
+    settings = dict(window.backend.preferences(), auto_continue_fixes_enabled=True)
+    window.backend.preferences = Mock(return_value=settings)
+    window.busy = True
+    window._worker = SimpleNamespace(settings=settings, _browser_prompts=None)
+    progress = window._progress_window = OptimizationProgressWindow(window, threading.Event())
+    progress.resultsDismissed.connect(window._dismiss_post_optimization_reviews)
+    progress.show()
+    window._workflow_result(report())
+    window._workflow_finished()
+    getattr(progress, dismiss)()
+    app.processEvents()
+    app.processEvents()
+    window.backend.apply_available_fixes.assert_not_called()
+    assert window._pending_auto_fixes is None and not window._post_review_active
+
+
+@pytest.mark.parametrize('failure', ['cancelled', 'error'])
+def test_saved_automatic_choice_never_continues_after_cancellation_or_error(window, app, failure):
+    window.backend.preferences = Mock(return_value=dict(window.backend.preferences(), auto_continue_fixes_enabled=True))
+    if failure == 'cancelled':
+        window.backend.optimize.return_value = report(cancelled=True, status='cancelled')
+    else:
+        window.backend.optimize.side_effect = RuntimeError('Fixture initial scan error')
+    complete_initial(window, app)
+    app.processEvents()
+    window.backend.apply_available_fixes.assert_not_called()

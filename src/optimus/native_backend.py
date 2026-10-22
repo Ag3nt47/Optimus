@@ -209,7 +209,7 @@ class NativeBackend(Backend):
         supported = ['audit', 'process-inventory', 'process-harness', 'resource-sampling', 'process-sleep',
                      'process-priority', 'cleanup', 'browser-cleanup', 'storage', 'duplicates',
                      'native-startup', 'startup-launch', 'installed-apps', 'software-update-scan',
-                     'security-status', 'kernel-driver-status', 'outcome-verification', 'sandbox']
+                     'security-status', 'kernel-driver-status', 'outcome-verification', 'speed-enhancements', 'sandbox']
         if self.system == 'linux':
             supported.append('process-affinity')
         if self.system == 'darwin':

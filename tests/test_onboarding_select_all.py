@@ -17,7 +17,7 @@ CHECKBOX_KEYS = {
     'cleanup': ('cleanup_enabled', 'browser_cache_enabled', 'browser_history_enabled',
                 'browser_cookies_enabled', 'browser_download_history_enabled'),
     'uninstaller': ('applications_review_enabled', *(key for key, _ in REMOVALS)),
-    'performance': ('performance_review_enabled', 'codex_priority_enabled', 'background_analysis_enabled'),
+    'performance': ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'codex_priority_enabled', 'background_analysis_enabled'),
 }
 
 

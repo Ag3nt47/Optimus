@@ -350,11 +350,13 @@ class Maintenance:
                 if row['name'].casefold() == name.casefold():
                     return False, 'This application has an installed-version WinGet pin; Optimus preserves it.', False
         return True, '', False
-    def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False, cancel_event=None) -> dict[str, Any]:
+    def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False, cancel_event=None, compatibility_mode: bool = False) -> dict[str, Any]:
         if confirmed is not True:
             raise ValueError("Confirm the selected software update before installing it.")
         if type(unattended) is not bool:
             raise ValueError("Choose an explicit unattended mode.")
+        if type(compatibility_mode) is not bool:
+            raise ValueError("Choose an explicit non-security compatibility mode.")
         if not isinstance(package_id, str) or not _PACKAGE_ID.fullmatch(package_id):
             raise ValueError("Select an exact package ID from a fresh update scan.")
         current = self._last_update_packages.get(package_id)
@@ -393,6 +395,8 @@ class Maintenance:
                     "failureKind": "pin_inventory_untrusted" if needs_review else "pinned",
                     "from_version": current["version"], "to_version": current["available"]}
         arguments = [self._winget(), "upgrade", "--id", package_id, "--exact", "--source", "winget", "--version", current['available']]
+        if compatibility_mode:
+            arguments += ["--force"]
         if unattended:
             arguments += ["--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
         else:
@@ -417,11 +421,13 @@ class Maintenance:
                              or 'another installation is already in progress.' in (output + '\n' + stderr).casefold())
         return {"id": package_id, "package_id": package_id, "source": "winget", "exitCode": result.returncode,
                 "status": "completed" if result.returncode in (0, 3010, 1641) else "failed", "unattended": unattended,
+                "compatibility_mode": compatibility_mode,
                 "restartNeeded": True if restart else None, "running": installer_running,
                 "from_version": current["version"], "to_version": current["available"],
                 "text": output, "stderr": stderr,
-                "note": ("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."
-                         if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")}
+                "note": (("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."
+                          if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")
+                         + (" Saved compatibility mode adds WinGet --force for non-security issues only. Hash/signature verification and installer hard blocks remain in effect." if compatibility_mode else ""))}
 
     @staticmethod
     def windows_update_open() -> dict[str, str]:

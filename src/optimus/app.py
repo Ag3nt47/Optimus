@@ -25,6 +25,10 @@ def parser():
     commands.add_argument('--verify-run', type=_run_identity, metavar='RUN_ID', help='Verify a completed saved workflow without repeating its actions or opening the interface.')
     commands.add_argument('--startup-probe', action='store_true', help='Inspect GUI startup without UAC, setup, background analysis or maintenance, then exit.')
     commands.add_argument('--startup-mode', choices=('on', 'off', 'status'), help='Configure or inspect this user\'s native sign-in launch without running maintenance.')
+    commands.add_argument('--speed-enhancements', choices=('status', 'apply', 'history'), help='Inspect, apply saved speed-enhancement choices, or list their recovery records without opening the interface.')
+    commands.add_argument('--speed-restore', type=_speed_identity, metavar='RUN_ID', help='Restore one exact recorded speed-enhancement change without opening the interface.')
+    commands.add_argument('--windows-compatibility', choices=('status', 'prepare'), help='Inspect or prepare the saved legacy Windows media-Setup CPU policy; no OS upgrade is launched.')
+    commands.add_argument('--windows-compatibility-restore', type=_run_identity, metavar='CHANGE_ID', help='Restore one recorded Windows compatibility-policy change.')
     result.add_argument('--output', type=Path, help='Report destination folder.')
     commands.add_argument('--smoke-test', action='store_true', help='Build and inspect the interface without changing settings.')
     result.add_argument('--screenshot', type=Path)
@@ -40,6 +44,63 @@ def _run_identity(value):
     if not re.fullmatch('[0-9a-f]{32}', value):
         raise argparse.ArgumentTypeError('Use one exact lowercase workflow run ID (32 hexadecimal characters).')
     return value
+
+
+def _speed_identity(value):
+    if not re.fullmatch('[0-9a-f]{32}', value):
+        raise argparse.ArgumentTypeError('Use one exact lowercase speed-enhancement run ID (32 hexadecimal characters).')
+    return value
+
+
+def _speed_command(backend, args):
+    """Dispatch only the requested service; no GUI, elevation or saved auto-run."""
+    mode = args.speed_enhancements or 'restore'
+    destination = None
+    if args.output is not None:
+        from .filesystem import resolve_data_root
+        destination = resolve_data_root(args.output)
+        destination.mkdir(parents=True, exist_ok=True)
+    if mode == 'status':
+        result = backend.speed_enhancements_scan()
+    elif mode == 'apply':
+        # The service loads and enforces saved settings. A command-line request
+        # never silently enables the package or changes the approved scope.
+        result = backend.apply_speed_enhancements()
+    elif mode == 'history':
+        result = backend.speed_enhancements_history()
+    else:
+        result = backend.restore_speed_enhancements(args.speed_restore)
+    if destination is not None:
+        from .workflow import atomic_json
+        exported = destination / ('speed-' + mode + '-' + uuid.uuid4().hex + '.json')
+        payload = {'schema': 1, 'command': mode, 'result': result}
+        atomic_json(exported, payload)
+        return dict(payload, report=str(exported))
+    return result
+
+
+def _windows_compatibility_command(backend, args):
+    if sys.platform != 'win32':
+        raise RuntimeError('Windows media-Setup compatibility policies are unavailable on this platform.')
+    destination = None
+    if args.output is not None:
+        from .filesystem import resolve_data_root
+        destination = resolve_data_root(args.output)
+        destination.mkdir(parents=True, exist_ok=True)
+    mode = args.windows_compatibility or 'restore'
+    if mode == 'status':
+        result = backend.windows_compatibility_status()
+    elif mode == 'prepare':
+        result = backend.prepare_windows_compatibility()
+    else:
+        result = backend.restore({'source': 'python-compatibility', 'Id': args.windows_compatibility_restore})
+    if destination is not None:
+        from .workflow import atomic_json
+        exported = destination / ('windows-compatibility-' + mode + '-' + uuid.uuid4().hex + '.json')
+        payload = {'schema': 1, 'command': mode, 'result': result}
+        atomic_json(exported, payload)
+        return dict(payload, report=str(exported))
+    return result
 
 
 def _verify_saved_run(backend, run_id, destination=None):
@@ -87,10 +148,15 @@ def main(argv=None):
     else:
         from .native_backend import NativeBackend as Backend
     backend = Backend()
-    if args.verify_run or args.startup_mode:
+    if (args.verify_run or args.startup_mode or args.speed_enhancements or args.speed_restore
+            or args.windows_compatibility or args.windows_compatibility_restore):
         try:
             if args.verify_run:
                 result = _verify_saved_run(backend, args.verify_run, args.output)
+            elif args.speed_enhancements or args.speed_restore:
+                result = _speed_command(backend, args)
+            elif args.windows_compatibility or args.windows_compatibility_restore:
+                result = _windows_compatibility_command(backend, args)
             else:
                 if args.startup_mode != 'status':
                     backend.set_startup_launch(args.startup_mode == 'on')
