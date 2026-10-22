@@ -11,7 +11,8 @@ from optimus.automation import CURRENT_SETUP_VERSION, RunLease
 from optimus.workflow import DEFAULTS, Preferences, Workflow
 from optimus.native_workflow import NativeWorkflow
 from optimus.parallel_updates import (ParallelAppUpdates, ProgressMux, WINDOWS_SOFTWARE,
-                                      NATIVE_SOFTWARE, isolated_backend, installer_barrier)
+                                      NATIVE_SOFTWARE, WAITING_FOR_UPDATES, isolated_backend,
+                                      installer_barrier, parallel_stages)
 from optimus.maintenance import Maintenance
 from optimus.native_operations import NativePackages
 from test_workflow import mock_verification
@@ -84,7 +85,6 @@ class Backend:
         return {'items': [], 'failed_items': 0}
 
     def driver_updates_scan(self):
-        assert self.release.is_set()
         self.calls.append('drivers')
         return {'resultCode': 2, 'updates': []}
 
@@ -119,14 +119,21 @@ def start_workflow(service, configuration, *, native=False, callback=None, cance
 def test_independent_stage_overlaps_but_queued_stages_and_final_readback_wait(tmp_path, native):
     service = Backend(tmp_path, native=native)
     events = []
+    waiting = threading.Event()
+    def progress(event):
+        events.append(event)
+        if event.get('waiting_for') == 'software_updates':
+            waiting.set()
     configuration = settings(applications_review_enabled=True, driver_updates_enabled=True,
                              drive_optimization_enabled=not native, windows_security_updates_enabled=not native)
-    workflow, thread, result, errors = start_workflow(service, configuration, native=native, callback=events.append)
+    workflow, thread, result, errors = start_workflow(service, configuration, native=native, callback=progress)
     try:
         assert service.independent.wait(5)
+        assert waiting.wait(5)
         assert thread.is_alive()
         assert service.calls.count('audit') == 1
-        assert not any(row in service.calls for row in ('drive', 'drivers', 'windows_updates', 'verify'))
+        assert 'drivers' in service.calls  # Read-only metadata remains independent.
+        assert not any(row in service.calls for row in ('drive', 'windows_updates', 'verify'))
         assert workflow.last_report['stages'][1]['status'] == 'running'
         assert all(event.get('percentage', 0) < 100 for event in events)
         assert any(event.get('jobs', [{}])[0].get('status') == 'running' for event in events)
@@ -378,6 +385,7 @@ def test_progress_mux_keeps_foreground_and_unions_processes():
     mux({'stage': 'Final verified result', 'percentage': 100})
     assert events[-1]['percentage'] == 100
     assert events[-1]['jobs'][0]['status'] == 'completed'
+    assert 'elapsed_seconds' not in events[-1]['jobs'][0]
 
 
 @pytest.mark.parametrize('value', [None, {'failed_items': 1}, {'running': True},
@@ -385,3 +393,127 @@ def test_progress_mux_keeps_foreground_and_unions_processes():
                                   {'items': [{'status': 'failed'}]}])
 def test_barrier_handles_all_material_unknown_or_failed_shapes(value):
     assert installer_barrier(value)
+
+
+@pytest.mark.parametrize('native', [False, True])
+def test_all_cleanup_finishes_before_updater_and_independent_work_overlaps(tmp_path, native):
+    service = Backend(tmp_path, native=native)
+    def categories():
+        return [{'id': 'fixture-temp', 'available': True}]
+    def scan(categories, age):
+        assert not service.started.is_set()
+        service.calls.append('cleanup_scan')
+        return {'files': [{'fixture': True}], 'complete': True, 'total_bytes': 1, 'errors': []}
+    def apply(plan):
+        assert not service.started.is_set()
+        service.calls.append('cleanup_apply')
+        return {'deleted_count': 1, 'deleted_bytes': 1, 'skipped_count': 0, 'errors': []}
+    def browser(*args, **kwargs):
+        assert not service.started.is_set()
+        service.calls.append('browser_cleanup')
+        return {'items': [], 'failed_items': 0}
+    service.cleanup_categories, service.cleanup_scan, service.cleanup_apply = categories, scan, apply
+    with patch('optimus.browser_cleanup.run_browser_cleanup', side_effect=browser):
+        workflow, thread, result, errors = start_workflow(service, settings(
+            applications_review_enabled=True, cleanup_enabled=True,
+            cleanup_category_ids=['fixture-temp'], browser_cache_enabled=True), native=native)
+        try:
+            assert service.independent.wait(5)
+            assert 'cleanup_apply' in service.calls and 'browser_cleanup' in service.calls
+            assert service.calls.index('browser_cleanup') < service.calls.index('update:Fixture.One')
+            assert thread.is_alive() and 'verify' not in service.calls
+        finally:
+            service.release.set()
+            thread.join(8)
+    assert not errors and result[0]['status'] == 'completed'
+
+
+def test_startup_duplicate_cloud_and_driver_reviews_continue_before_wait(tmp_path):
+    service = Backend(tmp_path)
+    reviews_done = threading.Event()
+    events = []
+    service.startup_list = Mock(side_effect=lambda: service.calls.append('startup_review') or [])
+    service.duplicate_scan = Mock(side_effect=lambda root: service.calls.append('duplicate_review') or {})
+    service.cloud_status = Mock(return_value={'connected': True})
+    service.cloud_scan = Mock(side_effect=lambda: service.calls.append('cloud_review') or {})
+    service.apply_system_privacy = Mock(return_value={'failed_items': 1})
+    def progress(event):
+        events.append(event)
+        if event.get('waiting_for') == 'software_updates':
+            reviews_done.set()
+    workflow, thread, result, errors = start_workflow(service, settings(
+        applications_review_enabled=True, startup_review_enabled=True,
+        duplicates_enabled=True, duplicate_roots=[r'D:\fixture-duplicates'], cloud_review_enabled=True,
+        driver_updates_enabled=True, privacy_advertising_enabled=True), callback=progress)
+    try:
+        assert reviews_done.wait(5)
+        assert all(call in service.calls for call in ('startup_review', 'duplicate_review', 'cloud_review', 'drivers'))
+        wait = events[-1]
+        assert wait['stage'] == WAITING_FOR_UPDATES
+        assert 'Apply saved privacy controls' not in wait['stage']
+        assert wait['jobs'][0]['current_package'] == 'Fixture.One'
+        assert wait['jobs'][0]['total'] == 2 and wait['jobs'][0]['current'] == 0
+        assert 'verify' not in service.calls
+        with pytest.raises(RuntimeError):
+            RunLease(tmp_path).acquire()
+    finally:
+        service.release.set()
+        thread.join(8)
+    assert not errors and result[0]['failed_stages'] == 1  # Privacy failure remains in its own result.
+
+
+def test_waiting_heartbeat_preserves_package_and_refreshes_elapsed_without_logs():
+    events = []
+    with patch('optimus.parallel_updates.time.monotonic', side_effect=[100, 100, 101, 161]):
+        mux = ProgressMux(events.append)
+        mux({'stage': 'Apply saved privacy controls', 'percentage': 29, 'completed': 8, 'total': 28,
+             'description': 'Privacy failed; review its items.', 'log': 'FAILED: Apply saved privacy controls'})
+        mux.background('running', {'id': 'Ollama.Ollama', 'description': 'Updating package 2/7: Ollama.Ollama',
+                                   'current': 1, 'total': 7})
+        mux.wait_for_updates('Install approved driver updates')
+        mux.heartbeat()
+    assert events[-1]['stage'] == WAITING_FOR_UPDATES and events[-1]['percentage'] == 29
+    assert events[-1]['waiting_for'] == 'software_updates'
+    assert events[-1]['jobs'][0]['current_package'] == 'Ollama.Ollama'
+    assert events[-1]['jobs'][0]['status'] == 'running'  # Foreground wait does not stop the updater.
+    assert events[-1]['jobs'][0]['current'] == 1 and events[-1]['jobs'][0]['total'] == 7
+    assert events[-1]['jobs'][0]['elapsed_seconds'] > events[-2]['jobs'][0]['elapsed_seconds']
+    assert 'log' not in events[-1]
+
+
+def test_parallel_schedule_with_no_software_is_unchanged():
+    stages = [('Inspect resources', lambda: None), ('Clean temporary files', lambda: None)]
+    planned, software, launch_after = parallel_stages(stages, WINDOWS_SOFTWARE)
+    assert planned is stages and software is None and launch_after is None
+
+
+@pytest.mark.parametrize('native', [False, True])
+@pytest.mark.parametrize('audit_failure', [False, True])
+def test_audit_failure_not_last_cleanup_result_controls_updater_launch(tmp_path, native, audit_failure):
+    service = Backend(tmp_path, native=native)
+    service.release.set()
+    original_audit = service.audit
+    def audit():
+        value = original_audit()
+        if service.audit_count == 1 and audit_failure:
+            value['failed_items'] = 1
+        return value
+    def scan(categories, age):
+        service.calls.append('cleanup_scan')
+        # Audit failure followed by successful cleanup must not authorize updates.
+        # Cleanup failure after a successful audit must not masquerade as audit failure.
+        return {'files': [], 'complete': audit_failure, 'total_bytes': 0,
+                'errors': [] if audit_failure else ['Fixture incomplete cleanup preview']}
+    service.audit = audit
+    service.cleanup_scan = scan
+    service.cleanup_categories = lambda: [{'id': 'fixture-temp', 'available': True}]
+    report = (NativeWorkflow if native else Workflow)(service).run(settings(
+        cleanup_enabled=True, cleanup_category_ids=['fixture-temp']), lambda _: None)
+    software = next(row for row in report['stages'] if row['title'] in (WINDOWS_SOFTWARE, NATIVE_SOFTWARE))
+    if audit_failure:
+        assert not any(call.startswith('update:') for call in service.calls)
+        assert 'initial before-inventory failed' in software['result']['stop_reason']
+    else:
+        assert 'update:Fixture.One' in service.calls
+        assert service.calls.index('cleanup_scan') < service.calls.index('update:Fixture.One')
+        assert any('Clean ' in row['title'] and row['status'] == 'failed' for row in report['stages'])

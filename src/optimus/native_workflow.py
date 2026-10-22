@@ -146,7 +146,7 @@ class NativeWorkflow:
         report, lease, path, attempted, parallel_job = None, None, None, False, None
         try:
             from .parallel_updates import (ProgressMux, ParallelAppUpdates, NATIVE_SOFTWARE,
-                                           INDEPENDENT, BLOCKED_STAGES, installer_barrier,
+                                           independent_stage, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_stages)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
@@ -184,9 +184,13 @@ class NativeWorkflow:
                 stages.append(('Apply supported speed enhancements',
                                lambda: self.backend._apply_speed_enhancements_stage(configuration, cancel_event=cancel_event)))
             if configuration.get('startup_review_enabled'):
-                stages.append(('Review or disable approved user startup entries', lambda: run_native_startup(self.backend, configuration, cancel_event=cancel_event)))
+                startup_title = ('Review or disable approved user startup entries' if configuration.get('startup_policy') == 'disable_selected'
+                                 else 'Review native startup registrations')
+                stages.append((startup_title, lambda: run_native_startup(self.backend, configuration, cancel_event=cancel_event)))
             if configuration.get('duplicates_enabled'):
-                stages.append(('Find or recycle approved duplicate copies', lambda: run_native_duplicates(self.backend, configuration, cancel_event=cancel_event)))
+                duplicate_title = ('Find or recycle approved duplicate copies' if configuration.get('duplicate_policy') != 'review'
+                                   else 'Review native duplicate copies')
+                stages.append((duplicate_title, lambda: run_native_duplicates(self.backend, configuration, cancel_event=cancel_event)))
             if configuration.get('cleanup_enabled'):
                 # Browser caches have their own per-run close choice. Never let
                 # a general category approval bypass that separate interaction.
@@ -214,16 +218,17 @@ class NativeWorkflow:
             stages.append(('Capture final native resource report', self.backend.audit))
             stages.append(('Verify optimization outcomes', lambda: self.backend.verify_optimization(report, cancel_event=cancel_event)))
             parallel_spec = None
+            parallel_launch_after = None
             if configuration.get('parallel_app_updates_enabled'):
-                stages, parallel_spec = parallel_stages(stages, NATIVE_SOFTWARE)
+                stages, parallel_spec, parallel_launch_after = parallel_stages(stages, NATIVE_SOFTWARE)
             total_stages = len(stages) + int(parallel_spec is not None)
             completed, joined = 0, False
             parallel_barrier = unresolved_apps
 
-            def join_updates():
+            def join_updates(next_stage=None):
                 nonlocal joined, completed, parallel_barrier
                 if parallel_job is not None and not joined:
-                    stage = parallel_job.join()
+                    stage = parallel_job.join(next_stage=next_stage)
                     joined = True
                     completed += 1
                     parallel_barrier = installer_barrier(stage['result'])
@@ -231,8 +236,8 @@ class NativeWorkflow:
                     atomic_json(path, report)
 
             for title, operation in stages:
-                if parallel_job is not None and title not in INDEPENDENT:
-                    join_updates()
+                if parallel_job is not None and not independent_stage(title):
+                    join_updates(title)
                 if _cancelled(cancel_event):
                     report['cancelled'] = True
                     break
@@ -268,8 +273,8 @@ class NativeWorkflow:
                 report['stages'].append(stage)
                 completed += 1
                 atomic_json(path, report)
-                if parallel_spec is not None and parallel_job is None and title == 'Inspect native resources and process identities' and not report['cancelled']:
-                    initial_failed = stage['status'] != 'completed'
+                if parallel_spec is not None and parallel_job is None and title == parallel_launch_after and not report['cancelled']:
+                    initial_failed = report['stages'][0]['status'] != 'completed'
                     def background_software(worker, item_callback):
                         if unresolved_apps or initial_failed:
                             return {'items': [], 'failed_items': 0, 'review_only': True, 'skipped': True,
@@ -397,7 +402,7 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
                 add(item['id'], 'confirmed' if valid else 'needs_review', 'Current native package version matches the recorded installation result.' if valid else 'The recorded installed-version change could not be confirmed.')
             if not outcome.get('items'):
                 add(label, 'not_applicable', 'Review only or no offered approved updates; no installer ran.')
-        elif label == 'Review or disable approved user startup entries':
+        elif label in ('Review or disable approved user startup entries', 'Review native startup registrations'):
             for item in outcome.get('items', []):
                 receipt = item.get('result', {}).get('entry')
                 if item.get('status') == 'completed' and receipt:
@@ -409,7 +414,7 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
                         add(item.get('name', label), 'unverified', 'The current startup file is unavailable.')
             if not outcome.get('items'):
                 add(label, 'not_applicable', 'Startup review only; no change was made.')
-        elif label == 'Find or recycle approved duplicate copies':
+        elif label in ('Find or recycle approved duplicate copies', 'Review native duplicate copies'):
             for item in outcome.get('items', []):
                 change = item.get('result', {})
                 if item.get('status') == 'completed':

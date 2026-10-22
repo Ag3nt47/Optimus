@@ -17,6 +17,11 @@ from .filesystem import _ordinary_data_path
 
 WINDOWS_SOFTWARE = 'Review or update configured software'
 NATIVE_SOFTWARE = 'Review or install approved native package updates'
+WAITING_FOR_UPDATES = 'Waiting for background application updates'
+BEFORE_UPDATES = frozenset({
+    'Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
+    'Clean approved native temporary files and caches', 'Clean selected browser data after close or skip choice',
+})
 INDEPENDENT = frozenset({
     'Review installed applications', 'Identify programs contributing to slowdowns',
     'Apply supported speed enhancements', 'Prepare approved Windows CPU upgrade workaround',
@@ -24,6 +29,9 @@ INDEPENDENT = frozenset({
     'Review installed native applications', 'Measure applications contributing to pressure',
     'Review native kernel and hardware-support inventory', 'Review native security observations',
     'Review vendor support and patch limitations', 'Start requested read-only background analysis',
+    'Review startup registrations', 'Review duplicate configuration', 'Review connected cloud drive',
+    'Review available driver updates', 'Review native kernel and hardware-support coverage',
+    'Review native startup registrations', 'Review native duplicate copies',
 })
 INSTALLER_STAGES = frozenset({
     'Install approved driver updates', 'Check or install Windows security updates',
@@ -38,6 +46,10 @@ BLOCKED_STAGES = INSTALLER_STAGES | frozenset({
     'Review or disable approved user startup entries', 'Find or recycle approved duplicate copies',
     'Clean approved native temporary files and caches', 'Clean selected browser data after close or skip choice',
 })
+
+
+def independent_stage(title):
+    return title in INDEPENDENT or title.startswith('Review duplicates: ')
 
 
 def isolated_backend(backend):
@@ -67,11 +79,14 @@ class ProgressMux:
         self.lock = threading.RLock()
         self.foreground = {}
         self.job = None
+        self.item_started = None
 
     def _event(self):
         event = dict(self.foreground)
         if self.job is not None:
             event['jobs'] = [dict(self.job)]
+            if self.item_started is not None and self.job['status'] in ('pending', 'running', 'waiting'):
+                event['jobs'][0]['elapsed_seconds'] = max(0, time.monotonic() - self.item_started)
             processes = list(event.get('processes', []))
             if self.job['status'] in ('pending', 'running', 'waiting'):
                 processes.append(self.job['description'])
@@ -87,9 +102,16 @@ class ProgressMux:
     def background(self, status, state=None):
         state = state if isinstance(state, dict) else {}
         with self.lock:
+            previous = self.job or {}
+            package = state.get('id', previous.get('current_package'))
+            if self.item_started is None or package != previous.get('current_package'):
+                self.item_started = time.monotonic()
             self.job = {'id': 'software_updates', 'status': status,
-                        'description': str(state.get('description') or 'Application update worker: ' + status)[:2000],
-                        'current': state.get('current', 0), 'total': state.get('total', 0)}
+                        'description': str(state.get('description') or previous.get('description')
+                                           or 'Application update worker: ' + status)[:2000],
+                        'current': state.get('current', previous.get('current', 0)),
+                        'total': state.get('total', previous.get('total', 0)),
+                        'current_package': package}
             # Serialize emission too, so an older background event cannot
             # replace a newer foreground stage in the queued UI callbacks.
             try:
@@ -98,6 +120,30 @@ class ProgressMux:
                 self.callback(output)
             except Exception:
                 # A display failure must never abandon a vendor installer.
+                pass
+
+    def wait_for_updates(self, next_stage=None):
+        """Replace stale foreground text, preserving actual package progress."""
+        with self.lock:
+            description = (('Independent maintenance has finished. ' if next_stage else '')
+                           + 'Application updates are still running. '
+                           + ('Waiting before: ' + str(next_stage) + '. ' if next_stage else '')
+                           + 'The current installer is not restarted; Cancel stops further package attempts.')
+            self.foreground = dict(self.foreground, stage=WAITING_FOR_UPDATES,
+                waiting_for='software_updates', description=description,
+                processes=['Optimus foreground worker: waiting for application updates'],
+                log='WAITING: Background application updates before ' + str(next_stage or 'workflow completion'))
+            try:
+                self.callback(self._event())
+            except Exception:
+                pass
+            self.foreground.pop('log', None)
+
+    def heartbeat(self):
+        with self.lock:
+            try:
+                self.callback(self._event())
+            except Exception:
                 pass
 
 
@@ -276,14 +322,19 @@ class ParallelAppUpdates:
                                stop_reason='The application outcome journal could not be saved; verify installer state before continuing.',
                                journal_error=str(error)[:2000])
         self.mux.background('needs_review' if installer_barrier(self.result) else 'completed',
-                            {'description': str(self.result.get('stop_reason') or 'Application update checks completed; item results are ready.')})
+                            {'description': str(self.result.get('stop_reason') or 'Application update checks completed; item results are ready.'),
+                             'current': len(self.result.get('items', []))})
 
-    def join(self):
+    def join(self, *, next_stage=None):
         if self.joined:
             return self.stage
         if self.thread is not None:
             if self.thread.is_alive():
-                self.mux.background('waiting', {'description': 'Waiting for the current application installer to return; it will not be terminated.'})
+                self.mux.wait_for_updates(next_stage)
+            while self.thread.is_alive():
+                self.thread.join(timeout=1)
+                if self.thread.is_alive():
+                    self.mux.heartbeat()
             self.thread.join()  # Never release the workflow lease before this returns.
         result = self.result or {'items': [], 'failed_items': 1, 'uncertain': True,
                                  'stop_reason': 'The application worker did not establish an outcome.'}
@@ -293,16 +344,19 @@ class ParallelAppUpdates:
         if status == 'failed':
             self.stage['error'] = 'One or more application update checks failed; review the saved item results.'
         self.mux.background('needs_review' if installer_barrier(result) else 'completed',
-                            {'description': str(result.get('stop_reason') or 'Application update checks completed; item results are ready.')})
+                            {'description': str(result.get('stop_reason') or 'Application update checks completed; item results are ready.'),
+                             'current': len(result.get('items', []))})
         return self.stage
 
 
 def parallel_stages(stages, software_title):
-    """Launch after before-inventory; hold file and installer phases until join."""
+    """Clean before installers; drain safe work before joining the updater."""
     software = next((row for row in stages if row[0] == software_title), None)
     if software is None:
-        return stages, None
+        return stages, None, None
     remaining = [row for row in stages[1:] if row is not software]
-    independent = [row for row in remaining if row[0] in INDEPENDENT]
-    queued = [row for row in remaining if row[0] not in INDEPENDENT]
-    return [stages[0], *independent, *queued], software
+    cleanup = [row for row in remaining if row[0] in BEFORE_UPDATES]
+    independent = [row for row in remaining if independent_stage(row[0])]
+    queued = [row for row in remaining if row[0] not in BEFORE_UPDATES and not independent_stage(row[0])]
+    launch_after = (cleanup[-1] if cleanup else stages[0])[0]
+    return [stages[0], *cleanup, *independent, *queued], software, launch_after

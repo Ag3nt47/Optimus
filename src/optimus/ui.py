@@ -3,6 +3,7 @@
 """Optimus desktop interface; host operations run through the local backend."""
 from __future__ import annotations
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -1654,6 +1655,8 @@ class OptimizationProgressWindow(QDialog):
         self._optimus_reveal_open_only = True
         self.cancel = cancel
         self.completed = False
+        self._waiting_for_updates = False
+        self._title_before_update_wait = None
         self._recommendations_ready = False
         self._results_dismissed = False
         self.setWindowTitle('Optimus - optimization progress')
@@ -1735,14 +1738,34 @@ class OptimizationProgressWindow(QDialog):
         if not isinstance(state, dict):
             self.log.appendPlainText(display(state))
             return
-        percentage = field(state, 'percentage', default=0)
-        percentage = max(0, min(100, float(percentage or 0)))
+        stage = display(field(state, 'stage', default='Working'))
+        waiting_for_updates = (state.get('waiting_for') == 'software_updates'
+                               or stage == 'Waiting for background application updates')
+        if waiting_for_updates and not self._waiting_for_updates:
+            self._title_before_update_wait = self.title.text()
+        elif not waiting_for_updates and self._waiting_for_updates:
+            self.title.setText(self._title_before_update_wait or 'OPTIMIZATION IN PROGRESS')
+            self._title_before_update_wait = None
+            if self.cancel_button.isEnabled():
+                self.cancel_button.setText('Cancel after current stage')
+        self._waiting_for_updates = waiting_for_updates
+        if waiting_for_updates:
+            self.title.setText('WAITING FOR APPLICATION UPDATES')
+            if self.cancel_button.isEnabled():
+                self.cancel_button.setText('Cancel after current update')
+        percentage = field(state, 'percentage', default=self.progress.value() if waiting_for_updates else 0)
+        percentage = max(0, min(99 if waiting_for_updates else 100, float(percentage or 0)))
         self.progress.setValue(int(percentage))
         self.spinner.set_pct(percentage)
-        stage = display(field(state, 'stage', default='Working'))
         self.stage.setText(stage)
         self.spinner.set_text(stage)
-        self.description.setText(display(field(state, 'description')))
+        description = display(field(state, 'description'))
+        if waiting_for_updates and not description:
+            description = ('Independent work has finished. Waiting for application updates before '
+                           'conflicting maintenance and final verification. You can cancel after the current update.')
+        if waiting_for_updates and self.cancel.is_set():
+            description = 'Cancellation requested. The current application update must return before the workflow stops.'
+        self.description.setText(description)
         self.processes.setPlainText(display(field(state, 'processes', default=[])))
         jobs = state.get('jobs')
         if isinstance(jobs, list):
@@ -1751,10 +1774,25 @@ class OptimizationProgressWindow(QDialog):
                 if not isinstance(job, dict):
                     continue
                 text = display(job.get('description') or str(job.get('id', '')).replace('_', ' '))
+                package = job.get('current_package')
+                if isinstance(package, str) and package.strip() and package not in text:
+                    text += ' — current package: ' + package
                 if job.get('status'):
                     text += ' — ' + display(job['status']).replace('_', ' ')
                 if isinstance(job.get('total'), (int, float)) and job['total'] > 0:
-                    text += f" ({job.get('current', 0)}/{job['total']})"
+                    if waiting_for_updates and job.get('id') == 'software_updates':
+                        text += f" — {job.get('current', 0)}/{job['total']} packages processed"
+                    else:
+                        text += f" ({job.get('current', 0)}/{job['total']})"
+                elapsed = job.get('elapsed_seconds')
+                if (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+                        and math.isfinite(elapsed) and 0 <= elapsed < 3155760000):
+                    seconds = int(elapsed)
+                    minutes, seconds = divmod(seconds, 60)
+                    hours, minutes = divmod(minutes, 60)
+                    elapsed_text = (f'{hours}h {minutes:02d}m {seconds:02d}s' if hours else
+                                    f'{minutes}m {seconds:02d}s' if minutes else f'{seconds}s')
+                    text += ' — elapsed ' + elapsed_text
                 descriptions.append(text)
             self.background_status.setText('Background: ' + '; '.join(descriptions))
             self.background_status.setVisible(bool(descriptions))
@@ -1764,6 +1802,8 @@ class OptimizationProgressWindow(QDialog):
 
     def finish(self, result, error=None):
         self.completed = True
+        self._waiting_for_updates = False
+        self._title_before_update_wait = None
         self.spinner.stop()
         self.title.setText('OPTIMIZATION RESULTS')
         self.processes_label.hide()
@@ -1842,6 +1882,8 @@ class OptimizationProgressWindow(QDialog):
     def begin_auto_continue(self, cancel, *, automatic=False):
         self.cancel = cancel
         self.completed = False
+        self._waiting_for_updates = False
+        self._title_before_update_wait = None
         self._results_dismissed = False
         self.set_recommendations_available(False)
         self.clear_auto_continue()
@@ -1888,7 +1930,9 @@ class OptimizationProgressWindow(QDialog):
         else:
             self.cancel.set()
             self.cancel_button.setEnabled(False)
-            self.description.setText('Cancellation requested. The current stage must finish before the workflow stops.')
+            self.description.setText('Cancellation requested. The current application update must return before the workflow stops.'
+                if self._waiting_for_updates else
+                'Cancellation requested. The current stage must finish before the workflow stops.')
 
     def closeEvent(self, event):
         if self.completed:

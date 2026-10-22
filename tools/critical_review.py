@@ -31,7 +31,7 @@ from optimus.filesystem import _ordinary_data_path
 from optimus.native_settings import full_native_settings
 from optimus.native_ui import NativeOptimusWindow, NativeSetupWizard
 from optimus.onboarding import InitialSetupWizard
-from optimus.ui import OptimusWindow
+from optimus.ui import OptimizationProgressWindow, OptimusWindow
 from optimus.widgets.questions import make_yes_no_dialog
 from optimus.workflow import full_optimization_settings
 
@@ -418,6 +418,71 @@ class CriticalReview:
         self.screenshot(settings, prefix + '-speed-deferred')
         settings.close()
 
+    def review_update_wait(self, window, dimensions, prefix):
+        """Replay the stale-stage regression without starting an updater."""
+        cancel = threading.Event()
+        progress = OptimizationProgressWindow(window, cancel)
+        waiting = {'stage': 'Waiting for background application updates',
+            'waiting_for': 'software_updates', 'percentage': 29,
+            'description': ('Independent maintenance is complete. Application updates must finish '
+                            'before conflicting maintenance and final verification.'),
+            'processes': ['In-memory application update fixture: Fixture.App'],
+            'jobs': [{'id': 'software_updates', 'status': 'waiting',
+                'description': 'Updating approved package 2/7: Fixture.App (1.0 to 1.1)',
+                'current': 1, 'total': 7, 'elapsed_seconds': 125}]}
+        try:
+            progress.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 29,
+                'description': 'One or more selected operations or scan checks failed.',
+                'log': 'FAILED: Apply saved privacy controls: fixture result requires review.'})
+            progress.update_progress(waiting)
+            self.viewport(progress, dimensions, prefix + '.updates-waiting')
+            self.buttons(progress, dimensions, prefix + '.updates-waiting', [progress.cancel_button])
+            self.check(prefix + '.updates-waiting.explicit-state',
+                progress.title.text() == 'WAITING FOR APPLICATION UPDATES'
+                and progress.stage.text() == waiting['stage']
+                and 'privacy' not in progress.description.text().casefold(),
+                'Waiting for an updater must replace the previous failed privacy stage and its active description.',
+                evidence={'title': progress.title.text(), 'stage': progress.stage.text(),
+                          'description': progress.description.text()})
+            job_text = progress.background_status.text()
+            self.check(prefix + '.updates-waiting.current-worker',
+                progress.background_status.isVisible() and 'Fixture.App' in job_text
+                and '2/7' in job_text and '1/7 packages processed' in job_text
+                and 'elapsed 2m 05s' in job_text
+                and 'Fixture.App' in progress.processes.toPlainText(),
+                'The waiting view must identify the current application, processed count and observed elapsed time.',
+                evidence={'background': job_text, 'processes': progress.processes.toPlainText()})
+            self.check(prefix + '.updates-waiting.progress-honesty',
+                progress.progress.value() == 29 and progress.progress.value() < 100 and not progress.completed,
+                'Waiting must retain completed-stage progress and must not claim full completion.',
+                evidence={'percentage': progress.progress.value(), 'completed': progress.completed})
+            self.check(prefix + '.updates-waiting.cancel-available',
+                progress.cancel_button.isEnabled() and 'Cancel' in progress.cancel_button.text(),
+                'An updater wait must keep cancellation available until the current update returns.')
+            self.check(prefix + '.updates-waiting.failure-history',
+                'FAILED: Apply saved privacy controls' in progress.log.toPlainText(),
+                'Replacing a completed stage caption must preserve its failure evidence in the stage log.')
+            self.screenshot(progress, prefix + '-updates-waiting')
+            progress.cancel_button.click()
+            progress.update_progress(waiting)
+            self.check(prefix + '.updates-waiting.cancellation-stable',
+                cancel.is_set() and not progress.cancel_button.isEnabled()
+                and 'Cancellation requested.' in progress.description.text(),
+                'Cancellation must remain visible when the updater sends a later heartbeat.')
+            progress.update_progress({'stage': 'Verify maintenance outcomes', 'percentage': 85,
+                'description': 'Fixture updater returned. No operating-system changes were performed.', 'jobs': []})
+            self.check(prefix + '.updates-waiting.foreground-resumes',
+                progress.title.text() == 'OPTIMIZATION IN PROGRESS'
+                and progress.stage.text() == 'Verify maintenance outcomes'
+                and progress.background_status.isHidden(),
+                'A later foreground stage must replace the waiting title and remove the finished background display.')
+        finally:
+            progress.completed = True
+            progress.spinner.stop()
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
     def review_workflow(self, window, backend, dimensions, prefix):
         entered, release = threading.Event(), threading.Event()
         entered_batch, release_batch = threading.Event(), threading.Event()
@@ -509,6 +574,7 @@ class CriticalReview:
                 self.screenshot(window, prefix + '-main')
                 self.review_setup(backend, dimensions, prefix)
                 self.review_speed(window, backend, dimensions, prefix)
+                self.review_update_wait(window, dimensions, prefix)
                 self.review_workflow(window, backend, dimensions, prefix)
                 self.check(prefix + '.no-background-analysis', backend.analysis_start.call_count == 0,
                     'Fixture navigation must never resume background collection or automatic startup maintenance.')

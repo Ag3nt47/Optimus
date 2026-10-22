@@ -259,7 +259,7 @@ class Workflow:
         attempt_started = False
         try:
             from .parallel_updates import (ProgressMux, ParallelAppUpdates, WINDOWS_SOFTWARE,
-                                           INDEPENDENT, BLOCKED_STAGES, installer_barrier,
+                                           independent_stage, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_stages)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
@@ -528,17 +528,18 @@ class Workflow:
             stages.append((FINAL_VERIFICATION_STAGE,
                            'Checking the selected operations against their saved evidence and fresh local state. Review-only, unknown and failed outcomes stay explicit; no new changes are applied.', final_verification))
             parallel_spec = None
+            parallel_launch_after = None
             if configuration['parallel_app_updates_enabled']:
-                stages, parallel_spec = parallel_stages(stages, WINDOWS_SOFTWARE)
+                stages, parallel_spec, parallel_launch_after = parallel_stages(stages, WINDOWS_SOFTWARE)
             total_stages = len(stages) + int(parallel_spec is not None)
             completed = 0
             joined = False
             parallel_barrier = unresolved_apps
 
-            def join_updates():
+            def join_updates(next_stage=None):
                 nonlocal joined, completed, parallel_barrier
                 if parallel_job is not None and not joined:
-                    stage = parallel_job.join()
+                    stage = parallel_job.join(next_stage=next_stage)
                     joined = True
                     completed += 1
                     parallel_barrier = installer_barrier(stage['result'])
@@ -546,8 +547,8 @@ class Workflow:
                     atomic_json(log_path, report)
 
             for title, description, operation in stages:
-                if parallel_job is not None and title not in INDEPENDENT:
-                    join_updates()
+                if parallel_job is not None and not independent_stage(title):
+                    join_updates(title)
                 if cancelled():
                     report['cancelled'] = True
                     break
@@ -581,11 +582,11 @@ class Workflow:
                 report['stages'].append(stage)
                 completed += 1
                 atomic_json(log_path, report)
-                if parallel_spec is not None and parallel_job is None and title == 'Inspect current resource usage' and not report['cancelled']:
+                if parallel_spec is not None and parallel_job is None and title == parallel_launch_after and not report['cancelled']:
                     from .automated_software import run_software
                     from .post_run_fixes import _prior_installer_barrier
                     prior_barrier = unresolved_apps or _prior_installer_barrier(self.backend, report)
-                    if stage['status'] != 'completed':
+                    if report['stages'][0]['status'] != 'completed':
                         prior_barrier = 'The initial before-inventory failed; application updating was deferred.'
                     def background_software(worker, item_callback):
                         if prior_barrier:

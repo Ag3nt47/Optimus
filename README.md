@@ -18,6 +18,8 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
+Version **0.8.1** fixes the apparent pause after privacy controls during a long application update. Selected temp/browser cleanup finishes before the updater starts, then safe startup, duplicate, cloud and driver metadata reviews continue beside it. Conflicting maintenance and final verification still wait, with a dedicated waiting display showing the actual package, processed count and elapsed time. Saved choices remain unchanged.
+
 Version **0.8.0** adds an automatic **Speed enhancements** package with native power-policy checks, fresh configuration verification and recorded undo. Full mode enables it; existing choices stay editable in Settings. Advanced Windows options add WinGet's non-security compatibility mode and a legacy unsupported-CPU policy for eligible media-Setup cases. The separate Windows-media script scans the selected image before an explicitly requested upgrade. See [Speed enhancements and compatibility](docs/SPEED_ENHANCEMENTS.md) for scope, script commands and limits.
 
 The one-click workflow also offers eligible Windows SSD TRIM/HDD optimization, a saved automatic post-scan continuation choice, and background app updates while independent work continues. The critical-review bot checks fixture UI layouts and workflow behavior during native builds, publishing a report and screenshots. [One-click coverage](docs/ONE_CLICK_COVERAGE.md) explains which actions can be automatic and which still need an explicit scope or decision.

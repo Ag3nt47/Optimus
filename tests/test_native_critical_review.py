@@ -136,10 +136,16 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'speed.cancel-completes', 'speed.deferred-honesty', 'workflow.single-initial-worker',
             'workflow.explicit-auto-continue', 'workflow.unverified-honesty',
             'workflow.single-follow-up-worker', 'workflow.follow-up-deferred',
-            'workflow.stale-request', 'workflow.manual-continue'):
+            'workflow.stale-request', 'workflow.manual-continue',
+            'updates-waiting.explicit-state', 'updates-waiting.current-worker',
+            'updates-waiting.progress-honesty', 'updates-waiting.cancel-available',
+            'updates-waiting.failure-history', 'updates-waiting.cancellation-stable',
+            'updates-waiting.foreground-resumes'):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed'
     assert by_id['confirmation.negative-default']['status'] == 'passed'
     assert report['screenshots'] and all((reviewer.output / item['file']).is_file() for item in report['screenshots'])
+    assert {item['name'] for item in report['screenshots']} >= {
+        f'{width}x{height}-updates-waiting' for width, height in bot.VIEWPORTS}
     assert {item['area'] for item in report['manual_review']} >= {'GPU', 'CPU and RAM', 'Updates and security'}
     assert all(item['status'] == 'not_exercised' for item in report['skipped_checks'])
     assert {item['source'] for item in report['documentation_comparison']} == {'docs/FEATURES.md', 'docs/PLATFORMS.md'}
@@ -148,6 +154,41 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
     summary = bot.github_summary(report)
     assert 'not AI review' in markdown and 'No host maintenance was applied' in summary
     assert 'critical-review.json' in summary and 'Manual review remains required' in summary
+
+
+@pytest.mark.parametrize(('defect', 'expected_failure'), [
+    ('stale-stage', 'explicit-state'), ('missing-package', 'current-worker'),
+    ('false-completion', 'progress-honesty'), ('disabled-cancel', 'cancel-available')])
+def test_waiting_review_detects_the_reintroduced_regression(reviewer, app, monkeypatch,
+                                                           defect, expected_failure):
+    original = bot.OptimizationProgressWindow.update_progress
+    def broken_update(progress, state):
+        original(progress, state)
+        if state.get('waiting_for') != 'software_updates':
+            return
+        if defect == 'stale-stage':
+            progress.title.setText('OPTIMIZATION IN PROGRESS')
+            progress.stage.setText('Apply saved privacy controls')
+            progress.description.setText('Privacy controls failed.')
+        elif defect == 'missing-package':
+            progress.background_status.clear()
+            progress.processes.clear()
+        elif defect == 'false-completion':
+            progress.progress.setValue(100)
+        elif defect == 'disabled-cancel':
+            progress.cancel_button.setEnabled(False)
+    monkeypatch.setattr(bot.OptimizationProgressWindow, 'update_progress', broken_update)
+    owner = QWidget()
+    try:
+        reviewer.review_update_wait(owner, bot.VIEWPORTS[0], 'regression')
+        findings = {item['id']: item for item in reviewer.report['checks']}
+        failure = findings['regression.updates-waiting.' + expected_failure]
+        assert failure['status'] == 'failed' and failure['severity'] == 'critical'
+        assert (reviewer.output / 'regression-updates-waiting.png').is_file()
+    finally:
+        owner.close()
+        owner.deleteLater()
+        app.processEvents()
 
 
 def test_cli_persists_failure_evidence_and_returns_nonzero(tmp_path, monkeypatch, capsys):
