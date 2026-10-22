@@ -7,7 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 from optimus.parallel_updates import (ParallelAppUpdates, ProgressMux, WINDOWS_DRIVER_REVIEW,
-                                     WINDOWS_SOFTWARE, update_completion_state, update_completion_status)
+                                     WINDOWS_SOFTWARE, update_completion_state, update_completion_status,
+                                     installer_barrier, _uncertain)
 
 
 @pytest.mark.parametrize('title,key,noun', [
@@ -98,3 +99,19 @@ def test_discovery_exception_preserves_failed_source_proof_without_claiming_a_li
     card = events[-1]['jobs'][0]
     assert card['status'] == 'needs_review'
     assert card['scan_label'] == 'Availability not confirmed'
+
+
+@pytest.mark.parametrize('key', ['app_scan', 'driver_scan'])
+def test_failed_search_proof_cannot_block_an_independent_installer_after_a_known_preflight_failure(key):
+    outcome = {'failed_items': 1, 'installer_started': False, 'outcomeKnown': True,
+        'running': False, 'uncertain': False, 'items': [],
+        key: {'schema': 1, 'complete': False, 'status': 'failed', 'offers_count': None,
+              'summary': 'Fixture source timeout; availability is uncertain.',
+              'errors': [{'source': 'Fixture source', 'error': 'Fixture catalog error'}]}}
+    assert installer_barrier(outcome) is None
+    assert _uncertain(outcome) is False
+    assert update_completion_status(outcome) == 'needs_review'
+    # Actual unresolved installer evidence still blocks the sibling channel.
+    outcome['items'] = [{'status': 'failed', 'result': {'installer_started': True, 'outcomeKnown': False}}]
+    assert installer_barrier(outcome)
+    assert _uncertain(outcome) is True

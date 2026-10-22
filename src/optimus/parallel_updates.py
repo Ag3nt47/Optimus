@@ -244,7 +244,8 @@ def installer_barrier(result):
                 return str(value.get('stop_reason') or 'An update failed or remains uncertain; review installer state before another mutation.')[:4000]
             if 'items' in value and not isinstance(value['items'], list):
                 return 'The update item outcomes are malformed; later conflicting operations were deferred.'
-            pending.extend(value.values())
+            # Discovery status is independent of actual installer receipts.
+            pending.extend(item for key, item in value.items() if key not in ('driver_scan', 'app_scan'))
         elif isinstance(value, list):
             if any(not isinstance(row, dict) for row in value) and value is result.get('items'):
                 return 'An update item has an unknown outcome; later conflicting operations were deferred.'
@@ -269,7 +270,8 @@ def _uncertain(result, *, native=False):
                 if (value.get('error') and value.get('status') == 'failed'
                         or native and value.get('status') == 'failed' and not value.get('skipped')):
                     return True
-            pending.extend(value.values())
+            # A source-search timeout does not make a known idle installer live.
+            pending.extend(item for key, item in value.items() if key not in ('driver_scan', 'app_scan'))
         elif isinstance(value, list):
             pending.extend(value)
     return False
