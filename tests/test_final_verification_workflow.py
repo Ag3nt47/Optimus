@@ -141,7 +141,7 @@ def test_production_backend_verifier_consumes_workflow_evidence_without_host_acc
     assert checked['run_id'] == result['id']
     assert checked['read_only'] is True and checked['status'] == 'confirmed'
     assert checked['coverage_complete'] is True and checked['failed_items'] == 0
-    assert checked['counts'] == {'confirmed': 2, 'needs_review': 0, 'unverified': 0, 'not_applicable': 0}
+    assert checked['counts'] == {'confirmed': 2, 'needs_review': 0, 'unverified': 0, 'not_applicable': 1}
     assert [row['title'] for row in checked['stages']] == [row['title'] for row in result['stages'][:-1]]
     native_reader.assert_not_called()
     service.sampler.status.assert_not_called()

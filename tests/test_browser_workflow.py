@@ -117,7 +117,8 @@ def test_each_browser_category_dispatches_one_orchestrator_stage(tmp_path, enabl
     operation.assert_called_once()
     browser_stages = [stage for stage in report['stages'] if stage.get('result', {}).get('fixture_browser_cleanup')]
     assert len(browser_stages) == 1
-    assert len(report['stages']) == 4  # Two reports, browser maintenance, then final outcome verification.
+    assert len(report['stages']) == 5  # Two audits, browser maintenance, observations, final verification.
+    assert report['maintenance_insights']['read_only'] is True
     assert not any(call[0] in ('cleanup_scan', 'cleanup_apply') for call in backend.calls)
 
 
