@@ -92,7 +92,8 @@ class ProgressMux:
         self.lock = threading.RLock()
         self.foreground = {}
         self.jobs = {}
-        self.item_started = {}
+        self.worker_started = {}
+        self.worker_finished = {}
 
     def _event(self):
         event = dict(self.foreground)
@@ -101,8 +102,10 @@ class ProgressMux:
             processes = list(event.get('processes', []))
             for job_id, job in self.jobs.items():
                 current = dict(job)
-                if job_id in self.item_started and job['status'] in ACTIVE_JOB_STATES:
-                    current['elapsed_seconds'] = max(0, time.monotonic() - self.item_started[job_id])
+                if job_id in self.worker_started:
+                    finished = self.worker_finished.get(job_id)
+                    current['elapsed_seconds'] = max(0, (time.monotonic() if finished is None else finished)
+                                                     - self.worker_started[job_id])
                 event['jobs'].append(current)
                 if job['status'] in ACTIVE_JOB_STATES:
                     processes.append(job['description'])
@@ -123,8 +126,13 @@ class ProgressMux:
         with self.lock:
             previous = self.jobs.get(job_id, {})
             package = state.get('id', previous.get('current_package'))
-            if job_id not in self.item_started or package != previous.get('current_package'):
-                self.item_started[job_id] = time.monotonic()
+            now = time.monotonic()
+            self.worker_started.setdefault(job_id, now)
+            # The card measures the whole worker, including discovery and both
+            # gates. Package changes and a later join must not reset its clock
+            # or extend the duration after the worker's first terminal event.
+            if status not in ACTIVE_JOB_STATES:
+                self.worker_finished.setdefault(job_id, now)
             self.jobs[job_id] = {'id': job_id, 'status': status,
                         'description': str(state.get('description') or previous.get('description')
                                            or ('Driver' if job_id == 'driver_updates' else 'Application') + ' update worker: ' + status)[:2000],

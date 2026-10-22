@@ -15,6 +15,7 @@ MAX_BYTES = 2 * 1024 * 1024
 MAX_CANVAS = 256
 MAX_FRAMES = 300
 MAX_DECODED_BYTES = 4 * 1024 * 1024
+MAX_DISPLAY_EXTENT = 128
 DEFAULT_ASSET = Path(__file__).resolve().parents[1] / 'assets' / 'raccoon-cane-dance.gif'
 
 
@@ -41,7 +42,7 @@ class LocalLoadingAnimation(QLabel):
         self.setAccessibleName('Dancing raccoon with a cane loading icon')
         self.setAccessibleDescription('Decorative animation. The worker panels report actual operation progress.')
         self.setToolTip('Racoon Dance Cane Dance — Tenor / Steveo0825. See the bundled RACCOON-NOTICE.txt.')
-        self._extent = max(16, min(96, int(extent)))
+        self._extent = max(16, min(MAX_DISPLAY_EXTENT, int(extent)))
         self._movie = None
         self._buffer = None
         self._poster = QPixmap()
@@ -76,13 +77,13 @@ class LocalLoadingAnimation(QLabel):
             if (not size.isValid() or size.width() > MAX_CANVAS or size.height() > MAX_CANVAS
                     or not 1 <= frames <= MAX_FRAMES):
                 raise ValueError('The loading asset exceeds the canvas or frame limits.')
-            if size.width() * size.height() * frames * 4 > MAX_DECODED_BYTES:
+            scaled = size.scaled(QSize(self._extent, self._extent), Qt.KeepAspectRatio)
+            if max(size.width() * size.height(), scaled.width() * scaled.height()) * frames * 4 > MAX_DECODED_BYTES:
                 raise ValueError('The loading asset exceeds the decoded-frame budget.')
             image = reader.read()
             if image.isNull():
                 raise ValueError('The loading asset could not be decoded.')
             reader = None
-            scaled = size.scaled(QSize(self._extent, self._extent), Qt.KeepAspectRatio)
             self.setFixedSize(scaled)
             self._poster = QPixmap.fromImage(image).scaled(scaled, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             # Only the bundled asset has an accompanying trusted static poster.
@@ -97,7 +98,7 @@ class LocalLoadingAnimation(QLabel):
             movie.setDevice(buffer)
             movie.setFormat(b'gif')
             # A bounded cache avoids Qt's QBuffer/CacheNone loop replay errors.
-            # The complete source frames above fit within a 4 MiB pixel budget.
+            # Both source and displayed frames fit within a 4 MiB pixel budget.
             movie.setCacheMode(QMovie.CacheAll)
             movie.setScaledSize(scaled)
             if not movie.isValid():

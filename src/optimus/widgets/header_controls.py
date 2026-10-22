@@ -1104,11 +1104,15 @@ def install_global_window_reveal(
     if isinstance(existing, PanelRevealOverlay):
         existing.set_motion_config(config)
         existing.enable_global_windows(True)
+        from .window_geometry import install_window_geometry
+        install_window_geometry(owner)
         return existing
     overlay = PanelRevealOverlay(owner)
     overlay.set_motion_config(config)
     overlay.enable_global_windows(True)
     setattr(owner, "_optimus_window_reveal", overlay)
+    from .window_geometry import install_window_geometry
+    install_window_geometry(owner)
     return overlay
 
 

@@ -82,7 +82,7 @@ class NativeSetupWizard(QWizard):
         self._startup_loaded = False
         self.setWindowTitle('Optimus — native setup questions')
         self.setWizardStyle(QWizard.ModernStyle)
-        self.setMinimumSize(850, 650)
+        self.setMinimumSize(640, 480)
         self.setStyleSheet(build_qss('cyber'))
         self.setButtonText(QWizard.FinishButton, 'Save choices')
         self._build_general()

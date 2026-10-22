@@ -11,8 +11,8 @@ from unittest.mock import Mock
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QWidget
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QPushButton, QScrollArea, QWidget
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +117,30 @@ def test_oversized_minimum_is_a_recorded_critical_failure(reviewer, app):
         window.close()
         window.deleteLater()
         app.processEvents()
+
+
+def test_fixture_virtual_desktop_keeps_exact_requested_client_viewport_and_restores_patch(tmp_path, app):
+    from optimus.widgets import window_geometry
+    original = window_geometry.available_screen_geometry
+    reviewer = bot.CriticalReview(tmp_path / 'virtual-desktop')
+    window = QMainWindow()
+    window_geometry.install_window_geometry(window)
+    child = QDialog(window)
+    try:
+        assert window_geometry.available_screen_geometry(window) == QRect(0, 0, 1920, 1080)
+        reviewer.viewport(window, (850, 650), 'fixture-owner')
+        reviewer.viewport(child, (1024, 768), 'fixture-dialog')
+        assert (window.width(), window.height()) == (850, 650)
+        assert (child.width(), child.height()) == (1024, 768)
+        assert all(row['status'] == 'passed' for row in reviewer.report['checks'])
+    finally:
+        child.close()
+        window.close()
+        child.deleteLater()
+        window.deleteLater()
+        reviewer.close()
+        app.processEvents()
+    assert window_geometry.available_screen_geometry is original
 
 
 def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer, monkeypatch):

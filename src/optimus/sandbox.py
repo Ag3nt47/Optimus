@@ -10,10 +10,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
-                             QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                             QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 from .source_workspace import SourceWorkspace
 from .widgets.code_highlighter import PythonHighlighter
 from .widgets.theme import build_qss
+from .widgets.flow_layout import FlowLayout
 
 class SandboxWindow(QMainWindow):
     def __init__(self, backend, parent=None):
@@ -21,6 +22,7 @@ class SandboxWindow(QMainWindow):
         self.backend = backend
         self.setWindowTitle('Optimus - Source Sandbox')
         self.resize(1280, 850)
+        self.setMinimumSize(640, 480)
         self.setStyleSheet(build_qss('cyber'))
         source_root = backend.source_root()
         self.workspace = SourceWorkspace(source_root, backend.data_dir)
@@ -31,7 +33,7 @@ class SandboxWindow(QMainWindow):
         self.description = QLabel('Full Optimus source working copy. Save and Revert keep version history. Restart Optimus runs the saved working copy. Installed release files remain available.')
         self.description.setWordWrap(True)
         layout.addWidget(self.description)
-        toolbar = QHBoxLayout()
+        toolbar = FlowLayout()
         for label, callback in [('Save', self.save), ('Revert', self.revert), ('Original version', self.original), ('History', self.history), ('Restart Optimus', self.restart), ('Export project', self.export)]:
             button = QPushButton(label)
             button.clicked.connect(callback)
@@ -40,16 +42,22 @@ class SandboxWindow(QMainWindow):
         splitter = QSplitter()
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel('Optimus source')
-        self.tree.setMinimumWidth(260)
+        self.tree.setMinimumWidth(160)
         self.editor = QPlainTextEdit()
         self.editor.setFont(QFont('Cascadia Mono', 10))
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.editor.setMinimumWidth(180)
         self.highlighter = PythonHighlighter(self.editor.document())
         splitter.addWidget(self.tree)
         splitter.addWidget(self.editor)
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([240, 900])
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter)
         self.status = QLabel(str(self.workspace.root))
+        self.status.setWordWrap(True)
+        self.status.setTextFormat(Qt.PlainText)
+        self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.status)
         self.setCentralWidget(root)
         QShortcut(QKeySequence.Save, self, activated=self.save)

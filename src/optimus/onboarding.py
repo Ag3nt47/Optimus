@@ -113,7 +113,7 @@ class InitialSetupWizard(QWizard):
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
         self.setButtonText(QWizard.FinishButton, 'Save choices')
         self.resize(1000, 780)
-        self.setMinimumSize(850, 650)
+        self.setMinimumSize(640, 480)
         palette = self.palette()
         for role, color in ((QPalette.Window, '#101722'), (QPalette.WindowText, '#e1ebf7'),
                             (QPalette.Base, '#0b111a'), (QPalette.AlternateBase, '#162232'),

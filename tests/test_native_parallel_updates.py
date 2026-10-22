@@ -386,7 +386,7 @@ def test_progress_mux_keeps_foreground_and_unions_processes():
     mux({'stage': 'Final verified result', 'percentage': 100})
     assert events[-1]['percentage'] == 100
     assert events[-1]['jobs'][0]['status'] == 'completed'
-    assert 'elapsed_seconds' not in events[-1]['jobs'][0]
+    assert events[-1]['jobs'][0]['elapsed_seconds'] >= 0
 
 
 @pytest.mark.parametrize('value', [None, {'failed_items': 1}, {'running': True},

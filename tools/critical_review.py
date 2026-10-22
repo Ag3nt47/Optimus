@@ -14,14 +14,14 @@ from pathlib import Path
 import sys
 import threading
 import time
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QAbstractButton, QMessageBox, QScrollArea,
     QTabWidget, QWizard)
@@ -246,8 +246,19 @@ class CriticalReview:
         metrics = QFontMetrics(self.app.font())
         self.check('review-environment.font-glyphs', all(metrics.inFont(character) for character in 'Optimus Yes No'),
             'The review renderer must have real glyphs before text geometry is meaningful.')
+        # An offscreen plugin commonly exposes an artificial 800x800 screen.
+        # Exercise the real fitter against an explicit virtual desktop so the
+        # requested client viewports stay exact; small-screen fitting has its
+        # own independent regression fixtures. No production bypass is added.
+        self._geometry_override = patch('optimus.widgets.window_geometry.available_screen_geometry',
+                                        return_value=QRect(0, 0, 1920, 1080))
+        self._geometry_override.start()
+        self.report['fixture_available_screen'] = [0, 0, 1920, 1080]
 
     def close(self):
+        if self._geometry_override is not None:
+            self._geometry_override.stop()
+            self._geometry_override = None
         self.app.setQuitOnLastWindowClosed(self._previous_quit)
         self.app.setFont(self._previous_font)
         for identity in self._font_ids:
@@ -267,8 +278,14 @@ class CriticalReview:
         widget.resize(*dimensions)
         widget.show()
         drain(self.app)
+        # Initial owner-relative fitting remains active. Then exercise a real
+        # user resize to this particular fixture viewport before measuring it.
+        widget.resize(*dimensions)
+        drain(self.app)
         actual = [widget.width(), widget.height()]
-        self.check(identity + '.viewport', actual[0] <= dimensions[0] and actual[1] <= dimensions[1],
+        contained = actual[0] <= dimensions[0] and actual[1] <= dimensions[1]
+        exact = actual == list(dimensions)
+        self.check(identity + '.viewport', contained if isinstance(widget, QMessageBox) else exact,
             'The requested client viewport must contain the complete window; an oversized minimum is a usability failure.',
             evidence={'requested': list(dimensions), 'actual': actual,
                       'minimum': [widget.minimumWidth(), widget.minimumHeight()],

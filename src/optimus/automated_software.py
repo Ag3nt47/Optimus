@@ -250,6 +250,10 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 uncertain = True
             if isinstance(outcome, dict) and outcome.get('requiresReview') is True:
                 stop_reason = 'The update safety checks need review before remaining applications can be updated.'
+                if (outcome.get('installer_started') is False and outcome.get('outcomeKnown') is True
+                        and outcome.get('running') is False and isinstance(outcome.get('note'), str)
+                        and outcome['note'].strip()):
+                    stop_reason = 'Update deferred: ' + ' '.join(outcome['note'].split())[:800]
                 deferred = selected[index + 1:]
                 break
             if restart_needed or uncertain or (not known_exit and not skipped):
