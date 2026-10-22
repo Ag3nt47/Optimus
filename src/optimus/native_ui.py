@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QHBox
 from .automation import CURRENT_SETUP_VERSION, save_setup
 from .native_settings import NativePreferences, full_native_settings, startup_descriptor
 from .ui import BackendWorker, DataTable, DetailedSettingsWindow, OptimusWindow
-from .widgets.theme import build_qss
+from .widgets.theme import THEMES, build_qss
 
 
 def note(layout, text):
@@ -455,7 +455,36 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         self.action(body, 'Show saved configuration', 'preferences')
         self.action(body, 'Inspect native security and OS update recommendations', 'security_status')
         self.action(body, 'Measure slowdown contributors', 'slowdown_report')
+        note(body, 'Appearance and window effects')
+        self.theme_choice = QComboBox()
+        self.theme_choice.addItems(list(THEMES))
+        self.theme_choice.setCurrentText(self.owner.appearance.get('theme', 'cyber'))
+        body.addWidget(self.theme_choice)
+        self.motion_choice = QCheckBox('Enable starfield and window animations')
+        self.motion_choice.setChecked(self.owner.appearance.get('motion', True))
+        body.addWidget(self.motion_choice)
+        self.orb_choice = QCheckBox('Use the holographic orb when closing the main window')
+        self.orb_choice.setChecked(self.owner.appearance.get('orb', True))
+        body.addWidget(self.orb_choice)
+        appearance = QPushButton('Save appearance')
+        appearance.clicked.connect(self._save_appearance)
+        body.addWidget(appearance)
         body.addStretch()
+
+    def _save_appearance(self):
+        if self.smoke_test or self.busy:
+            self.status.setText('Appearance changes are disabled during a smoke test or active operation.')
+            return
+        from .workflow import atomic_json
+        value = dict(self.owner.appearance, theme=self.theme_choice.currentText(),
+                     motion=self.motion_choice.isChecked(), orb=self.orb_choice.isChecked())
+        try:
+            atomic_json(self.owner.preferences_path, value)
+            self.owner.apply_appearance(value)
+            self.setStyleSheet(build_qss(value['theme']))
+            self.status.setText('Appearance saved. The reduced-motion setup choice still takes precedence.')
+        except (OSError, ValueError, RuntimeError) as error:
+            self._error(str(error))
 
     def _build_native_processes(self):
         body = self.page('Performance')

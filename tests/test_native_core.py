@@ -269,6 +269,29 @@ def test_native_mac_helper_blocks_privacy_before_opening_database(monkeypatch):
         browser_privacy.BrowserPrivacy._closed({'browser': 'Google Chrome', 'browser_id': 'chrome', 'process': 'Google Chrome'})
 
 
+def test_mac_posix_session_zero_is_valid_and_uid_lifetime_checks_remain(tmp_path, monkeypatch):
+    monkeypatch.setattr(browser_cleanup, '_PLATFORM', 'darwin')
+    monkeypatch.setattr(browser_cleanup, '_session_id', lambda pid: 0)
+    monkeypatch.setattr(browser_cleanup.os, 'getuid', lambda: 1001, raising=False)
+    monkeypatch.setattr(browser_cleanup.os, 'geteuid', lambda: 1001, raising=False)
+    process = SimpleNamespace(pid=123, name=lambda: 'Google Chrome',
+        exe=lambda: str(tmp_path / 'Google Chrome'), create_time=lambda: 10.0,
+        username=lambda: 'fixtureuser', uids=lambda: SimpleNamespace(real=1001, effective=1001))
+    monkeypatch.setattr(browser_cleanup.psutil, 'Process', lambda pid: process)
+    context = browser_cleanup.BrowserSessionController._context()
+    assert context == ('fixtureuser', 0)
+    record = browser_cleanup.BrowserSessionController._identity(process, 'chrome', context)
+    assert record['session_id'] == 0 and record['verified']
+    controller = browser_cleanup.BrowserSessionController()
+    assert controller._same_process('chrome', record)
+    process.create_time = lambda: 11.0
+    assert not controller._same_process('chrome', record)
+    process.create_time = lambda: 10.0
+    process.uids = lambda: SimpleNamespace(real=1002, effective=1002)
+    with pytest.raises(ValueError, match='user IDs'):
+        controller._identity(process, 'chrome', context)
+
+
 @pytest.mark.parametrize('platform', ['linux', 'darwin'])
 def test_native_close_rechecks_lifetime_and_requires_complete_exit(monkeypatch, platform):
     monkeypatch.setattr(browser_cleanup, '_PLATFORM', platform)
@@ -377,6 +400,17 @@ def test_native_lower_priority_presets_use_positive_nice_values_without_elevatio
     assert outcome['applied'] and outcome['priority'] == priority
     assert process.actions == [('nice', nice_value)]
     assert 'restoring a lower nice value may require OS permission' in record['priority_note']
+
+
+@pytest.mark.parametrize('platform', ['linux', 'darwin'])
+def test_native_windows_profile_is_explicitly_unavailable_and_private_bytes_unknown(tmp_path, monkeypatch, platform):
+    process = native_process(tmp_path, monkeypatch, platform)
+    assert performance._record(process)['private_bytes'] is None
+    enumerate_processes = Mock(side_effect=AssertionError('Unsupported native Codex preset must not enumerate or change processes.'))
+    monkeypatch.setattr(performance.psutil, 'process_iter', enumerate_processes)
+    with pytest.raises(performance.PerformanceError, match='Windows-only'):
+        performance.performance_profile()
+    assert process.actions == []
 
 
 def test_mac_affinity_is_explicitly_unavailable(tmp_path, monkeypatch):

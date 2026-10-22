@@ -1,6 +1,7 @@
 """Opt-in background resource sampling. It never stops or tunes applications."""
 from __future__ import annotations
 import copy
+import sys
 import threading
 import time
 import psutil
@@ -36,7 +37,7 @@ class ResourceSampler:
             try:
                 item = process.info
                 record = {'pid': item['pid'], 'name': item['name'], 'rss': item['memory_info'].rss,
-                          'private': getattr(item['memory_info'], 'private', 0), 'cpu_percent': 0.0,
+                          'private': getattr(item['memory_info'], 'private', 0 if sys.platform == 'win32' else None), 'cpu_percent': 0.0,
                           'priority': str(item['nice']), 'create_time': item['create_time']}
                 key = (item['pid'], item['create_time'])
                 try:

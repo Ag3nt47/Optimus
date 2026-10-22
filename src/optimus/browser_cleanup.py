@@ -67,7 +67,8 @@ class BrowserSessionController:
     def _context():
         user = psutil.Process(os.getpid()).username()
         session = _session_id(os.getpid())
-        if not user or type(session) is not int or session <= 0:
+        minimum_session = 1 if _PLATFORM == 'win32' else 0
+        if not user or type(session) is not int or session < minimum_session:
             raise OSError('The current user/session is unavailable.')
         return user.casefold(), session
 
@@ -83,7 +84,8 @@ class BrowserSessionController:
                 or not process_matches(browser_id, path_module.basename(executable), _PLATFORM, allow_truncated=False)
                 or type(created) not in (int, float) or not math.isfinite(created) or created <= 0
                 or not isinstance(user, str) or not user or user.casefold() != context[0]
-                or (not native and session != context[1]) or session <= 0):
+                or type(session) is not int or session < (0 if native else 1)
+                or (not native and session != context[1])):
             raise ValueError('Browser process ownership, session or lifetime could not be verified.')
         if native:
             identities = process.uids()

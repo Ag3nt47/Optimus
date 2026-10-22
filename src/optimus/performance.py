@@ -267,7 +267,8 @@ def _record(process: Any) -> dict[str, Any]:
             'pid': int(process.pid), 'name': _safe_metric(process.name, 'Unavailable'), 'exe': executable,
             'create_time': _safe_metric(lambda: float(process.create_time())), 'username': _safe_metric(process.username, ''),
             'ppid': _safe_metric(lambda: int(process.ppid())), 'priority': _PRIORITY_NAMES.get(priority, str(priority)) if priority is not None else 'Unavailable',
-            'priority_value': priority, 'memory_rss': int(memory.rss) if memory else 0, 'private_bytes': getattr(memory, 'private', 0) if memory else 0,
+            'priority_value': priority, 'memory_rss': int(memory.rss) if memory else 0,
+            'private_bytes': getattr(memory, 'private', 0 if _PLATFORM == 'win32' else None) if memory else (0 if _PLATFORM == 'win32' else None),
             'cpu_percent': round(min(100.0, max(0.0, raw_cpu / cpu_count)), 2) if raw_cpu is not None else 0.0,
             'cpu_percent_one_core': raw_cpu, 'cpu_sample_available': raw_cpu is not None,
             'io_read_bytes': getattr(io, 'read_bytes', None), 'io_write_bytes': getattr(io, 'write_bytes', None),
@@ -293,7 +294,7 @@ def list_performance_candidates() -> list[dict[str, Any]]:
             rows.append({"pid": int(process.pid), "name": "Unavailable", "exe": "", "create_time": None,
                          "username": "", "ppid": None, "priority": "Unavailable", "priority_value": None,
                          "memory_rss": 0, "protected": True, "reason": "Process identity is inaccessible.",
-                         "can_set_priority": False, "can_sleep": False, "private_bytes": 0, "verified_codex_executable": False, "cpu_percent": 0.0, "cpu_percent_one_core": None, "cpu_sample_available": False, "affinity": None, "affinity_text": "Unavailable", "io_read_bytes": None, "io_write_bytes": None, "io_read_count": None, "io_write_count": None, "thread_count": None, "handle_count": None})
+                         "can_set_priority": False, "can_sleep": False, "private_bytes": 0 if _PLATFORM == 'win32' else None, "verified_codex_executable": False, "cpu_percent": 0.0, "cpu_percent_one_core": None, "cpu_sample_available": False, "affinity": None, "affinity_text": "Unavailable", "io_read_bytes": None, "io_write_bytes": None, "io_read_count": None, "io_write_count": None, "thread_count": None, "handle_count": None})
     return sorted(rows, key=lambda row: row["memory_rss"], reverse=True)
 
 
@@ -598,6 +599,8 @@ def performance_profile(priority: str = "High", include_tool_helpers: bool = Fal
     Tool helpers are opt-in and must descend from a verified Codex executable.
     Optimus itself, Windows processes, services and security processes stay protected.
     """
+    if _PLATFORM != 'win32':
+        raise PerformanceError('The verified Codex installation profile is Windows-only. Select an exact owned process in native resource controls instead.')
     if priority not in _PRIORITY_VALUES:
         raise PerformanceError(_priority_choice_message())
     selected_root = None
