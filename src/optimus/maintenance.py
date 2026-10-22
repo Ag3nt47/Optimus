@@ -37,6 +37,20 @@ _TASK_NAME = re.compile(r"^\\?Optimus-Audit-[A-Za-z0-9\-]{1,60}$")
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+class UpdatePreflightError(ValueError):
+    """A rejected update attempt that did not start a package installer."""
+    installer_started = False
+    outcomeKnown = True
+    running = False
+
+
+class UpdateOutcomeError(RuntimeError):
+    """An installer was launched but its final state cannot be established."""
+    installer_started = True
+    outcomeKnown = False
+    running = True
+
+
 class Maintenance:
     """Bridge-backed optional app removals and native Windows entry points.
 
@@ -352,24 +366,28 @@ class Maintenance:
         return True, '', False
     def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False, cancel_event=None, compatibility_mode: bool = False) -> dict[str, Any]:
         if confirmed is not True:
-            raise ValueError("Confirm the selected software update before installing it.")
+            raise UpdatePreflightError("Confirm the selected software update before installing it.")
         if type(unattended) is not bool:
-            raise ValueError("Choose an explicit unattended mode.")
+            raise UpdatePreflightError("Choose an explicit unattended mode.")
         if type(compatibility_mode) is not bool:
-            raise ValueError("Choose an explicit non-security compatibility mode.")
+            raise UpdatePreflightError("Choose an explicit non-security compatibility mode.")
         if not isinstance(package_id, str) or not _PACKAGE_ID.fullmatch(package_id):
-            raise ValueError("Select an exact package ID from a fresh update scan.")
+            raise UpdatePreflightError("Select an exact package ID from a fresh update scan.")
         current = self._last_update_packages.get(package_id)
         age = time.time() - self._last_update_scan
         if (package_id not in self._last_update_ids or not current or current.get("source") != "winget"
                 or not is_newer_version(current.get('version'), current.get('available'))
-                or self._last_update_scan <= 0 or age < 0 or age > 900):
-            raise ValueError("Select an unambiguous winget package from a fresh update scan.")
+                or self._last_update_scan <= 0 or age < 0):
+            raise UpdatePreflightError("Select an unambiguous winget package from a fresh update scan.")
+        # Retain the exact previously selected version pair, even when a prior
+        # installer took over fifteen minutes. Fresh revalidation below must
+        # still match that pair; an aged cache never authorizes a broader offer.
         expected = dict(current)
         def cancelled_result():
             if cancel_event is not None and cancel_event.is_set():
                 return {"id": package_id, "package_id": package_id, "source": "winget", "status": "cancelled",
                         "cancelled": True, "skipped": True, "exitCode": None, "unattended": unattended,
+                        "installer_started": False, "outcomeKnown": True, "running": False,
                         "from_version": (current or expected).get("version"), "to_version": (current or expected).get("available"),
                         "note": "Cancelled during update safety checks; no installer was started."}
             return None
@@ -377,24 +395,38 @@ class Maintenance:
             return interrupted
         # Revalidate both manual and unattended updates. An external updater may
         # have already installed the offered version since the preview.
-        self.updates_scan()
+        try:
+            fresh = self.updates_scan()
+        except Exception as error:
+            raise UpdatePreflightError("The update revalidation failed before any installer started (" + type(error).__name__ + ").") from error
+        if not isinstance(fresh, dict) or fresh.get('structured') is not True or type(fresh.get('exitCode')) is not int or fresh['exitCode'] != 0:
+            raise UpdatePreflightError("The update revalidation was incomplete; no installer was started.")
         current = self._last_update_packages.get(package_id)
         if (interrupted := cancelled_result()) is not None:
             return interrupted
         if not current or any(current.get(field) != expected.get(field) for field in ('id', 'version', 'available', 'source')):
             return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
                     "exitCode": None, "unattended": unattended, "failureKind": "version_changed",
+                    "installer_started": False, "outcomeKnown": True, "running": False,
                     "from_version": (current or expected).get("version"), "to_version": (current or expected).get("available"),
                     "note": "The installed or available version changed during revalidation; no installer was started."}
-        unpinned, reason, needs_review = self._pin_status(current)
+        try:
+            unpinned, reason, needs_review = self._pin_status(current)
+        except Exception as error:
+            raise UpdatePreflightError("The pin safety check failed before any installer started (" + type(error).__name__ + ").") from error
         if (interrupted := cancelled_result()) is not None:
             return interrupted
         if not unpinned:
             return {"id": package_id, "package_id": package_id, "source": "winget", "status": "skipped", "skipped": True,
                     "exitCode": None, "unattended": unattended, "note": reason, "requiresReview": needs_review,
+                    "installer_started": False, "outcomeKnown": True, "running": False,
                     "failureKind": "pin_inventory_untrusted" if needs_review else "pinned",
                     "from_version": current["version"], "to_version": current["available"]}
-        arguments = [self._winget(), "upgrade", "--id", package_id, "--exact", "--source", "winget", "--version", current['available']]
+        try:
+            executable = self._winget()
+        except Exception as error:
+            raise UpdatePreflightError("WinGet became unavailable before any installer started.") from error
+        arguments = [executable, "upgrade", "--id", package_id, "--exact", "--source", "winget", "--version", current['available']]
         if compatibility_mode:
             arguments += ["--force"]
         if unattended:
@@ -407,7 +439,11 @@ class Maintenance:
             result = self._run(arguments, timeout=1800)
         except subprocess.TimeoutExpired:
             # The vendor child can outlive WinGet. Never retry or replay here.
-            raise RuntimeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
+            raise UpdateOutcomeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
+        except (FileNotFoundError, PermissionError) as error:
+            # These launch errors occur before CreateProcess starts WinGet;
+            # a missing/replaced executable is not a detached installer.
+            raise UpdatePreflightError("WinGet could not be started; no installer was launched.") from error
         output = _ANSI.sub("", result.stdout or "")
         stderr = _ANSI.sub("", result.stderr or "")
         native_code = result.returncode & 0xffffffff
@@ -423,6 +459,7 @@ class Maintenance:
                 "status": "completed" if result.returncode in (0, 3010, 1641) else "failed", "unattended": unattended,
                 "compatibility_mode": compatibility_mode,
                 "restartNeeded": True if restart else None, "running": installer_running,
+                "installer_started": True, "outcomeKnown": not installer_running,
                 "from_version": current["version"], "to_version": current["available"],
                 "text": output, "stderr": stderr,
                 "note": (("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."

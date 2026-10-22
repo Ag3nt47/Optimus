@@ -20,6 +20,8 @@ class ResourceSampler:
 
     def sample(self):
         now = time.time()
+        measured_at = time.monotonic()
+        logical_cpus = max(1, psutil.cpu_count() or 1)
         memory = psutil.virtual_memory()
         errors = []
         try:
@@ -45,8 +47,8 @@ class ResourceSampler:
                     cpu_total = cpu.user + cpu.system
                     previous_cpu = self._previous_cpu.get(key)
                     if previous_cpu:
-                        record['cpu_percent'] = max(0.0, min(100.0, (cpu_total - previous_cpu[1]) / max(0.01, now - previous_cpu[0]) / max(1, psutil.cpu_count()) * 100))
-                    self._previous_cpu[key] = (now, cpu_total)
+                        record['cpu_percent'] = max(0.0, min(100.0, (cpu_total - previous_cpu[1]) / max(0.01, measured_at - previous_cpu[0]) / logical_cpus * 100))
+                    self._previous_cpu[key] = (measured_at, cpu_total)
                 except (psutil.Error, OSError, AttributeError, NotImplementedError):
                     pass
                 try:
@@ -55,10 +57,10 @@ class ResourceSampler:
                     key = (item['pid'], item['create_time'])
                     previous = self._previous_io.get(key)
                     if previous:
-                        elapsed = max(0.01, now - previous[0])
+                        elapsed = max(0.01, measured_at - previous[0])
                         record['read_bytes_per_second'] = max(0, counters.read_bytes - previous[1]) / elapsed
                         record['write_bytes_per_second'] = max(0, counters.write_bytes - previous[2]) / elapsed
-                    self._previous_io[key] = (now, counters.read_bytes, counters.write_bytes)
+                    self._previous_io[key] = (measured_at, counters.read_bytes, counters.write_bytes)
                 except (psutil.Error, OSError, AttributeError, NotImplementedError):
                     pass
                 processes.append(record)
@@ -76,15 +78,20 @@ class ResourceSampler:
         return result
 
     def _run(self, stop_event):
-        while not stop_event.is_set():
-            try:
-                result = self.sample()
-                with self._lock:
-                    self.latest = result
-            except Exception as error:
-                with self._lock:
-                    self.latest = {'timestamp': time.time(), 'errors': [str(error)]}
-            stop_event.wait(self.interval)
+        from .runtime_priority import lower_worker_priority
+        restore_priority = lower_worker_priority()
+        try:
+            while not stop_event.is_set():
+                try:
+                    result = self.sample()
+                    with self._lock:
+                        self.latest = result
+                except Exception as error:
+                    with self._lock:
+                        self.latest = {'timestamp': time.time(), 'errors': [str(error)]}
+                stop_event.wait(self.interval)
+        finally:
+            restore_priority()
 
     def start(self, interval=5):
         with self._lifecycle_lock:
@@ -97,6 +104,13 @@ class ResourceSampler:
         self.stop()
         if self._thread and self._thread.is_alive():
             raise RuntimeError('The previous analysis sample is still stopping. Try again shortly.')
+        # A resumed sampler must produce a fresh observation before verification
+        # can confirm it. Old rates cannot span an off interval or clock change.
+        with self._lock:
+            self.latest = None
+            self._previous_cpu = {}
+            self._previous_io = {}
+            self._previous_time = None
         self.interval = interval
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, args=(self._stop,), name='Optimus resource sampler', daemon=True)

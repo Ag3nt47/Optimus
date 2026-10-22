@@ -31,23 +31,37 @@ class _SpinRing(QWidget):
         super().__init__(parent)
         self.setFixedSize(d, d)
         self._angle = 0.0
+        self._running = False
         self._color = QColor(*_C_RED)
         self._timer = PresentationTimer(self, cosmetic=True)
         self._timer.timeout.connect(self._tick)
 
     def start(self) -> None:
+        self._running = True
+        self.show()
+        self._sync_animation()
+
+    def _sync_animation(self) -> None:
         from .header_controls import motion_allowed
         owner = self
         while owner is not None and not hasattr(owner, 'config'):
             owner = owner.parentWidget()
-        if not motion_allowed(getattr(owner, 'config', None)):
+        if not self._running or not self.isVisible() or not motion_allowed(getattr(owner, 'config', None)):
             self._timer.stop()
         elif not self._timer.isActive():
             self._timer.start(33)
-        self.show()
 
     def stop(self) -> None:
+        self._running = False
         self._timer.stop()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._sync_animation()
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
 
     def set_color(self, c: QColor) -> None:
         self._color = c

@@ -429,7 +429,10 @@ class CriticalReview:
             'processes': ['In-memory application update fixture: Fixture.App'],
             'jobs': [{'id': 'software_updates', 'status': 'waiting',
                 'description': 'Updating approved package 2/7: Fixture.App (1.0 to 1.1)',
-                'current': 1, 'total': 7, 'elapsed_seconds': 125}]}
+                'current': 1, 'total': 7, 'elapsed_seconds': 125},
+                {'id': 'driver_updates', 'status': 'pending',
+                 'description': 'Approved driver updates are queued behind app updates.',
+                 'current': 0, 'total': 2, 'elapsed_seconds': 0}]}
         try:
             progress.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 29,
                 'description': 'One or more selected operations or scan checks failed.',
@@ -462,9 +465,37 @@ class CriticalReview:
             self.check(prefix + '.updates-waiting.failure-history',
                 'FAILED: Apply saved privacy controls' in progress.log.toPlainText(),
                 'Replacing a completed stage caption must preserve its failure evidence in the stage log.')
+            cards = progress.worker_cards
+            self.check(prefix + '.updates-waiting.three-worker-cards',
+                [card.heading.text() for card in cards.values()] == ['Maintenance', 'App updates', 'Driver updates']
+                and all(card.isVisible() and not card.visibleRegion().isEmpty() for card in cards.values())
+                and cards['software_updates'].status.text().startswith('Running')
+                and cards['driver_updates'].status.text() == 'Queued',
+                'All three worker panels must remain visible and distinguish the running app installer from queued drivers.')
             self.screenshot(progress, prefix + '-updates-waiting')
+            driver_wait = dict(waiting, stage='Waiting for background updates', waiting_for='installer_updates',
+                active_job_id='driver_updates', next_stage='Check Windows security updates', percentage=57,
+                description='The driver worker is still running. Conflicting maintenance and final verification wait for the update queue.',
+                processes=['In-memory driver update fixture: Fixture GPU driver'],
+                jobs=[{'id': 'software_updates', 'status': 'completed', 'description': 'Approved application updates returned.',
+                       'current': 7, 'total': 7, 'elapsed_seconds': 145},
+                      {'id': 'driver_updates', 'status': 'running', 'description': 'Installing approved Fixture GPU driver',
+                       'current_package': 'Fixture GPU driver', 'current': 0, 'total': 2, 'elapsed_seconds': 12}])
+            progress.update_progress(driver_wait)
+            drain(self.app)
+            self.check(prefix + '.updates-waiting.driver-handoff',
+                progress.title.text() == 'WAITING FOR BACKGROUND UPDATES'
+                and cards['maintenance'].status.text() == 'Waiting for update lane'
+                and cards['software_updates'].status.text() == 'Completed'
+                and cards['driver_updates'].status.text() == 'Running'
+                and 'Fixture GPU driver' in cards['driver_updates'].details.text()
+                and cards['driver_updates'].elapsed.text() == 'Elapsed: 12s'
+                and cards['driver_updates'].progress.value() == 0
+                and cards['driver_updates'].progress.maximum() == 2,
+                'The same window must show application completion and the current driver installer without claiming simultaneous installers.')
+            self.screenshot(progress, prefix + '-driver-updates-waiting')
             progress.cancel_button.click()
-            progress.update_progress(waiting)
+            progress.update_progress(driver_wait)
             self.check(prefix + '.updates-waiting.cancellation-stable',
                 cancel.is_set() and not progress.cancel_button.isEnabled()
                 and 'Cancellation requested.' in progress.description.text(),

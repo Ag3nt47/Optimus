@@ -188,6 +188,7 @@ def _run_gui(backend, args, actual_arguments):
     from .gui_instance import GuiInstance
     read_only_gui = args.smoke_test or args.startup_probe
     instance = None
+    interface_priority = None
     closed = False
 
     def close():
@@ -224,12 +225,26 @@ def _run_gui(backend, args, actual_arguments):
                      else {'started': False, 'status': 'per_operation', 'note': ''})
         if elevation.get('started') is True:
             return 0
+        if not read_only_gui:
+            from .runtime_priority import InterfacePriority
+            interface_priority = InterfacePriority()
+            preference_reader = getattr(backend, 'preferences', None)
+            preference = (preference_reader().get('interface_priority_boost_enabled', True)
+                          if callable(preference_reader) else False)
+            priority_status = interface_priority.apply(preference)
+            if priority_status.get('status') in ('unavailable', 'external_priority') and sys.platform == 'win32':
+                elevation = dict(elevation, note=' '.join(filter(None, (
+                    elevation.get('note'), priority_status.get('note')))))
         return _show_gui(backend, args, elevation, instance, staged_restart, close)
     except (OSError, ValueError, RuntimeError) as error:
         print(json.dumps({'status': 'error', 'error': str(error)}), file=sys.stderr)
         return 2
     finally:
-        close()
+        try:
+            if interface_priority is not None:
+                interface_priority.restore()
+        finally:
+            close()
 
 
 def _show_gui(backend, args, elevation, instance, staged_restart, close):

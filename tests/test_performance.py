@@ -139,6 +139,51 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual((process.priority_calls, process.suspend_calls, process.resume_calls), ([], 0, 0))
         self.assertFalse(self.state_path.exists())
 
+    def test_inventory_collects_shared_guards_once_and_live_changes_recheck(self):
+        first = self.add(200)
+        second = self.add(201)
+        with patch.object(perf, '_current_user', return_value='machine\\user') as owner, \
+                patch.object(perf, '_ancestor_ids', return_value={100}) as ancestors, \
+                patch.object(perf, '_service_ids', return_value=set()) as services, \
+                patch.object(perf, '_session_id', return_value=1) as sessions, \
+                patch.object(fake_psutil, 'cpu_count', return_value=4) as cpus:
+            rows = perf.list_performance_candidates()
+        self.assertEqual(len(rows), 2)
+        for shared in (owner, ancestors, services, cpus):
+            self.assertEqual(shared.call_count, 1)
+        self.assertEqual(sessions.call_count, 2)
+        self.assertTrue(all(row['can_sleep'] for row in rows))
+        # Census snapshots are display evidence only. A newly service-owned PID
+        # must be refused by the existing fresh mutation guard.
+        self.services.add(first.pid)
+        record = next(row for row in rows if row['pid'] == first.pid)
+        with self.assertRaises(perf.PerformanceError):
+            self.controller.sleep_process(record)
+        self.assertEqual(first.suspend_calls + second.suspend_calls, 0)
+        self.assertFalse(self.state_path.exists())
+
+    def test_inventory_shared_guard_failures_stay_protected(self):
+        self.add()
+        cases = (
+            ('_current_user', {'side_effect': perf.PerformanceError('Unavailable owner')}),
+            ('_service_ids', {'return_value': None}),
+            ('_ancestor_ids', {'return_value': {-1, 100}}),
+        )
+        for name, options in cases:
+            with self.subTest(name=name), patch.object(perf, name, **options):
+                row = perf.list_performance_candidates()[0]
+                self.assertTrue(row['protected'])
+                self.assertFalse(row['can_sleep'])
+                self.assertFalse(row['can_set_priority'])
+
+    def test_unavailable_cpu_count_retains_read_only_inventory(self):
+        self.add()
+        with patch.object(fake_psutil, 'cpu_count', return_value=None), \
+                patch.object(perf.os, 'cpu_count', return_value=4):
+            row = perf.list_performance_candidates()[0]
+        self.assertEqual(row['cpu_percent'], 20.0)
+        self.assertTrue(row['can_sleep'])
+
     def test_stale_pid_and_changed_path_rejected(self):
         process = self.add()
         record = perf._record(process)

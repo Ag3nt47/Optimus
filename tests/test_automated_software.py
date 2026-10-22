@@ -200,6 +200,43 @@ def test_any_exception_defers_remaining_packages_without_replay():
     assert result['failed_items'] == 1 and result['deferred_ids'] == ['Vendor.Two']
 
 
+def test_known_preflight_failure_retains_error_without_orphan_installer_claim():
+    from optimus.maintenance import UpdatePreflightError
+    service = backend()
+    service.update_app_unattended.side_effect = UpdatePreflightError('Fixture exact candidate changed before installation')
+    result = run_software(service, configuration())
+    assert result['failed_items'] == 1 and result['deferred_ids'] == ['Vendor.Two']
+    assert result['items'][0]['result']['installer_started'] is False
+    assert result['outcomeKnown'] is True and result['installer_started'] is False
+    assert 'no installer was started' in result['stop_reason']
+    assert 'verify installer state' not in result['stop_reason']
+    service.update_app_unattended.assert_called_once_with('Vendor.One')
+
+
+def test_completed_update_then_preflight_failure_keeps_both_outcomes_known():
+    from optimus.maintenance import UpdatePreflightError
+    service = backend()
+    service.update_app_unattended.side_effect = [
+        {'exitCode': 0, 'installer_started': True, 'outcomeKnown': True},
+        UpdatePreflightError('Fixture safety check refused the next package')]
+    result = run_software(service, configuration())
+    assert [row['status'] for row in result['items']] == ['completed', 'failed']
+    assert result['installer_started'] is True and result['outcomeKnown'] is True
+
+
+@pytest.mark.parametrize('typed', [False, True])
+def test_real_timeout_and_unclassified_exceptions_remain_uncertain(typed):
+    from optimus.maintenance import UpdateOutcomeError
+    service = backend()
+    service.update_app_unattended.side_effect = (UpdateOutcomeError('Fixture vendor still running') if typed else
+                                               RuntimeError('Unclassified fixture failure'))
+    result = run_software(service, configuration())
+    assert result['outcomeKnown'] is False
+    assert result['items'][0]['result']['outcomeKnown'] is False
+    assert 'verify installer state' in result['stop_reason']
+    assert result['deferred_ids'] == ['Vendor.Two']
+
+
 def test_pin_or_changed_version_skip_does_not_block_other_candidates():
     service = backend()
     service.update_app_unattended.side_effect = [

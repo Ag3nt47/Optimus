@@ -116,6 +116,29 @@ def _status(checks):
     return next((state for state in ('needs_review', 'unverified', 'confirmed') if state in states), 'not_applicable')
 
 
+def _no_change_claimed(value):
+    """A skipped/review label cannot suppress an actual mutation receipt."""
+    if value.get('skipped') is not True and value.get('review_only') is not True:
+        return False
+    pending, inspected = [(value, 0)], 0
+    while pending:
+        item, depth = pending.pop()
+        inspected += 1
+        if inspected > 10000 or depth > 16:
+            return False  # Incomplete inspection cannot prove a no-op.
+        if isinstance(item, dict):
+            if (item.get('status') in ('completed', 'applied', 'recycled', 'deleted', 'failed', 'cancelled', 'uncertain')
+                    or item.get('errors') or type(item.get('failed_items')) is int and item['failed_items'] > 0
+                    or any(item.get(key) is True for key in ('applied', 'changed', 'removed', 'Recycled', 'completion_verified'))
+                    or any(type(item.get(key)) is int and item[key] > 0
+                           for key in ('deleted_count', 'recycled_count', 'changed_count'))):
+                return False
+            pending.extend((child, depth + 1) for child in item.values() if isinstance(child, (dict, list)))
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
+    return True
+
+
 class OutcomeVerification:
     def __init__(self, data_dir, *, native_reader=None, process_reader=None, sampler_status=None, speed_reader=None, compatibility_reader=None, drive_reader=None, clock=None):
         self.data_dir = Path(data_dir)
@@ -262,6 +285,12 @@ class OutcomeVerification:
         if not isinstance(value, dict):
             if isinstance(value, list): self._add(checks, 'review', title, 'not_applicable', 'This stage collected records and claimed no maintenance change.')
             else: self._add(checks, 'stage_result', title, 'unverified', 'The original stage has no usable outcome record.')
+            return
+        if title in ('Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
+                     'Scan for spyware and malware', 'Optimize eligible internal drives') and _no_change_claimed(value):
+            self._add(checks, 'review', title, 'not_applicable',
+                      'This operation was skipped or review-only; no applied maintenance change is claimed.',
+                      note=str(value.get('note', value.get('reason', value.get('stop_reason', ''))))[:500])
             return
         if title in ('Clean temporary files', 'Clean selected additional categories'):
             self._clean(value.get('result', {}), checks, title)

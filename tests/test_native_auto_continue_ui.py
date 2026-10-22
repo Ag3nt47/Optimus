@@ -251,14 +251,26 @@ def test_manual_continue_discards_the_batch_and_dismiss_can_cancel_queued_review
 
 
 def test_new_scan_discards_old_result_actions_and_stale_window_signals(window, app):
+    from shiboken6 import isValid
     old = complete_initial(window, app)
     old.close()
-    second = complete_initial(window, app)
+    generation = window._post_review_generation
+    def queue_old_actions():
+        old.autoContinueRequested.emit()
+        old.resultsAcknowledged.emit()
+        old.resultsDismissed.emit()
+    sender = threading.Thread(target=queue_old_actions)
+    sender.start()
+    sender.join(timeout=2)
+    assert not sender.is_alive()
+    assert window._post_review_generation == generation  # Queued UI callbacks have not run yet.
+    window.start_optimization()
+    wait_until(app, lambda: window._progress_window is not old and not window.busy)
+    second = window._progress_window
     assert second is not old
     pending = window._pending_auto_fixes
-    old.autoContinueRequested.emit()
-    old.resultsAcknowledged.emit()
-    old.resultsDismissed.emit()
+    assert not isValid(old)  # Retired signal sources no longer retain old reports.
+    window._start_auto_continue(old)  # An already queued controller request is also stale.
     assert window._pending_auto_fixes is pending
     window.backend.apply_available_fixes.assert_not_called()
     window._offer_post_optimization_reviews.assert_not_called()

@@ -15,7 +15,7 @@ WINDOWS_ONLY = (
     'privacy_diagnostics_enabled', 'spyware_scan_enabled', 'windows_security_updates_enabled',
     'windows_security_updates_install_approved', 'windows_security_update_agreements_accepted',
     'driver_updates_enabled', 'legacy_patch_review_enabled', 'cloud_review_enabled',
-    'codex_priority_enabled',
+    'codex_priority_enabled', 'interface_priority_boost_enabled',
     'update_compatibility_mode_enabled', 'windows_cpu_compatibility_enabled',
     'drive_optimization_enabled',
 )

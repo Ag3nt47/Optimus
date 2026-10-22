@@ -42,6 +42,7 @@ DEFAULTS = {
     'speed_enhancements_enabled': False,
     'drive_optimization_enabled': False, 'auto_continue_fixes_enabled': False,
     'parallel_app_updates_enabled': False,
+    'interface_priority_boost_enabled': True,
     'update_compatibility_mode_enabled': False, 'windows_cpu_compatibility_enabled': False,
     'startup_review_enabled': False, 'duplicates_enabled': False, 'duplicate_roots': [],
     'cloud_review_enabled': False, 'software_updates_enabled': False,
@@ -258,9 +259,9 @@ class Workflow:
         report, log_path, lease, parallel_job = None, None, None, None
         attempt_started = False
         try:
-            from .parallel_updates import (ProgressMux, ParallelAppUpdates, WINDOWS_SOFTWARE,
+            from .parallel_updates import (ProgressMux, ParallelAppUpdates, ParallelInstallerQueue, WINDOWS_SOFTWARE, WINDOWS_DRIVERS,
                                            independent_stage, BLOCKED_STAGES, installer_barrier,
-                                           pending_updates_barrier, parallel_stages)
+                                           pending_updates_barrier, parallel_installer_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
             unresolved_apps = pending_updates_barrier(self.backend)
@@ -280,6 +281,7 @@ class Workflow:
             def review(operation, note):
                 return {'review_only': True, 'result': operation(), 'note': note}
 
+            serial_job = None
             stages = [('Inspect current resource usage', 'Reading running programs, memory, storage, startup entries and services.', self.backend.audit)]
             if configuration['applications_review_enabled']:
                 stages.append(('Review installed applications', 'Collecting installed-program metadata; no uninstaller is launched.', lambda: review(self.backend.installed_apps, 'Review only; no applications were uninstalled.')))
@@ -288,12 +290,14 @@ class Workflow:
             def item_progress(title):
                 def emit(state):
                     state = state if isinstance(state, dict) else {'description': str(state)}
+                    if serial_job is not None:
+                        serial_job.item_progress(state)
                     current = state.get('current', state.get('processed', state.get('item', 0)))
                     total = state.get('total', state.get('items', 0))
                     fraction = max(0, min(1, current / total)) if type(current) in (int, float) and type(total) in (int, float) and total > 0 else 0
                     description = str(state.get('description', state.get('item', title)))
                     progress_callback({'percentage': min(99, int((completed + fraction) * 100 / total_stages)),
-                                       'stage': title, 'description': description,
+                                       'stage': title, 'stage_status': 'running', 'description': description,
                                        'processes': ['Optimus maintenance worker', description],
                                        'log': str(state.get('log', description)), 'completed': completed, 'total': total_stages,
                                        'item': state.get('item', current), 'items': state.get('items', total)})
@@ -527,11 +531,11 @@ class Workflow:
                 return result
             stages.append((FINAL_VERIFICATION_STAGE,
                            'Checking the selected operations against their saved evidence and fresh local state. Review-only, unknown and failed outcomes stay explicit; no new changes are applied.', final_verification))
-            parallel_spec = None
+            parallel_specs = []
             parallel_launch_after = None
             if configuration['parallel_app_updates_enabled']:
-                stages, parallel_spec, parallel_launch_after = parallel_stages(stages, WINDOWS_SOFTWARE)
-            total_stages = len(stages) + int(parallel_spec is not None)
+                stages, parallel_specs, parallel_launch_after = parallel_installer_stages(stages, (WINDOWS_SOFTWARE, WINDOWS_DRIVERS))
+            total_stages = len(stages) + len(parallel_specs)
             completed = 0
             joined = False
             parallel_barrier = unresolved_apps
@@ -539,11 +543,12 @@ class Workflow:
             def join_updates(next_stage=None):
                 nonlocal joined, completed, parallel_barrier
                 if parallel_job is not None and not joined:
-                    stage = parallel_job.join(next_stage=next_stage)
+                    background_stages = parallel_job.join(next_stage=next_stage)
                     joined = True
-                    completed += 1
-                    parallel_barrier = installer_barrier(stage['result'])
-                    report['cancelled'] = report['cancelled'] or stage['result'].get('cancelled') is True
+                    completed += len(background_stages)
+                    for stage in background_stages:
+                        parallel_barrier = parallel_barrier or installer_barrier(stage['result'])
+                        report['cancelled'] = report['cancelled'] or stage['result'].get('cancelled') is True
                     atomic_json(log_path, report)
 
             for title, description, operation in stages:
@@ -557,45 +562,66 @@ class Workflow:
                 if process is not None and process.poll() is None:
                     process_lines.append(f'Windows PowerShell engine (PID {process.pid})')
                 progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
-                                   'description': description, 'processes': process_lines, 'log': f'Starting: {title}', 'completed': completed, 'total': total_stages})
+                                   'stage_status': 'running', 'description': description, 'processes': process_lines, 'log': f'Starting: {title}', 'completed': completed, 'total': total_stages})
                 started = time.time()
+                serial_job = None
                 try:
                     if parallel_barrier and title in BLOCKED_STAGES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,
-                                  'note': 'Deferred after application updating: ' + parallel_barrier}
+                                  'blocked_by_prior_installer': True,
+                                  'note': 'Deferred after update installation: ' + parallel_barrier}
                         if title == 'Check or install Windows security updates':
                             report['windows_security_updates'] = result
+                    elif title in (WINDOWS_SOFTWARE, WINDOWS_DRIVERS, 'Check or install Windows security updates'):
+                        # Inline execution uses the same durable lifecycle as
+                        # the background lane, including a before-install item
+                        # receipt. A crash in a serial installer must not erase
+                        # its unresolved state on the next launch.
+                        observer_mux = (ProgressMux(lambda _: None) if title == 'Check or install Windows security updates'
+                                        else progress_callback)
+                        serial_job = ParallelAppUpdates(self.backend, run_id, title,
+                            lambda worker, callback, operation=operation: operation(), observer_mux, cancel_event=cancel_event)
+                        serial_job.start(inline=True)
+                        if serial_job.result is None:
+                            serial_job._run()
+                        result = serial_job.result
                     else:
                         result = operation()
                     interrupted = cancelled() or (isinstance(result, dict) and result.get('cancelled') is True)
                     status = 'cancelled' if interrupted else 'failed' if isinstance(result, dict) and result.get('failed_items', 0) else 'completed'
                     stage = {'title': title, 'status': status, 'started_at': started, 'finished_at': time.time(), 'result': result}
+                    if serial_job is not None:
+                        stage['worker_log_path'] = str(serial_job.path)
                     if status == 'failed':
                         stage['error'] = 'One or more selected operations or scan checks failed; review the saved item results.'
                     if interrupted:
                         report['cancelled'] = True
                 except Exception as error:
                     stage = {'title': title, 'status': 'failed', 'started_at': started, 'finished_at': time.time(), 'error': str(error)}
-                if title == WINDOWS_SOFTWARE and parallel_job is None:
-                    parallel_barrier = installer_barrier(stage.get('result'))
+                if title in (WINDOWS_SOFTWARE, WINDOWS_DRIVERS, 'Check or install Windows security updates'):
+                    parallel_barrier = parallel_barrier or installer_barrier(stage.get('result'))
+                    if serial_job is None and not (isinstance(stage.get('result'), dict) and stage['result'].get('blocked_by_prior_installer')):
+                        record_installer_outcome(self.backend, run_id, title, stage.get('result'))
                 report['stages'].append(stage)
                 completed += 1
                 atomic_json(log_path, report)
-                if parallel_spec is not None and parallel_job is None and title == parallel_launch_after and not report['cancelled']:
+                if parallel_specs and parallel_job is None and title == parallel_launch_after and not report['cancelled']:
                     from .automated_software import run_software
                     from .post_run_fixes import _prior_installer_barrier
                     prior_barrier = unresolved_apps or _prior_installer_barrier(self.backend, report)
                     if report['stages'][0]['status'] != 'completed':
                         prior_barrier = 'The initial before-inventory failed; application updating was deferred.'
                     def background_software(worker, item_callback):
-                        if prior_barrier:
-                            return {'items': [], 'failed_items': 0, 'skipped': True, 'review_only': True,
-                                    'stop_reason': prior_barrier, 'requiresReview': True}
                         return run_software(worker, configuration, cancel_event=parallel_job.cancel_event, item_callback=item_callback)
-                    parallel_job = ParallelAppUpdates(self.backend, run_id, WINDOWS_SOFTWARE,
-                                                      background_software, progress_callback, cancel_event=cancel_event)
-                    report['stages'].append(parallel_job.start())
+                    def background_drivers(worker, item_callback):
+                        from .automated_system import run_drivers
+                        return run_drivers(worker, configuration, cancel_event=parallel_job.cancel_event, item_callback=item_callback)
+                    operations = [(spec[0], background_drivers if spec[0] == WINDOWS_DRIVERS else background_software)
+                                  for spec in parallel_specs]
+                    parallel_job = ParallelInstallerQueue(self.backend, run_id, operations, progress_callback,
+                                                         cancel_event=cancel_event, prior_barrier=prior_barrier)
+                    report['stages'].extend(parallel_job.start())
                     atomic_json(log_path, report)
                 percentage = int(completed * 100 / total_stages)
                 if report['cancelled']:
@@ -609,6 +635,7 @@ class Workflow:
                 if title == FINAL_VERIFICATION_STAGE and isinstance(stage.get('result'), dict):
                     description = str(stage['result'].get('summary') or 'Final verification: ' + str(stage['result'].get('status', 'unverified')).replace('_', ' ') + '. Review the outcome details before recommendations.')
                 progress_callback({'percentage': percentage, 'stage': title, 'description': description,
+                                   'stage_status': stage['status'],
                                    'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': total_stages})
             join_updates()
             report['finished_at'] = time.time()

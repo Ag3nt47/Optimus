@@ -11,6 +11,9 @@ def gui_lease(monkeypatch):
     lease = Mock()
     lease.try_claim.return_value = True
     monkeypatch.setattr('optimus.gui_instance.GuiInstance', lambda data_dir: lease)
+    priority = Mock()
+    priority.apply.return_value = {'status': 'applied'}
+    monkeypatch.setattr('optimus.runtime_priority.InterfacePriority', lambda: priority)
     return lease
 
 

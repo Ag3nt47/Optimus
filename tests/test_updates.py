@@ -4,7 +4,7 @@ import subprocess
 import time
 from unittest.mock import Mock, patch
 import pytest
-from optimus.maintenance import Maintenance
+from optimus.maintenance import Maintenance, UpdatePreflightError, UpdateOutcomeError
 from optimus.backend import Backend
 
 
@@ -94,11 +94,59 @@ def test_invalid_or_unselected_id_never_invokes_updater(updater,package_id):
 def test_explicit_confirmation_freshness_and_source_are_required(updater):
     scan(updater);updater._run.reset_mock()
     with pytest.raises(ValueError):updater.updates_apply('Vendor.App',unattended=True)
-    updater._last_update_scan = time.time() - 901
+    updater._last_update_scan = time.time() + 901
     with pytest.raises(ValueError):updater.updates_apply('Vendor.App',confirmed=True,unattended=True)
     updater._last_update_scan = time.time()
     updater._last_update_packages['Vendor.App']['source'] = 'other'
     with pytest.raises(ValueError):updater.updates_apply('Vendor.App',confirmed=True,unattended=True)
+    updater._run.assert_not_called()
+
+
+def test_long_previous_installer_refreshes_only_original_exact_offer(updater):
+    scan(updater)
+    updater._last_update_scan = time.time() - 1801
+    updater._run = Mock(side_effect=[
+        subprocess.CompletedProcess([], 0, table(('Fixture App', 'Vendor.App', '1.0', '2.0', 'winget'),
+            ('Unselected App', 'Vendor.Other', '1.0', '4.0', 'winget')), ''),
+        subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''),
+        subprocess.CompletedProcess([], 0, 'Fixture installed', '')])
+    result = updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    installers = [call.args[0] for call in updater._run.call_args_list if '--id' in call.args[0]]
+    assert len(installers) == 1
+    assert installers[0][installers[0].index('--id') + 1] == 'Vendor.App'
+    assert installers[0][installers[0].index('--version') + 1] == '2.0'
+    assert result['installer_started'] is True and result['outcomeKnown'] is True
+
+
+@pytest.mark.parametrize('installed,available', [('1.1', '2.0'), ('1.0', '3.0'), ('2.0', '2.0')])
+def test_expired_cached_offer_cannot_widen_after_refresh(updater, installed, available):
+    scan(updater)
+    updater._last_update_scan = time.time() - 1801
+    updater._run = Mock(return_value=subprocess.CompletedProcess([], 0,
+        table(('Fixture App', 'Vendor.App', installed, available, 'winget')), ''))
+    result = updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    assert result['skipped'] and result['failureKind'] == 'version_changed'
+    assert result['installer_started'] is False and result['outcomeKnown'] is True
+    assert updater._run.call_count == 1 and '--id' not in updater._run.call_args.args[0]
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'unstructured', 'native_failure'])
+def test_revalidation_failure_is_known_before_installation(updater, failure):
+    scan(updater)
+    updater._run = Mock(side_effect=subprocess.TimeoutExpired('fixture scan', 120)) if failure == 'timeout' else Mock(
+        return_value=subprocess.CompletedProcess([], 5 if failure == 'native_failure' else 0, 'Unrecognized fixture output', ''))
+    with pytest.raises(UpdatePreflightError) as raised:
+        updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    assert raised.value.installer_started is False and raised.value.outcomeKnown is True
+    assert updater._run.call_count == 1 and '--id' not in updater._run.call_args.args[0]
+
+
+def test_missing_cached_identity_error_does_not_claim_an_installer_started(updater):
+    scan(updater)
+    updater._run.reset_mock()
+    with pytest.raises(UpdatePreflightError) as raised:
+        updater.updates_apply('Other.App', confirmed=True, unattended=True)
+    assert raised.value.installer_started is False and raised.value.outcomeKnown is True
     updater._run.assert_not_called()
 
 
@@ -148,8 +196,21 @@ def test_manual_exact_updates_preserve_pins_too(updater):
 def test_timeout_is_reported_without_replaying_command(updater):
     scan(updater)
     updater._run = Mock(side_effect=[subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','1.0','2.0','winget')),''), subprocess.CompletedProcess([],0,'There are no pins configured.',''), subprocess.TimeoutExpired(['winget-fixture.exe'],1800)])
-    with pytest.raises(RuntimeError,match='may still be running'):
+    with pytest.raises(UpdateOutcomeError,match='may still be running') as raised:
         updater.updates_apply('Vendor.App',confirmed=True,unattended=True)
+    assert raised.value.installer_started is True and raised.value.outcomeKnown is False
+    assert updater._run.call_count == 3
+
+
+@pytest.mark.parametrize('error', [FileNotFoundError('Fixture executable disappeared'), PermissionError('Fixture launch denied')])
+def test_native_process_creation_failure_is_known_without_replay(updater, error):
+    scan(updater)
+    updater._run = Mock(side_effect=[
+        subprocess.CompletedProcess([], 0, table(('Fixture App', 'Vendor.App', '1.0', '2.0', 'winget')), ''),
+        subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''), error])
+    with pytest.raises(UpdatePreflightError) as raised:
+        updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    assert raised.value.installer_started is False and raised.value.outcomeKnown is True
     assert updater._run.call_count == 3
 
 

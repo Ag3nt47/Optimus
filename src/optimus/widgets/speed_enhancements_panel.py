@@ -27,11 +27,14 @@ class _Worker(QRunnable):
         self.signals = _Signals()
 
     def run(self):
+        from optimus.runtime_priority import lower_worker_priority
+        restore_priority = lower_worker_priority()
         try:
             self.signals.result.emit(self.operation(self.signals.progress.emit, self.cancel))
         except Exception as error:
             self.signals.error.emit(str(error))
         finally:
+            restore_priority()
             self.signals.finished.emit()
 
 

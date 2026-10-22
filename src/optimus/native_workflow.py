@@ -147,7 +147,7 @@ class NativeWorkflow:
         try:
             from .parallel_updates import (ProgressMux, ParallelAppUpdates, NATIVE_SOFTWARE,
                                            independent_stage, BLOCKED_STAGES, installer_barrier,
-                                           pending_updates_barrier, parallel_stages)
+                                           pending_updates_barrier, parallel_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
             unresolved_apps = pending_updates_barrier(self.backend)
@@ -174,6 +174,11 @@ class NativeWorkflow:
                     return {'cancelled': True, 'failed_items': 0}
                 applied = self.backend.cleanup_apply(plan)
                 return {'result': applied, 'failed_items': len(applied.get('errors', []))}
+
+            serial_job = None
+            def serial_item_progress(state):
+                if serial_job is not None:
+                    serial_job.item_progress(state)
 
             stages = [('Inspect native resources and process identities', self.backend.audit)]
             if configuration.get('applications_review_enabled'):
@@ -203,7 +208,7 @@ class NativeWorkflow:
                                lambda: run_browser_cleanup(self.backend, configuration, clean=clean,
                                                             browser_prompt=browser_prompt, cancel_event=cancel_event)))
             if configuration.get('software_updates_enabled'):
-                stages.append(('Review or install approved native package updates', lambda: run_native_software(self.backend, configuration, cancel_event=cancel_event)))
+                stages.append(('Review or install approved native package updates', lambda: run_native_software(self.backend, configuration, cancel_event=cancel_event, item_callback=serial_item_progress)))
             if configuration.get('driver_updates_enabled'):
                 stages.append(('Review native kernel and hardware-support coverage', self.backend.driver_updates_scan))
             if configuration.get('security_review_enabled'):
@@ -231,7 +236,7 @@ class NativeWorkflow:
                     stage = parallel_job.join(next_stage=next_stage)
                     joined = True
                     completed += 1
-                    parallel_barrier = installer_barrier(stage['result'])
+                    parallel_barrier = parallel_barrier or installer_barrier(stage['result'])
                     report['cancelled'] = report['cancelled'] or stage['result'].get('cancelled') is True
                     atomic_json(path, report)
 
@@ -242,14 +247,24 @@ class NativeWorkflow:
                     report['cancelled'] = True
                     break
                 progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
-                                   'description': 'Starting: ' + title, 'processes': ['Optimus native maintenance worker'],
+                                   'stage_status': 'running', 'description': 'Starting: ' + title, 'processes': ['Optimus native maintenance worker'],
                                    'log': 'Starting: ' + title, 'completed': completed, 'total': total_stages})
                 stage = {'name': title, 'title': title, 'started_at': time.time(), 'status': 'completed'}
+                serial_job = None
                 try:
                     if parallel_barrier and title in BLOCKED_STAGES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,
-                                  'note': 'Deferred after application updating: ' + parallel_barrier}
+                                  'blocked_by_prior_installer': True,
+                                  'note': 'Deferred after update installation: ' + parallel_barrier}
+                    elif title == NATIVE_SOFTWARE:
+                        serial_job = ParallelAppUpdates(self.backend, identifier, title,
+                            lambda worker, callback, operation=operation: operation(), progress_callback, cancel_event=cancel_event)
+                        serial_job.start(inline=True)
+                        if serial_job.result is None:
+                            serial_job._run()
+                        result = serial_job.result
+                        stage['worker_log_path'] = str(serial_job.path)
                     else:
                         result = operation()
                     stage['result'] = result
@@ -268,7 +283,9 @@ class NativeWorkflow:
                 except Exception as error:
                     stage.update(status='failed', error=str(error))
                 if title == NATIVE_SOFTWARE and parallel_job is None:
-                    parallel_barrier = installer_barrier(stage.get('result'))
+                    parallel_barrier = parallel_barrier or installer_barrier(stage.get('result'))
+                    if serial_job is None and not (isinstance(stage.get('result'), dict) and stage['result'].get('blocked_by_prior_installer')):
+                        record_installer_outcome(self.backend, identifier, title, stage.get('result'))
                 stage['finished_at'] = time.time()
                 report['stages'].append(stage)
                 completed += 1
@@ -285,6 +302,7 @@ class NativeWorkflow:
                     report['stages'].append(parallel_job.start())
                     atomic_json(path, report)
                 progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
+                                   'stage_status': stage['status'],
                                    'description': stage.get('error') or title + ': ' + stage['status'],
                                    'processes': ['Optimus native maintenance worker'],
                                    'log': stage['status'].upper() + ': ' + title,

@@ -173,12 +173,28 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
                 deferred = selected[index + 1:]
                 break
         except Exception as error:
-            results.append({'id': identity, 'status': 'failed', 'error': str(error)})
-            # Exceptions cannot establish that an installer child has stopped.
+            preflight = (getattr(error, 'installer_started', None) is False
+                         and getattr(error, 'outcomeKnown', None) is True)
+            evidence = ({'installer_started': False, 'outcomeKnown': True, 'running': False,
+                         'failureKind': 'preflight_failed', 'status': 'blocked'} if preflight else
+                        {'installer_started': getattr(error, 'installer_started', None),
+                         'outcomeKnown': False, 'running': getattr(error, 'running', None)})
+            results.append({'id': identity, 'status': 'failed', 'error': str(error), 'result': evidence})
+            # Known pre-install refusals must not create an orphan-installer
+            # record. Unclassified exceptions still cannot prove child exit.
             deferred = selected[index + 1:]
-            stop_reason = 'The updater raised an error; verify installer state before continuing.'
+            stop_reason = ('Update preflight failed; no installer was started for this application. Remaining packages need a fresh review.' if preflight else
+                           'The updater raised an error; verify installer state before continuing.')
             break
     needs_review = sum(item.get('result', {}).get('requiresReview') is True for item in results if isinstance(item.get('result'), dict))
+    lifecycle = {}
+    evidence = [item.get('result') for item in results]
+    if not evidence:
+        lifecycle = {'installer_started': False, 'outcomeKnown': True}
+    elif all(isinstance(value, dict) and type(value.get('outcomeKnown')) is bool for value in evidence):
+        lifecycle['outcomeKnown'] = all(value['outcomeKnown'] for value in evidence)
+        if all(type(value.get('installer_started')) is bool for value in evidence):
+            lifecycle['installer_started'] = any(value['installer_started'] for value in evidence)
     return {'review_only': not bool(selected), 'scan': scan, 'policy': policy, 'items': results,
             'failed_items': sum(item['status'] == 'failed' for item in results) + needs_review + int(untrusted),
             'skipped_items': sum(item['status'] == 'skipped' for item in results), 'requires_review_items': needs_review,
@@ -187,6 +203,7 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
             'excluded_ids': [identity for identity in candidates if identity.casefold() in exclusions],
             'not_available_ids': [identity for identity in configuration.get('software_update_ids', []) if identity.casefold() not in canonical_ids],
             'compatibility_mode': configuration.get('update_compatibility_mode_enabled') is True,
+            **lifecycle,
             'note': ('Only complete identities with a provably newer version from a successful fresh winget-source scan may be updated. Equal, older or incomparable versions are skipped. Saved exclusions and native pin checks remain in effect. '
                      + ('The saved compatibility choice adds WinGet --force for non-security issues; it cannot bypass an installer hard block. ' if configuration.get('update_compatibility_mode_enabled') is True else 'No force option is requested. ')
                      + 'Hash/signature checks remain enabled; no pin override, unknown-version update, blind retry or automatic restart is requested. Unsupported applications require their publisher updater.')}

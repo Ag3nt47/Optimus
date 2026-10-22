@@ -72,11 +72,14 @@ class InventoryProbe(QRunnable):
         self.signals = ProbeSignals()
 
     def run(self):
+        from .runtime_priority import lower_worker_priority
+        restore_priority = lower_worker_priority()
         try:
             self.signals.result.emit(self.operation(*self.args, **self.kwargs))
         except Exception as error:
             self.signals.error.emit(str(error))
         finally:
+            restore_priority()
             self.signals.finished.emit()
 
 
@@ -497,8 +500,9 @@ class InitialSetupWizard(QWizard):
     def _build_performance(self):
         body = self._page('performance', '7. Performance Optimizer',
             'Review process CPU/memory and priority/affinity information without closing applications. Optional Codex priority and background sampling are separate choices. Existing external priority watchers are preserved.')
-        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'codex_priority_enabled', 'background_analysis_enabled')])
+        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'interface_priority_boost_enabled', 'codex_priority_enabled', 'background_analysis_enabled')])
         self._check(body, 'performance_review_enabled', 'Include a detailed process/resource review report')
+        self._check(body, 'interface_priority_boost_enabled', 'Prioritize Optimus interface (Above Normal CPU; takes effect the next time Optimus opens)')
         self._check(body, 'speed_enhancements_enabled', 'Automatically apply supported reversible speed enhancements during Optimize')
         self._check(body, 'drive_optimization_enabled', 'Optimize eligible internal drives (SSD TRIM / HDD optimization)')
         body.addWidget(_label('The speed package applies a supported performance power policy only after fresh power, permission and policy checks. Battery, custom/managed and unsupported configurations are deferred. Changes are recorded for restore in Settings. Existing cleanup and resource-analysis choices remain separate; no performance gain is assumed.'))
@@ -545,9 +549,9 @@ class InitialSetupWizard(QWizard):
         body = self._page('software', '9. Software Updater',
             'Load current WinGet application updates and select exact packages, or authorize all supported installed WinGet applications with explicit exclusions. Review only never installs. All-supported approval also covers future matching installed applications.')
         self._check(body, 'software_updates_enabled', 'Include the Software Updater stage')
-        self._check(body, 'parallel_app_updates_enabled', 'Update apps in background while independent steps continue')
+        self._check(body, 'parallel_app_updates_enabled', 'Update apps and Windows drivers in background while independent steps continue')
         self._check(body, 'auto_continue_fixes_enabled', 'Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)')
-        body.addWidget(_label('Saving automatic continuation approves supported Defender/firewall fixes and already-approved updates after a completed scan, without another per-run prompt. Process choices, application removal and restarts remain manual. Background app updates keep a single installer lane while independent review and cleanup steps continue.'))
+        body.addWidget(_label('Saving automatic continuation approves supported Defender/firewall fixes and already-approved updates after a completed scan, without another per-run prompt. Process choices, application removal and restarts remain manual. App and Windows driver updates share one background installer lane while independent steps continue.'))
         self._check(body, 'legacy_patch_review_enabled', 'Review known legacy/unofficial support provider paths (information only; no unverified replacement installation)')
         self._check(body, 'windows_security_updates_enabled', 'Check available Windows Security and Critical updates')
         self._check(body, 'windows_security_updates_install_approved', 'Approve automatic installation of eligible Windows Security/Critical updates, including later matching offers')
@@ -1207,7 +1211,7 @@ class InitialSetupWizard(QWizard):
         if settings.get('drive_optimization_enabled'):
             actions.append('Optimize eligible internal drives through Windows SSD TRIM / HDD optimization after fresh eligibility checks')
         if settings.get('parallel_app_updates_enabled'):
-            actions.append('Update approved apps in the background while independent steps continue; installer work stays serialized')
+            actions.append('Update approved apps and Windows drivers in the background while independent steps continue; installer work stays serialized')
         if settings.get('auto_continue_fixes_enabled'):
             actions.append('Automatically continue after completed scans with supported Defender/firewall fixes and already-approved updates; process choices, application removal and restarts remain manual')
         if settings.get('update_compatibility_mode_enabled'):

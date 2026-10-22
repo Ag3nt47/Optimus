@@ -371,26 +371,38 @@ class Backend:
 
     def update_app_unattended(self, package_id, *, cancel_event=None, compatibility_mode=False):
         """Saved scope/agreements authorize updates; cancellation still gates installation."""
-        readiness = self.update_disk_readiness()
+        from .maintenance import UpdatePreflightError
+        before_install = {'installer_started': False, 'outcomeKnown': True, 'running': False}
+        try:
+            readiness = self.update_disk_readiness()
+            if not isinstance(readiness, dict) or type(readiness.get('ready')) is not bool:
+                raise ValueError('Invalid installation-space metadata.')
+        except Exception as error:
+            raise UpdatePreflightError('Installation-space checks failed before any installer started (' + type(error).__name__ + ').') from error
         if readiness['ready'] is not True:
             return {'skipped': True, 'requiresReview': True, 'exitCode': 0,
-                    'status': 'deferred', 'note': readiness['reason'], 'disk_readiness': readiness}
+                    'status': 'deferred', 'note': readiness.get('reason', 'Installation space could not be established.'), 'disk_readiness': readiness, **before_install}
         options = {'cancel_event': cancel_event} if cancel_event is not None else {}
         if type(compatibility_mode) is not bool:
-            raise ValueError('Choose an explicit compatibility mode.')
+            raise UpdatePreflightError('Choose an explicit compatibility mode.')
         if compatibility_mode:
             from .automation import CURRENT_SETUP_VERSION
-            saved = self.preferences()
+            try:
+                saved = self.preferences()
+                if not isinstance(saved, dict):
+                    raise ValueError('Invalid saved compatibility metadata.')
+            except Exception as error:
+                raise UpdatePreflightError('Saved compatibility choices could not be verified before any installer started.') from error
             if saved.get('update_compatibility_mode_enabled') is not True or saved.get('setup_version') != CURRENT_SETUP_VERSION:
                 return {'skipped': True, 'requiresReview': True, 'exitCode': None,
-                        'status': 'deferred', 'note': 'The saved non-security compatibility choice is off or setup is incomplete.'}
+                        'status': 'deferred', 'note': 'The saved non-security compatibility choice is off or setup is incomplete.', **before_install}
             try:
                 current_security = self.security_status()
             except Exception:
                 current_security = {}
             if not isinstance(current_security, dict) or current_security.get('reboot_required') is not False:
                 return {'skipped': True, 'requiresReview': True, 'exitCode': None, 'status': 'deferred',
-                        'note': 'A Windows restart is pending or its state could not be verified. Compatibility mode did not start an installer.'}
+                        'note': 'A Windows restart is pending or its state could not be verified. Compatibility mode did not start an installer.', **before_install}
             options['compatibility_mode'] = True
         return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True, **options)
 

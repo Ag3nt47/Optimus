@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter, QScrollArea,
-    QStackedWidget, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget,
+    QSizePolicy, QStackedWidget, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget,
     QVBoxLayout, QWidget,
 )
 from optimus.widgets.theme import THEMES, build_qss
@@ -55,6 +55,55 @@ def display(value):
     return f"{value:,.1f}" if isinstance(value, float) else str(value)
 
 
+def _report_preview(value, *, max_chars=48000):
+    """Bound GUI work before serialization; complete reports remain in their journal."""
+    remaining, nodes, shortened = max_chars // 2, 1200, False
+    def trim(item, depth=0):
+        nonlocal remaining, nodes, shortened
+        nodes -= 1
+        if nodes < 0 or remaining <= 0 or depth > 9:
+            shortened = True
+            return '[Further details omitted from this display preview]'
+        if isinstance(item, dict):
+            output = {}
+            for index, (key, part) in enumerate(item.items()):
+                if index >= 64 or nodes <= 0 or remaining <= 0:
+                    shortened = True
+                    output['display_preview'] = 'Further fields omitted'
+                    break
+                text = str(key)[:160]
+                remaining -= len(text)
+                output[text] = trim(part, depth + 1)
+            return output
+        if isinstance(item, (list, tuple)):
+            output = []
+            for index, part in enumerate(item):
+                if index >= 80 or nodes <= 0 or remaining <= 0:
+                    shortened = True
+                    output.append(f'[{len(item) - index} further items omitted from this display preview]')
+                    break
+                output.append(trim(part, depth + 1))
+            return output
+        if item is None or isinstance(item, (bool, int, float)):
+            return item
+        text = str(item)
+        limit = min(1800, max(0, remaining))
+        remaining -= min(len(text), limit)
+        if len(text) > limit:
+            shortened = True
+            return text[:limit] + ' [display preview shortened]'
+        return text
+    text = json.dumps(trim(value), indent=2, ensure_ascii=False, default=str)
+    if len(text) > max_chars:
+        shortened = True
+        text = text[:max_chars] + '\n[Display preview shortened]'
+    if shortened:
+        path = value.get('log_path') if isinstance(value, dict) else None
+        text += '\n\nDisplay preview shortened to keep the interface responsive.'
+        text += '\nFull saved report: ' + str(path)[:1024] if path else '\nConsult the saved run report for complete item details.'
+    return text
+
+
 class NumericItem(QTableWidgetItem):
     def __lt__(self, other):
         a, b = self.data(Qt.UserRole + 1), other.data(Qt.UserRole + 1)
@@ -76,11 +125,14 @@ class BackendWorker(QRunnable):
         self.signals = WorkerSignals()
 
     def run(self):
+        from .runtime_priority import lower_worker_priority
+        restore_priority = lower_worker_priority()
         try:
             self.signals.result.emit(self.operation(*self.args, **self.kwargs))
         except Exception as exc:
             self.signals.error.emit(str(exc))
         finally:
+            restore_priority()
             self.signals.finished.emit()
 
 
@@ -1613,6 +1665,8 @@ class WorkflowWorker(QRunnable):
             self._browser_prompts = BrowserPromptBridge(prompt_parent)
 
     def run(self):
+        from .runtime_priority import lower_worker_priority
+        restore_priority = lower_worker_priority()
         try:
             kwargs = {'progress_callback': self.signals.progress.emit, 'cancel_event': self.cancel}
             if self._browser_prompts is not None:
@@ -1622,6 +1676,7 @@ class WorkflowWorker(QRunnable):
         except Exception as exc:
             self.signals.error.emit(str(exc))
         finally:
+            restore_priority()
             self.signals.finished.emit()
 
 
@@ -1633,6 +1688,8 @@ class AvailableFixesWorker(QRunnable):
         self.signals = WorkflowSignals()
 
     def run(self):
+        from .runtime_priority import lower_worker_priority
+        restore_priority = lower_worker_priority()
         try:
             result = self.backend.apply_available_fixes(self.report, self.settings,
                 progress_callback=self.signals.progress.emit, cancel_event=self.cancel)
@@ -1640,7 +1697,98 @@ class AvailableFixesWorker(QRunnable):
         except Exception as exc:
             self.signals.error.emit(str(exc))
         finally:
+            restore_priority()
             self.signals.finished.emit()
+
+
+class WorkflowWorkerCard(QFrame):
+    """A persistent worker status, with observed item counts and no invented ETA."""
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.setObjectName('WorkflowWorkerCard')
+        self.setMinimumWidth(0)
+        self.setStyleSheet('QFrame#WorkflowWorkerCard {background:#101925;border:1px solid #293c4f;border-radius:7px;}')
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(9, 7, 9, 7)
+        layout.setSpacing(3)
+        self.heading = QLabel(title)
+        self.heading.setStyleSheet('font-weight:700;color:#78c8ff;')
+        layout.addWidget(self.heading)
+        self.status = QLabel('Not started')
+        self.status.setTextFormat(Qt.PlainText)
+        layout.addWidget(self.status)
+        self.details = QLabel('Waiting for this run to start.')
+        self.details.setTextFormat(Qt.PlainText)
+        self.details.setWordWrap(True)
+        self.details.setMinimumWidth(0)
+        self.details.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.details.setMaximumHeight(self.details.fontMetrics().lineSpacing() * 2 + 4)
+        layout.addWidget(self.details, 1)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.setFormat('No item count yet')
+        self.progress.setMaximumHeight(18)
+        layout.addWidget(self.progress)
+        self.elapsed = QLabel('Elapsed: —')
+        self._elapsed_base = None
+        self._elapsed_clock = QElapsedTimer()
+        self._elapsed_active = False
+        layout.addWidget(self.elapsed)
+
+    def update_state(self, state, *, maintenance=False):
+        state = state if isinstance(state, dict) else {}
+        raw_status = str(state.get('status', 'not_started'))
+        labels = {'not_started': 'Not started', 'not_run': 'Not run', 'not_selected': 'Not selected', 'pending': 'Queued',
+                  'running': 'Running', 'waiting': 'Running; maintenance is waiting',
+                  'completed': 'Completed', 'completed_with_errors': 'Completed; review findings',
+                  'deferred': 'Deferred', 'cancelled': 'Cancelled', 'failed': 'Failed',
+                  'needs_review': 'Needs review', 'stopped': 'Stopped'}
+        self.status.setText('Waiting for update lane' if maintenance and raw_status == 'waiting' else
+                            labels.get(raw_status, raw_status.replace('_', ' ').capitalize()))
+        description = display(state.get('description') or 'Waiting for this run to start.')
+        package = state.get('current_package')
+        if isinstance(package, str) and package.strip() and package not in description:
+            description += ' — ' + package
+        self.details.setText(description)
+        self.details.setToolTip(description)
+        current, total = state.get('current'), state.get('total')
+        if maintenance:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(max(0, min(100, int(state.get('percentage') or 0))))
+            self.progress.setFormat('%p% of workflow stages')
+        elif (type(current) is int and type(total) is int and 0 < total <= 1000000
+              and 0 <= current <= total):
+            self.progress.setRange(0, total)
+            self.progress.setValue(current)
+            self.progress.setFormat('%v / %m processed')
+        else:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self.progress.setFormat('Not selected' if raw_status == 'not_selected' else
+                                    'Queued' if raw_status == 'pending' else 'No item count reported')
+        elapsed = state.get('elapsed_seconds')
+        if (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+                and 0 <= elapsed < 3155760000):
+            self._elapsed_base = float(elapsed)
+        elif raw_status in ('not_started', 'not_selected', 'not_run'):
+            self._elapsed_base = None
+        elif self._elapsed_base is not None and self._elapsed_active and self._elapsed_clock.isValid():
+            self._elapsed_base += self._elapsed_clock.elapsed() / 1000
+        self._elapsed_active = raw_status in ('pending', 'running', 'waiting')
+        self._elapsed_clock.start()
+        self.refresh_elapsed()
+
+    def refresh_elapsed(self):
+        if self._elapsed_base is not None:
+            elapsed = self._elapsed_base + (self._elapsed_clock.elapsed() / 1000 if self._elapsed_active else 0)
+            minutes, seconds = divmod(int(elapsed), 60)
+            hours, minutes = divmod(minutes, 60)
+            text = (f'{hours}h {minutes:02d}m {seconds:02d}s' if hours else
+                    f'{minutes}m {seconds:02d}s' if minutes else f'{seconds}s')
+            self.elapsed.setText('Elapsed: ' + text)
+        else:
+            self.elapsed.setText('Elapsed: —')
 
 
 class OptimizationProgressWindow(QDialog):
@@ -1657,6 +1805,11 @@ class OptimizationProgressWindow(QDialog):
         self.completed = False
         self._waiting_for_updates = False
         self._title_before_update_wait = None
+        self._waiting_update_kind = None
+        self._worker_selection = {}
+        self._foreground_update_clocks = {}
+        self._maintenance_clock = QElapsedTimer()
+        self._maintenance_clock.start()
         self._recommendations_ready = False
         self._results_dismissed = False
         self.setWindowTitle('Optimus - optimization progress')
@@ -1666,7 +1819,7 @@ class OptimizationProgressWindow(QDialog):
         self.title = QLabel('OPTIMIZATION IN PROGRESS')
         self.title.setObjectName('PageTitle')
         layout.addWidget(self.title)
-        self.spinner = RunSpinner()
+        self.spinner = RunSpinner(self)
         self.spinner.start('Preparing')
         layout.addWidget(self.spinner)
         self.progress = QProgressBar()
@@ -1681,6 +1834,15 @@ class OptimizationProgressWindow(QDialog):
         self.description = QLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
         self.description.setWordWrap(True)
         layout.addWidget(self.description)
+        worker_row = QHBoxLayout()
+        worker_row.setSpacing(7)
+        self.worker_cards = {}
+        for identity, title in (('maintenance', 'Maintenance'), ('software_updates', 'App updates'),
+                                ('driver_updates', 'Driver updates')):
+            card = WorkflowWorkerCard(title, self)
+            self.worker_cards[identity] = card
+            worker_row.addWidget(card, 1)
+        layout.addLayout(worker_row)
         self.background_status = QLabel()
         self.background_status.setObjectName('BackgroundStatus')
         self.background_status.setTextFormat(Qt.PlainText)
@@ -1732,6 +1894,48 @@ class OptimizationProgressWindow(QDialog):
         self.cancel_button.setMinimumHeight(36)
         self.cancel_button.clicked.connect(self.request_close)
         layout.addWidget(self.cancel_button)
+        self._worker_elapsed_timer = QTimer(self)
+        self._worker_elapsed_timer.setInterval(1000)
+        self._worker_elapsed_timer.timeout.connect(self._refresh_worker_elapsed)
+
+    def _refresh_worker_elapsed(self):
+        for card in self.worker_cards.values():
+            card.refresh_elapsed()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.completed:
+            self._refresh_worker_elapsed()
+            self._worker_elapsed_timer.start()
+
+    def hideEvent(self, event):
+        self._worker_elapsed_timer.stop()
+        super().hideEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, '_worker_elapsed_timer'):
+            if self.isMinimized() or not self.isVisible() or self.completed:
+                self._worker_elapsed_timer.stop()
+            else:
+                self._worker_elapsed_timer.start()
+
+    def configure_workers(self, settings):
+        self._worker_selection = dict(settings) if isinstance(settings, dict) else {}
+        for identity, key in (('software_updates', 'software_updates_enabled'),
+                              ('driver_updates', 'driver_updates_enabled')):
+            selected = self._worker_selection.get(key) is not False
+            self.worker_cards[identity].update_state({'status': 'not_started' if selected else 'not_selected',
+                'description': ('Waiting for the saved update scope to be checked.' if selected else
+                                'This update module is disabled for this run.')})
+
+    @staticmethod
+    def _update_stage_worker(stage):
+        return {'Review or update configured software': 'software_updates',
+                'Review or install approved native package updates': 'software_updates',
+                'Recheck remaining approved application updates': 'software_updates',
+                'Install approved driver updates': 'driver_updates',
+                'Recheck remaining approved Windows Update drivers': 'driver_updates'}.get(stage)
 
     @Slot(object)
     def update_progress(self, state):
@@ -1739,8 +1943,12 @@ class OptimizationProgressWindow(QDialog):
             self.log.appendPlainText(display(state))
             return
         stage = display(field(state, 'stage', default='Working'))
-        waiting_for_updates = (state.get('waiting_for') == 'software_updates'
-                               or stage == 'Waiting for background application updates')
+        waiting_kind = state.get('waiting_for')
+        if waiting_kind not in ('software_updates', 'driver_updates', 'installer_updates'):
+            waiting_kind = {'Waiting for background application updates': 'software_updates',
+                            'Waiting for background driver updates': 'driver_updates',
+                            'Waiting for background updates': 'installer_updates'}.get(stage)
+        waiting_for_updates = waiting_kind is not None
         if waiting_for_updates and not self._waiting_for_updates:
             self._title_before_update_wait = self.title.text()
         elif not waiting_for_updates and self._waiting_for_updates:
@@ -1749,8 +1957,11 @@ class OptimizationProgressWindow(QDialog):
             if self.cancel_button.isEnabled():
                 self.cancel_button.setText('Cancel after current stage')
         self._waiting_for_updates = waiting_for_updates
+        self._waiting_update_kind = waiting_kind
         if waiting_for_updates:
-            self.title.setText('WAITING FOR APPLICATION UPDATES')
+            self.title.setText({'software_updates': 'WAITING FOR APPLICATION UPDATES',
+                                'driver_updates': 'WAITING FOR DRIVER UPDATES',
+                                'installer_updates': 'WAITING FOR BACKGROUND UPDATES'}[waiting_kind])
             if self.cancel_button.isEnabled():
                 self.cancel_button.setText('Cancel after current update')
         percentage = field(state, 'percentage', default=self.progress.value() if waiting_for_updates else 0)
@@ -1761,18 +1972,36 @@ class OptimizationProgressWindow(QDialog):
         self.spinner.set_text(stage)
         description = display(field(state, 'description'))
         if waiting_for_updates and not description:
-            description = ('Independent work has finished. Waiting for application updates before '
+            description = ('Independent work has finished. Waiting for background updates before '
                            'conflicting maintenance and final verification. You can cancel after the current update.')
         if waiting_for_updates and self.cancel.is_set():
-            description = 'Cancellation requested. The current application update must return before the workflow stops.'
+            description = self._update_cancellation_message()
         self.description.setText(description)
         self.processes.setPlainText(display(field(state, 'processes', default=[])))
+        self.worker_cards['maintenance'].update_state({'status': 'waiting' if waiting_for_updates else 'running',
+            'description': ('Ready for: ' + display(state['next_stage']) if waiting_for_updates and state.get('next_stage') else stage),
+            'percentage': percentage, 'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
         jobs = state.get('jobs')
+        job_ids = {job.get('id') for job in jobs if isinstance(job, dict)} if isinstance(jobs, list) else set()
+        sequential_worker = self._update_stage_worker(stage)
+        if sequential_worker and sequential_worker not in job_ids:
+            status = state.get('stage_status')
+            if not status:
+                marker = display(state.get('log')).partition(':')[0].casefold()
+                status = marker if marker in ('completed', 'failed', 'cancelled') else 'running'
+            clock = self._foreground_update_clocks.get(sequential_worker)
+            if clock is None:
+                clock = self._foreground_update_clocks[sequential_worker] = QElapsedTimer()
+                clock.start()
+            self.worker_cards[sequential_worker].update_state({'status': status, 'description': description or stage,
+                'elapsed_seconds': clock.elapsed() / 1000})
         if isinstance(jobs, list):
             descriptions = []
             for job in jobs:
                 if not isinstance(job, dict):
                     continue
+                if job.get('id') in ('software_updates', 'driver_updates'):
+                    self.worker_cards[job['id']].update_state(job)
                 text = display(job.get('description') or str(job.get('id', '')).replace('_', ' '))
                 package = job.get('current_package')
                 if isinstance(package, str) and package.strip() and package not in text:
@@ -1780,8 +2009,9 @@ class OptimizationProgressWindow(QDialog):
                 if job.get('status'):
                     text += ' — ' + display(job['status']).replace('_', ' ')
                 if isinstance(job.get('total'), (int, float)) and job['total'] > 0:
-                    if waiting_for_updates and job.get('id') == 'software_updates':
-                        text += f" — {job.get('current', 0)}/{job['total']} packages processed"
+                    if waiting_for_updates and job.get('id') in ('software_updates', 'driver_updates'):
+                        unit = 'packages' if job['id'] == 'software_updates' else 'driver updates'
+                        text += f" — {job.get('current', 0)}/{job['total']} {unit} processed"
                     else:
                         text += f" ({job.get('current', 0)}/{job['total']})"
                 elapsed = job.get('elapsed_seconds')
@@ -1800,10 +2030,16 @@ class OptimizationProgressWindow(QDialog):
         if log:
             self.log.appendPlainText(display(log))
 
+    def _update_cancellation_message(self):
+        kind = 'application' if self._waiting_update_kind == 'software_updates' else 'background'
+        return f'Cancellation requested. The current {kind} update must return before the workflow stops.'
+
     def finish(self, result, error=None):
         self.completed = True
+        self._worker_elapsed_timer.stop()
         self._waiting_for_updates = False
         self._title_before_update_wait = None
+        self._waiting_update_kind = None
         self.spinner.stop()
         self.title.setText('OPTIMIZATION RESULTS')
         self.processes_label.hide()
@@ -1830,7 +2066,7 @@ class OptimizationProgressWindow(QDialog):
                 summary += '. ' + '; '.join(str(counts.get(key, 0)) + ' ' + label for key, label in (
                     ('confirmed', 'confirmed'), ('needs_review', 'need review'), ('unverified', 'unverified'), ('not_applicable', 'review/no change'))) + '.'
                 self.verification_summary.setText(summary)
-                self.verification_details.setPlainText(json.dumps(verification, indent=2, ensure_ascii=False, default=str))
+                self.verification_details.setPlainText(_report_preview(verification))
             else:
                 self.verification_summary.setText('Final verification was not run because the workflow was cancelled.' if cancelled else 'Final verification is unavailable; optimization outcomes have not been confirmed.')
                 self.verification_details.setPlainText('No final verification report was produced. Review the recorded stage outcomes below.')
@@ -1840,11 +2076,37 @@ class OptimizationProgressWindow(QDialog):
                 if isinstance(observed_summary, str) and observed_summary.strip():
                     self.insights_summary.setText('Observed resource and startup changes: ' + observed_summary)
                     self.insights_summary.show()
-                self.verification_details.appendPlainText('\nREAD-ONLY MAINTENANCE OBSERVATIONS\n' + json.dumps(insights, indent=2, ensure_ascii=False, default=str))
+                self.verification_details.appendPlainText('\nREAD-ONLY MAINTENANCE OBSERVATIONS\n' + _report_preview(insights))
             self.verification_summary.show()
             self.verification_details.show()
             self.description.setText('Review the final verification and any skipped or failed stages. Recommendations open only after you continue; closing this window skips those prompts.')
-            self.log.appendPlainText(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+            self.log.appendPlainText(_report_preview(result))
+        self.worker_cards['maintenance'].update_state({'status': 'stopped' if error else
+            'cancelled' if field(result, 'cancelled', 'canceled', default=False) else field(result, 'status', default='completed'),
+            'description': self.stage.text(), 'percentage': self.progress.value(),
+            'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
+        # Sequential mode and supported follow-ups report to these same panels;
+        # a stage returning is distinct from every package being fixed.
+        for item in rows(field(result, 'stages', default=[]))[:256]:
+            if not isinstance(item, dict):
+                continue
+            worker = self._update_stage_worker(display(field(item, 'title', 'name')))
+            if worker:
+                outcome = item.get('result') if isinstance(item.get('result'), dict) else {}
+                status = 'deferred' if outcome.get('skipped') else item.get('status', 'needs_review')
+                clock = self._foreground_update_clocks.get(worker)
+                details = display(outcome.get('stop_reason') or item.get('error') or outcome.get('note')
+                                  or (display(field(item, 'title', 'name')) + ': ' + status))
+                if clock is not None or self.worker_cards[worker].status.text() in ('Not started', 'Not selected'):
+                    self.worker_cards[worker].update_state({'status': status, 'description': details,
+                        'elapsed_seconds': clock.elapsed() / 1000 if clock is not None else None})
+        for identity in ('software_updates', 'driver_updates'):
+            card = self.worker_cards[identity]
+            if card.status.text() == 'Not started':
+                card.update_state({'status': 'not_run', 'description': 'No update operation was reported for this worker in this run.'})
+            elif error and (card.status.text().startswith('Running') or card.status.text() == 'Queued'):
+                card.update_state({'status': 'needs_review',
+                    'description': 'The run stopped before a final updater status was reported. Review the saved outcome before retrying.'})
         self.cancel_button.setText('Close results')
         self.cancel_button.setEnabled(True)
 
@@ -1884,6 +2146,14 @@ class OptimizationProgressWindow(QDialog):
         self.completed = False
         self._waiting_for_updates = False
         self._title_before_update_wait = None
+        self._waiting_update_kind = None
+        self._maintenance_clock.restart()
+        self._foreground_update_clocks.clear()
+        if self.isVisible():
+            self._worker_elapsed_timer.start()
+        self.configure_workers(self._worker_selection)
+        self.worker_cards['maintenance'].update_state({'status': 'pending',
+            'description': 'Preparing the approved follow-up checks and fixes.', 'percentage': 0}, maintenance=True)
         self._results_dismissed = False
         self.set_recommendations_available(False)
         self.clear_auto_continue()
@@ -1930,7 +2200,7 @@ class OptimizationProgressWindow(QDialog):
         else:
             self.cancel.set()
             self.cancel_button.setEnabled(False)
-            self.description.setText('Cancellation requested. The current application update must return before the workflow stops.'
+            self.description.setText(self._update_cancellation_message()
                 if self._waiting_for_updates else
                 'Cancellation requested. The current stage must finish before the workflow stops.')
 
@@ -2523,6 +2793,7 @@ class OptimusWindow(QMainWindow):
         labels = [('cleanup_enabled','Clean reviewed temporary files'),('browser_cache_enabled','Clean selected browser caches (ask before closing active browsers)'),
             ('launch_at_sign_in','Launch Optimus when I sign in to Windows'),
             ('request_admin_on_startup','Ask Windows for administrator access once at app startup (UAC)'),
+            ('interface_priority_boost_enabled','Prioritize Optimus interface (Above Normal CPU; takes effect the next time Optimus opens)'),
             ('browser_history_enabled','Clear selected browsers’ history'),('browser_cookies_enabled','Clear selected cookies (can sign me out)'),
             ('browser_download_history_enabled','Clear selected browser download-list records'),
             ('consumer_debloat_enabled','Remove selected consumer bloatware'),('m365_debloat_enabled','Run Microsoft 365 debloat'),
@@ -2534,7 +2805,7 @@ class OptimusWindow(QMainWindow):
             ('windows_security_update_agreements_accepted','Accept Microsoft agreements for this Windows Security/Critical update scope'),
             ('driver_updates_enabled','Check/apply driver offers under saved device approval'),
             ('drive_optimization_enabled','Optimize eligible internal drives (SSD TRIM / HDD optimization)'),
-            ('parallel_app_updates_enabled','Update apps in background while independent steps continue'),
+            ('parallel_app_updates_enabled','Update apps and Windows drivers in background while independent steps continue'),
             ('auto_continue_fixes_enabled','Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)'),
             ('post_process_review_enabled','Offer process/program review after completion'),
             ('security_review_enabled','Check Windows security and offer reviewed fixes'),
@@ -2552,7 +2823,7 @@ class OptimusWindow(QMainWindow):
             controls[key]=checkbox
             toggles.addWidget(checkbox,index,0)
         layout.addLayout(toggles)
-        continuation_note = QLabel('Saving automatic continuation approves supported Defender/firewall fixes and updates within your existing saved scopes and agreements after a completed scan. Process choices, application removal and restarts remain manual. Background app updates share a single installer lane while independent steps continue. Drive optimization uses eligible Windows SSD TRIM/HDD operations after fresh checks.')
+        continuation_note = QLabel('Saving automatic continuation approves supported Defender/firewall fixes and updates within your existing saved scopes and agreements after a completed scan. Process choices, application removal and restarts remain manual. App and Windows driver updates share a single background installer lane while independent steps continue. Drive optimization uses eligible Windows SSD TRIM/HDD operations after fresh checks.')
         continuation_note.setWordWrap(True)
         layout.addWidget(continuation_note)
         sign_in_note = QLabel('Saving the sign-in option enables or disables the managed Windows startup entry. Windows starts Optimus as your regular user about one minute after sign-in; maintenance follows its separate cadence. The administrator option requests normal Windows UAC consent once per app launch. Already elevated sessions do not ask again; declining keeps standard access. A failed registration leaves the saved preference unchanged. A startup entry you disable manually stays disabled until you explicitly apply this choice again.')
@@ -2773,16 +3044,24 @@ class OptimusWindow(QMainWindow):
         if not callable(getattr(self.backend, 'optimize', None)):
             QMessageBox.warning(self, 'Optimus', 'The workflow engine is unavailable. No action was taken.')
             return
+        if self._progress_window is not None and not self._progress_window.completed:
+            self.status.setText('Wait for the previous progress window to finish before starting another workflow.')
+            self.activate_existing_window()
+            return
         self.busy = True
         self._pending_post_review = None
         self._pending_auto_fixes = None
         self._auto_continue_attempted = False
         self._post_review_generation += 1
         if self._progress_window is not None:
-            self._progress_window.clear_auto_continue()
+            previous, self._progress_window = self._progress_window, None
+            previous.clear_auto_continue()
+            previous.close()
+            previous.deleteLater()
         self._cancel = threading.Event()
         self._progress_window = OptimizationProgressWindow(self, self._cancel)
         progress = self._progress_window
+        progress.configure_workers(settings)
         progress.resultsAcknowledged.connect(lambda: self._continue_post_optimization_reviews()
             if progress is self._progress_window else None)
         progress.resultsDismissed.connect(lambda: self._dismiss_post_optimization_reviews()

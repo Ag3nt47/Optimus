@@ -1066,7 +1066,12 @@ class PanelRevealOverlay(QWidget):
             # not clear its state when the outer close resumes.
             if self._target is target:
                 if self._frame is not None:
-                    self._frame.deleteLater()
+                    try:
+                        self._frame.deleteLater()
+                    except RuntimeError:
+                        # The parent window may have retired this completed
+                        # dialog while its opening transition was finishing.
+                        pass
                 self._frame = None
                 self._target = None
                 self._previous_mask = QRegion()

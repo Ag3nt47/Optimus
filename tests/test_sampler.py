@@ -66,15 +66,46 @@ class SamplerTests(unittest.TestCase):
         self.assertEqual(snapshot['process_count'], 1)
 
     def test_cpu_and_io_rates_use_owned_baselines(self):
-        with patch.object(sampler_module.time, 'time', return_value=10.0): self.sampler.sample()
+        with patch.object(sampler_module.time, 'time', return_value=10.0), patch.object(sampler_module.time, 'monotonic', return_value=10.0): self.sampler.sample()
         self.process.cpu_user += 2.0
         self.process.read_bytes += 1000
         self.process.write_bytes += 2000
-        with patch.object(sampler_module.time, 'time', return_value=12.0): snapshot = self.sampler.sample()
+        with patch.object(sampler_module.time, 'time', return_value=12.0), patch.object(sampler_module.time, 'monotonic', return_value=12.0): snapshot = self.sampler.sample()
         process = snapshot['processes'][0]
         self.assertAlmostEqual(process['cpu_percent'], 25.0)
         self.assertEqual(process['read_bytes_per_second'], 500)
         self.assertEqual(process['write_bytes_per_second'], 1000)
+
+    def test_wall_clock_adjustment_does_not_inflate_cpu_or_io_rates(self):
+        with patch.object(sampler_module.time, 'time', return_value=100.0), patch.object(sampler_module.time, 'monotonic', return_value=10.0):
+            self.sampler.sample()
+        self.process.cpu_user += 2.0
+        self.process.read_bytes += 1000
+        with patch.object(sampler_module.time, 'time', return_value=50.0), patch.object(sampler_module.time, 'monotonic', return_value=12.0):
+            snapshot = self.sampler.sample()
+        self.assertEqual(snapshot['timestamp'], 50.0)
+        self.assertEqual(snapshot['processes'][0]['cpu_percent'], 25.0)
+        self.assertEqual(snapshot['processes'][0]['read_bytes_per_second'], 500)
+
+    def test_restart_does_not_publish_old_sample_or_reuse_old_rates(self):
+        self.sampler.latest = {'timestamp': 1, 'processes': [{'pid': 200}]}
+        self.sampler._previous_cpu = {(200, 1234.5): (1, 2)}
+        self.sampler._previous_io = {(200, 1234.5): (1, 1000, 2000)}
+        entered, release = threading.Event(), threading.Event()
+        def pending_sample():
+            entered.set()
+            release.wait(2)
+            return {'timestamp': 2, 'processes': []}
+        with patch.object(self.sampler, 'sample', side_effect=pending_sample):
+            try:
+                self.sampler.start(2)
+                self.assertTrue(entered.wait(1))
+                self.assertIsNone(self.sampler.status()['latest'])
+                self.assertEqual(self.sampler._previous_cpu, {})
+                self.assertEqual(self.sampler._previous_io, {})
+            finally:
+                release.set()
+                self.sampler.stop()
 
     def test_pid_reuse_starts_new_baseline(self):
         with patch.object(sampler_module.time, 'time', return_value=10.0): self.sampler.sample()

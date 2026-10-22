@@ -155,24 +155,55 @@ def _service_ids(force: bool = False) -> set[int] | None:
         return identities
 
 
-def _base_protection(process: Any, *, for_sleep: bool = True) -> str:
+class _InventoryContext:
+    """One read-only census, never authority for a process change.
+
+    Current user, management ancestry and service membership are invariant enough
+    for display within one scan. Mutations still call the live guards without
+    this context and revalidate the selected process identity.
+    """
+    def __init__(self):
+        try:
+            self.current_user = _current_user()
+        except (PerformanceError, psutil.Error, OSError):
+            self.current_user = None
+        self.ancestors = _ancestor_ids()
+        self.services = _service_ids() if _PLATFORM == 'win32' else set()
+        self.cpu_count = max(1, int(_safe_metric(lambda: psutil.cpu_count(logical=True), None) or os.cpu_count() or 1))
+        self.sessions = {}
+
+    def session_id(self, pid):
+        if pid not in self.sessions:
+            self.sessions[pid] = _session_id(pid)
+        return self.sessions[pid]
+
+
+def _base_protection(process: Any, *, for_sleep: bool = True,
+                     inventory_context=None, details=None) -> str:
     if _PLATFORM != 'win32':
-        return _native_protection(process, for_sleep=for_sleep)
+        return _native_protection(process, for_sleep=for_sleep,
+                                  inventory_context=inventory_context, details=details)
     try:
         process_id = int(process.pid)
-        name, executable, username = process.name().casefold(), process.exe(), process.username().casefold()
+        if details is None:
+            name, executable, username = process.name().casefold(), process.exe(), process.username().casefold()
+        else:
+            name, executable, username = details['name'].casefold(), details['exe'], details['username'].casefold()
         if process_id <= 4:
             return "Core Windows process."
         if not executable or not username:
             return "Executable or process ownership is inaccessible."
         if 'bingwallpaper' in re.sub(r'[^a-z0-9]', '', name + ' ' + executable.casefold()):
             return "Bing Wallpaper is preserved."
-        if username != _current_user():
+        current_user = inventory_context.current_user if inventory_context is not None else _current_user()
+        if current_user is None:
+            return "The current user could not be verified."
+        if username != current_user:
             return "Only applications owned by the current user can be changed."
-        session = _session_id(process_id)
+        session = inventory_context.session_id(process_id) if inventory_context is not None else _session_id(process_id)
         if session is None:
             return "Windows session could not be verified."
-        services = _service_ids()
+        services = inventory_context.services if inventory_context is not None else _service_ids()
         if services is None:
             return "Windows service ownership could not be verified."
         if process_id in services:
@@ -186,7 +217,7 @@ def _base_protection(process: Any, *, for_sleep: bool = True) -> str:
             return "Security or core Windows infrastructure."
         if re.search(r"\\(?:eset|avast software|avg|sophos|bitdefender|malwarebytes|crowdstrike|sentinelone|kaspersky lab|norton|mcafee)\\", _norm(executable)):
             return "Security product installation path."
-        ancestors = _ancestor_ids()
+        ancestors = inventory_context.ancestors if inventory_context is not None else _ancestor_ids()
         if -1 in ancestors:
             return "Management-tool ancestry could not be verified."
         if process_id in ancestors:
@@ -200,16 +231,23 @@ def _base_protection(process: Any, *, for_sleep: bool = True) -> str:
         return "Process details could not be verified: " + type(exc).__name__
 
 
-def _native_protection(process: Any, *, for_sleep: bool = True) -> str:
+def _native_protection(process: Any, *, for_sleep: bool = True,
+                       inventory_context=None, details=None) -> str:
     """Only current-user applications are eligible; core session agents stay live."""
     try:
-        pid, name = int(process.pid), process.name().casefold()
-        executable, owner = process.exe(), process.username()
+        pid = int(process.pid)
+        if details is None:
+            name, executable, owner = process.name().casefold(), process.exe(), process.username()
+        else:
+            name, executable, owner = details['name'].casefold(), details['exe'], details['username']
         if pid <= 4:
             return 'Kernel or system initialization process.'
         if not executable or not os.path.isabs(executable) or not owner:
             return 'Executable or process ownership is inaccessible.'
-        if owner != _current_user():
+        current_user = inventory_context.current_user if inventory_context is not None else _current_user()
+        if current_user is None:
+            return 'The current user could not be verified.'
+        if owner != current_user:
             return 'Only applications owned by the current user can be changed.'
         identities = process.uids()
         if identities.real != os.getuid() or identities.effective != os.geteuid():
@@ -235,7 +273,7 @@ def _native_protection(process: Any, *, for_sleep: bool = True) -> str:
             'gvfsd', 'ibus-daemon', 'fcitx', 'fcitx5', 'at-spi-bus-launcher', 'at-spi2-registryd'}
         if name in protected_names or any(token in name for token in ('falcon', 'sentinel', 'clamd', 'sophos', 'defender')):
             return 'Desktop session, security agent or core system infrastructure.'
-        ancestors = _ancestor_ids()
+        ancestors = inventory_context.ancestors if inventory_context is not None else _ancestor_ids()
         if -1 in ancestors:
             return 'Management-tool ancestry could not be verified.'
         if pid in ancestors:
@@ -254,12 +292,13 @@ def _safe_metric(action: Any, default: Any = None) -> Any:
         return default
 
 
-def _record(process: Any) -> dict[str, Any]:
+def _record(process: Any, *, inventory_context=None) -> dict[str, Any]:
     with process.oneshot():
         executable = _safe_metric(process.exe, '')
         priority = _safe_metric(lambda: int(process.nice()))
         raw_cpu = _safe_metric(lambda: float(process.cpu_percent(interval=None)))
-        cpu_count = max(1, int(_safe_metric(lambda: psutil.cpu_count(logical=True), os.cpu_count() or 1)))
+        cpu_count = (inventory_context.cpu_count if inventory_context is not None else
+                     max(1, int(_safe_metric(lambda: psutil.cpu_count(logical=True), None) or os.cpu_count() or 1)))
         io = _safe_metric(lambda: process.io_counters())
         affinity = _safe_metric(lambda: list(process.cpu_affinity()))
         memory = _safe_metric(process.memory_info)
@@ -276,9 +315,11 @@ def _record(process: Any) -> dict[str, Any]:
             'affinity': affinity, 'affinity_text': ','.join(str(core) for core in affinity) if affinity is not None else 'Unavailable',
             'thread_count': _safe_metric(lambda: process.num_threads()), 'handle_count': _safe_metric(lambda: process.num_handles()),
         }
-    reason = _base_protection(process)
+        reason = _base_protection(process, inventory_context=inventory_context, details=record)
+        can_set_priority = not bool(_base_protection(process, for_sleep=False,
+                                   inventory_context=inventory_context, details=record))
     record.update({'protected': bool(reason), 'reason': reason, 'can_sleep': not bool(reason),
-                   'can_set_priority': not bool(_base_protection(process, for_sleep=False)),
+                   'can_set_priority': can_set_priority,
                    'verified_codex_executable': _trusted_codex_exe(executable),
                    'affinity_supported': _PLATFORM != 'darwin' and affinity is not None,
                    'priority_note': 'Native presets use nice values: Normal 0, AboveNormal -5, High -10, BelowNormal 10, Idle 19. Raising priority or restoring a lower nice value may require OS permission; failures are reported without bypassing it.' if _PLATFORM != 'win32' else ''})
@@ -287,9 +328,10 @@ def _record(process: Any) -> dict[str, Any]:
 def list_performance_candidates() -> list[dict[str, Any]]:
     """Inventory all readable processes, including explicit protection reasons."""
     rows: list[dict[str, Any]] = []
+    context = _InventoryContext()
     for process in psutil.process_iter():
         try:
-            rows.append(_record(process))
+            rows.append(_record(process, inventory_context=context))
         except (psutil.Error, OSError, ValueError):
             rows.append({"pid": int(process.pid), "name": "Unavailable", "exe": "", "create_time": None,
                          "username": "", "ppid": None, "priority": "Unavailable", "priority_value": None,

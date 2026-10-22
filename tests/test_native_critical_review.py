@@ -140,12 +140,14 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'updates-waiting.explicit-state', 'updates-waiting.current-worker',
             'updates-waiting.progress-honesty', 'updates-waiting.cancel-available',
             'updates-waiting.failure-history', 'updates-waiting.cancellation-stable',
-            'updates-waiting.foreground-resumes'):
+            'updates-waiting.foreground-resumes', 'updates-waiting.three-worker-cards',
+            'updates-waiting.driver-handoff'):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed'
     assert by_id['confirmation.negative-default']['status'] == 'passed'
     assert report['screenshots'] and all((reviewer.output / item['file']).is_file() for item in report['screenshots'])
     assert {item['name'] for item in report['screenshots']} >= {
-        f'{width}x{height}-updates-waiting' for width, height in bot.VIEWPORTS}
+        f'{width}x{height}-{state}' for width, height in bot.VIEWPORTS
+        for state in ('updates-waiting', 'driver-updates-waiting')}
     assert {item['area'] for item in report['manual_review']} >= {'GPU', 'CPU and RAM', 'Updates and security'}
     assert all(item['status'] == 'not_exercised' for item in report['skipped_checks'])
     assert {item['source'] for item in report['documentation_comparison']} == {'docs/FEATURES.md', 'docs/PLATFORMS.md'}

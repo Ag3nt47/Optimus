@@ -22,7 +22,7 @@ def tool(tmp_path):
     value._last_update_scan = time.time()
     value._last_update_packages = {'Fixture.App': row}
     value._last_update_ids = {'Fixture.App'}
-    value.updates_scan = Mock()
+    value.updates_scan = Mock(return_value={'structured': True, 'exitCode': 0, 'updates': [row]})
     value._winget = Mock(return_value='fixture-winget.exe')
     value._pin_status = Mock(return_value=(True, '', False))
     value._run = Mock(return_value=subprocess.CompletedProcess([], 0, 'Fixture updated', ''))
@@ -52,7 +52,10 @@ def test_force_mode_still_refuses_pin_and_changed_version(tmp_path):
     assert result['failureKind'] == 'pinned' and result['skipped']
     service._run.assert_not_called()
     service = tool(tmp_path)
-    service.updates_scan.side_effect = lambda: service._last_update_packages['Fixture.App'].update(available='3.0')
+    def changed_offer():
+        service._last_update_packages['Fixture.App'].update(available='3.0')
+        return {'structured': True, 'exitCode': 0, 'updates': list(service._last_update_packages.values())}
+    service.updates_scan.side_effect = changed_offer
     result = service.updates_apply('Fixture.App', confirmed=True, compatibility_mode=True)
     assert result['failureKind'] == 'version_changed'
     service._run.assert_not_called()
