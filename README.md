@@ -14,11 +14,13 @@ Give your computer a clearer, cleaner workspace with Optimus: cleanup, browser p
 
 ![Optimus main screen](docs/optimus.png)
 
-Optimus combines previewed cleanup, browser privacy tools, resource management, startup controls, debloat actions, disk analysis, duplicate finding and updates in one local application. Its dark blue/orange presentation, reveal animations and holographic window effects are adapted from the MIT-licensed [AngeronaSuite](https://github.com/Ag3nt47/AngeronaSuite).
+Optimus combines previewed cleanup, browser privacy tools, resource management, startup controls, debloat actions, disk analysis, duplicate finding and updates in one local application. Its dark blue/orange presentation and reveal animations are adapted from the MIT-licensed [AngeronaSuite](https://github.com/Ag3nt47/AngeronaSuite).
 
 ## Download and run
 
 Choose your native download above; Python is not required. **Windows:** extract the entire ZIP and open `Optimus.exe`, keeping `_internal` and `source` beside it. **macOS:** extract the ZIP, move `Optimus.app` to Applications, and open it. **Linux:** extract the tar archive and run `Optimus/Optimus`; keep its supporting files together. The macOS builds are ad-hoc signed, without Apple notarization; use the normal macOS Privacy & Security review if Gatekeeper asks. Do not disable operating-system protections.
+
+Version **0.7.1** gives confirmation prompts larger, clearly labelled Yes/No buttons and removes the floating globe. Minimize now uses the taskbar or Dock, and closing the main window exits after active work and unsaved Sandbox edits are resolved. Reopening Optimus brings its existing question or progress window forward instead of starting a second cleanup. The starfield background and other window transitions remain available.
 
 Version **0.7.0** introduces native macOS and Linux backends and a four-platform build/test matrix. Shared cleanup, supported browser profiles, resource analysis, disk/duplicate tools, Sandbox and native startup/package-manager operations use the host platform. Windows registry, Appx debloat, Defender, DPAPI/OneDrive integration, Windows Update drivers and Windows-specific repair tools remain Windows features; unavailable actions are identified instead of emulated. See [the capability table](docs/PLATFORMS.md) for exact scopes and requirements.
 

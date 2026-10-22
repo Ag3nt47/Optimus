@@ -8,6 +8,7 @@ import time
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox
+from .widgets.questions import make_yes_no_dialog
 
 
 @dataclass(eq=False)
@@ -94,11 +95,9 @@ class BrowserPromptBridge(QObject):
 
     def _ask_dialog(self, pending):
         name = str(pending.info.get('browser') or pending.info.get('browser_id') or 'this browser')
-        dialog = QMessageBox(self.parent())
-        dialog.setWindowTitle('Optimus — close ' + name + '?')
-        dialog.setIcon(QMessageBox.Question)
-        dialog.setTextFormat(Qt.PlainText)
-        dialog.setText('Close ' + name + ' for this optimization run?')
+        dialog = make_yes_no_dialog(self.parent(), 'Optimus — close ' + name + '?',
+                                   'Close ' + name + ' for this optimization run?',
+                                   yes_label='Yes — close and clean', no_label='No — skip browser')
         dialog.setInformativeText(
             'Save unfinished work first. Yes asks this browser to close normally; all of its '
             'windows and profiles may close. If cookie cleanup is selected, websites may sign you out.\n\n'
@@ -112,9 +111,6 @@ class BrowserPromptBridge(QObject):
                     details.append(str(record.get('name') or name) + ' — PID ' + str(record.get('pid', '?')))
             if details:
                 dialog.setDetailedText('Detected browser processes:\n' + '\n'.join(details))
-        dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        dialog.setDefaultButton(QMessageBox.No)
-        dialog.setEscapeButton(QMessageBox.No)
         timer = QTimer(dialog)
         timer.setInterval(50)
 

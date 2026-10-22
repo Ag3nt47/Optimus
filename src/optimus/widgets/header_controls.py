@@ -40,6 +40,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStyle,
@@ -492,11 +493,13 @@ class PanelRevealOverlay(QWidget):
     def _is_reveal_destination(self, widget: QWidget) -> bool:
         """Return whether *widget* is an Optimus-owned content window.
 
-        Tooltips, menus, splash surfaces, and the holographic token are not
-        content windows. They already own purpose-built motion and masking them
-        here causes flicker or a duplicate animation.
+        Tooltips, menus and splash surfaces are not content windows. They
+        already own purpose-built motion and masking them here causes flicker
+        or a duplicate animation.
         """
         try:
+            if isinstance(widget, QMessageBox):
+                return False
             if not widget.isWindow() or widget is self.window():
                 return False
             if widget.windowType() in (
@@ -506,8 +509,6 @@ class PanelRevealOverlay(QWidget):
             ):
                 return False
             if self._widget_flag(widget, "_optimus_no_reveal"):
-                return False
-            if self._widget_flag(widget, "_optimus_orb_ignore"):
                 return False
             return True
         except RuntimeError:
@@ -729,10 +730,8 @@ class PanelRevealOverlay(QWidget):
         )
         setattr(target, "_optimus_pending_reveal_original_mask", None)
         self._mode = "opening"
-        # The primary dashboard owns a purpose-built close/minimize path that
-        # collapses into the holographic orb. It still receives this real-window
-        # opening reveal, but must not acquire a second competing close handler.
-        # Ordinary content windows receive the matching reverse reveal.
+        # Windows may opt into an opening reveal while retaining their own
+        # close handler. Other content windows receive a matching reverse reveal.
         setattr(
             target,
             "_optimus_reverse_reveal_close",

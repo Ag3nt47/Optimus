@@ -86,7 +86,9 @@ Manual cloud scans read metadata, not file contents, and do not hydrate local pl
 
 Use **Settings > Appearance and Windows tools > Restart as administrator** for a system-wide action that needs elevation. The elevated window is a separate process; the current window stays open. A read-only inventory can be useful in a normal user session even when some protected details are unavailable.
 
-The appearance page contains the Angerona-derived dark themes, reduced-motion control and holographic minimize/restore behavior. Swirling stars pause while the main window is hidden or minimized. Windows' reduced-motion preference is also respected. Closing a window can collapse it to the orb; use the tray's **Quit Optimus** or the settings **Exit Optimus** control to exit. Active operations must finish or reach a cancellation boundary before exit.
+The appearance page contains the Angerona-derived dark themes and reduced-motion control. The interface uses real-content reveal and reverse-close transitions, and swirling stars pause while the main window is hidden or minimized. Windows' reduced-motion preference is also respected.
+
+**Minimize** uses the native taskbar or Dock. Closing the main window exits Optimus, as do the tray's **Quit Optimus** and settings **Exit Optimus** controls. Active operations must finish or reach a cancellation boundary before exit. Finish or cancel setup and finish or close post-optimization recommendations first. Unsaved Sandbox edits prompt before exit.
 
 ## Edit the source with Sandbox
 

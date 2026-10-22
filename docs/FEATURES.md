@@ -36,7 +36,7 @@ Optimus implements independent Windows maintenance tools. This table explains th
 | Windows audit scheduling | Windows Task Scheduler integration | Separate per-user daily read-only audits. Audit execution does not start setup, automatic maintenance or background sampling. |
 | Recovery/history | Direct plus native recovery | Supported setting undo records, browser database rollback copies, local/OneDrive Recycle Bins and vendor/Windows reinstall or rollback routes. There is no universal undo for all operations. |
 | Source Sandbox | Direct | Editable source working copy, Python AST save validation, bounded history, Revert, Original version, export and ready-checked restart. It is not an OS/container security sandbox. |
-| Themes and motion | Direct | Adapted MIT Angerona themes, real-content reveal/reverse-close transitions, holographic orb minimize/restore and a pausing starfield. Reduced motion is supported. |
+| Themes and motion | Direct | Adapted MIT Angerona themes, real-content reveal/reverse-close transitions and a pausing starfield. Reduced motion is supported. Minimize uses the native taskbar or Dock. Closing the main window exits after active operations, setup and post-optimization reviews finish or close; unsaved Sandbox edits prompt before exit. |
 | Secure overwrite, free-space wiping and deleted-file recovery | No exposed automatic workflow | Normal cleanup/recycling does not securely erase storage or recover deleted files. A separately confirmed internal Windows Cipher helper is restricted to positively matched physical HDDs; it is not connected to one-click cleanup or advertised as a universal erasure guarantee. |
 
 ## How to assess a result

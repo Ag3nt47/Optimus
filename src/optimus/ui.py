@@ -4,6 +4,7 @@
 from __future__ import annotations
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime
@@ -18,8 +19,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from optimus.widgets.theme import THEMES, build_qss
+from optimus.widgets.questions import ask_yes_no
 from optimus.widgets.header_controls import HeaderActionButton, install_global_window_reveal, motion_allowed
-from optimus.widgets.holographic_orb import HolographicOrbController
 
 
 def field(record, *names, default=""):
@@ -186,9 +187,7 @@ class DetailedSettingsWindow(QMainWindow):
                 self.preferences = {}
         except (OSError, ValueError):
             self.preferences = {}
-        self.config = SimpleNamespace(ui_motion_enabled=self.preferences.get("motion", True),
-                                      holographic_orb_enabled=self.preferences.get("orb", True),
-                                      holographic_orb_x=-1, holographic_orb_y=-1)
+        self.config = SimpleNamespace(ui_motion_enabled=self.preferences.get("motion", True))
         self.setWindowTitle("Optimus: Computer optimization tool")
         self.resize(1440, 920)
         self.setMinimumSize(1080, 720)
@@ -200,7 +199,6 @@ class DetailedSettingsWindow(QMainWindow):
             getattr(self, "_build_" + builder)()
         self.tray = None
         self._window_reveal = None
-        self._holographic_orb = None
         QApplication.instance().aboutToQuit.connect(self.shutdown)
         self.select_page("Dashboard", load=False)
         if not smoke_test:
@@ -1366,9 +1364,6 @@ class DetailedSettingsWindow(QMainWindow):
         self.motion_toggle = QCheckBox('Animate reveal and reverse close (respects Windows reduced motion)')
         self.motion_toggle.setChecked(self.config.ui_motion_enabled)
         options.addWidget(self.motion_toggle)
-        self.orb_toggle = QCheckBox('Collapse closed or minimized windows to the holographic orb')
-        self.orb_toggle.setChecked(self.config.holographic_orb_enabled)
-        options.addWidget(self.orb_toggle)
         self._button(options, 'Save appearance', self.save_preferences, primary=True)
         layout.addWidget(panel)
         access = self._toolbar(layout)
@@ -1378,24 +1373,23 @@ class DetailedSettingsWindow(QMainWindow):
         except Exception:
             admin = False
         access.addWidget(QLabel('Current access: ' + ('Administrator' if admin else 'Standard user') + '. Some system-wide actions require elevation.'), 1)
-        self._button(access, 'Restart as administrator', lambda: self._run('elevate', done=self._show_result))
+        self._button(access, 'Restart as administrator', self._restart_as_administrator)
         tools = QGridLayout()
         for index, (label, identifier) in enumerate((('Windows Storage cleanup', 'storage'), ('Optimize drives', 'defrag'), ('Windows Update', 'windows-update'), ('Device Manager', 'device-manager'), ('Installed apps', 'installed-apps'), ('Task Scheduler', 'task-scheduler'))):
             button = QPushButton(label)
             button.clicked.connect(lambda checked=False, key=identifier: self._run('system_tool', key))
             tools.addWidget(button, index // 2, index % 2)
         layout.addLayout(tools)
-        self._note(layout, 'Presentation adapted from your MIT-licensed AngeronaSuite: dark palettes, live-content reveal, reverse close and holographic minimize/restore. Optimus runs independently of Angerona services and AI providers.')
-        self._note(layout, 'Close collapses to the orb when enabled. Choose Exit Optimus here or Quit from the tray to stop. Logs and settings stay in your local Optimus folder.')
+        self._note(layout, 'Presentation adapted from your MIT-licensed AngeronaSuite: dark palettes, live-content reveal and reverse close. Optimus runs independently of Angerona services and AI providers.')
+        self._note(layout, 'Minimize uses the taskbar. Close the main window, choose Exit Optimus here or Quit from the tray to exit after active work finishes. Unsaved Sandbox edits prompt before exit. Logs and settings stay in your local Optimus folder.')
         bar = self._toolbar(layout)
         self._button(bar, 'Exit Optimus', self.quit_application)
         bar.addStretch()
         layout.addStretch()
 
     def save_preferences(self):
-        self.preferences = {'theme': self.theme_combo.currentData(), 'motion': self.motion_toggle.isChecked(), 'orb': self.orb_toggle.isChecked()}
+        self.preferences = {'theme': self.theme_combo.currentData(), 'motion': self.motion_toggle.isChecked()}
         self.config.ui_motion_enabled = self.preferences['motion']
-        self.config.holographic_orb_enabled = self.preferences['orb']
         try:
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.settings_path.with_suffix('.tmp')
@@ -1407,19 +1401,24 @@ class DetailedSettingsWindow(QMainWindow):
         except OSError as exc:
             self._error(str(exc))
 
+    def _restore_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         self.tray.setToolTip('Optimus: Computer optimization tool')
         menu = QMenu()
         show = QAction('Open Optimus', self)
-        show.triggered.connect(lambda: self._holographic_orb.restore_main())
+        show.triggered.connect(self._restore_window)
         quit_action = QAction('Quit Optimus', self)
         quit_action.triggered.connect(self.quit_application)
         menu.addAction(show)
         menu.addSeparator()
         menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self._holographic_orb.restore_main() if reason == QSystemTrayIcon.Trigger else None)
+        self.tray.activated.connect(lambda reason: self._restore_window() if reason == QSystemTrayIcon.Trigger else None)
         if not self.smoke_test:
             self.tray.show()
 
@@ -1430,7 +1429,17 @@ class DetailedSettingsWindow(QMainWindow):
         else:
             event.accept()
 
+    def _restart_as_administrator(self, checked=False):
+        owner = getattr(self, '_main_window', None)
+        if owner is not None:
+            return owner.restart_as_administrator()
+        self.status.setText('Open Optimus from its main window before restarting as administrator.')
+        return False
+
     def quit_application(self):
+        owner = getattr(self, '_main_window', None)
+        if owner is not None:
+            return owner.quit_application()
         if self.busy and not self._confirm('Exit Optimus', 'An operation is running. Waiting for completion is recommended. Exit the interface now?'):
             return
         self.close()
@@ -1447,8 +1456,6 @@ class DetailedSettingsWindow(QMainWindow):
             self.process_harness_panel.shutdown()
         if hasattr(self, '_analysis_timer'):
             self._analysis_timer.stop()
-        if getattr(self, '_holographic_orb', None) is not None:
-            self._holographic_orb.shutdown()
         if getattr(self, '_window_reveal', None) is not None:
             self._window_reveal.shutdown()
         if getattr(self, 'tray', None) is not None:
@@ -1785,10 +1792,10 @@ class PrivacyRestoreDialog(QDialog):
                                             and record.get('id') and record.get('changed_count', 0) > 0))
 
     def _approve_restore(self, record):
-        return QMessageBox.question(self, 'Restore one recorded privacy change',
+        return ask_yes_no(self, 'Restore one recorded privacy change',
             'Restore the original supported settings from this record?\n\n' + str(record['id'])
             + '\n\nCurrent values must still match the recorded change. Blocked and skipped items are reported. '
-              'No leaves the settings unchanged.', QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+              'No leaves the settings unchanged.', yes_label='Yes — restore', no_label='No — cancel')
 
     def restore_selected(self):
         if self._running or getattr(self.window, 'busy', False):
@@ -1937,8 +1944,7 @@ class SecurityReviewDialog(QDialog):
         if recommendation.get('requires_admin'):
             text += '\nAdministrator access may be required; a refused or policy-blocked change is reported.'
         text += '\n\nApply this recommendation now? No leaves this item unchanged.'
-        return QMessageBox.question(self, 'Approve one security recommendation', text,
-                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+        return ask_yes_no(self, 'Approve one security recommendation', text)
 
     def apply_selected(self):
         if self._worker is not None:
@@ -2024,9 +2030,10 @@ class SecurityReviewDialog(QDialog):
 
 
 class OptimusWindow(QMainWindow):
-    def __init__(self, backend, *, smoke_test=False):
+    def __init__(self, backend, *, smoke_test=False, defer_activation=False):
         super().__init__()
         self.backend, self.smoke_test = backend, smoke_test
+        self._defer_activation = defer_activation
         self.busy = False
         self._quitting = False
         self._settings_window = None
@@ -2049,8 +2056,7 @@ class OptimusWindow(QMainWindow):
             self.workflow_settings = self._settings()
         except Exception:
             self.workflow_settings = {}
-        self.config = SimpleNamespace(ui_motion_enabled=self.appearance.get('motion', True) and not bool(self.workflow_settings.get('reduce_motion', False)),
-            holographic_orb_enabled=self.appearance.get('orb', True), holographic_orb_x=-1, holographic_orb_y=-1)
+        self.config = SimpleNamespace(ui_motion_enabled=self.appearance.get('motion', True) and not bool(self.workflow_settings.get('reduce_motion', False)))
         self.setWindowTitle('Optimus: Computer optimization tool')
         self.setWindowIcon(DetailedSettingsWindow._icon())
         self.resize(1280, 820)
@@ -2096,9 +2102,8 @@ class OptimusWindow(QMainWindow):
         layout.addStretch(4)
         self.setCentralWidget(self.canvas)
         self._window_reveal = install_global_window_reveal(self, config=self.config)
-        self._holographic_orb = HolographicOrbController(self, self.config)
         self._build_tray()
-        QApplication.instance().setQuitOnLastWindowClosed(False)
+        QApplication.instance().setQuitOnLastWindowClosed(True)
         QApplication.instance().aboutToQuit.connect(self.shutdown)
 
     def _qss(self):
@@ -2190,6 +2195,7 @@ class OptimusWindow(QMainWindow):
             return
         if self._settings_window is None:
             self._settings_window = DetailedSettingsWindow(self.backend, smoke_test=self.smoke_test)
+            self._settings_window._main_window = self
             self._settings_window.setWindowTitle('Optimus - Settings and tools')
             self._settings_window.appearanceChanged.connect(self.apply_appearance)
             self._install_workflow_preferences(self._settings_window)
@@ -2471,10 +2477,8 @@ class OptimusWindow(QMainWindow):
     def apply_appearance(self, settings):
         self.appearance = settings
         self.config.ui_motion_enabled = bool(settings.get('motion', True)) and not bool(getattr(self,'workflow_settings',{}).get('reduce_motion',False))
-        self.config.holographic_orb_enabled = bool(settings.get('orb', True))
         self.canvas.motion = motion_allowed(self.config)
         self.canvas.sync_motion()
-        self._holographic_orb.sync_config()
         self.setStyleSheet(self._qss())
 
     def open_sandbox(self, checked=False):
@@ -2502,6 +2506,7 @@ class OptimusWindow(QMainWindow):
             return
         if self.busy or self._post_review_active or (self._settings_window is not None and self._settings_window.busy):
             self.status.setText('Wait for the current task before starting optimization.')
+            self.activate_existing_window()
             return
         try:
             settings = self._settings()
@@ -2510,6 +2515,7 @@ class OptimusWindow(QMainWindow):
             return
         if self._setup_wizard is not None:
             self.status.setText('Finish or cancel the setup questions first.')
+            self.activate_existing_window()
             return
         from .automation import CURRENT_SETUP_VERSION
         if int(settings.get('setup_version', 0)) < CURRENT_SETUP_VERSION:
@@ -2581,12 +2587,12 @@ class OptimusWindow(QMainWindow):
     def _ask_process_review(self, report):
         actions = report.get('actions', [])
         count = len(actions) if isinstance(actions, list) else 0
-        return QMessageBox.question(self, 'Optimization complete — review background programs?',
+        return ask_yes_no(self, 'Optimization complete — review background programs?',
             f'The final process scan lists {count} optional process/startup choices. Review them now?\n\n'
             'Yes opens the Process cleanup harness with nothing selected. You decide which applications to pause '
             'or startup entries to disable. Installed-application review is available there. No continues without those changes. '
             'RAM use or process age alone does not prove an application is unwanted.',
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+            yes_label='Yes — review', no_label='No — skip')
 
     def _offer_post_optimization_reviews(self, result, settings):
         if self.smoke_test or self._quitting:
@@ -2625,19 +2631,86 @@ class OptimusWindow(QMainWindow):
             if not opened_process_review and self._progress_window is not None and not self._quitting:
                 self._progress_window.show()
 
+    def activate_existing_window(self):
+        """Restore the current question or progress instead of opening new work."""
+        if self._quitting:
+            return False
+        target = QApplication.activeModalWidget()
+        if target is None:
+            for candidate in (self._setup_wizard, self._security_review_dialog,
+                              self._progress_window, self._settings_window):
+                if candidate is not None and (candidate.isVisible() or
+                        candidate is self._progress_window and self.busy):
+                    target = candidate
+                    break
+        target = target or self
+        if target.isMinimized():
+            target.showNormal()
+        else:
+            target.show()
+        target.raise_()
+        target.activateWindow()
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                ctypes.windll.user32.SetForegroundWindow(int(target.winId()))
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
+        return True
+
+    def _restore_window(self):
+        self.activate_existing_window()
+
+    def restart_as_administrator(self):
+        if self.smoke_test:
+            self.status.setText('Administrator restart is disabled during a UI smoke test.')
+            return False
+        if getattr(self, '_admin_restarting', False):
+            return False
+        bridge = getattr(self.backend, 'bridge', None)
+        if (self.busy or self._post_review_active or self._setup_wizard is not None
+                or self._settings_window is not None and self._settings_window.busy
+                or bool(getattr(getattr(self.backend, 'workflow', None), 'active', False))
+                or bool(getattr(bridge, '_busy', False)) or bool(getattr(bridge, 'busy', False))
+                or bool(getattr(bridge, '_pending', {})) or bool(getattr(bridge, 'pending', {}))):
+            self.status.setText('Finish the current operation or questions before restarting as administrator.')
+            self.activate_existing_window()
+            return False
+        is_admin = getattr(self.backend, 'is_admin', None)
+        if callable(is_admin) and is_admin():
+            self.status.setText('Optimus already has administrator access.')
+            return False
+        if self._sandbox_window is not None and not self._sandbox_window._unsaved():
+            return False
+        self._admin_restarting = True
+        try:
+            from .elevation import request_administrator
+            result = request_administrator()
+        finally:
+            self._admin_restarting = False
+        self.status.setText(result.get('note', 'Administrator relaunch could not start.'))
+        if result.get('started') is not True:
+            return False
+        # The UAC child waits on our GUI lease. Exit only after Windows accepts
+        # its normal consent flow, and release the lease during orderly shutdown.
+        self._quitting = True
+        self.shutdown()
+        QApplication.instance().quit()
+        return True
+
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         self.tray.setToolTip('Optimus: Computer optimization tool')
         menu = QMenu()
         show = QAction('Open Optimus', self)
-        show.triggered.connect(self._holographic_orb.restore_main)
+        show.triggered.connect(self._restore_window)
         quit_action = QAction('Quit Optimus', self)
         quit_action.triggered.connect(self.quit_application)
         menu.addAction(show)
         menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self._holographic_orb.restore_main() if reason == QSystemTrayIcon.Trigger else None)
-        if not self.smoke_test:
+        self.tray.activated.connect(lambda reason: self._restore_window() if reason == QSystemTrayIcon.Trigger else None)
+        if not self.smoke_test and not self._defer_activation:
             self.tray.show()
 
     def changeEvent(self, event):
@@ -2648,9 +2721,6 @@ class OptimusWindow(QMainWindow):
     def closeEvent(self, event):
         if self._quitting or self.smoke_test:
             event.accept()
-        elif self._holographic_orb.enabled() and not self.property('disable_orb'):
-            event.ignore()
-            self._holographic_orb.collapse_window(self)
         elif self.busy:
             self.status.setText('The workflow is still active. Cancel from its progress window and wait for the current stage.')
             event.ignore()
@@ -2673,6 +2743,19 @@ class OptimusWindow(QMainWindow):
                 self._progress_window.show()
                 self._progress_window.raise_()
             return False
+        if self._sandbox_window is not None:
+            # Run the editor's unsaved-work guard synchronously before tearing
+            # down the application; its reverse-close animation defers close().
+            sandbox = self._sandbox_window
+            previous_bypass = getattr(sandbox, '_optimus_close_bypass', False)
+            sandbox._optimus_close_bypass = True
+            try:
+                closed = sandbox.close()
+            finally:
+                sandbox._optimus_close_bypass = previous_bypass
+            if not closed:
+                self.status.setText('Save or discard the Sandbox edits before exiting, or cancel to keep working.')
+                return False
         self._quitting = True
         self.shutdown()
         QApplication.instance().quit()
@@ -2689,7 +2772,6 @@ class OptimusWindow(QMainWindow):
             self._cancel.set()
             bridge.shutdown()
         self.canvas.timer.stop()
-        self._holographic_orb.shutdown()
         self._window_reveal.shutdown()
         self.tray.hide()
         if self._settings_window is not None:

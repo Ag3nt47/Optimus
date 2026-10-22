@@ -30,9 +30,8 @@ def test_appearance_saves_to_moved_data_and_reopens_without_legacy_directory(qap
     try:
         detail.theme_combo.setCurrentIndex(detail.theme_combo.findData(next(iter(THEMES))))
         detail.motion_toggle.setChecked(False)
-        detail.orb_toggle.setChecked(False)
         detail.save_preferences()
-        expected = {'theme': next(iter(THEMES)), 'motion': False, 'orb': False}
+        expected = {'theme': next(iter(THEMES)), 'motion': False}
         assert detail.settings_path == moved / 'ui-settings.json'
         assert json.loads(detail.settings_path.read_text()) == expected
         assert not (local / 'Optimus').exists()
@@ -56,7 +55,7 @@ def test_moved_appearance_authority_wins_over_stale_legacy_settings(qapp, tmp_pa
     stale.write_text(json.dumps({'theme': next(iter(THEMES)), 'motion': True, 'orb': True}))
     original = stale.read_bytes()
     moved.mkdir()
-    selected = {'theme': next(reversed(THEMES)), 'motion': False, 'orb': False}
+    selected = {'theme': next(reversed(THEMES)), 'motion': False}
     (moved / 'ui-settings.json').write_text(json.dumps(selected))
     monkeypatch.setenv('LOCALAPPDATA', str(local))
     backend = SimpleNamespace(data_dir=moved, preferences=lambda: {})

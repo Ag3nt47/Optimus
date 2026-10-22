@@ -652,7 +652,7 @@ class InitialSetupWizard(QWizard):
         load.clicked.connect(self.load_driver_approvals)
         self.driver_offer_load_button=load
         body.addWidget(load)
-        admin = QPushButton('Restart Optimus as administrator (Windows UAC)')
+        admin = QPushButton('How to restart as administrator (Windows UAC)')
         admin.clicked.connect(self.request_administrator)
         body.addWidget(admin)
         self.driver_status = _label('No Windows Update driver candidates loaded in this setup session.')
@@ -937,7 +937,7 @@ class InitialSetupWizard(QWizard):
         self.driver_details.setPlainText(json.dumps(item.data(Qt.UserRole), indent=2) if item else '')
 
     def request_administrator(self):
-        self._start_probe(self.backend.elevate, (), {}, lambda result:self.driver_status.setText('Administrator restart requested. Windows UAC controls consent. Save setup choices in the elevated session.'), self.driver_status)
+        self.driver_status.setText('Save your setup choices, or cancel setup, then open Settings and choose Restart as administrator. Windows UAC controls consent. Your current setup choices stay open here; no restart was started.')
 
     @staticmethod
     def _checked(table):

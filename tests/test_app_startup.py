@@ -2,7 +2,16 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
+import pytest
 import optimus.app as app
+
+
+@pytest.fixture(autouse=True)
+def gui_lease(monkeypatch):
+    lease = Mock()
+    lease.try_claim.return_value = True
+    monkeypatch.setattr('optimus.gui_instance.GuiInstance', lambda data_dir: lease)
+    return lease
 
 
 def test_default_does_not_start_background_analysis():
@@ -34,9 +43,9 @@ def test_cli_audit_never_resumes_enabled_analysis(monkeypatch, tmp_path):
     backend.close.assert_called_once()
 
 
-def test_successful_startup_admin_launch_exits_parent_before_any_gui(monkeypatch):
+def test_successful_startup_admin_launch_exits_parent_before_any_gui(monkeypatch, tmp_path):
     import optimus.backend
-    backend=SimpleNamespace(close=Mock())
+    backend=SimpleNamespace(data_dir=tmp_path, close=Mock())
     monkeypatch.setattr(optimus.backend,'Backend',lambda:backend)
     monkeypatch.setattr(app.sys,'platform','win32')
     with patch('optimus.elevation.startup_administrator',return_value={'started':True}) as request:
@@ -45,9 +54,9 @@ def test_successful_startup_admin_launch_exits_parent_before_any_gui(monkeypatch
     assert request.call_args.args[2]==['--no-orb']
 
 
-def test_denied_startup_elevation_still_shows_gui_and_explains_access(monkeypatch):
+def test_denied_startup_elevation_still_shows_gui_and_explains_access(monkeypatch, tmp_path):
     import optimus.backend
-    backend=SimpleNamespace(preferences=lambda:{},close=Mock())
+    backend=SimpleNamespace(data_dir=tmp_path, preferences=lambda:{},close=Mock())
     monkeypatch.setattr(optimus.backend,'Backend',lambda:backend)
     monkeypatch.setattr(app.sys,'platform','win32')
     monkeypatch.setattr(app,'ctypes',SimpleNamespace(windll=SimpleNamespace(shell32=Mock())))

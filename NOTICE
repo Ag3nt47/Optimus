@@ -1,6 +1,6 @@
 Optimus contains independently authored maintenance implementations.
 
-UI theme, header transition and holographic orb components are adapted from
+UI theme and header transition components are adapted from
 AngeronaSuite (https://github.com/Ag3nt47/AngeronaSuite), copyright 2026
 Angerona contributors, under the MIT license reproduced in LICENSE.
 Only presentation components are used; Angerona security/AI services are not included.

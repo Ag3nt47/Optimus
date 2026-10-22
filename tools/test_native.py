@@ -12,7 +12,8 @@ import sys
 
 PORTABLE_SUITES = (
     'test_filesystem.py', 'test_source_workspace.py', 'test_package_source.py',
-    'test_automation.py', 'test_gui_startup.py', 'test_sampler.py', 'test_slowdown.py',
+    'test_automation.py', 'test_gui_startup.py', 'test_gui_instance.py', 'test_gui_activation.py',
+    'test_sampler.py', 'test_slowdown.py',
     'test_driver_coverage.py', 'test_legacy_support.py', 'test_maintenance_insights.py',
 )
 

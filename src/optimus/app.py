@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -30,7 +31,8 @@ def parser():
     result.add_argument('--source-workspace', type=Path, help=argparse.SUPPRESS)
     result.add_argument('--restart-ready-file', type=Path, help=argparse.SUPPRESS)
     result.add_argument('--admin-relaunch', action='store_true', help=argparse.SUPPRESS)
-    result.add_argument('--no-orb', action='store_true', help='Use normal Windows close behavior for this session.')
+    # Retain old shortcuts and restart arguments; native window behavior is now standard.
+    result.add_argument('--no-orb', action='store_true', help=argparse.SUPPRESS)
     return result
 
 
@@ -112,12 +114,59 @@ def main(argv=None):
             return 0
         finally:
             backend.close()
-    from .elevation import startup_administrator
-    elevation = (startup_administrator(backend, args, actual_arguments) if sys.platform == 'win32'
-                 else {'started': False, 'status': 'per_operation', 'note': ''})
-    if elevation.get('started') is True:
-        backend.close()
-        return 0
+    return _run_gui(backend, args, actual_arguments)
+
+
+def _run_gui(backend, args, actual_arguments):
+    """Claim the interactive session before UAC or any automatic GUI work."""
+    from .gui_instance import GuiInstance
+    read_only_gui = args.smoke_test or args.startup_probe
+    instance = None
+    closed = False
+
+    def close():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        try:
+            backend.close()
+        finally:
+            if instance is not None:
+                instance.close()
+
+    try:
+        staged_restart = False
+        if not read_only_gui:
+            instance = GuiInstance(backend.data_dir)
+            if not instance.try_claim():
+                if args.restart_ready_file and args.source_workspace:
+                    # Build the saved source hidden. The current editor only
+                    # exits after its child has initialized and reported ready.
+                    staged_restart = True
+                elif args.admin_relaunch:
+                    if not instance.wait_for_handoff():
+                        if instance.activate_existing():
+                            return 0
+                        raise RuntimeError('The previous Optimus window is still open. The administrator relaunch could not take over.')
+                else:
+                    if instance.activate_existing():
+                        return 0
+                    raise RuntimeError('Optimus is already open, but its window could not be activated. Wait for it to finish starting or respond, then launch it again.')
+        from .elevation import startup_administrator
+        elevation = (startup_administrator(backend, args, actual_arguments) if sys.platform == 'win32'
+                     else {'started': False, 'status': 'per_operation', 'note': ''})
+        if elevation.get('started') is True:
+            return 0
+        return _show_gui(backend, args, elevation, instance, staged_restart, close)
+    except (OSError, ValueError, RuntimeError) as error:
+        print(json.dumps({'status': 'error', 'error': str(error)}), file=sys.stderr)
+        return 2
+    finally:
+        close()
+
+
+def _show_gui(backend, args, elevation, instance, staged_restart, close):
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QIcon
@@ -132,19 +181,13 @@ def main(argv=None):
     app.setOrganizationName('Optimus')
     app.setWindowIcon(QIcon(str(Path(__file__).with_name('assets') / 'optimus.svg')))
     read_only_gui = args.smoke_test or args.startup_probe
-    window = OptimusWindow(backend, smoke_test=read_only_gui)
+    window = OptimusWindow(backend, smoke_test=read_only_gui,
+                           **({'defer_activation': True} if staged_restart else {}))
     if args.startup_probe:
         window.setEnabled(False)
-    if args.no_orb:
-        window.setProperty('disable_orb', True)
-    window.show()
-    if not read_only_gui:
-        try:
-            _resume_saved_analysis(backend)
-        except Exception as error:
-            window.status.setText('Background analysis could not resume: ' + str(error))
     if elevation.get('note'):
         window.status.setText(elevation['note'])
+    app.aboutToQuit.connect(close)
     if args.restart_ready_file:
         marker = args.restart_ready_file.resolve()
         allowed = (backend.data_dir / 'Sandbox' / 'restart').resolve()
@@ -152,19 +195,52 @@ def main(argv=None):
             raise ValueError('Restart readiness marker is outside the app data folder.')
         marker.parent.mkdir(parents=True, exist_ok=True)
         QTimer.singleShot(750, lambda: marker.write_text(json.dumps({'ready': True, 'pid': os.getpid()}), encoding='utf-8'))
-    app.aboutToQuit.connect(backend.close)
-    if not read_only_gui:
-        from .gui_startup import SetupAutomationController
-        controller = SetupAutomationController(backend, window, modal_active=lambda: app.activeModalWidget() is not None)
-        window._automation_controller = controller
-        timer = QTimer(window)
-        timer.setInterval(30000)
-        timer.timeout.connect(controller.tick)
-        app.aboutToQuit.connect(controller.stop)
-        app.aboutToQuit.connect(timer.stop)
-        timer.start()
-        window._automation_timer = timer
-        QTimer.singleShot(1500, controller.tick)
+
+    def start_session():
+        if instance is not None:
+            instance.listen(window.activate_existing_window)
+        window.show()
+        if not read_only_gui:
+            window.tray.show()
+            try:
+                _resume_saved_analysis(backend)
+            except Exception as error:
+                window.status.setText('Background analysis could not resume: ' + str(error))
+            from .gui_startup import SetupAutomationController
+            controller = SetupAutomationController(backend, window, modal_active=lambda: app.activeModalWidget() is not None)
+            window._automation_controller = controller
+            timer = QTimer(window)
+            timer.setInterval(30000)
+            timer.timeout.connect(controller.tick)
+            app.aboutToQuit.connect(controller.stop)
+            app.aboutToQuit.connect(timer.stop)
+            timer.start()
+            window._automation_timer = timer
+            QTimer.singleShot(1500, controller.tick)
+
+    if staged_restart:
+        window.tray.hide()
+        deadline = time.monotonic() + 25
+        handoff = QTimer(window)
+        window._handoff_timer = handoff
+
+        def take_over():
+            try:
+                if instance.try_claim():
+                    handoff.stop()
+                    start_session()
+                elif time.monotonic() >= deadline:
+                    handoff.stop()
+                    print(json.dumps({'status': 'error', 'error': 'The previous Optimus window did not finish its source restart handoff.'}), file=sys.stderr)
+                    app.exit(2)
+            except (OSError, ValueError, RuntimeError) as error:
+                handoff.stop()
+                print(json.dumps({'status': 'error', 'error': str(error)}), file=sys.stderr)
+                app.exit(2)
+        handoff.timeout.connect(take_over)
+        handoff.start(100)
+    else:
+        start_session()
     if read_only_gui:
         def inspect():
             try:

@@ -15,6 +15,7 @@ from .automation import CURRENT_SETUP_VERSION, save_setup
 from .native_settings import NativePreferences, full_native_settings, startup_descriptor
 from .ui import BackendWorker, DataTable, DetailedSettingsWindow, OptimusWindow
 from .widgets.theme import THEMES, build_qss
+from .widgets.questions import make_yes_no_dialog
 
 
 def note(layout, text):
@@ -463,9 +464,7 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         self.motion_choice = QCheckBox('Enable starfield and window animations')
         self.motion_choice.setChecked(self.owner.appearance.get('motion', True))
         body.addWidget(self.motion_choice)
-        self.orb_choice = QCheckBox('Use the holographic orb when closing the main window')
-        self.orb_choice.setChecked(self.owner.appearance.get('orb', True))
-        body.addWidget(self.orb_choice)
+        note(body, 'Minimize uses the taskbar or Dock. Closing the main window exits after active work finishes; unsaved Sandbox edits prompt before exit.')
         appearance = QPushButton('Save appearance')
         appearance.clicked.connect(self._save_appearance)
         body.addWidget(appearance)
@@ -476,8 +475,7 @@ class NativeSettingsWindow(DetailedSettingsWindow):
             self.status.setText('Appearance changes are disabled during a smoke test or active operation.')
             return
         from .workflow import atomic_json
-        value = dict(self.owner.appearance, theme=self.theme_choice.currentText(),
-                     motion=self.motion_choice.isChecked(), orb=self.orb_choice.isChecked())
+        value = {'theme': self.theme_choice.currentText(), 'motion': self.motion_choice.isChecked()}
         try:
             atomic_json(self.owner.preferences_path, value)
             self.owner.apply_appearance(value)
@@ -727,15 +725,16 @@ class NativeOptimusWindow(OptimusWindow):
                 self._progress_window.hide()
             security = result.get('security_review')
             if isinstance(security, dict) and security.get('recommendations'):
-                dialog = QMessageBox(self)
-                dialog.setWindowTitle('Native security recommendations')
-                dialog.setText('Review native security and update findings. Open the native security/update tools now?')
+                dialog = make_yes_no_dialog(self, 'Native security recommendations',
+                    'Review native security and update findings. Open the native security/update tools now?',
+                    yes_label='Yes — review', no_label='No — skip')
                 dialog.setDetailedText(json.dumps(security, indent=2, default=str))
-                dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-                dialog.setDefaultButton(QMessageBox.No)
-                if dialog.exec() == QMessageBox.Yes:
-                    self.open_settings(page='Updates')
-                    self._settings_window._show_result(security)
+                try:
+                    if dialog.exec() == QMessageBox.Yes:
+                        self.open_settings(page='Updates')
+                        self._settings_window._show_result(security)
+                finally:
+                    dialog.deleteLater()
             processes = result.get('process_review')
             if settings.get('post_process_review_enabled') and isinstance(processes, dict) and self._ask_process_review(processes):
                 self.open_settings(page='Performance')
