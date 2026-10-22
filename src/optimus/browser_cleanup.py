@@ -7,25 +7,25 @@ backups; cache writes remain delegated to the existing allowlisted cleaner.
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
 import math
 import ntpath
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from typing import Any
 
 import psutil
+from .browser_paths import browser_definitions, process_matches
 
-BROWSERS = {
-    'edge': {'name': 'Microsoft Edge', 'process': 'msedge.exe'},
-    'chrome': {'name': 'Google Chrome', 'process': 'chrome.exe'},
-    'brave': {'name': 'Brave', 'process': 'brave.exe'},
-    'vivaldi': {'name': 'Vivaldi', 'process': 'vivaldi.exe'},
-    'firefox': {'name': 'Mozilla Firefox', 'process': 'firefox.exe'},
-}
+_PLATFORM = sys.platform
+BROWSERS = browser_definitions(_PLATFORM)
 _PROFILE_BROWSER = {value['name']: key for key, value in BROWSERS.items()}
 _HEX32 = re.compile(r'^[a-f0-9]{32}$')
+_X11_LOCK = threading.RLock()
 
 
 def _browser(browser_id):
@@ -40,7 +40,7 @@ def _cancelled(event):
 
 def _session_id(pid):
     if os.name != 'nt':
-        raise OSError('Windows browser sessions are unavailable.')
+        return os.getsid(pid)
     from ctypes import wintypes
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.ProcessIdToSessionId.argtypes = (wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
@@ -68,7 +68,7 @@ class BrowserSessionController:
         user = psutil.Process(os.getpid()).username()
         session = _session_id(os.getpid())
         if not user or type(session) is not int or session <= 0:
-            raise OSError('The current Windows user/session is unavailable.')
+            raise OSError('The current user/session is unavailable.')
         return user.casefold(), session
 
     @staticmethod
@@ -76,14 +76,20 @@ class BrowserSessionController:
         wanted = _browser(browser_id)['process']
         pid, name, executable = process.pid, process.name(), process.exe()
         created, user, session = process.create_time(), process.username(), _session_id(process.pid)
-        if (type(pid) is not int or pid <= 4 or not isinstance(name, str) or name.casefold() != wanted
-                or not isinstance(executable, str) or not ntpath.isabs(executable)
-                or ntpath.basename(executable).casefold() != wanted
+        native = _PLATFORM != 'win32'
+        path_module = os.path if native else ntpath
+        if (type(pid) is not int or pid <= 4 or not isinstance(name, str) or not process_matches(browser_id, name, _PLATFORM)
+                or not isinstance(executable, str) or not path_module.isabs(executable)
+                or not process_matches(browser_id, path_module.basename(executable), _PLATFORM, allow_truncated=False)
                 or type(created) not in (int, float) or not math.isfinite(created) or created <= 0
                 or not isinstance(user, str) or not user or user.casefold() != context[0]
-                or session != context[1] or session <= 0):
+                or (not native and session != context[1]) or session <= 0):
             raise ValueError('Browser process ownership, session or lifetime could not be verified.')
-        return {'pid': pid, 'name': name, 'exe': ntpath.normcase(ntpath.normpath(executable)),
+        if native:
+            identities = process.uids()
+            if identities.real != os.getuid() or identities.effective != os.geteuid():
+                raise ValueError('The browser real and effective user IDs must match the current desktop account.')
+        return {'pid': pid, 'name': name, 'exe': path_module.normcase(path_module.normpath(executable)),
                 'create_time': float(created), 'username': user.casefold(), 'session_id': session, 'verified': True}
 
     @staticmethod
@@ -95,7 +101,13 @@ class BrowserSessionController:
         no process termination/debug privilege and never authorize closure.
         """
         if os.name != 'nt':
-            raise OSError('Windows process snapshots are unavailable.')
+            names = {}
+            for process in psutil.process_iter(['pid', 'name'], ad_value=None):
+                name = process.info.get('name')
+                if not isinstance(name, str) or not name:
+                    raise OSError('A native process name is inaccessible.')
+                names[int(process.pid)] = name
+            return names
         from ctypes import wintypes
         class ProcessEntry(ctypes.Structure):
             _fields_ = [('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD),
@@ -148,7 +160,7 @@ class BrowserSessionController:
                 if not isinstance(name, str) or not name:
                     unknown.append(process.pid)
                     continue
-                if name.casefold() != wanted:
+                if not process_matches(browser_id, name, _PLATFORM):
                     continue
                 try:
                     records.append(self._identity(process, browser_id, context))
@@ -163,7 +175,7 @@ class BrowserSessionController:
                 # inaccessible process is harmless. Include matching browser PIDs
                 # found only in the newer snapshot as well.
                 native_names = self._native_process_names()
-                browser_pids = {pid for pid, name in native_names.items() if name.casefold() == wanted}
+                browser_pids = {pid for pid, name in native_names.items() if process_matches(browser_id, name, _PLATFORM)}
                 for pid in unknown:
                     if pid not in native_names and psutil.pid_exists(pid):
                         errors.append('A live process name could not be inspected safely.')
@@ -191,7 +203,7 @@ class BrowserSessionController:
     def _windows(pids):
         """Enumerate visible top-level windows before requesting any closure."""
         if os.name != 'nt':
-            raise OSError('Browser window closure requires Windows.')
+            return _x11_windows(pids)
         from ctypes import wintypes
         user = ctypes.WinDLL('user32', use_last_error=True)
         callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -228,6 +240,8 @@ class BrowserSessionController:
 
     @staticmethod
     def _post_close(handle, expected_pid):
+        if os.name != 'nt':
+            return _x11_post_close(handle, expected_pid)
         from ctypes import wintypes
         user = ctypes.WinDLL('user32', use_last_error=True)
         user.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
@@ -255,7 +269,14 @@ class BrowserSessionController:
             if not before['running']:
                 return dict(result, closed=True, complete=True, reason='The browser is already closed.')
             identities = {record['pid']: record for record in before['processes']}
-            windows = self._windows(set(identities))
+            if _PLATFORM == 'darwin':
+                if not all(self._same_process(browser_id, record) for record in identities.values()):
+                    return dict(result, reason='A browser process lifetime changed before its normal quit request.')
+                _mac_quit(browser_id)
+                result['requested_windows'] = 1
+                windows = []
+            else:
+                windows = self._windows(set(identities))
             for handle, pid in windows:
                 if _cancelled(cancel_event):
                     return dict(result, cancelled=True, reason='Cancelled; no further windows were asked to close.')
@@ -282,7 +303,7 @@ class BrowserSessionController:
                     cancel_event.wait(min(0.1, remaining))
                 else:
                     time.sleep(min(0.1, remaining))
-        except (psutil.Error, OSError, ValueError, TypeError, KeyError, AttributeError):
+        except (psutil.Error, OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
             return dict(result, reason='Graceful browser closure could not be completed or verified.')
         finally:
             self._close_lock.release()
@@ -290,6 +311,137 @@ class BrowserSessionController:
 
 # Keep the shorter name usable by source integrations.
 SessionController = BrowserSessionController
+
+
+def _mac_quit(browser_id):
+    """Request the application's ordinary quit action; never send kill signals."""
+    bundle_id = _browser(browser_id)['bundle_id']
+    subprocess.run(['/usr/bin/osascript', '-e', f'tell application id "{bundle_id}" to quit'],
+                   check=True, timeout=10, capture_output=True)
+
+
+def _x11_connection():
+    """X11/XWayland only. Native Wayland exposes no universal close-window API."""
+    library = ctypes.util.find_library('X11')
+    if not library or not os.environ.get('DISPLAY'):
+        raise OSError('Normal browser closure is unavailable in this desktop session. Close the browser yourself or skip it.')
+    native = ctypes.CDLL(library)
+    native.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    native.XOpenDisplay.restype = ctypes.c_void_p
+    native.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    native.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    native.XDefaultRootWindow.restype = ctypes.c_ulong
+    native.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    native.XInternAtom.restype = ctypes.c_ulong
+    native.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+        ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_void_p)]
+    native.XFree.argtypes = [ctypes.c_void_p]
+    display = native.XOpenDisplay(None)
+    if not display:
+        raise OSError('The X11 display could not be opened for normal browser closure.')
+    # A window can disappear after enumeration. Xlib's default error handler can
+    # terminate the entire application on BadWindow; keep those races local to
+    # this close attempt, and preserve another library's handler for its display.
+    _X11_LOCK.acquire()
+    try:
+        native.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+        native.XSetErrorHandler.restype = ctypes.c_void_p
+        native.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        handler_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        previous = native.XSetErrorHandler(None)
+        old_callback = handler_type(previous) if previous else None
+        errors = [False]
+        def handle_error(error_display, event):
+            if error_display == display:
+                errors[0] = True
+                return 0
+            return old_callback(error_display, event) if old_callback else 0
+        callback = handler_type(handle_error)
+        native.XSetErrorHandler(ctypes.cast(callback, ctypes.c_void_p))
+        native._optimus_callback = callback
+        native._optimus_previous_handler = previous
+        native._optimus_errors = errors
+    except BaseException:
+        native.XCloseDisplay(display)
+        _X11_LOCK.release()
+        raise
+    return native, display
+
+
+def _x11_disconnect(native, display):
+    try:
+        native.XCloseDisplay(display)
+        native.XSetErrorHandler(native._optimus_previous_handler)
+    finally:
+        _X11_LOCK.release()
+
+
+def _x11_property(native, display, window, name):
+    atom = native.XInternAtom(display, name, True)
+    if not atom:
+        return []
+    actual, count, remaining = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_ulong()
+    format_value, data = ctypes.c_int(), ctypes.c_void_p()
+    result = native.XGetWindowProperty(display, window, atom, 0, 20000, False, 0,
+        ctypes.byref(actual), ctypes.byref(format_value), ctypes.byref(count), ctypes.byref(remaining), ctypes.byref(data))
+    try:
+        if result or native._optimus_errors[0] or remaining.value or count.value > 20000 or format_value.value not in (0, 32):
+            raise OSError('The X11 window property inventory is incomplete.')
+        if not data.value:
+            return []
+        return list(ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong * count.value)).contents)
+    finally:
+        if data.value:
+            native.XFree(data)
+
+
+def _x11_windows(pids):
+    native, display = _x11_connection()
+    try:
+        windows = _x11_property(native, display, native.XDefaultRootWindow(display), b'_NET_CLIENT_LIST')
+        result, deadline = [], time.monotonic() + 2
+        for window in windows:
+            if time.monotonic() >= deadline:
+                raise OSError('The X11 browser-window inventory exceeded its deadline.')
+            owner = _x11_property(native, display, window, b'_NET_WM_PID')
+            if len(owner) == 1 and owner[0] in pids:
+                result.append((window, owner[0]))
+        return result
+    finally:
+        _x11_disconnect(native, display)
+
+
+def _x11_post_close(handle, expected_pid):
+    native, display = _x11_connection()
+    try:
+        if _x11_property(native, display, handle, b'_NET_WM_PID') != [expected_pid]:
+            return False
+        protocol = native.XInternAtom(display, b'WM_PROTOCOLS', True)
+        close_atom = native.XInternAtom(display, b'WM_DELETE_WINDOW', True)
+        if not protocol or not close_atom:
+            return False
+        class MessageData(ctypes.Union):
+            _fields_ = [('b', ctypes.c_char * 20), ('s', ctypes.c_short * 10), ('l', ctypes.c_long * 5)]
+        class ClientMessage(ctypes.Structure):
+            _fields_ = [('type', ctypes.c_int), ('serial', ctypes.c_ulong), ('send_event', ctypes.c_int),
+                ('display', ctypes.c_void_p), ('window', ctypes.c_ulong), ('message_type', ctypes.c_ulong),
+                ('format', ctypes.c_int), ('data', MessageData)]
+        class Event(ctypes.Union):
+            _fields_ = [('message', ClientMessage), ('padding', ctypes.c_long * 24)]
+        event = Event()
+        event.message.type, event.message.display, event.message.window = 33, display, handle
+        event.message.message_type, event.message.format = protocol, 32
+        event.message.data.l[0] = close_atom
+        native.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.POINTER(Event)]
+        native.XFlush.argtypes = [ctypes.c_void_p]
+        sent = bool(native.XSendEvent(display, handle, False, 0, ctypes.byref(event)))
+        native.XFlush(display)
+        native.XSync(display, False)
+        return sent and not native._optimus_errors[0]
+    finally:
+        _x11_disconnect(native, display)
 
 
 def _closed(status):
@@ -385,7 +537,7 @@ def run_browser_cleanup(backend: Any, settings: dict[str, Any], *, clean, browse
                 identity = category.get('id')
                 browser_id = identity.split(':', 1)[0] if isinstance(identity, str) and ':' in identity else None
                 if (browser_id in selected and category.get('available') is True
-                        and BROWSERS[browser_id]['process'] in category.get('process_names', [])):
+                        and any(process_matches(browser_id, name, _PLATFORM) for name in category.get('process_names', []))):
                     if identity not in caches.setdefault(browser_id, []):
                         caches[browser_id].append(identity)
     except Exception as error:
@@ -428,7 +580,7 @@ def run_browser_cleanup(backend: Any, settings: dict[str, Any], *, clean, browse
                 if (status.get('can_close') is not True or not process_rows
                         or any(not isinstance(record, dict) or type(record.get('pid')) is not int
                                or record['pid'] <= 4 or not isinstance(record.get('name'), str)
-                               or record['name'].casefold() != BROWSERS[browser_id]['process'] for record in process_rows)
+                               or not process_matches(browser_id, record['name'], _PLATFORM) for record in process_rows)
                         or len({record['pid'] for record in process_rows}) != len(process_rows)):
                     skip('Browser ownership/session could not be verified for graceful closure.', failure=True)
                     continue

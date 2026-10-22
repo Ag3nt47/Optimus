@@ -180,7 +180,7 @@ class Preferences:
                 or len(set(packages)) != len(packages)):
             raise ValueError('Choose unique exact names from the supported consumer-app removal list.')
         browsers = result['browser_cleanup_browsers']
-        if type(browsers) is not list or len(browsers) > 5 or any(not isinstance(item, str) or item not in ('edge', 'chrome', 'brave', 'vivaldi', 'firefox') for item in browsers) or len(set(browsers)) != len(browsers):
+        if type(browsers) is not list or len(browsers) > 6 or any(not isinstance(item, str) or item not in ('edge', 'chrome', 'chromium', 'brave', 'vivaldi', 'firefox') for item in browsers) or len(set(browsers)) != len(browsers):
             raise ValueError('Choose unique supported browser identifiers for browser cleanup.')
         if type(result['browser_keep_domains']) is not list:
             raise ValueError('Cookie keep domains must be a list of plain host names.')

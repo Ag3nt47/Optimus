@@ -191,7 +191,7 @@ class SandboxWindow(QMainWindow):
         if errors:
             QMessageBox.warning(self, 'Source validation', '\n'.join(errors[:10]))
             return
-        if QMessageBox.question(self, 'Restart with saved code', 'Run the saved source working copy in a new Optimus process? It will use your current Windows permissions. The current window stays open if the new version fails to start.', QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
+        if QMessageBox.question(self, 'Restart with saved code', 'Run the saved source working copy in a new Optimus process? It will use your current account permissions. The current window stays open if the new version fails to start.', QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
             return
         ready_dir = self.backend.data_dir / 'Sandbox' / 'restart'
         ready_dir.mkdir(parents=True, exist_ok=True)

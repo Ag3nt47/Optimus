@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from datetime import datetime, timezone
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +23,8 @@ from typing import Any
 
 import psutil
 from .filesystem import replace_with_retry
+
+_PLATFORM = sys.platform
 
 
 class PerformanceError(RuntimeError):
@@ -45,25 +48,41 @@ _PRIORITY_VALUES = {
     "AboveNormal": getattr(psutil, "ABOVE_NORMAL_PRIORITY_CLASS", 0x8000),
     "High": getattr(psutil, "HIGH_PRIORITY_CLASS", 0x80),
 }
+if _PLATFORM != 'win32':
+    _PRIORITY_VALUES = {'Normal': 0, 'AboveNormal': -5, 'High': -10, 'BelowNormal': 10, 'Idle': 19}
 _PRIORITY_NAMES = {int(value): name for name, value in _PRIORITY_VALUES.items()}
-_PRIORITY_NAMES.update({0x40: "Idle", 0x4000: "BelowNormal", 0x100: "RealTime"})
+if _PLATFORM == 'win32':
+    _PRIORITY_NAMES.update({0x40: "Idle", 0x4000: "BelowNormal", 0x100: "RealTime"})
+else:
+    _PRIORITY_NAMES.update({value: f'Nice {value}' for value in range(-20, 20) if value not in _PRIORITY_NAMES})
 _STATE_LOCK = threading.RLock()
 _TRACKED_SLEEP_STATES = {"pending", "sleeping", "resume_pending"}
 _SERVICE_CACHE: tuple[float, set[int] | None] = (0.0, None)
 
 
+def _priority_choice_message() -> str:
+    if _PLATFORM == 'win32':
+        return 'Choose Normal, AboveNormal, or High priority.'
+    return 'Choose Normal, AboveNormal, High, BelowNormal or Idle priority. Native presets use OS nice values.'
+
+
 def _norm(path: str) -> str:
-    return ntpath.normcase(ntpath.normpath(str(path))) if path else ""
+    module = ntpath if _PLATFORM == 'win32' else os.path
+    return module.normcase(module.normpath(str(path))) if path else ""
 
 
 def _within(path: str, root: str) -> bool:
     path, root = _norm(path), _norm(root)
-    return bool(root) and (path == root or path.startswith(root.rstrip("\\") + "\\"))
+    separator = '\\' if _PLATFORM == 'win32' else os.sep
+    return bool(root) and (path == root or path.startswith(root.rstrip(separator) + separator))
 
 
 def _session_id(process_id: int) -> int | None:
     if os.name != "nt":
-        return None
+        try:
+            return os.getsid(int(process_id))
+        except OSError:
+            return None
     session = ctypes.c_ulong()
     if not ctypes.windll.kernel32.ProcessIdToSessionId(int(process_id), ctypes.byref(session)):
         return None
@@ -72,9 +91,10 @@ def _session_id(process_id: int) -> int | None:
 
 def _current_user() -> str:
     try:
-        return psutil.Process(os.getpid()).username().casefold()
+        user = psutil.Process(os.getpid()).username()
+        return user.casefold() if _PLATFORM == 'win32' else user
     except psutil.Error as exc:
-        raise PerformanceError("The current Windows user could not be verified.") from exc
+        raise PerformanceError("The current user could not be verified.") from exc
 
 
 def _ancestor_ids() -> set[int]:
@@ -94,6 +114,10 @@ def _trusted_codex_exe(executable: str) -> bool:
     path allowlist, not a claim that an Authenticode verification was performed.
     """
     executable = _norm(executable)
+    if _PLATFORM != 'win32':
+        # A basename is insufficient to give an arbitrary Unix process special
+        # scheduling privileges. Its ordinary owner/ancestry rules still apply.
+        return False
     name = ntpath.basename(executable)
     program_files = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles", r"C:\Program Files")
     store_root = ntpath.join(program_files, "WindowsApps")
@@ -117,6 +141,8 @@ def _related_to_codex(process: Any) -> bool:
 
 
 def _service_ids(force: bool = False) -> set[int] | None:
+    if _PLATFORM != 'win32':
+        return set()
     global _SERVICE_CACHE
     with _STATE_LOCK:
         if not force and time.monotonic() - _SERVICE_CACHE[0] < 2:
@@ -130,6 +156,8 @@ def _service_ids(force: bool = False) -> set[int] | None:
 
 
 def _base_protection(process: Any, *, for_sleep: bool = True) -> str:
+    if _PLATFORM != 'win32':
+        return _native_protection(process, for_sleep=for_sleep)
     try:
         process_id = int(process.pid)
         name, executable, username = process.name().casefold(), process.exe(), process.username().casefold()
@@ -172,6 +200,53 @@ def _base_protection(process: Any, *, for_sleep: bool = True) -> str:
         return "Process details could not be verified: " + type(exc).__name__
 
 
+def _native_protection(process: Any, *, for_sleep: bool = True) -> str:
+    """Only current-user applications are eligible; core session agents stay live."""
+    try:
+        pid, name = int(process.pid), process.name().casefold()
+        executable, owner = process.exe(), process.username()
+        if pid <= 4:
+            return 'Kernel or system initialization process.'
+        if not executable or not os.path.isabs(executable) or not owner:
+            return 'Executable or process ownership is inaccessible.'
+        if owner != _current_user():
+            return 'Only applications owned by the current user can be changed.'
+        identities = process.uids()
+        if identities.real != os.getuid() or identities.effective != os.geteuid():
+            return 'Only applications with the current real and effective user IDs can be changed.'
+        # Running Optimus as root does not authorize treating system daemons as
+        # desktop applications. Use the normal desktop account for these tools.
+        if owner == 'root':
+            return 'Root-owned system processes are protected.'
+        system_roots = ('/System', '/usr/libexec', '/usr/lib/systemd', '/lib/systemd', '/sbin', '/usr/sbin')
+        if any(_within(executable, root) for root in system_roots):
+            return 'Operating-system service executable.'
+        protected_names = {'systemd', 'init', 'launchd', 'kernel_task', 'windowserver',
+            'loginwindow', 'coreaudiod', 'mds', 'mdworker', 'mdworker_shared', 'securityd',
+            'trustd', 'tccd', 'syspolicyd', 'amfid', 'xprotectservice', 'xprotectremediator',
+            'gnome-shell', 'gnome-session-binary', 'plasmashell', 'kwin_wayland', 'kwin_x11',
+            'xfce4-session', 'xfwm4', 'cinnamon', 'mate-session', 'sway', 'weston', 'xorg',
+            'xwayland', 'dbus-daemon', 'dbus-broker', 'pipewire', 'wireplumber', 'pulseaudio',
+            'gpg-agent', 'ssh-agent', 'gnome-keyring-daemon', 'kwalletd5', 'kwalletd6',
+            'polkitd', 'polkit-gnome-authentication-agent-1', 'agent47-opt-guard',
+            'xfce4-panel', 'xfsettingsd', 'mate-panel', 'budgie-panel', 'kded5', 'kded6',
+            'kdeinit5', 'kdeinit6', 'kaccess', 'ksmserver', 'xdg-desktop-portal',
+            'xdg-desktop-portal-gtk', 'xdg-desktop-portal-gnome', 'xdg-desktop-portal-kde',
+            'gvfsd', 'ibus-daemon', 'fcitx', 'fcitx5', 'at-spi-bus-launcher', 'at-spi2-registryd'}
+        if name in protected_names or any(token in name for token in ('falcon', 'sentinel', 'clamd', 'sophos', 'defender')):
+            return 'Desktop session, security agent or core system infrastructure.'
+        ancestors = _ancestor_ids()
+        if -1 in ancestors:
+            return 'Management-tool ancestry could not be verified.'
+        if pid in ancestors:
+            return 'Optimus or a parent process of Optimus.'
+        if for_sleep and (name in {'codex', 'chatgpt'} or any(parent.name().casefold() in {'codex', 'chatgpt'} for parent in process.parents())):
+            return 'Codex and its tool family are excluded from sleeping.'
+        return ''
+    except (psutil.Error, OSError, ValueError, AttributeError, TypeError) as exc:
+        return 'Process details could not be verified: ' + type(exc).__name__
+
+
 def _safe_metric(action: Any, default: Any = None) -> Any:
     try:
         return action()
@@ -203,7 +278,9 @@ def _record(process: Any) -> dict[str, Any]:
     reason = _base_protection(process)
     record.update({'protected': bool(reason), 'reason': reason, 'can_sleep': not bool(reason),
                    'can_set_priority': not bool(_base_protection(process, for_sleep=False)),
-                   'verified_codex_executable': _trusted_codex_exe(executable)})
+                   'verified_codex_executable': _trusted_codex_exe(executable),
+                   'affinity_supported': _PLATFORM != 'darwin' and affinity is not None,
+                   'priority_note': 'Native presets use nice values: Normal 0, AboveNormal -5, High -10, BelowNormal 10, Idle 19. Raising priority or restoring a lower nice value may require OS permission; failures are reported without bypassing it.' if _PLATFORM != 'win32' else ''})
     return record
 
 def list_performance_candidates() -> list[dict[str, Any]]:
@@ -232,7 +309,10 @@ def _fresh(record: dict[str, Any]) -> Any:
             raise PerformanceError("The process ID has been reused. Refresh the list.")
         if _norm(process.exe()) != _norm(expected_exe):
             raise PerformanceError("The executable identity changed. Refresh the list.")
-        if record.get("username") and process.username().casefold() != str(record["username"]).casefold():
+        actual_owner, expected_owner = process.username(), str(record.get('username', ''))
+        if _PLATFORM == 'win32':
+            actual_owner, expected_owner = actual_owner.casefold(), expected_owner.casefold()
+        if expected_owner and actual_owner != expected_owner:
             raise PerformanceError("The process owner changed. Refresh the list.")
         return process
     except (KeyError, TypeError, ValueError, psutil.Error) as exc:
@@ -242,7 +322,7 @@ def _fresh(record: dict[str, Any]) -> Any:
 def _set_priority_verified(record: dict[str, Any], priority: str) -> dict[str, Any]:
     """Change only one explicit verified current-user application; never RealTime."""
     if priority not in _PRIORITY_VALUES:
-        raise PerformanceError("Choose Normal, AboveNormal, or High priority.")
+        raise PerformanceError(_priority_choice_message())
     with _STATE_LOCK:
         process = _fresh(record)
         _service_ids(force=True)
@@ -368,7 +448,7 @@ class PerformanceController:
 
     def set_process_priority(self, record: dict[str, Any], priority: str) -> dict[str, Any]:
         if priority not in _PRIORITY_VALUES:
-            raise PerformanceError('Choose Normal, AboveNormal, or High priority.')
+            raise PerformanceError(_priority_choice_message())
         with _STATE_LOCK:
             process = _fresh(record)
             _service_ids(force=True)
@@ -411,7 +491,7 @@ class PerformanceController:
             previous = int(change['previous'])
             if previous not in _PRIORITY_NAMES:
                 raise PerformanceError('The recorded original priority class is invalid.')
-            if previous == 0x100 and not _trusted_codex_exe(process.exe()):
+            if _PLATFORM == 'win32' and previous == 0x100 and not _trusted_codex_exe(process.exe()):
                 raise PerformanceError('Realtime restoration is limited to a verified Codex executable with a recorded original Realtime class.')
             change['status'] = 'restore_pending'
             self._save(state)
@@ -436,6 +516,8 @@ class PerformanceController:
         return performance_profile(priority=priority, include_tool_helpers=include_tool_helpers, root_pid=root_pid, controller=self)
 
     def set_affinity(self, record: dict[str, Any], cores: Any) -> dict[str, Any]:
+        if _PLATFORM == 'darwin':
+            raise PerformanceError('macOS does not expose supported per-process CPU affinity. Priority and resource analysis remain available.')
         with _STATE_LOCK:
             selected = _validate_cores(cores)
             process = _fresh(record)
@@ -459,7 +541,7 @@ class PerformanceController:
             except Exception as exc:
                 change['status'], change['error'] = 'failed', str(exc)
                 self._save(state)
-                raise PerformanceError('Windows rejected the selected CPU affinity.') from exc
+                raise PerformanceError('The operating system rejected the selected CPU affinity.') from exc
             change['status'] = 'applied'
             self._save(state)
             return {'pid': process.pid, 'affinity': selected, 'previous': previous, 'change_id': change_id, 'applied': True}
@@ -476,6 +558,8 @@ class PerformanceController:
                      'Undo': {'record': change['record'], 'previous': change['previous']}} for change in history]
 
     def restore_affinity(self, change_id: str) -> dict[str, Any]:
+        if _PLATFORM == 'darwin':
+            raise PerformanceError('macOS does not expose supported per-process CPU affinity.')
         with _STATE_LOCK:
             state = self._load()
             matches = [change for change in state.get('allocation_history', []) if change.get('id') == change_id and change.get('kind') == 'affinity']
@@ -515,7 +599,7 @@ def performance_profile(priority: str = "High", include_tool_helpers: bool = Fal
     Optimus itself, Windows processes, services and security processes stay protected.
     """
     if priority not in _PRIORITY_VALUES:
-        raise PerformanceError("Choose Normal, AboveNormal, or High; RealTime is not an Optimus preset.")
+        raise PerformanceError(_priority_choice_message())
     selected_root = None
     if root_pid is not None:
         selected_root = psutil.Process(int(root_pid))
@@ -605,7 +689,7 @@ def diagnose_priority_watchers() -> dict[str, Any]:
 
 def _validate_cores(cores: Any) -> list[int]:
     count = max(1, int(psutil.cpu_count(logical=True) or 1))
-    if count > 64:
+    if count > 64 and _PLATFORM == 'win32':
         raise PerformanceError('Affinity editing is disabled on systems with more than 64 logical CPUs; keep Windows scheduling.')
     if isinstance(cores, str):
         cores = cores.split(',')
@@ -661,18 +745,22 @@ def get_process_details(record: dict[str, Any], *, include_expensive_counts: boo
         details['open_file_count'] = inspect('open files', lambda: len(process.open_files()))
         details['network_connection_count'] = inspect('network connections', lambda: len(process.net_connections(kind='all')))
     else:
-        notes.append('Open-file and network-connection counts were not collected because Windows enumeration can be slow or unavailable. These are counts unavailable, not zero.')
+        notes.append('Open-file and network-connection counts were not collected because enumeration can be slow or unavailable. These are counts unavailable, not zero.')
     details['status'] = inspect('status', process.status)
     details['services'] = []
-    try:
-        for service in psutil.win_service_iter():
-            try:
-                if service.pid() == process.pid:
-                    details['services'].append({'name': service.name(), 'display_name': service.display_name(), 'status': service.status(), 'pid': process.pid})
-            except psutil.Error as exc:
-                notes.append('Service details: ' + type(exc).__name__)
-    except (psutil.Error, AttributeError, OSError) as exc:
-        notes.append('Service inventory: ' + type(exc).__name__)
+    details['services_supported'] = _PLATFORM == 'win32'
+    if _PLATFORM != 'win32':
+        notes.append('Windows service registration does not apply on this platform; parent/executable details remain available.')
+    else:
+        try:
+            for service in psutil.win_service_iter():
+                try:
+                    if service.pid() == process.pid:
+                        details['services'].append({'name': service.name(), 'display_name': service.display_name(), 'status': service.status(), 'pid': process.pid})
+                except psutil.Error as exc:
+                    notes.append('Service details: ' + type(exc).__name__)
+        except (psutil.Error, AttributeError, OSError) as exc:
+            notes.append('Service inventory: ' + type(exc).__name__)
     # Fail if PID/executable identity changed while details were being collected.
     _fresh(record)
     details['notes'] = notes

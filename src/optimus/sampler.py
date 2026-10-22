@@ -20,8 +20,17 @@ class ResourceSampler:
     def sample(self):
         now = time.time()
         memory = psutil.virtual_memory()
-        io = psutil.disk_io_counters()
-        network = psutil.net_io_counters()
+        errors = []
+        try:
+            io = psutil.disk_io_counters()
+        except (psutil.Error, OSError, AttributeError, NotImplementedError):
+            io = None
+            errors.append('System disk I/O counters are unavailable.')
+        try:
+            network = psutil.net_io_counters()
+        except (psutil.Error, OSError, AttributeError, NotImplementedError):
+            network = None
+            errors.append('System network counters are unavailable.')
         processes = []
         for process in psutil.process_iter(['pid', 'name', 'memory_info', 'create_time', 'nice']):
             try:
@@ -37,7 +46,7 @@ class ResourceSampler:
                     if previous_cpu:
                         record['cpu_percent'] = max(0.0, min(100.0, (cpu_total - previous_cpu[1]) / max(0.01, now - previous_cpu[0]) / max(1, psutil.cpu_count()) * 100))
                     self._previous_cpu[key] = (now, cpu_total)
-                except (psutil.Error, OSError):
+                except (psutil.Error, OSError, AttributeError, NotImplementedError):
                     pass
                 try:
                     counters = process.io_counters()
@@ -49,7 +58,7 @@ class ResourceSampler:
                         record['read_bytes_per_second'] = max(0, counters.read_bytes - previous[1]) / elapsed
                         record['write_bytes_per_second'] = max(0, counters.write_bytes - previous[2]) / elapsed
                     self._previous_io[key] = (now, counters.read_bytes, counters.write_bytes)
-                except (psutil.Error, OSError):
+                except (psutil.Error, OSError, AttributeError, NotImplementedError):
                     pass
                 processes.append(record)
             except (psutil.Error, OSError, AttributeError):
@@ -59,9 +68,9 @@ class ResourceSampler:
         self._previous_cpu = {key: value for key, value in self._previous_cpu.items() if key in alive}
         result = {'timestamp': now, 'cpu_percent': psutil.cpu_percent(None),
                   'memory': {'total': memory.total, 'available': memory.available, 'percent': memory.percent},
-                  'disk_io': dict(io._asdict()) if io else {}, 'network': dict(network._asdict()),
+                  'disk_io': dict(io._asdict()) if io else {}, 'network': dict(network._asdict()) if network else {},
                   'processes': sorted(processes, key=lambda item: item['rss'], reverse=True)[:60],
-                  'process_count': len(processes), 'errors': [],
+                  'process_count': len(processes), 'errors': errors,
                   'note': 'The first CPU/IO sample establishes a baseline. Samples include the current diagnostic activity.'}
         return result
 

@@ -57,7 +57,8 @@ class SetupAutomationController:
                 if own_state or isinstance(own_report, dict) and own_report:
                     self._startup_attempted = True
                     return
-            if due(settings, last_attempt, now=self.clock()):
+            validation = getattr(getattr(self.backend, 'preference_store', None), 'validate', None)
+            if due(settings, last_attempt, now=self.clock(), **({'validator': validation} if validation else {})):
                 if startup_mode:
                     # Another process may overwrite the shared journal. It must
                     # never re-arm this process's already dispatched startup run.

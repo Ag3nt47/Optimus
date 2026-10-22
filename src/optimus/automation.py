@@ -62,11 +62,11 @@ def load_attempt(data_dir):
             return {'schema': 1, 'status': 'invalid', 'error': 'Automation state could not be verified; automatic maintenance is paused.'}
 
 
-def due(settings, last_attempt, now=None):
+def due(settings, last_attempt, now=None, *, validator=None):
     """A failed/manual attempt counts toward cadence; nothing runs while closed."""
     from .workflow import Preferences
     try:
-        config = Preferences.validate(settings)
+        config = (validator or Preferences.validate)(settings)
         current = _timestamp(now)
         if config['setup_version'] < CURRENT_SETUP_VERSION or config['automation_mode'] == 'manual':
             return False
@@ -106,14 +106,14 @@ def _persist_attempt(data_dir, config, status, current, error, run_id):
         return dict(value)
 
 
-def record_attempt(data_dir, settings, status='started', now=None, error=None, run_id=None):
+def record_attempt(data_dir, settings, status='started', now=None, error=None, run_id=None, *, validator=None):
     """Record a configured baseline or update a Workflow-owned attempt.
 
     Workflow holds its RunLease for started/terminal updates. Configured writes
     acquire their own lease so settings cannot clobber another process's run.
     """
     from .workflow import Preferences
-    config = Preferences.validate(settings)
+    config = (validator or Preferences.validate)(settings)
     current = _timestamp(now)
     if status not in ('configured', 'started', 'completed', 'failed', 'cancelled'):
         raise ValueError('Unsupported automation attempt status.')
@@ -137,14 +137,15 @@ def _restore_state_bytes(path, original):
     replace_with_retry(temporary, path)
 
 
-def save_setup(data_dir, settings, save_preferences, *, run_now=False):
+def save_setup(data_dir, settings, save_preferences, *, run_now=False, validator=None):
     """Lease baseline + preference save, restoring exact prior state on failure.
 
     Return saved validated settings. run_now is the UI's explicit intent only;
     this helper never executes maintenance or enables the resource sampler.
     """
     from .workflow import Preferences
-    config = Preferences.validate(settings)
+    validate = validator or Preferences.validate
+    config = validate(settings)
     if config['setup_version'] != CURRENT_SETUP_VERSION or type(run_now) is not bool or not callable(save_preferences):
         raise ValueError('Complete the current setup and provide a valid save action.')
     with RunLease(data_dir):
@@ -153,7 +154,7 @@ def save_setup(data_dir, settings, save_preferences, *, run_now=False):
         try:
             _persist_attempt(data_dir, config, 'configured', _timestamp(), None, None)
             saved = save_preferences(copy.deepcopy(config))
-            return Preferences.validate(saved) if isinstance(saved, dict) else copy.deepcopy(config)
+            return validate(saved) if isinstance(saved, dict) else copy.deepcopy(config)
         except Exception:
             _restore_state_bytes(state_path, original)
             raise

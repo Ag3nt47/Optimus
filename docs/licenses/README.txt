@@ -1,8 +1,8 @@
 Bundled runtime notices
 =======================
 Optimus source is MIT-licensed. The dynamically loaded Python, Qt/PySide6,
-shiboken6, psutil and PyInstaller bootloader retain their own licenses.
-These notices accompany the portable Windows release; the Qt LICENSES set
+shiboken6, psutil, Send2Trash and PyInstaller bootloader retain their own licenses.
+These notices accompany the native desktop releases; the Qt LICENSES set
 also includes license forms for optional components, which are not all used.
 Users may replace the dynamically loaded Qt/PySide6 libraries and rebuild
 Optimus against compatible modified versions using the complete app source.
@@ -17,6 +17,7 @@ Corresponding upstream source and copyright/attribution information:
 - Qt GUI attributions: https://doc.qt.io/qt-6/qtgui-attribution.html
 - Qt SVG attributions: https://doc.qt.io/qt-6/qtsvg-attribution.html
 - psutil 7.2.2: https://github.com/giampaolo/psutil/tree/release-7.2.2
+- Send2Trash 2.1.0: https://github.com/arsenetar/send2trash/tree/2.1.0
 - CPython 3.12: https://github.com/python/cpython/tree/3.12
 - PyInstaller 6.21.0: https://github.com/pyinstaller/pyinstaller/tree/v6.21.0
 

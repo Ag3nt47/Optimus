@@ -1,4 +1,4 @@
-name: Windows build
+name: Native builds
 on:
   push:
     branches: [main]
@@ -9,17 +9,44 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: windows-latest
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: Windows-x64
+            architecture: x64
+          - os: macos-14
+            target: macOS-arm64
+            architecture: arm64
+          - os: macos-15-intel
+            target: macOS-x64
+            architecture: x64
+          - os: ubuntu-22.04
+            target: Linux-x86_64
+            architecture: x64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.architecture }}
           cache: pip
+      - name: Install Linux desktop runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libx11-xcb1 libfontconfig1
+          echo "QT_QPA_PLATFORM=offscreen" >> "$GITHUB_ENV"
       - run: python -m pip install -r requirements-build.txt
       - run: python -m pip install -e "." --no-deps
-      - run: python -m pytest -q --junitxml=test-artifacts/pytest.xml
+      - name: Native and shared platform regression suites
+        run: python tools/test_native.py --junitxml=test-artifacts/pytest.xml
       - name: PowerShell engine fixture tests
+        if: runner.os == 'Windows'
         shell: powershell
         run: |
           & tests/Test-FileTools.ps1
@@ -38,49 +65,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-InventoryCoverage.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - run: python -m PyInstaller --noconfirm --windowed --onedir --name Optimus --icon src/optimus/assets/optimus.ico --paths src --collect-all optimus --collect-submodules psutil --add-data "LICENSE;." --add-data "NOTICE;." launch.py
-      - run: python tools/normalize_bundle.py --bundle dist/Optimus
-      - run: python tools/package_source.py --source . --destination dist/Optimus/source
-      - run: python tools/package_licenses.py --source . --destination dist/Optimus
-      - name: Verify packaged interface
-        shell: pwsh
-        run: |
-          $env:QT_QPA_PLATFORM = 'offscreen'
-          $app = Start-Process -FilePath dist/Optimus/Optimus.exe -ArgumentList '--smoke-test' -PassThru
-          if (-not $app.WaitForExit(45000)) { Stop-Process -Id $app.Id -Force; throw 'Packaged interface did not finish its smoke test.' }
-          if ($app.ExitCode -ne 0) { throw 'Packaged interface failed its smoke test.' }
+      - name: Build, verify and archive the native application
+        run: python tools/build_native.py --expected-target ${{ matrix.target }}
+      - name: Package public editable source
+        if: runner.os == 'Windows'
+        run: python tools/build_native.py --source-only
       - uses: actions/upload-artifact@v4
         with:
-          name: Optimus-Windows
-          path: dist/Optimus/
-      - name: Upload Python test results
+          name: Optimus-release-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+      - name: Upload test and packaged interface results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Optimus-test-results
-          path: test-artifacts/pytest.xml
+          name: Optimus-test-results-${{ matrix.target }}
+          path: test-artifacts/
           if-no-files-found: ignore
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
-    runs-on: windows-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
-          name: Optimus-Windows
-          path: Optimus
-      - run: Compress-Archive -Path Optimus -DestinationPath Optimus-Windows.zip
-      - name: Publish release asset
-        shell: pwsh
+          pattern: Optimus-release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Generate cross-platform release checksums
+        run: python tools/build_native.py --checksums-only
+      - name: Publish individually downloadable native applications
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          gh release view $env:GITHUB_REF_NAME 2>$null
-          if ($LASTEXITCODE -ne 0) { gh release create $env:GITHUB_REF_NAME --generate-notes }
-          $assets = gh release view $env:GITHUB_REF_NAME --json assets --jq '.assets[].name'
-          if ($assets -notcontains 'Optimus-Windows.zip') { gh release upload $env:GITHUB_REF_NAME Optimus-Windows.zip }
-
-
+        run: python tools/publish_release.py --tag "$GITHUB_REF_NAME" --assets release-assets

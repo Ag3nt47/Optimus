@@ -21,6 +21,12 @@ def _configuration_exists(path: Path) -> bool:
 
 
 def _local_data_path(value) -> Path:
+    if sys.platform != 'win32':
+        if (not isinstance(value, str) or not value or len(value) > 1024
+                or re.search(r'[\x00-\x1f]', value) or not value.startswith('/')
+                or '..' in Path(value).parts or Path(value) == Path('/')):
+            raise ValueError('Choose an absolute ordinary local data folder below the filesystem root.')
+        return Path(value)
     if not isinstance(value, str) or not value or len(value) > 1024 or re.search(r'[\x00-\x1f*?<>|"%]', value):
         raise ValueError('The configured data directory must be an absolute ordinary local-drive folder.')
     drive, tail = ntpath.splitdrive(value)
@@ -43,6 +49,8 @@ def default_data_root(installation_root: Path | None = None) -> Path:
         installation = Path(os.path.abspath(installation_root))
     elif getattr(sys, 'frozen', False):
         installation = Path(sys.executable).parent
+        if sys.platform == 'darwin' and installation.name == 'MacOS':
+            installation = installation.parent / 'Resources'
     else:
         installation = Path(os.environ.get('OPTIMUS_ORIGINAL_SOURCE') or Path(__file__).parents[2])
         # The portable bundle keeps its original source directly under App/source.
@@ -52,7 +60,15 @@ def default_data_root(installation_root: Path | None = None) -> Path:
     config = installation / LOCATION_FILE
     info = _ordinary_data_path(config, file=True)
     if info is None:
-        return resolve_data_root(Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Optimus')
+        if sys.platform == 'darwin':
+            root = Path.home() / 'Library' / 'Application Support' / 'Optimus'
+        elif sys.platform == 'linux':
+            configured = os.environ.get('XDG_STATE_HOME', '')
+            base = Path(configured) if configured and Path(configured).is_absolute() else Path.home() / '.local/state'
+            root = base / 'optimus'
+        else:
+            root = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Optimus'
+        return resolve_data_root(root)
     physical = config.resolve(strict=True)
     physical_info = _ordinary_data_path(physical, file=True)
     if physical_info is None or (info.st_dev, info.st_ino) != (physical_info.st_dev, physical_info.st_ino):
@@ -83,8 +99,13 @@ def _ordinary_data_path(path: Path, *, file=False):
             if index == 0:
                 continue
             continue
-        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+        native_system_alias = (sys.platform == 'darwin' and part in (Path('/var'), Path('/tmp'), Path('/etc'))
+                               and part.is_symlink() and str(part.resolve()) == '/private' + str(part)
+                               and info.st_uid == 0)
+        if (stat.S_ISLNK(info.st_mode) and not native_system_alias) or getattr(info, 'st_file_attributes', 0) & 0x400:
             raise ValueError('Indirect Optimus data paths are not supported.')
+        if native_system_alias:
+            continue
         if index == 0 and file:
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ValueError('The preferences anchor must be an ordinary file without hardlinks.')

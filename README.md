@@ -1,6 +1,16 @@
 # Optimus: Computer optimization tool
 
-An open-source Windows maintenance app with three main controls: **1 click Optimize and debloat**, **Settings**, and **Sandbox**.
+Give your computer a clearer, cleaner workspace with Optimus: cleanup, browser privacy, process analysis and supported updates in one open-source app. Choose what it can do, run your saved maintenance with one click, and inspect or edit the source whenever you like. Native Windows, macOS and Linux downloads come without a subscription.
+
+| Your computer | One-click download |
+| --- | --- |
+| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip) |
+| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip) |
+| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip) |
+| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz) |
+| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip) |
+
+[Release notes and SHA256 checksums](https://github.com/Ag3nt47/Optimus/releases/latest) · [Platform capabilities and installation](docs/PLATFORMS.md)
 
 ![Optimus main screen](docs/optimus.png)
 
@@ -8,9 +18,11 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
-Download **Optimus-Windows.zip** from [the latest app release](https://github.com/Ag3nt47/Optimus/releases/latest). Extract the entire archive and open `Optimus.exe`. Keep `_internal` and `source` beside the executable. Python is not required for the portable build.
+Choose your native download above; Python is not required. **Windows:** extract the entire ZIP and open `Optimus.exe`, keeping `_internal` and `source` beside it. **macOS:** extract the ZIP, move `Optimus.app` to Applications, and open it. **Linux:** extract the tar archive and run `Optimus/Optimus`; keep its supporting files together. The macOS builds are ad-hoc signed, without Apple notarization; use the normal macOS Privacy & Security review if Gatekeeper asks. Do not disable operating-system protections.
 
-Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
+Version **0.7.0** introduces native macOS and Linux backends and a four-platform build/test matrix. Shared cleanup, supported browser profiles, resource analysis, disk/duplicate tools, Sandbox and native startup/package-manager operations use the host platform. Windows registry, Appx debloat, Defender, DPAPI/OneDrive integration, Windows Update drivers and Windows-specific repair tools remain Windows features; unavailable actions are identified instead of emulated. See [the capability table](docs/PLATFORMS.md) for exact scopes and requirements.
+
+Start normally. Windows can request administrator permission once on startup. On macOS and Linux, privileged changes remain subject to the platform's authentication and package-manager rules. The Windows build is unsigned; the macOS builds have no Developer ID signing or notarization. CI validates macOS 14 Apple Silicon, macOS 15 Intel and Ubuntu 22.04 x86_64; other compatible desktops need local verification.
 
 **Version 0.6.2** adds automatic before/after resource observations and a comparison with the previous complete inventory of enabled Run/Startup-folder entries. Results show measured CPU, available RAM and disk free space separately from verified cleanup totals; they do not claim that Optimus caused every difference. Incomplete inventories do not replace the startup baseline. Redirected TEMP and the original LocalAppData temporary folder are separate selectable cleanup categories; choosing Full includes both available locations, while existing saved category selections stay unchanged. Settings can check the effective Windows sign-in task and apply/repair its saved choice. `--startup-probe` checks GUI startup without requesting elevation, starting maintenance or resuming background sampling. The Sandbox also retains PowerShell module files when editing and exporting source.
 
@@ -85,6 +97,25 @@ The MIT-licensed [Angerona Disposable Cleanup](tools/angerona-cleanup/README.txt
 
 ## Build from source
 
+On macOS or Linux:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-build.txt
+python -m pip install -e . --no-deps
+python tools/test_native.py
+python -m optimus
+```
+
+Build on the operating system and CPU architecture you intend to distribute:
+
+```sh
+python tools/build_native.py
+```
+
+This produces the native application under `dist`, includes the editable public source and dependency licenses, runs read-only packaged checks, and writes its platform archive to `release-assets`. The macOS archive preserves application/framework symlinks; the Linux tar archive preserves executable permissions. Linux builds target glibc 2.35 or newer and require desktop graphics libraries. See [the build and platform notes](docs/PLATFORMS.md).
+
 Install Python 3.12, then run:
 
 ```powershell
@@ -110,6 +141,8 @@ The build normalization step checks Qt's required Windows ICU symbols and remove
 The `source` folder is required for the Sandbox editor. Saved source executes with the current Windows account's permissions after an explicit restart; the editor is a source workspace, not an operating-system isolation boundary.
 
 ## Data and recovery
+
+macOS stores its local state under `~/Library/Application Support/Optimus`. Linux uses `$XDG_STATE_HOME/optimus`, defaulting to `~/.local/state/optimus`. macOS source and license payloads are contained within `Optimus.app/Contents/Resources`. The following relocation example uses Windows paths; a native relocation target must be an ordinary absolute path on that platform.
 
 User settings, reports, operation journals, browser rollback copies and source history use `%LOCALAPPDATA%\Optimus` by default. A relocated installation can place `Optimus.location.json` beside `Optimus.exe`, with exactly `{"schema":1,"data_dir":"D:\\OptimusData"}`. The target must be an ordinary absolute local folder. Invalid, indirect or oversized configuration is rejected; it never silently falls back to another folder. Sandbox restarts use the original installation location too. Machine-specific location files are excluded from public downloads. They are not uploaded by Optimus. Cleanup permanently deletes the previewed cache files; duplicate removal uses the Recycle Bin. Application uninstalls and all debloat operations are not universally reversible. Each removal plan describes its recovery route.
 

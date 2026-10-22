@@ -1,9 +1,11 @@
 """Previewed cache cleanup. Only allowlisted roots and scan-approved identities can be deleted."""
 from __future__ import annotations
 import ctypes
+import hashlib
 import json
 import os
 import stat
+import sys
 import threading
 import time
 import uuid
@@ -11,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 import psutil
+from .browser_paths import browser_definitions, native_locations, process_matches
+
+_PLATFORM = sys.platform
 
 REPARSE = 0x400
 OFFLINE = 0x1000
@@ -38,6 +43,8 @@ class Cleaner:
     def _definitions(self) -> list[Category]:
         if self._custom_categories is not None:
             return self._custom_categories
+        if _PLATFORM != 'win32':
+            return self._native_definitions()
         local = Path(os.environ['LOCALAPPDATA'])
         windows = Path(os.environ.get('SystemRoot', r'C:\Windows'))
         definitions = [
@@ -65,6 +72,7 @@ class Cleaner:
         chromium = [
             ('edge', 'Microsoft Edge', local / 'Microsoft/Edge/User Data', ('msedge.exe',)),
             ('chrome', 'Google Chrome', local / 'Google/Chrome/User Data', ('chrome.exe',)),
+            ('chromium', 'Chromium', local / 'Chromium/User Data', ('chromium.exe',)),
             ('brave', 'Brave', local / 'BraveSoftware/Brave-Browser/User Data', ('brave.exe',)),
             ('vivaldi', 'Vivaldi', local / 'Vivaldi/User Data', ('vivaldi.exe',)),
         ]
@@ -89,12 +97,113 @@ class Cleaner:
                 pass
         return definitions
 
+    def _native_definitions(self) -> list[Category]:
+        home = Path.home()
+        if _PLATFORM == 'darwin':
+            cache = home / 'Library/Caches'
+            # macOS assigns a private temporary directory to each signed-in user.
+            temporary = Path(os.environ.get('TMPDIR', str(cache / 'Optimus/tmp'))).resolve()
+            definitions = [Category('user-temp', 'User temporary files', temporary,
+                'Private user temporary files at least seven days old. Known open files and coordination files are preserved; an incomplete process check skips this scope.'),
+                Category('pip-cache', 'Python package download cache', cache / 'pip', 'Rebuildable package downloads; installed Python packages are preserved.')]
+        else:
+            cache = Path(os.environ.get('XDG_CACHE_HOME', str(home / '.cache')))
+            if not cache.is_absolute():
+                cache = home / '.cache'
+            # /tmp is shared by every user. Never offer its complete contents.
+            temporary = cache / 'Optimus/tmp'
+            configured = os.environ.get('TMPDIR')
+            if configured:
+                candidate = Path(configured).resolve()
+                try:
+                    info = candidate.stat()
+                    if (candidate.is_dir() and info.st_uid == os.getuid()
+                            and not info.st_mode & 0o077 and candidate != home):
+                        temporary = candidate
+                except OSError:
+                    pass
+            definitions = [Category('user-temp', 'Private user temporary files', temporary,
+                'Private temporary files at least seven days old. Open/coordination files are preserved; incomplete process checks skip this scope. Shared /tmp and /var/tmp are excluded.'),
+                Category('pip-cache', 'Python package download cache', cache / 'pip', 'Rebuildable package downloads; installed Python packages are preserved.'),
+                Category('thumbnail-cache', 'Desktop thumbnail cache', cache / 'thumbnails', 'Desktop previews regenerate when needed; image files are preserved.'),
+                Category('mesa-shader-cache', 'Mesa graphics shader cache', cache / 'mesa_shader_cache', 'Rebuildable graphics cache. Clearing it can temporarily increase shader compilation.'),
+                Category('mesa-shader-cache-db', 'Mesa shader cache database', cache / 'mesa_shader_cache_db', 'Rebuildable graphics cache; changed files are skipped.')]
+        for browser in native_locations(_PLATFORM, home):
+            base = browser['cache_root']
+            try:
+                profiles = sorted(path for path in base.iterdir() if path.is_dir() and
+                    (browser['family'] == 'firefox' or path.name == 'Default' or path.name.startswith('Profile ')))
+            except OSError:
+                continue
+            root_id = hashlib.sha256(str(base).encode()).hexdigest()[:8]
+            for profile in profiles:
+                cache_names = ('cache2', 'startupCache') if browser['family'] == 'firefox' else ('Cache', 'Code Cache', 'GPUCache')
+                for cache_name in cache_names:
+                    ident = f"{browser['id']}:{profile.name}:{cache_name}:{root_id}"
+                    definitions.append(Category(ident, f"{browser['name']} / {profile.name} / {cache_name}",
+                        profile / cache_name, 'Browser cache only. Close this browser first; passwords, bookmarks, cookies and history are preserved.',
+                        tuple(browser['process_names'])))
+        # A user-selected TMPDIR must also be private on macOS; fail closed if a
+        # custom environment points at a shared or another user's directory.
+        try:
+            temporary_info = temporary.stat()
+            if (temporary_info.st_uid != os.getuid() or temporary_info.st_mode & 0o077
+                    or temporary in (home, Path('/'), Path('/tmp'), Path('/var/tmp'))):
+                definitions = [item for item in definitions if item.id != 'user-temp']
+        except OSError:
+            pass
+        return definitions
+
+    @staticmethod
+    def _coordination_file(path: Path) -> bool:
+        """Do not remove filenames commonly used for locks, ownership or IPC."""
+        name = path.name.casefold()
+        return (name.endswith(('.lock', '.lck', '.pid', '.sock', '.socket'))
+                or name in {'lock', 'pid', 'singletonlock', 'singletoncookie', 'singletonsocket'}
+                or name.startswith(('.lock', '.pid')))
+
+    @staticmethod
+    def _open_files_snapshot() -> tuple[set[str], bool]:
+        """Best-effort current-user descriptor inventory; no process is changed.
+
+        POSIX cannot reserve a file against future opens. Broad temporary-folder
+        cleanup additionally uses an age floor and fails closed on incomplete
+        ownership/descriptor information.
+        """
+        paths, complete = set(), True
+        try:
+            current = psutil.Process(os.getpid()).username()
+            deadline = time.monotonic() + 3
+            for index, process in enumerate(psutil.process_iter(['pid', 'username'], ad_value=None)):
+                if index >= 20000 or time.monotonic() >= deadline:
+                    return paths, False
+                try:
+                    owner = process.info.get('username')
+                    if not owner:
+                        complete = False
+                        continue
+                    if owner != current:
+                        continue
+                    for opened in process.open_files():
+                        if not isinstance(opened.path, str) or not opened.path:
+                            complete = False
+                            continue
+                        paths.add(os.path.normcase(os.path.realpath(opened.path)))
+                except psutil.NoSuchProcess:
+                    continue
+                except (psutil.Error, OSError, AttributeError, NotImplementedError):
+                    complete = False
+        except (psutil.Error, OSError, AttributeError, NotImplementedError):
+            complete = False
+        return paths, complete
+
     def categories(self) -> list[dict]:
         result = []
         for category in self._definitions():
             available = category.path.is_dir()
             result.append({'id': category.id, 'name': category.name, 'path': str(category.path), 'available': available,
-                           'description': category.description, 'requires_admin': category.requires_admin, 'process_names': list(category.process_names)})
+                           'description': category.description, 'requires_admin': category.requires_admin, 'process_names': list(category.process_names),
+                           'minimum_age_days': 7 if _PLATFORM != 'win32' and category.id == 'user-temp' else 0})
         return result
 
     @staticmethod
@@ -102,7 +211,7 @@ class Cleaner:
         try:
             full = Path(os.path.abspath(path))
             base = Path(os.path.abspath(root))
-            if full == base or os.path.commonpath([str(full), str(base)]).casefold() != str(base).casefold():
+            if full == base or os.path.normcase(os.path.commonpath([str(full), str(base)])) != os.path.normcase(str(base)):
                 return False
             # Resolve no junctions or cloud placeholders, including any ancestor of the root.
             for component in (full, *full.parents):
@@ -123,7 +232,10 @@ class Cleaner:
         for process in psutil.process_iter(['name']):
             try:
                 name = process.info.get('name') or ''
-                if name.casefold() in wanted:
+                if name.casefold() in wanted or any(
+                    browser_id for browser_id, browser in browser_definitions(_PLATFORM).items()
+                    if wanted.intersection(value.casefold() for value in browser['process_names'])
+                    and process_matches(browser_id, name, _PLATFORM)):
                     result.add(name)
             except (psutil.Error, OSError):
                 continue
@@ -142,6 +254,10 @@ class Cleaner:
                 'total_bytes': 0, 'total_mb': 0.0, 'complete': True, 'skipped': [], 'errors': []}
         seen = set()
         examined = 0
+        native_open, native_open_complete = self._open_files_snapshot() if os.name != 'nt' else (set(), True)
+        if _PLATFORM != 'win32':
+            plan['native_temp_minimum_age_days'] = 7
+            plan['safety_notes'] = ['Native private temporary folders keep a seven-day minimum age, including Full mode. Open-file checks are best effort; incomplete coverage skips broad temporary-folder cleanup.']
         for category_id in dict.fromkeys(category_ids):
             category = choices[category_id]
             root = Path(os.path.abspath(category.path))
@@ -152,7 +268,12 @@ class Cleaner:
             if not root.is_dir():
                 plan['skipped'].append(f'{category.name}: folder not present.')
                 continue
-            summary = {'id': category.id, 'name': category.name, 'files': 0, 'bytes': 0, 'size_mb': 0.0}
+            if _PLATFORM != 'win32' and category.id == 'user-temp' and not native_open_complete:
+                plan['skipped'].append(f'{category.name}: open-file ownership could not be completely verified; this scope was preserved.')
+                continue
+            effective_age = max(min_age_days, 7) if _PLATFORM != 'win32' and category.id == 'user-temp' else min_age_days
+            summary = {'id': category.id, 'name': category.name, 'files': 0, 'bytes': 0, 'size_mb': 0.0,
+                       'effective_min_age_days': effective_age}
             stack = [root]
             while stack:
                 if examined >= max_files or time.monotonic() >= deadline:
@@ -192,19 +313,25 @@ class Cleaner:
                                 info = path.lstat()  # DirEntry.stat leaves inode/link/device zero on Windows.
                                 if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
                                     continue
+                                if os.name != 'nt' and info.st_uid != os.getuid():
+                                    continue
+                                if os.name != 'nt' and (self._coordination_file(path)
+                                        or os.path.normcase(os.path.realpath(path)) in native_open):
+                                    continue
                                 if category.suffixes and path.suffix.casefold() not in category.suffixes:
                                     continue
                                 # Zero selects all ages. NTFS creation times can
                                 # lead the process clock slightly after a write.
-                                if min_age_days > 0 and now - max(info.st_mtime, info.st_ctime) < min_age_days * 86400:
+                                if effective_age > 0 and now - max(info.st_mtime, info.st_ctime) < effective_age * 86400:
                                     continue
-                                key = str(path).casefold()
+                                key = os.path.normcase(str(path))
                                 if key in seen or not self._safe_path(path, root):
                                     continue
                                 seen.add(key)
                                 record = {'id': uuid.uuid4().hex, 'category_id': category.id, 'category': category.name,
                                           'path': str(path), 'root': str(root), 'size': info.st_size, 'size_mb': round(info.st_size / 1048576, 3),
                                           'modified_ns': info.st_mtime_ns, 'created_ns': info.st_ctime_ns,
+                                          'effective_min_age_days': effective_age,
                                           'inode': info.st_ino, 'device': info.st_dev, 'age_days': round((now - info.st_mtime) / 86400, 1)}
                                 plan['files'].append(record)
                                 summary['files'] += 1
@@ -238,7 +365,8 @@ class Cleaner:
         if info.st_nlink > 1 or getattr(info, 'st_file_attributes', 0) & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY):
             raise ValueError('Linked, cloud, system or read-only file excluded.')
         if os.name != 'nt':
-            raise OSError('Cleanup deletion is supported only on Windows.')
+            Cleaner._delete_posix(record)
+            return
         from ctypes import wintypes
         class FileInformation(ctypes.Structure):
             _fields_ = [('attrs', wintypes.DWORD), ('created', wintypes.FILETIME), ('accessed', wintypes.FILETIME), ('written', wintypes.FILETIME),
@@ -282,6 +410,51 @@ class Cleaner:
         finally:
             kernel.CloseHandle(handle)
 
+    @staticmethod
+    def _delete_posix(record: dict) -> None:
+        """Delete only the previewed inode through a no-follow directory handle.
+
+        A same-directory quarantine rename happens before the final identity
+        check. If a racing replacement is discovered, its bytes are retained
+        and the original basename is restored when it remains free.
+        """
+        path = Path(record['path'])
+        descriptors = []
+        staged = None
+        parent_fd = None
+        expected = (record['device'], record['inode'], record['size'], record['modified_ns'])
+        try:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            descriptor = os.open(path.anchor, flags)
+            descriptors.append(descriptor)
+            for part in path.parent.parts[1:]:
+                descriptor = os.open(part, flags, dir_fd=descriptor)
+                descriptors.append(descriptor)
+            parent_fd = descriptor
+            info = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
+                    or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != expected):
+                raise ValueError('File ownership or identity changed after preview.')
+            staged = '.optimus-delete-' + uuid.uuid4().hex
+            os.rename(path.name, staged, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            info = os.stat(staged, dir_fd=parent_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
+                    or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != expected):
+                raise ValueError('File changed during cleanup; its bytes were preserved.')
+            os.unlink(staged, dir_fd=parent_fd)
+            staged = None
+        finally:
+            if staged is not None and parent_fd is not None:
+                try:
+                    # link() fails if the original name has been reused; never
+                    # overwrite a new file while recovering a concurrent change.
+                    os.link(staged, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+                    os.unlink(staged, dir_fd=parent_fd)
+                except OSError:
+                    pass  # Keep the quarantined bytes for manual recovery.
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
     def apply(self, displayed_plan: dict) -> dict:
         with self._lock:
             plan = self._plans.pop(str(displayed_plan.get('id', '')), None)
@@ -291,6 +464,14 @@ class Cleaner:
             raise ValueError('Preview is older than 15 minutes. Scan again.')
         choices = {item.id: item for item in self._definitions()}
         result = {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0, 'errors': [], 'files': []}
+        native = os.name != 'nt'
+        opened, open_check_complete = self._open_files_snapshot() if native else (set(), True)
+        open_checked_at = time.monotonic()
+        if native:
+            result['safety_notes'] = [
+                'Private temporary folders retain a seven-day age floor even when zero days is selected.',
+                'Known open files and coordination files are preserved. POSIX cannot reserve a file against future opens; rebuildable-cache descriptor checks are best effort.',
+                'An incomplete process/descriptor inventory skips broad temporary-folder cleanup.']
         log_root = self.data_dir / 'cleanup'
         log_root.mkdir(parents=True, exist_ok=True)
         log_path = log_root / f'{plan["id"]}.json'
@@ -299,10 +480,24 @@ class Cleaner:
         for record in plan['files']:
             try:
                 category = choices.get(record['category_id'])
-                if category is None or os.path.abspath(category.path).casefold() != record['root'].casefold():
+                if category is None or os.path.normcase(os.path.abspath(category.path)) != os.path.normcase(record['root']):
                     raise ValueError('Cleanup category changed.')
                 if self._running(category.process_names):
                     raise ValueError('The browser started after the preview. Close it and scan again.')
+                if native:
+                    broad_temp = category.id == 'user-temp'
+                    if time.monotonic() - open_checked_at >= 0.5:
+                        opened, open_check_complete = self._open_files_snapshot()
+                        open_checked_at = time.monotonic()
+                    if broad_temp and not open_check_complete:
+                        raise ValueError('Open-file ownership could not be completely verified; private temporary files were preserved.')
+                    path = Path(record['path'])
+                    if self._coordination_file(path) or os.path.normcase(os.path.realpath(path)) in opened:
+                        raise ValueError('A currently open or coordination file was preserved.')
+                    if broad_temp:
+                        info = path.lstat()
+                        if time.time() - max(info.st_mtime, info.st_ctime) < 7 * 86400:
+                            raise ValueError('Native temporary files newer than seven days are preserved.')
                 self._delete_exact(record)
                 result['deleted_count'] += 1
                 result['deleted_bytes'] += record['size']

@@ -18,5 +18,6 @@ reports/
 *.pem
 
 test-artifacts/
+release-assets/
 *-tests.json
 file-fixture*/

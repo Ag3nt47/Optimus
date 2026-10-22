@@ -10,6 +10,7 @@ licenses. The portable build uses dynamically loaded Qt libraries. License
 texts accompany the bundled packages; see https://doc.qt.io/qtforpython-6/licenses.html
 and https://code.qt.io/pyside/pyside-setup for corresponding source.
 psutil uses the BSD 3-Clause license: https://github.com/giampaolo/psutil .
+Send2Trash uses the BSD 3-Clause license: https://github.com/arsenetar/send2trash .
 PyInstaller has its GPL license with its bootloader distribution exception:
 https://pyinstaller.org/en/stable/license.html .
 

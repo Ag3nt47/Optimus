@@ -12,11 +12,15 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 import time
 import uuid
 from typing import Any
 import psutil
+from optimus.browser_paths import native_locations, process_matches
+
+_PLATFORM = sys.platform
 
 _CATEGORIES = frozenset(("history", "cookies", "downloads"))
 _HEX_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -110,10 +114,31 @@ class BrowserPrivacy:
         self._plans: dict[str, dict[str, Any]] = {}
 
     def _discover(self) -> list[dict[str, Any]]:
+        if _PLATFORM != 'win32':
+            found = []
+            for browser in native_locations(_PLATFORM):
+                root = browser['profile_root']
+                try:
+                    for profile in root.iterdir():
+                        if not profile.is_dir():
+                            continue
+                        if browser['family'] == 'firefox':
+                            recognized = (profile / 'places.sqlite').is_file()
+                        else:
+                            recognized = profile.name == 'Default' or bool(re.fullmatch(r'Profile \d+', profile.name))
+                        if recognized:
+                            found.append({'browser': browser['name'], 'browser_id': browser['id'],
+                                'name': profile.name, 'path': str(profile.absolute()), 'root': str(root.absolute()),
+                                'family': browser['family'], 'process': browser['process'],
+                                'process_names': list(browser['process_names'])})
+                except OSError:
+                    continue
+            return found
         local = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
         roaming = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
         roots = (("Microsoft Edge", local / "Microsoft" / "Edge" / "User Data", "msedge.exe"),
                  ("Google Chrome", local / "Google" / "Chrome" / "User Data", "chrome.exe"),
+                 ("Chromium", local / "Chromium" / "User Data", "chromium.exe"),
                  ("Brave", local / "BraveSoftware" / "Brave-Browser" / "User Data", "brave.exe"),
                  ("Vivaldi", local / "Vivaldi" / "User Data", "vivaldi.exe"))
         found = []
@@ -155,7 +180,10 @@ class BrowserPrivacy:
         wanted = profile["process"].lower()
         try:
             for process in psutil.process_iter(["pid", "name"]):
-                if (process.info.get("name") or "").lower() == wanted:
+                name = process.info.get('name')
+                if not isinstance(name, str) or not name:
+                    raise RuntimeError('A running process name is inaccessible; browser closure cannot be verified.')
+                if name.lower() == wanted or profile.get('browser_id') and process_matches(profile['browser_id'], name, _PLATFORM):
                     raise RuntimeError(f"Close every {profile['browser']} window and its background processes before scanning, cleaning or restoring this profile.")
         except (psutil.AccessDenied, psutil.Error) as error:
             raise RuntimeError("Running browser processes could not be checked safely.") from error

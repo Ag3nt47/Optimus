@@ -2,6 +2,7 @@
 from __future__ import annotations
 import math
 import ntpath
+import os
 import threading
 import time
 import psutil
@@ -19,7 +20,12 @@ def _number(value, default=0.0):
 
 def _capture():
     records, inaccessible = {}, 0
-    for process in psutil.process_iter(['pid', 'name', 'exe', 'create_time', 'memory_info', 'cpu_times', 'io_counters'], ad_value=None):
+    attributes = ['pid', 'name', 'exe', 'create_time', 'memory_info', 'cpu_times']
+    # macOS psutil intentionally has no per-process io_counters() interface.
+    # An unsupported attribute must not prevent CPU/RAM diagnostics entirely.
+    if hasattr(psutil.Process, 'io_counters'):
+        attributes.append('io_counters')
+    for process in psutil.process_iter(attributes, ad_value=None):
         try:
             info = process.info
             executable, created = info.get('exe'), info.get('create_time')
@@ -27,7 +33,7 @@ def _capture():
                 inaccessible += 1
                 continue
             memory, cpu, counters = info.get('memory_info'), info.get('cpu_times'), info.get('io_counters')
-            identity = (int(info['pid']), float(created), ntpath.normcase(ntpath.normpath(executable)))
+            identity = (int(info['pid']), float(created), os.path.normcase(os.path.normpath(executable)))
             records[identity] = {
                 'pid': int(info['pid']), 'name': info.get('name') or ntpath.basename(executable), 'exe': executable,
                 'memory_rss': int(_number(getattr(memory, 'rss', 0))),

@@ -23,7 +23,7 @@ def parser():
     commands.add_argument('--process-scan', action='store_true', help='Export a read-only process and launch-evidence report; no actions are applied.')
     commands.add_argument('--verify-run', type=_run_identity, metavar='RUN_ID', help='Verify a completed saved workflow without repeating its actions or opening the interface.')
     commands.add_argument('--startup-probe', action='store_true', help='Inspect GUI startup without UAC, setup, background analysis or maintenance, then exit.')
-    commands.add_argument('--startup-mode', choices=('on', 'off', 'status'), help='Configure or inspect this user\'s Windows sign-in launch without running maintenance.')
+    commands.add_argument('--startup-mode', choices=('on', 'off', 'status'), help='Configure or inspect this user\'s native sign-in launch without running maintenance.')
     result.add_argument('--output', type=Path, help='Report destination folder.')
     commands.add_argument('--smoke-test', action='store_true', help='Build and inspect the interface without changing settings.')
     result.add_argument('--screenshot', type=Path)
@@ -77,10 +77,13 @@ def _verify_saved_run(backend, run_id, destination=None):
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(actual_arguments)
-    if sys.platform != 'win32':
-        print('Optimus currently supports Windows 10/11.', file=sys.stderr)
+    if sys.platform not in ('win32', 'darwin', 'linux'):
+        print('Optimus supports Windows, macOS and Linux.', file=sys.stderr)
         return 2
-    from .backend import Backend
+    if sys.platform == 'win32':
+        from .backend import Backend
+    else:
+        from .native_backend import NativeBackend as Backend
     backend = Backend()
     if args.verify_run or args.startup_mode:
         try:
@@ -110,15 +113,19 @@ def main(argv=None):
         finally:
             backend.close()
     from .elevation import startup_administrator
-    elevation = startup_administrator(backend, args, actual_arguments)
+    elevation = (startup_administrator(backend, args, actual_arguments) if sys.platform == 'win32'
+                 else {'started': False, 'status': 'per_operation', 'note': ''})
     if elevation.get('started') is True:
         backend.close()
         return 0
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QIcon
-    from .ui import OptimusWindow
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Ag3nt47.Optimus.Desktop')
+    if sys.platform == 'win32':
+        from .ui import OptimusWindow
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Ag3nt47.Optimus.Desktop')
+    else:
+        from .native_ui import NativeOptimusWindow as OptimusWindow
     app = QApplication(sys.argv[:1])
     app.setApplicationName('Optimus')
     app.setApplicationDisplayName('Optimus: Computer optimization tool')
