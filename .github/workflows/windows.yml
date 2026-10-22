@@ -18,7 +18,7 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements-build.txt
       - run: python -m pip install -e "." --no-deps
-      - run: python -m pytest -q
+      - run: python -m pytest -q --junitxml=test-artifacts/pytest.xml
       - name: PowerShell engine fixture tests
         shell: powershell
         run: |
@@ -36,6 +36,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-RegistryIntegration.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-InventoryCoverage.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python -m PyInstaller --noconfirm --windowed --onedir --name Optimus --icon src/optimus/assets/optimus.ico --paths src --collect-all optimus --collect-submodules psutil --add-data "LICENSE;." --add-data "NOTICE;." launch.py
       - run: python tools/normalize_bundle.py --bundle dist/Optimus
       - run: python tools/package_source.py --source . --destination dist/Optimus/source
@@ -51,6 +53,13 @@ jobs:
         with:
           name: Optimus-Windows
           path: dist/Optimus/
+      - name: Upload Python test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Optimus-test-results
+          path: test-artifacts/pytest.xml
+          if-no-files-found: ignore
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build

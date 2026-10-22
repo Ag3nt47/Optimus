@@ -68,14 +68,21 @@ class WipeTests(unittest.TestCase):
     def test_injected_data_directory_owns_wipe_logs_without_creating_legacy_state(self):
         selected=Path(self.temp.name)/'selected'; selected.mkdir()
         moved=Path(self.temp.name)/'moved-data'
+        spacer=Path(self.temp.name)/'spacer'; spacer.mkdir()
+        alias=spacer/'..'/'moved-data'
+        self.assertNotEqual(alias,moved)
         legacy=Path(self.temp.name)/'legacy-local'
         process=types.SimpleNamespace(pid=99998,poll=lambda:None)
         status={'available':True,'drive':'D:','note':'Fixture only; no wipe runs'}
-        with patch.dict(os.environ,{'LOCALAPPDATA':str(legacy)}),patch.object(tools,'free_space_wipe_status',return_value=status),patch.object(tools,'_validated_directory',return_value=(selected,'D')),patch.object(tools,'_system_executable',return_value=Path(r'C:\Windows\System32\cipher.exe')),patch.object(tools.subprocess,'Popen',return_value=process):
-            result=tools.launch_free_space_wipe(selected,confirmed=True,data_dir=moved)
-        self.assertEqual(Path(result['log_path']).parent,moved/'wipe-logs')
-        self.assertTrue(Path(result['log_path']).is_file())
-        self.assertFalse((legacy/'Optimus').exists())
+        for injected in (moved,alias):
+            with self.subTest(data_dir=injected):
+                with patch.dict(os.environ,{'LOCALAPPDATA':str(legacy)}),patch.object(tools,'free_space_wipe_status',return_value=status),patch.object(tools,'_validated_directory',return_value=(selected,'D')),patch.object(tools,'_system_executable',return_value=Path(r'C:\Windows\System32\cipher.exe')),patch.object(tools.subprocess,'Popen',return_value=process) as popen:
+                    result=tools.launch_free_space_wipe(selected,confirmed=True,data_dir=injected)
+                popen.assert_called_once()
+                # Canonical Windows paths can expand an 8.3 alias such as RUNNER~1.
+                self.assertTrue(Path(result['log_path']).parent.samefile(moved/'wipe-logs'))
+                self.assertTrue(Path(result['log_path']).is_file())
+                self.assertFalse((legacy/'Optimus').exists())
 
     def test_default_wipe_logs_follow_installation_location(self):
         selected=Path(self.temp.name)/'selected'; selected.mkdir()
