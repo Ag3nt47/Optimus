@@ -189,12 +189,14 @@ class SamplerTests(unittest.TestCase):
         original_thread = threading.Thread
         factory_gate = threading.Barrier(2)
         activity_lock = threading.Lock()
+        sample_entered = threading.Event()
         activity = {'active': 0, 'peak': 0}
         errors = []
         def sample():
             with activity_lock:
                 activity['active'] += 1
                 activity['peak'] = max(activity['peak'], activity['active'])
+                sample_entered.set()
             time.sleep(0.02)
             with activity_lock:
                 activity['active'] -= 1
@@ -211,6 +213,10 @@ class SamplerTests(unittest.TestCase):
             for item in starters: item.start()
             for item in starters: item.join(timeout=1)
             self.assertTrue(all(not item.is_alive() for item in starters))
+            # Starting a thread does not establish that its first observation
+            # has run. Wait for actual entry before requesting the final stop;
+            # otherwise a correct early cancellation can leave peak at zero.
+            self.assertTrue(sample_entered.wait(2))
             self.sampler.stop()
         self.assertEqual(errors, [])
         self.assertEqual(activity['peak'], 1)
