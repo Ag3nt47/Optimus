@@ -18,6 +18,8 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
+Version **0.7.2** adds **Auto continue — apply available fixes** to completed scan/cleanup results. Review the listed automatic fixes, then click once to apply them as a batch and verify the outcomes. It can apply supported Windows security corrections and retry remaining updates within your saved scopes and licence approvals. Restarts, vendor-only patches and newly suggested program changes stay listed for manual action. Auto continue does not repeat cleanup or debloat, and closing results never approves a fix.
+
 Choose your native download above; Python is not required. **Windows:** extract the entire ZIP and open `Optimus.exe`, keeping `_internal` and `source` beside it. **macOS:** extract the ZIP, move `Optimus.app` to Applications, and open it. **Linux:** extract the tar archive and run `Optimus/Optimus`; keep its supporting files together. The macOS builds are ad-hoc signed, without Apple notarization; use the normal macOS Privacy & Security review if Gatekeeper asks. Do not disable operating-system protections.
 
 Version **0.7.1** gives confirmation prompts larger, clearly labelled Yes/No buttons and removes the floating globe. Minimize now uses the taskbar or Dock, and closing the main window exits after active work and unsaved Sandbox edits are resolved. Reopening Optimus brings its existing question or progress window forward instead of starting a second cleanup. The starfield background and other window transitions remain available.

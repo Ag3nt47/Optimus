@@ -93,6 +93,14 @@ class Backend:
         return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event,
                                  browser_prompt=browser_prompt)
 
+    def available_fixes(self, report, settings):
+        from .post_run_fixes import available_fixes
+        return available_fixes(self, report, settings)
+
+    def apply_available_fixes(self, report, settings, *, progress_callback=None, cancel_event=None):
+        from .post_run_fixes import apply_available_fixes
+        return apply_available_fixes(self, report, settings, progress_callback=progress_callback, cancel_event=cancel_event)
+
     def verify_optimization(self, report, cancel_event=None, timeout=30):
         from .verification import OutcomeVerification
         active = getattr(getattr(self, 'workflow', None), 'last_report', None)

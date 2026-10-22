@@ -1588,22 +1588,42 @@ class WorkflowWorker(QRunnable):
             self.signals.finished.emit()
 
 
+class AvailableFixesWorker(QRunnable):
+    """Run only the batch explicitly approved on the completed results screen."""
+    def __init__(self, backend, report, settings, cancel):
+        super().__init__()
+        self.backend, self.report, self.settings, self.cancel = backend, report, settings, cancel
+        self.signals = WorkflowSignals()
+
+    def run(self):
+        try:
+            result = self.backend.apply_available_fixes(self.report, self.settings,
+                progress_callback=self.signals.progress.emit, cancel_event=self.cancel)
+            self.signals.result.emit(result)
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
+        finally:
+            self.signals.finished.emit()
+
+
 class OptimizationProgressWindow(QDialog):
     resultsAcknowledged = Signal()
     resultsDismissed = Signal()
+    autoContinueRequested = Signal()
 
     def __init__(self, owner, cancel):
         super().__init__(owner)
         self.cancel = cancel
         self.completed = False
         self._recommendations_ready = False
+        self._results_dismissed = False
         self.setWindowTitle('Optimus - optimization progress')
         self.setWindowModality(Qt.WindowModal)
         self.resize(850, 650)
         layout = QVBoxLayout(self)
-        title = QLabel('OPTIMIZATION IN PROGRESS')
-        title.setObjectName('PageTitle')
-        layout.addWidget(title)
+        self.title = QLabel('OPTIMIZATION IN PROGRESS')
+        self.title.setObjectName('PageTitle')
+        layout.addWidget(self.title)
         self.spinner = RunSpinner()
         self.spinner.start('Preparing')
         layout.addWidget(self.spinner)
@@ -1633,7 +1653,8 @@ class OptimizationProgressWindow(QDialog):
         self.verification_details.setMaximumHeight(160)
         self.verification_details.hide()
         layout.addWidget(self.verification_details)
-        layout.addWidget(QLabel('CURRENT PROCESSES / ITEMS'))
+        self.processes_label = QLabel('CURRENT PROCESSES / ITEMS')
+        layout.addWidget(self.processes_label)
         self.processes = QPlainTextEdit()
         self.processes.setReadOnly(True)
         self.processes.setMaximumHeight(130)
@@ -1642,6 +1663,20 @@ class OptimizationProgressWindow(QDialog):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         layout.addWidget(self.log, 1)
+        self.auto_continue_summary = QLabel()
+        self.auto_continue_summary.setTextFormat(Qt.PlainText)
+        self.auto_continue_summary.setWordWrap(True)
+        layout.addWidget(self.auto_continue_summary)
+        self.auto_continue_details = QPlainTextEdit()
+        self.auto_continue_details.setReadOnly(True)
+        self.auto_continue_details.setMaximumHeight(140)
+        layout.addWidget(self.auto_continue_details)
+        self.auto_continue_button = QPushButton('Auto continue — apply available fixes')
+        self.auto_continue_button.setAutoDefault(False)
+        self.auto_continue_button.setDefault(False)
+        self.auto_continue_button.clicked.connect(self.autoContinueRequested.emit)
+        layout.addWidget(self.auto_continue_button)
+        self.clear_auto_continue()
         self.cancel_button = QPushButton('Cancel after current stage')
         self.cancel_button.clicked.connect(self.request_close)
         layout.addWidget(self.cancel_button)
@@ -1667,6 +1702,10 @@ class OptimizationProgressWindow(QDialog):
     def finish(self, result, error=None):
         self.completed = True
         self.spinner.stop()
+        self.title.setText('OPTIMIZATION RESULTS')
+        self.processes_label.hide()
+        self.processes.hide()
+        self.clear_auto_continue()
         self.insights_summary.clear()
         self.insights_summary.hide()
         if error:
@@ -1703,6 +1742,70 @@ class OptimizationProgressWindow(QDialog):
         self.cancel_button.setText('Close results')
         self.cancel_button.setEnabled(True)
 
+    def clear_auto_continue(self):
+        self.auto_continue_button.setEnabled(False)
+        self.auto_continue_button.hide()
+        self.auto_continue_summary.hide()
+        self.auto_continue_details.hide()
+
+    def set_auto_continue_plan(self, plan, *, ready=False):
+        actions = rows(field(plan, 'actions', default=[]))
+        manual = rows(field(plan, 'manual_items', default=[]))
+        self.auto_continue_summary.setText(
+            f'{len(actions)} automatic {"action" if len(actions) == 1 else "actions"} available; '
+            f'{len(manual)} {"item requires" if len(manual) == 1 else "items require"} manual review. '
+            + (' Clicking Auto continue approves the automatic actions listed below.' if actions
+               else 'No automatic fixes are available for this result. ' + display(field(plan, 'summary'))))
+        details = ['AUTOMATIC ACTIONS']
+        details.extend('• ' + display(field(item, 'title')) for item in actions)
+        if not actions:
+            details.append('None available.')
+        details.append('\nMANUAL REVIEW / REMAINING ITEMS')
+        details.extend('• ' + display(field(item, 'title')) + ': ' + display(field(item, 'reason'))
+                       for item in manual)
+        if not manual:
+            details.append('None listed.')
+        self.auto_continue_details.setPlainText('\n'.join(details))
+        self.auto_continue_summary.show()
+        self.auto_continue_details.show()
+        self.auto_continue_button.show()
+        self.auto_continue_button.setEnabled(bool(actions) and ready and self.completed)
+        self.auto_continue_button.setToolTip('Apply the listed automatic actions once.' if actions
+            else 'No automatic fixes are available; use Continue for any remaining recommendations.')
+
+    def begin_auto_continue(self, cancel):
+        self.cancel = cancel
+        self.completed = False
+        self._results_dismissed = False
+        self.set_recommendations_available(False)
+        self.clear_auto_continue()
+        self.title.setText('APPLYING AVAILABLE FIXES')
+        self.progress.setValue(0)
+        self.spinner.start('Preparing available fixes')
+        self.stage.setText('Preparing available fixes')
+        self.description.setText('Applying the automatic actions you approved. Progress is recorded by stage.')
+        self.insights_summary.hide()
+        self.verification_summary.hide()
+        self.verification_details.hide()
+        self.processes_label.show()
+        self.processes.show()
+        self.processes.clear()
+        self.log.appendPlainText('\nAUTO CONTINUE — USER APPROVED AVAILABLE FIXES')
+        self.cancel_button.setText('Cancel after current stage')
+        self.cancel_button.setEnabled(True)
+
+    def finish_auto_continue(self, result, error=None):
+        self.finish(result, error=error)
+        self.title.setText('AVAILABLE FIXES RESULTS')
+        if not error:
+            counts = field(result, 'counts', default={})
+            outcomes = '; '.join(str(value) + ' ' + str(key).replace('_', ' ')
+                for key, value in counts.items()) if isinstance(counts, dict) else display(counts)
+            self.auto_continue_summary.setText('Available fixes: ' + display(field(result, 'summary'))
+                + ('\nRecorded action/check outcomes: ' + outcomes if outcomes else '')
+                + '\nThis batch has been attempted. Review the verification and remaining recommendations.')
+            self.auto_continue_summary.show()
+
     def set_recommendations_available(self, available):
         self._recommendations_ready = bool(available)
         if self.completed:
@@ -1722,9 +1825,7 @@ class OptimizationProgressWindow(QDialog):
 
     def closeEvent(self, event):
         if self.completed:
-            if self._recommendations_ready:
-                self.set_recommendations_available(False)
-                self.resultsDismissed.emit()
+            self._dismiss_results()
             event.accept()
         else:
             self.request_close()
@@ -1734,10 +1835,15 @@ class OptimizationProgressWindow(QDialog):
         if not self.completed:
             self.request_close()
             return
-        if self._recommendations_ready:
-            self.set_recommendations_available(False)
-            self.resultsDismissed.emit()
+        self._dismiss_results()
         super().reject()
+
+    def _dismiss_results(self):
+        self.set_recommendations_available(False)
+        self.clear_auto_continue()
+        if not self._results_dismissed:
+            self._results_dismissed = True
+            self.resultsDismissed.emit()
 
 
 class PrivacyRestoreDialog(QDialog):
@@ -2041,6 +2147,9 @@ class OptimusWindow(QMainWindow):
         self._setup_wizard = None
         self._worker = None
         self._pending_post_review = None
+        self._pending_auto_fixes = None
+        self._auto_continue_attempted = False
+        self._post_review_generation = 0
         self._post_review_active = False
         self._security_review_dialog = None
         self._progress_window = None
@@ -2526,10 +2635,19 @@ class OptimusWindow(QMainWindow):
             return
         self.busy = True
         self._pending_post_review = None
+        self._pending_auto_fixes = None
+        self._auto_continue_attempted = False
+        self._post_review_generation += 1
+        if self._progress_window is not None:
+            self._progress_window.clear_auto_continue()
         self._cancel = threading.Event()
         self._progress_window = OptimizationProgressWindow(self, self._cancel)
-        self._progress_window.resultsAcknowledged.connect(self._continue_post_optimization_reviews)
-        self._progress_window.resultsDismissed.connect(self._dismiss_post_optimization_reviews)
+        progress = self._progress_window
+        progress.resultsAcknowledged.connect(lambda: self._continue_post_optimization_reviews()
+            if progress is self._progress_window else None)
+        progress.resultsDismissed.connect(lambda: self._dismiss_post_optimization_reviews()
+            if progress is self._progress_window else None)
+        progress.autoContinueRequested.connect(lambda: self._start_auto_continue(progress))
         self._progress_window.show()
         self._worker = WorkflowWorker(self.backend, settings, self._cancel, prompt_parent=self._progress_window)
         self._worker.signals.progress.connect(self._progress_window.update_progress)
@@ -2543,16 +2661,41 @@ class OptimusWindow(QMainWindow):
     def _workflow_result(self, result):
         self._progress_window.finish(result)
         settings = dict(getattr(self._worker, 'settings', {}))
-        if isinstance(result, dict) and not result.get('cancelled') and not result.get('canceled'):
+        self._prepare_post_reviews(result, settings)
+        self._pending_auto_fixes = None
+        if self._completed_result(result):
+            plan = {'actions': [], 'manual_items': [], 'summary': 'Automatic follow-up is unavailable with this backend.'}
+            preview = getattr(self.backend, 'available_fixes', None)
+            apply = getattr(self.backend, 'apply_available_fixes', None)
+            if callable(preview) and callable(apply):
+                try:
+                    candidate = preview(result, settings)
+                    if isinstance(candidate, dict):
+                        plan = candidate
+                except Exception as exc:
+                    plan['summary'] = 'Available fixes could not be reviewed: ' + str(exc)
+            self._progress_window.set_auto_continue_plan(plan)
+            if isinstance(plan.get('actions'), list) and plan['actions']:
+                self._pending_auto_fixes = (result, settings, plan)
+        self.status.setText('Workflow returned results. Review available fixes and final verification before continuing.')
+
+    @staticmethod
+    def _completed_result(result):
+        return (isinstance(result, dict) and not result.get('cancelled') and not result.get('canceled')
+            and result.get('status') in ('completed', 'completed_with_errors'))
+
+    def _prepare_post_reviews(self, result, settings):
+        self._pending_post_review = None
+        if self._completed_result(result):
             security, processes = result.get('security_review'), result.get('process_review')
             if ((isinstance(security, dict) and security.get('recommendations'))
                     or settings.get('post_process_review_enabled') and isinstance(processes, dict)):
                 self._pending_post_review = (result, settings)
-        self.status.setText('Workflow returned results. Read the final outcome verification before continuing to recommendations.')
 
     @Slot(str)
     def _workflow_error(self, error):
         self._pending_post_review = None
+        self._pending_auto_fixes = None
         self._progress_window.finish(None, error=error)
         self.status.setText('Workflow stopped: ' + error)
 
@@ -2565,24 +2708,82 @@ class OptimusWindow(QMainWindow):
             bridge.shutdown()
             bridge.deleteLater()
         self._worker = None
-        if self._pending_post_review is not None and not self.smoke_test and not self._quitting:
-            self._post_review_active = True
-            self._progress_window.set_recommendations_available(True)
-        else:
+        self._enable_result_actions()
+
+    def _enable_result_actions(self):
+        if self.smoke_test or self._quitting or not self._progress_window.isVisible():
             self._pending_post_review = None
+            self._pending_auto_fixes = None
             self._post_review_active = False
+            return
+        self._post_review_active = self._pending_post_review is not None or self._pending_auto_fixes is not None
+        self._progress_window.set_recommendations_available(self._pending_post_review is not None)
+        if self._pending_auto_fixes is not None and not self._auto_continue_attempted:
+            self._progress_window.set_auto_continue_plan(self._pending_auto_fixes[2], ready=True)
+
+    def _start_auto_continue(self, progress):
+        if (self.smoke_test or self._quitting or self.busy or self._auto_continue_attempted
+                or self._pending_auto_fixes is None or progress is not self._progress_window
+                or not progress.isVisible() or not progress.completed
+                or self._security_review_dialog is not None or self._setup_wizard is not None
+                or self._settings_window is not None and self._settings_window.busy):
+            return
+        report, settings, plan = self._pending_auto_fixes
+        if not plan.get('actions') or not callable(getattr(self.backend, 'apply_available_fixes', None)):
+            return
+        self._auto_continue_attempted = True
+        self._post_review_generation += 1
+        self._pending_auto_fixes = None
+        self._pending_post_review = None
+        self._post_review_active = False
+        self.busy = True
+        self._cancel = threading.Event()
+        progress.begin_auto_continue(self._cancel)
+        self._worker = AvailableFixesWorker(self.backend, report, settings, self._cancel)
+        self._worker.signals.progress.connect(progress.update_progress)
+        self._worker.signals.result.connect(self._auto_fixes_result)
+        self._worker.signals.error.connect(self._auto_fixes_error)
+        self._worker.signals.finished.connect(self._auto_fixes_finished)
+        self.main_buttons[0].setEnabled(False)
+        self.status.setText('Applying the available fixes you approved. Cancellation is available in the progress window.')
+        self.pool.start(self._worker)
+
+    @Slot(object)
+    def _auto_fixes_result(self, result):
+        self._progress_window.finish_auto_continue(result)
+        self._prepare_post_reviews(result, dict(getattr(self._worker, 'settings', {})))
+        self.status.setText('Available fixes returned results. Review the recorded outcomes and final verification.')
+
+    @Slot(str)
+    def _auto_fixes_error(self, error):
+        self._pending_post_review = None
+        self._progress_window.finish_auto_continue(None, error=error)
+        self.status.setText('Available fixes stopped: ' + error)
+
+    @Slot()
+    def _auto_fixes_finished(self):
+        self.busy = False
+        self.main_buttons[0].setEnabled(True)
+        self._worker = None
+        self._enable_result_actions()
 
     def _continue_post_optimization_reviews(self):
+        self._pending_auto_fixes = None
+        self._progress_window.clear_auto_continue()
         pending, self._pending_post_review = self._pending_post_review, None
         if pending is not None and not self.smoke_test and not self._quitting:
-            QTimer.singleShot(0, lambda: self._offer_post_optimization_reviews(*pending))
+            generation = self._post_review_generation
+            QTimer.singleShot(0, lambda: self._offer_post_optimization_reviews(*pending)
+                if generation == self._post_review_generation and not self._quitting else None)
         else:
             self._post_review_active = False
 
     def _dismiss_post_optimization_reviews(self):
         self._pending_post_review = None
+        self._pending_auto_fixes = None
+        self._post_review_generation += 1
         self._post_review_active = False
-        self.status.setText('Results are saved. Post-run recommendation prompts were skipped without applying changes.')
+        self.status.setText('Results are saved. Remaining recommendation prompts were dismissed.')
 
     def _ask_process_review(self, report):
         actions = report.get('actions', [])
@@ -2767,6 +2968,9 @@ class OptimusWindow(QMainWindow):
         self._presentation_shutdown = True
         if self._security_review_dialog is not None:
             self._security_review_dialog.shutdown()
+        if self.busy:
+            self._cancel.set()
+        self._pending_auto_fixes = None
         bridge = getattr(self._worker, '_browser_prompts', None)
         if bridge is not None:
             self._cancel.set()
