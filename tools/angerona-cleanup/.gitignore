@@ -1,0 +1,6 @@
+*.json
+*.log
+*.lock
+Handoffs/
+Reports/
+fixture-*/

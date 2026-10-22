@@ -8,7 +8,7 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
-Download **Optimus-Windows.zip** from [Releases](https://github.com/Ag3nt47/Optimus/releases). Extract the entire archive and open `Optimus.exe`. Keep `_internal` and `source` beside the executable. Python is not required for the portable build.
+Download **Optimus-Windows.zip** from [the latest app release](https://github.com/Ag3nt47/Optimus/releases/latest). Extract the entire archive and open `Optimus.exe`. Keep `_internal` and `source` beside the executable. Python is not required for the portable build.
 
 Windows 10/11, 64-bit. Start normally; administrator mode is available inside Settings for operations that need it. The Windows build is currently unsigned.
 
@@ -74,6 +74,10 @@ The completion window records actual per-stage results, exclusions and failures.
 - Read-only scheduled reports, local history and supported setting restoration.
 
 See [the user guide](docs/USER_GUIDE.md) and [feature coverage](docs/FEATURES.md) for operation-specific behavior. Optimus is an independent implementation, not a patched CCleaner executable or a claim of identical vendor catalogs, cloud integrations or native algorithms.
+
+## Standalone Angerona cleanup
+
+The MIT-licensed [Angerona Disposable Cleanup](tools/angerona-cleanup/README.txt) is maintained in [tools/angerona-cleanup](tools/angerona-cleanup) with native Windows PowerShell 5.1 tests. Its [independent 1.1.0 release](https://github.com/Ag3nt47/Optimus/releases/tag/angerona-cleanup-v1.1.0) provides the standalone source archive. See its README for installation, Windows consent prompts, cleanup scopes and recovery limits.
 
 ## Build from source
 
