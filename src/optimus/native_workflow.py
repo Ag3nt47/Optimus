@@ -319,11 +319,21 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
             add(label, 'confirmed' if valid else 'needs_review', f'{checked} reported deletions checked; {remaining} original identities remain or are inaccessible.')
         elif 'Review or install approved native package updates' == label:
             for item in outcome.get('items', []):
+                if expired():
+                    add(item.get('id', label), 'unverified', 'The bounded verification deadline or cancellation prevented this package check.')
+                    continue
                 if item.get('status') != 'completed':
                     add(item.get('id', label), 'not_applicable' if item.get('status') == 'skipped' else 'needs_review', 'No completed package installation to confirm.')
                     continue
                 if installed is None:
-                    installed = {row['id']: row for row in backend.native_packages.installed()}
+                    try:
+                        installed = {row['id']: row for row in backend.native_packages.installed(timeout=max(0.1, deadline - time.monotonic()), cancel_event=cancel_event)}
+                    except Exception as error:
+                        add(item['id'], 'unverified', 'Current native package inventory is unavailable (' + type(error).__name__ + ').')
+                        continue
+                if expired():
+                    add(item['id'], 'unverified', 'The package inventory did not finish within the verification budget.')
+                    continue
                 current = installed.get(item['id'])
                 recorded = item.get('result', {}).get('installed_version')
                 valid = current is not None and recorded and current['version'] == recorded and recorded != item.get('from_version')
@@ -364,8 +374,11 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
                         if state.get('complete') is not True or state.get('running') is not False:
                             raise ValueError('Browser reopened or its closed state is unknown.')
                         preview = backend.privacy_scan(profile['profile_id'], categories=profile['categories'], keep_domains=report['settings'].get('browser_keep_domains', []))
-                        valid = all(preview.get('counts', {}).get(category) == 0 for category in profile['categories'])
-                        add(label, 'confirmed' if valid else 'needs_review', 'A fresh read-only profile count found no remaining eligible selected rows.' if valid else 'Selected browser data remains; new activity or unsupported schemas need review.')
+                        if expired():
+                            add(label, 'unverified', 'The browser profile check exceeded the remaining verification budget.')
+                        else:
+                            valid = all(preview.get('counts', {}).get(category) == 0 for category in profile['categories'])
+                            add(label, 'confirmed' if valid else 'needs_review', 'A fresh read-only profile count found no remaining eligible selected rows.' if valid else 'Selected browser data remains; new activity or unsupported schemas need review.')
                     except Exception as error:
                         add(label, 'unverified', 'Current browser postcondition unavailable: ' + str(error)[:250])
                 cache = browser.get('cache', {})
@@ -399,6 +412,8 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
             add(label, 'confirmed' if good else 'unverified', 'A live read-only sampler and a successful current sample were verified.' if good else 'The sampler is not yet producing a verified successful sample; check background-analysis status.')
         else:
             add(label, 'not_applicable', 'Read-only discovery, recommendation or monitoring stage; no mutation was repeated.')
+    if expired() and not result['counts']['unverified']:
+        add('Native outcome verification', 'unverified', 'The verification budget expired or cancellation interrupted postcondition checks.')
     result['failed_items'] = result['counts']['needs_review'] + result['counts']['unverified']
     result['coverage_complete'] = result['coverage_complete'] and not result['counts']['unverified']
     result['status'] = 'needs_review' if result['counts']['needs_review'] else 'unverified' if result['counts']['unverified'] else 'confirmed'

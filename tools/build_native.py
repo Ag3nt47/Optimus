@@ -12,11 +12,13 @@ import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 
 import package_licenses
 import package_source
@@ -64,6 +66,19 @@ def bundle_paths(destination, system=None):
         return bundle, bundle / 'Contents/Resources', bundle / 'Contents/MacOS/Optimus'
     bundle = destination / 'Optimus'
     return bundle, bundle, bundle / ('Optimus.exe' if system == 'win32' else 'Optimus')
+
+
+def configure_macos_metadata(bundle, source):
+    path = Path(bundle) / 'Contents/Info.plist'
+    with path.open('rb') as stream:
+        value = plistlib.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError('The generated macOS application metadata is invalid.')
+    version = tomllib.loads((Path(source) / 'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
+    value.update(CFBundleShortVersionString=version, CFBundleVersion=version,
+                 NSAppleEventsUsageDescription='Optimus requests permission to close a browser only after you choose Close and clean.')
+    with path.open('wb') as stream:
+        plistlib.dump(value, stream)
 
 
 def verify_package(executable, *, output=None):
@@ -181,6 +196,7 @@ def main(argv=None):
         package_source.package(source, resources / 'source')
         package_licenses.package(source, resources)
         if sys.platform == 'darwin':
+            configure_macos_metadata(bundle, source)
             # Adding the editable source changes the bundle seal. Sign only
             # after the final payload is present. This is ad-hoc signing,
             # not Developer ID signing/notarization.

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from optimus.native_settings import NativePreferences, full_native_settings
 from optimus.native_ui import NativeOptimusWindow, NativeSetupWizard
@@ -69,5 +69,20 @@ def test_native_wizard_saved_software_selection_is_not_silently_replaced(app, ba
         wizard._software_ready({'updates': [{'id': 'apt:new', 'name': 'Fixture', 'installedVersion': '1', 'availableVersion': '2'}]})
         assert wizard.collect()['software_update_ids'] == []
         assert not wizard.controls['software_update_agreements_accepted'].isChecked()
+    finally:
+        wizard.reject()
+
+
+def test_native_select_all_respects_approval_limit_without_accepting_agreements(app, backend):
+    from optimus.native_ui import checked_data
+    wizard = NativeSetupWizard(backend)
+    try:
+        wizard._software_ready({'updates': [{'id': 'apt:fixture' + str(i)} for i in range(101)]})
+        page = wizard.software.parentWidget()
+        select = next(button for button in page.findChildren(QPushButton) if button.text() == 'Select all')
+        select.click()
+        assert len(checked_data(wizard.software)) == 100
+        assert not wizard.controls['software_update_agreements_accepted'].isChecked()
+        assert not wizard.controls['software_update_all_approved'].isChecked()
     finally:
         wizard.reject()

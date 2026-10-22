@@ -114,6 +114,28 @@ class FileTests(unittest.TestCase):
         fake.send2trash.assert_not_called()
         self.assertTrue(Path(row['Path']).is_file())
 
+    @unittest.skipUnless(os.name == 'posix', 'Exercises no-clobber POSIX recovery in a real directory.')
+    def test_trash_failure_recovery_cannot_clobber_a_concurrent_replacement(self):
+        self.files()
+        row = self.engine.duplicates(self.root)['duplicates'][0]
+        path = Path(row['Path'])
+        real_stat = os.stat
+        raced = []
+        def race_stat(value, *args, **kwargs):
+            if value == path.name and kwargs.get('dir_fd') is not None and not raced:
+                raced.append(True)
+                path.write_bytes(b'new unrelated application data')
+                raise FileNotFoundError('Simulated name recreation after an absent probe')
+            return real_stat(value, *args, **kwargs)
+        fake = types.SimpleNamespace(send2trash=Mock(side_effect=OSError('Trash failed')))
+        with patch.dict(sys.modules, {'send2trash': fake}), patch('optimus.native_operations.os.stat', side_effect=race_stat):
+            with self.assertRaisesRegex(OSError, 'Trash failed'):
+                self.engine.recycle(row)
+        self.assertEqual(path.read_bytes(), b'new unrelated application data')
+        journal = json.loads(next((self.engine.data_dir / 'native-recycle').glob('*.json')).read_text(encoding='utf-8'))
+        self.assertEqual(Path(journal['staged_path']).read_bytes(), b'identical contents')
+        self.assertTrue(journal['recovery_required'])
+
     @unittest.skipUnless(sys.platform == 'linux', 'Isolates the real Linux XDG Trash API in a fresh process.')
     def test_real_linux_trash_is_confined_to_fixture_xdg_data_home(self):
         self.files()
@@ -250,6 +272,14 @@ class PackageTests(unittest.TestCase):
         self.assertTrue(result['verified'])
         self.assertEqual(result['installed_version'], '0:2.0-1')
 
+    def test_dnf_epoch_only_upgrade_is_not_silently_omitted(self):
+        self.packages.manager, self.packages.executable = 'dnf', '/usr/bin/dnf'
+        self.runner.run.side_effect = lambda argv, **kw: (
+            self.result('editor.x86_64\t0:2.0-1\n') if argv[0] == '/usr/bin/rpm'
+            else self.result('editor.x86_64 1:2.0-1 updates\n', code=100))
+        scan = self.packages.scan()
+        self.assertEqual(scan['updates'][0]['available'], '1:2.0-1')
+
     def test_privilege_broker_uses_argument_vector_and_cancellation_gates(self):
         native = NativeRunner(system='linux')
         native.run = Mock(return_value=self.result())
@@ -320,6 +350,50 @@ class StartupTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, 'Disk full'):
                 self.engine.set(record, False)
         self.assertEqual(self.entry.read_bytes(), self.original)
+
+    def test_prepared_startup_receipt_recognizes_an_original_that_never_changed(self):
+        actual_replace = os.replace
+        def replace(source, target):
+            if Path(target) == self.entry:
+                raise OSError('Could not replace startup file')
+            return actual_replace(source, target)
+        with patch('optimus.native_operations.os.replace', side_effect=replace), self.assertRaisesRegex(OSError, 'Could not replace'):
+            self.engine.set(self.engine.list()[0], False)
+        self.assertEqual(self.entry.read_bytes(), self.original)
+        receipt = self.engine.history()[-1]
+        self.assertEqual(receipt['state'], 'prepared')
+        self.assertTrue(self.engine.restore(receipt['Id'])['verified'])
+
+    def test_invalid_macos_plist_schema_is_an_unmanageable_row_not_an_audit_failure(self):
+        engine = NativeStartup(self.data, system='darwin', home=self.home, runner=self.runner)
+        engine.root.mkdir(parents=True)
+        for name, value in [('list.plist', ['not', 'a', 'dictionary']),
+                            ('arguments.plist', {'Label': 'org.example.invalid', 'ProgramArguments': [False]}),
+                            ('program.plist', {'Label': 'org.example.invalid', 'Program': 45})]:
+            (engine.root / name).write_bytes(plistlib.dumps(value))
+        (engine.root / 'broken.plist').write_bytes(b'<?xml version="1.0"?><plist><invalid')
+        rows = engine.list()
+        self.assertEqual(len(rows), 4)
+        self.assertTrue(all(row['Manageable'] is False and row['Protected'] for row in rows))
+
+    def test_prepared_macos_receipt_recovers_planned_bytes_before_a_failed_rename(self):
+        engine = NativeStartup(self.data, system='darwin', home=self.home, runner=self.runner)
+        engine.root.mkdir(parents=True)
+        path = engine.root / 'org.example.disabled.disabled'
+        before = plistlib.dumps({'Label': 'org.example.disabled', 'Program': '/Applications/Editor.app/Contents/MacOS/editor', 'Disabled': True})
+        path.write_bytes(before)
+        original_rename = Path.rename
+        def fail_final_rename(source, target):
+            if Path(source) == path:
+                raise OSError('Final LaunchAgent rename failed')
+            return original_rename(source, target)
+        with patch.object(Path, 'rename', fail_final_rename), self.assertRaisesRegex(OSError, 'Final LaunchAgent rename failed'):
+            engine.set(engine.list()[0], True)
+        self.assertNotEqual(path.read_bytes(), before)
+        receipt = engine.history()[-1]
+        self.assertEqual(receipt['state'], 'prepared')
+        self.assertTrue(engine.restore(receipt['Id'])['verified'])
+        self.assertEqual(path.read_bytes(), before)
 
     def test_final_journal_failure_leaves_usable_prepared_recovery(self):
         from optimus.workflow import atomic_json
@@ -418,6 +492,24 @@ class WorkflowTests(unittest.TestCase):
         result = verify_native_outcomes(Mock(), {'stages': []}, cancel_event=cancelled)
         self.assertEqual(result['status'], 'unverified')
         self.assertFalse(result['coverage_complete'])
+
+    def test_package_verification_passes_remaining_timeout_and_rejects_late_success(self):
+        backend = Mock()
+        clock = {'now': 0.0}
+        def inventory(**kwargs):
+            self.assertLessEqual(kwargs['timeout'], 1.0)
+            clock['now'] = 2.0
+            return [{'id': 'apt:editor', 'version': '2'}]
+        backend.native_packages.installed.side_effect = inventory
+        report = {'stages': [{'title': 'Review or install approved native package updates', 'status': 'completed',
+                              'result': {'items': [{'id': 'apt:editor', 'status': 'completed', 'from_version': '1',
+                                                     'result': {'installed_version': '2'}}]}}]}
+        with patch('optimus.native_workflow.time.monotonic', side_effect=lambda: clock['now']):
+            result = verify_native_outcomes(backend, report, timeout=1)
+        self.assertEqual(result['status'], 'unverified')
+        self.assertTrue(result['deadline_reached'])
+        self.assertFalse(result['coverage_complete'])
+        self.assertEqual(result['counts']['confirmed'], 0)
 
     def test_exported_process_report_is_inert_and_both_export_paths_work(self):
         backend = Mock()

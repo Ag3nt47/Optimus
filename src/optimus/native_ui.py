@@ -27,17 +27,25 @@ def note(layout, text):
 
 def selection_buttons(layout, table):
     row = QHBoxLayout()
+    status = QLabel()
     for label, state in (('Select all', Qt.Checked), ('Clear all', Qt.Unchecked)):
         button = QPushButton(label)
         def change(checked=False, value=state):
+            selected = skipped = 0
             for index in range(table.count()):
                 item = table.item(index)
                 if item.flags() & Qt.ItemIsEnabled:
-                    item.setCheckState(value)
+                    include = value == Qt.Checked and selected < 100
+                    item.setCheckState(Qt.Checked if include else Qt.Unchecked)
+                    selected += int(include)
+                    skipped += int(value == Qt.Checked and not include)
+            status.setText(f'{selected} selected; {skipped} remain unselected due to the 100-entry approval limit.'
+                           if skipped else f'{selected} choices selected.')
         button.clicked.connect(change)
         row.addWidget(button)
     row.addStretch()
     layout.addLayout(row)
+    layout.addWidget(status)
 
 
 def check_item(table, label, data, checked=False, eligible=True):

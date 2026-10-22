@@ -160,7 +160,7 @@ class Cleaner:
         name = path.name.casefold()
         return (name.endswith(('.lock', '.lck', '.pid', '.sock', '.socket'))
                 or name in {'lock', 'pid', 'singletonlock', 'singletoncookie', 'singletonsocket'}
-                or name.startswith(('.lock', '.pid')))
+                or name.startswith(('.lock', '.pid', '.optimus-delete-')))
 
     @staticmethod
     def _open_files_snapshot() -> tuple[set[str], bool]:
@@ -435,8 +435,9 @@ class Cleaner:
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
                     or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != expected):
                 raise ValueError('File ownership or identity changed after preview.')
-            staged = '.optimus-delete-' + uuid.uuid4().hex
-            os.rename(path.name, staged, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            quarantine = '.optimus-delete-' + uuid.uuid4().hex
+            os.rename(path.name, quarantine, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            staged = quarantine
             info = os.stat(staged, dir_fd=parent_fd, follow_symlinks=False)
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
                     or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != expected):
@@ -444,16 +445,19 @@ class Cleaner:
             os.unlink(staged, dir_fd=parent_fd)
             staged = None
         finally:
+            recovery_error = None
             if staged is not None and parent_fd is not None:
                 try:
                     # link() fails if the original name has been reused; never
                     # overwrite a new file while recovering a concurrent change.
                     os.link(staged, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
                     os.unlink(staged, dir_fd=parent_fd)
-                except OSError:
-                    pass  # Keep the quarantined bytes for manual recovery.
+                except OSError as error:
+                    recovery_error = OSError(f'Cleanup conflict: bytes were preserved for manual recovery at {path.parent / staged}. {error}')
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
+            if recovery_error is not None:
+                raise recovery_error
 
     def apply(self, displayed_plan: dict) -> dict:
         with self._lock:

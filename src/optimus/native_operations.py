@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+from xml.parsers.expat import ExpatError
 
 from .workflow import atomic_json
 
@@ -168,8 +169,11 @@ class NativePackages:
                 'note': ('Arch Linux requires a complete system upgrade; individual package upgrades are review-only to avoid unsupported partial upgrades.'
                          if self.manager == 'pacman' else 'Signed repository and vendor update policy remains controlled by the native package manager. No unofficial drivers or lifecycle bypasses are downloaded.')}
 
-    def _command(self, argv, *, allowed=(0,), timeout=120):
-        result = self.runner.run(argv, timeout=timeout)
+    def _command(self, argv, *, allowed=(0,), timeout=120, cancel_event=None):
+        options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+        result = self.runner.run(argv, timeout=timeout, **options)
+        if result.get('cancelled'):
+            raise InterruptedError('Native package inventory was cancelled.')
         if result['exitCode'] not in allowed:
             raise RuntimeError(Path(str(argv[0])).name + ' could not read package metadata: ' + result.get('stderr', '')[:1000])
         return result['stdout']
@@ -199,11 +203,12 @@ class NativePackages:
             record['eligible'] = True
         return dict(record, **extra)
 
-    def installed(self):
+    def installed(self, *, timeout=120, cancel_event=None):
+        options = {'timeout': max(0.1, min(float(timeout), 120)), 'cancel_event': cancel_event}
         if self.manager is None:
             return []
         if self.manager == 'brew':
-            result = json.loads(self._command([self.executable, 'info', '--json=v2', '--installed']))
+            result = json.loads(self._command([self.executable, 'info', '--json=v2', '--installed'], **options))
             records = []
             for item in result.get('formulae', []):
                 installed = item.get('installed', [])
@@ -220,14 +225,14 @@ class NativePackages:
                         continue  # "latest" / vendor comma versions are not safe unattended targets.
             return records
         if self.manager == 'apt':
-            output = self._command(['/usr/bin/dpkg-query', '-W', '-f=${binary:Package}\t${Version}\t${db:Status-Status}\n'])
+            output = self._command(['/usr/bin/dpkg-query', '-W', '-f=${binary:Package}\t${Version}\t${db:Status-Status}\n'], **options)
             return [self._record('apt', parts[0], parts[1]) for line in output.splitlines()
                     if len(parts := line.split('\t')) == 3 and parts[2] == 'installed']
         if self.manager == 'dnf':
-            output = self._command(['/usr/bin/rpm', '-qa', '--qf', '%{NAME}.%{ARCH}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\n'])
+            output = self._command(['/usr/bin/rpm', '-qa', '--qf', '%{NAME}.%{ARCH}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\n'], **options)
             return [self._record('dnf', parts[0], parts[1]) for line in output.splitlines()
                     if len(parts := line.split('\t')) == 2]
-        output = self._command([self.executable, '-Q'])
+        output = self._command([self.executable, '-Q'], **options)
         return [self._record('pacman', parts[0], parts[1]) for line in output.splitlines()
                 if len(parts := line.split()) == 2]
 
@@ -270,8 +275,12 @@ class NativePackages:
                 if len(parts) != 3 or parts[0] not in installed or not _VERSION.fullmatch(parts[1]):
                     continue
                 current = installed[parts[0]]
-                if current['version'].split(':', 1)[-1] != parts[1].split(':', 1)[-1]:
+                try:
+                    # check-update already applies RPM ordering, including an
+                    # epoch-only upgrade. Do not discard that epoch evidence.
                     updates.append(self._record('dnf', parts[0], current['version'], parts[1]))
+                except ValueError:
+                    continue
         else:
             output = self._command([self.executable, '-Qu'], allowed=(0, 1))
             for line in output.splitlines():
@@ -583,7 +592,10 @@ class NativeStartup:
         path = self._valid(path)
         content = path.read_bytes()
         if self.system == 'darwin':
-            payload = plistlib.loads(content)
+            try:
+                payload = plistlib.loads(content)
+            except (plistlib.InvalidFileException, ExpatError, ValueError, OverflowError) as error:
+                raise ValueError('The LaunchAgent plist is invalid.') from error
             if not isinstance(payload, dict):
                 raise ValueError('The LaunchAgent plist must contain a dictionary.')
             label = payload.get('Label')

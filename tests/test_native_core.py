@@ -213,6 +213,29 @@ def test_posix_replacement_during_delete_is_restored_without_deleting_its_bytes(
     assert not list(root.glob('.optimus-delete-*'))
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='Exercises actual POSIX conflict preservation and subsequent scan exclusions.')
+def test_posix_unrestorable_conflict_is_journaled_and_never_reselected(tmp_path, monkeypatch):
+    root = tmp_path / 'cache'
+    root.mkdir()
+    target = root / 'racing.tmp'
+    target.write_bytes(b'previewed bytes')
+    engine = cleaner.Cleaner(tmp_path / 'Data', [cleaner.Category('fixture', 'Fixture', root, '')])
+    plan = engine.scan(['fixture'], min_age_days=0)
+    rename = os.rename
+    def race_before_rename(source, destination, **options):
+        target.write_bytes(b'unapproved bytes to preserve')
+        rename(source, destination, **options)
+        target.write_bytes(b'new application state at reused original name')
+    monkeypatch.setattr(cleaner.os, 'rename', race_before_rename)
+    result = engine.apply(plan)
+    retained = list(root.glob('.optimus-delete-*'))
+    assert len(retained) == 1 and retained[0].read_bytes() == b'unapproved bytes to preserve'
+    assert str(retained[0]) in result['errors'][0]
+    assert target.read_bytes() == b'new application state at reused original name'
+    next_plan = engine.scan(['fixture'], min_age_days=0)
+    assert str(retained[0]) not in {item['path'] for item in next_plan['files']}
+
+
 @pytest.mark.parametrize('platform', ['linux', 'darwin'])
 def test_native_privacy_cleanup_backs_up_restores_and_preserves_bookmarks(tmp_path, monkeypatch, platform):
     home = native_home(tmp_path, monkeypatch, platform)

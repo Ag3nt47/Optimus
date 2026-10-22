@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import plistlib
 from pathlib import Path
 import sys
 import tarfile
@@ -131,6 +132,21 @@ def test_packaged_verification_uses_only_read_only_commands_and_real_report(monk
     assert result['maintenance_applied'] is False
     assert '--screenshot' in calls[0][0] and (tmp_path / 'evidence.png').is_file()
     assert json.loads((tmp_path / 'evidence.json').read_text()) == result
+
+
+def test_macos_bundle_declares_browser_consent_and_real_release_version(tmp_path):
+    bundle = tmp_path / 'Optimus.app'
+    (bundle / 'Contents').mkdir(parents=True)
+    path = bundle / 'Contents/Info.plist'
+    path.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'io.github.Ag3nt47.Optimus'}))
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'pyproject.toml').write_text('[project]\nversion="0.7.0"\n', encoding='utf-8')
+    build.configure_macos_metadata(bundle, source)
+    value = plistlib.loads(path.read_bytes())
+    assert value['CFBundleShortVersionString'] == '0.7.0'
+    assert value['CFBundleVersion'] == '0.7.0'
+    assert 'Close and clean' in value['NSAppleEventsUsageDescription']
 
 
 @pytest.mark.parametrize('payload,error', [
