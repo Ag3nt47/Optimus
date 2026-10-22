@@ -986,11 +986,14 @@ class DetailedSettingsWindow(QMainWindow):
     def _updates_ready(self, result):
         self.updates_output.setPlainText(display(field(result,'output','text','Text',default=result)))
         candidates = field(result,'packages','updates',default=[])
-        complete = field(result,'structured',default=False) is True and field(result,'exitCode',default=-1)==0 and isinstance(candidates,list)
         from .automated_software import fresh_candidates
+        from .update_scan_evidence import app_scan_evidence
+        evidence = app_scan_evidence(result)
         values=[dict(record,id=identity) for identity,record in fresh_candidates(result).items()]
         self.updates_candidates_table.populate(values)
-        self.updates_summary.setText(str(len(values))+' recognized unique WinGet update candidates. '+('Choose a row to fill its exact ID.' if complete else 'The scan was incomplete or its format unrecognized; no selectable rows were inferred.')+' Exclusions/notes: '+display(field(result,'excluded',default=[])))
+        self.updates_summary.setText(evidence['summary'] + ' ' + evidence['coverage_limit']
+            + (' Choose a row to fill its exact ID.' if values else '')
+            + ' Exclusions/notes: ' + display(field(result,'excluded',default=[])))
         self.loaded_pages.add('Updates')
 
     def _update_selected(self):
@@ -1066,13 +1069,16 @@ class DetailedSettingsWindow(QMainWindow):
         candidates = rows(field(result, 'updates', default=[]))
         self.driver_updates_table.populate(candidates)
         self.driver_tabs.setCurrentIndex(1)
-        self.driver_update_note.setText(f'Windows Update returned {len(candidates):,} driver candidates. Source: ' + display(field(result, 'source', default='Windows Update Agent')) + '. Result code: ' + display(field(result, 'resultCode')) + '. Review a title and revision before installation; this query does not cover every manufacturer catalog.')
+        from .driver_coverage import driver_scan_evidence
+        evidence = driver_scan_evidence(result)
+        self.driver_update_note.setText(evidence['summary'] + ' Result code: '
+            + display(evidence.get('result_code')) + '. Review a title and revision before installation.')
 
     def _driver_coverage_ready(self, report, *, activate=True):
         self._driver_coverage_report=report
         self.driver_coverage_table.populate(field(report,'devices',default=[]))
         summary=field(report,'summary',default={}) or {}
-        self.driver_coverage_summary.setText('Present devices: '+display(field(summary,'devices',default=0))+'; Windows Update offers: '+display(field(summary,'offered',default=0))+'; device problems: '+display(field(summary,'deviceProblems',default=0))+'; no offer: '+display(field(summary,'noOffer',default=0))+'. '+('Device inventory complete. ' if field(report,'inventoryComplete',default=False) else 'Device inventory incomplete. ')+('Update scan complete. ' if field(report,'updateScanComplete',default=False) else 'Update scan incomplete. ')+display(field(report,'notes',default=[])))
+        self.driver_coverage_summary.setText('Present devices: '+display(field(summary,'devices',default=0))+'; devices with Windows Update offers: '+display(field(summary,'offered',default=0))+'; device problems: '+display(field(summary,'deviceProblems',default=0))+'; no offer: '+display(field(summary,'noOffer',default=0))+'. '+('Device inventory complete. ' if field(report,'inventoryComplete',default=False) else 'Device inventory incomplete. ')+('Update scan complete. ' if field(report,'updateScanComplete',default=False) else 'Update scan incomplete. ')+display(field(report,'notes',default=[])))
         if activate:
             self.driver_tabs.setCurrentIndex(2)
         self._driver_coverage_selected()
@@ -1851,7 +1857,9 @@ class WorkflowWorkerCard(QFrame):
         else:
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
-            self.progress.setFormat('Not selected' if raw_status == 'not_selected' else
+            scan_label = state.get('scan_label')
+            self.progress.setFormat(str(scan_label)[:200] if isinstance(scan_label, str) and scan_label else
+                                    'Not selected' if raw_status == 'not_selected' else
                                     'Queued' if raw_status == 'pending' else
                                     'Waiting' if raw_status.startswith('waiting_for_') else
                                     'Scanning; total unknown' if raw_status == 'scanning' else
@@ -2254,8 +2262,14 @@ class OptimizationProgressWindow(QDialog):
                 details = display(outcome.get('stop_reason') or item.get('error') or outcome.get('note')
                                   or (display(field(item, 'title', 'name')) + ': ' + status))
                 if clock is not None or self.worker_cards[worker].status.text() in ('Not started', 'Not selected'):
-                    self.worker_cards[worker].update_state({'status': status, 'description': details,
-                        'elapsed_seconds': clock.elapsed() / 1000 if clock is not None else None})
+                    from .parallel_updates import update_completion_state, update_completion_status
+                    completion = update_completion_state(outcome)
+                    evidence = outcome.get('driver_scan') or outcome.get('app_scan')
+                    if isinstance(evidence, dict):
+                        details = completion['description']
+                        status = update_completion_status(outcome)
+                    self.worker_cards[worker].update_state(dict(completion, status=status, description=details,
+                        elapsed_seconds=clock.elapsed() / 1000 if clock is not None else None))
         for identity in ('software_updates', 'driver_updates'):
             card = self.worker_cards[identity]
             if card.status.text() == 'Not started':

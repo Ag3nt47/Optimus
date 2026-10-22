@@ -169,9 +169,11 @@ class NativePackages:
                 'note': ('Arch Linux requires a complete system upgrade; individual package upgrades are review-only to avoid unsupported partial upgrades.'
                          if self.manager == 'pacman' else 'Signed repository and vendor update policy remains controlled by the native package manager. No unofficial drivers or lifecycle bypasses are downloaded.')}
 
-    def _command(self, argv, *, allowed=(0,), timeout=120, cancel_event=None):
+    def _command(self, argv, *, allowed=(0,), timeout=120, cancel_event=None, evidence=None):
         options = {'cancel_event': cancel_event} if cancel_event is not None else {}
         result = self.runner.run(argv, timeout=timeout, **options)
+        if evidence is not None:
+            evidence.update(exitCode=result.get('exitCode'), stderr=result.get('stderr', ''))
         if result.get('cancelled'):
             raise InterruptedError('Native package inventory was cancelled.')
         if result['exitCode'] not in allowed:
@@ -237,15 +239,23 @@ class NativePackages:
                 if len(parts := line.split()) == 2]
 
     def scan(self):
+        started = time.time()
         if self.manager is None:
             return {'available': False, 'source': None, 'updates': [], 'structured': True,
-                    'exitCode': 0, 'complete': False, 'note': 'No supported native package manager was found.'}
+                    'exitCode': 0, 'complete': False, 'discovery': {'started_at': started, 'completed_at': time.time()},
+                    'note': 'No supported native package manager was found.'}
         installed = {item['native_name']: item for item in self.installed()}
-        updates = []
+        updates, excluded, query = [], [], {}
         if self.manager == 'brew':
-            result = json.loads(self._command([self.executable, 'outdated', '--json=v2']))
+            result = json.loads(self._command([self.executable, 'outdated', '--json=v2'], evidence=query))
+            if not isinstance(result, dict) or not any(key in result for key in ('formulae', 'casks')):
+                raise ValueError('Homebrew returned an unrecognized update inventory.')
             for kind, key in (('formula', 'formulae'), ('cask', 'casks')):
+                if not isinstance(result.get(key, []), list):
+                    raise ValueError('Homebrew returned an invalid update inventory.')
                 for item in result.get(key, []):
+                    if not isinstance(item, dict):
+                        raise ValueError('Homebrew returned an invalid update row.')
                     name = item.get('full_name') or item.get('full_token') or item.get('name') or item.get('token')
                     current = installed.get(name)
                     offered = str(item.get('current_version', ''))
@@ -253,26 +263,38 @@ class NativePackages:
                         try:
                             updates.append(self._record('brew', name, current['version'], offered, kind=kind))
                         except ValueError:
+                            excluded.append('A Homebrew offer has an unsupported identity or version.')
                             continue
+                    else:
+                        excluded.append('A pinned, unmatched or unchanged Homebrew offer was excluded.')
         elif self.manager == 'apt':
-            output = self._command([self.executable, 'list', '--upgradable'])
+            output = self._command([self.executable, 'list', '--upgradable'], evidence=query)
+            if not output.strip():
+                excluded.append('APT returned an empty unrecognized update response.')
             for line in output.splitlines():
                 match = re.fullmatch(r'([^/\s]+)/\S+\s+(\S+)\s+\S+\s+\[upgradable from: ([^\]]+)\]', line.strip())
                 if not match:
+                    if line.strip() and not re.fullmatch(r'Listing\.\.\.(?:\s*Done)?', line.strip()):
+                        excluded.append('An unrecognized APT update row was excluded.')
                     continue
                 name, available, old = match.groups()
                 current = installed.get(name) or next((item for key, item in installed.items() if key.split(':')[0] == name and item['version'] == old), None)
                 if current is None or current['version'] != old:
+                    excluded.append('An APT offer could not be matched to the installed version.')
                     continue
                 # Let dpkg implement Debian's complete epoch/tilde ordering.
                 newer = self.runner.run(['/usr/bin/dpkg', '--compare-versions', available, 'gt', old])
                 if newer['exitCode'] == 0:
                     updates.append(self._record('apt', current['native_name'], old, available))
+                else:
+                    excluded.append('An APT offered version could not be confirmed newer.')
         elif self.manager == 'dnf':
-            output = self._command([self.executable, '--cacheonly', 'check-update'], allowed=(0, 100))
+            output = self._command([self.executable, '--cacheonly', 'check-update'], allowed=(0, 100), evidence=query)
             for line in output.splitlines():
                 parts = line.split()
                 if len(parts) != 3 or parts[0] not in installed or not _VERSION.fullmatch(parts[1]):
+                    if line.strip() and not line.startswith('Last metadata expiration check:'):
+                        excluded.append('An unrecognized or unmatched DNF update row was excluded.')
                     continue
                 current = installed[parts[0]]
                 try:
@@ -280,18 +302,39 @@ class NativePackages:
                     # epoch-only upgrade. Do not discard that epoch evidence.
                     updates.append(self._record('dnf', parts[0], current['version'], parts[1]))
                 except ValueError:
+                    excluded.append('A DNF offer has an unsupported identity or version.')
                     continue
         else:
-            output = self._command([self.executable, '-Qu'], allowed=(0, 1))
+            output = self._command([self.executable, '-Qu'], allowed=(0, 1), evidence=query)
             for line in output.splitlines():
                 parts = line.split()
                 if len(parts) == 4 and parts[2] == '->' and parts[0] in installed:
                     updates.append(self._record('pacman', parts[0], parts[1], parts[3]))
+                elif line.strip():
+                    excluded.append('An unrecognized or unmatched pacman update row was excluded.')
+        query_code = query.get('exitCode')
+        if type(query_code) is not int:
+            excluded.append('The native update query completion status could not be verified.')
+        elif self.manager == 'dnf' and ((query_code == 100 and not updates) or (query_code == 0 and updates)):
+            excluded.append('The DNF update status does not match the recognized offered updates.')
+        elif self.manager == 'pacman' and query_code == 1 and updates:
+            excluded.append('The pacman query status does not match the recognized offered updates.')
+        raw_diagnostic = str(query.get('stderr', ''))[:4000]
+        diagnostics = raw_diagnostic.strip()
+        if self.manager == 'apt':
+            diagnostics = '\n'.join(line for line in diagnostics.splitlines() if line.strip() and line.strip() !=
+                'WARNING: apt does not have a stable CLI interface. Use with caution in scripts.')
+        if diagnostics:
+            excluded.append('The native manager reported diagnostic output; repository coverage requires review.')
         ids = [item['id'] for item in updates]
         if len(ids) != len(set(ids)):
             raise ValueError('Ambiguous native package identities; refresh before installing.')
         result = {'available': True, 'source': self.manager, 'structured': True, 'exitCode': 0,
-                  'complete': True, 'updates': updates, 'scanned_at': time.time(),
+                  'complete': not excluded, 'updates': updates, 'scanned_at': time.time(),
+                  'excluded': excluded[:1000], 'installed_packages_checked': len(installed),
+                  'manager_exit_code': query_code, 'stderr': diagnostics,
+                  'manager_diagnostics': raw_diagnostic,
+                  'discovery': {'started_at': started, 'completed_at': time.time()},
                   'note': 'Offered updates use existing native repository metadata. Use the native updater to refresh repositories; unsupported, held, pinned, unregistered and incomparable packages are not forced.'}
         self._last_scan = result
         return result

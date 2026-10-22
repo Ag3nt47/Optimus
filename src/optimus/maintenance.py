@@ -250,6 +250,11 @@ class Maintenance:
         for line in lines[index + 2:]:
             if not line.strip():
                 continue
+            if re.fullmatch(r"\d+ upgrades? available\.", line.strip()):
+                continue
+            if re.fullmatch(r"\d+ package\(s\) have version numbers that cannot be determined\. Use --include-unknown to see all results\.", line.strip()):
+                skipped.append("Installed packages with unknown versions require their publisher updater or version review.")
+                continue
             values = [line[start:starts[position + 1] if position < len(starts) - 1 else len(line)].strip()
                       for position, start in enumerate(starts)]
             name, package_id, version, available = values[:4]
@@ -257,6 +262,7 @@ class Maintenance:
             # Footers/progress are not data. IDs, versions and source must be
             # complete and aligned; truncated names are harmless display text.
             if not _PACKAGE_ID.fullmatch(package_id) or package_id.endswith(".") or "..." in package_id or not name:
+                skipped.append("An unrecognized or truncated update row was excluded.")
                 continue
             if source != "winget":
                 skipped.append("A row without the exact winget source was excluded.")
@@ -283,10 +289,17 @@ class Maintenance:
         self._last_update_ids = set()
         self._last_update_packages = {}
         self._last_update_scan = 0.0
+        started = time.time()
         result = self._run([self._winget(), "upgrade", "--source", "winget", "--disable-interactivity"])
         output = _ANSI.sub("", result.stdout or "").replace("\r", "")
         stderr = _ANSI.sub("", result.stderr or "")
         rows, structured, skipped = self._parse_update_table(output, source_context="winget")
+        reported = re.findall(r"^(\d+) upgrades? available\.$", output, re.M)
+        reported_count = int(reported[0]) if len(reported) == 1 and len(reported[0]) <= 6 else None
+        if reported and (reported_count is None or reported_count != len(rows)):
+            skipped.append("The source-reported upgrade count does not match the recognized update rows.")
+        if stderr.strip():
+            skipped.append("WinGet reported diagnostic output; source coverage requires review.")
         # ReportListResult(true) emits this single line, without a table, when
         # a successful source-scoped listing has no selectable upgrades. Do not
         # mistake the normal empty state for an unsupported table or generalize
@@ -304,6 +317,9 @@ class Maintenance:
         return {"updates": rows, "packages": [dict(row) for row in rows], "text": output, "output": output,
                 "stderr": stderr, "exitCode": result.returncode,
                 "structured": structured, "source": "winget", "excluded": skipped,
+                "source_reported_offers_count": reported_count,
+                "discovery": {"started_at": started, "completed_at": time.time(),
+                              "command": "winget upgrade --source winget --disable-interactivity"},
                 "no_applicable_upgrades": no_applicable_upgrades,
                 "note": "Only recognized complete winget-source rows are selectable. Localized or changed output remains text; an empty parsed list does not establish that no updates exist."}
 

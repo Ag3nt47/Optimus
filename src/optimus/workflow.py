@@ -351,9 +351,9 @@ class Workflow:
                                    lambda: run_drivers(self.backend, configuration, cancel_event=cancel_event, item_callback=item_progress('Install approved driver updates'))))
                 else:
                     def driver_review():
-                        result = self.backend.driver_updates_scan()
-                        successful = isinstance(result, dict) and type(result.get('resultCode')) is int and result['resultCode'] == 2
-                        return {'review_only': True, 'result': result, 'failed_items': 0 if successful else 1,
+                        from .automated_system import run_drivers
+                        result = run_drivers(self.backend, configuration, cancel_event=cancel_event)
+                        return {**result, 'result': result.get('scan'),
                                 'note': 'Review only; no driver was downloaded or installed by this workflow. Windows Update must report a successful completed scan; partial/failed/unknown scan results require review.'}
                     stages.append(('Review available driver updates', 'Checking Windows Update metadata; driver installation requires separate review.', driver_review))
 
@@ -625,6 +625,13 @@ class Workflow:
                         report['cancelled'] = True
                 except Exception as error:
                     stage = {'title': title, 'status': 'failed', 'started_at': started, 'finished_at': time.time(), 'error': str(error)}
+                    for key in ('driver_scan', 'app_scan'):
+                        evidence = getattr(error, key, None)
+                        if isinstance(evidence, dict):
+                            from .parallel_updates import _bounded_scan_evidence
+                            stage['result'] = {'failed_items': 1, 'items': [],
+                                'installer_started': False, 'outcomeKnown': True,
+                                key: _bounded_scan_evidence(evidence)}
                 if title in (WINDOWS_SOFTWARE, WINDOWS_DRIVERS, 'Check or install Windows security updates'):
                     parallel_barrier = parallel_barrier or installer_barrier(stage.get('result'))
                     if serial_job is None and not (isinstance(stage.get('result'), dict) and stage['result'].get('blocked_by_prior_installer')):

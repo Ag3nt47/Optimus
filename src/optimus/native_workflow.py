@@ -11,6 +11,7 @@ import uuid
 from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
 from .workflow import atomic_json
 from .native_operations import sha256_file
+from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
 
 
 def _cancelled(event):
@@ -27,28 +28,48 @@ def run_native_software(backend, settings, *, cancel_event=None, item_callback=N
             if prepared_callback:
                 prepared_callback(state or {'operation': 'software', 'scan_complete': False,
                                             'candidate_count': 0, 'review_only': True})
+    context = {}
     try:
-        return _run_native_software(backend, settings, cancel_event=cancel_event,
-            item_callback=item_callback, prepared_callback=prepared, before_install=before_install)
-    finally:
-        prepared()
+        try:
+            outcome = _run_native_software(backend, settings, cancel_event=cancel_event,
+                item_callback=item_callback, prepared_callback=prepared, before_install=before_install,
+                scan_context=context)
+            context['outcome'] = outcome
+            return outcome
+        finally:
+            prepared()
+    except Exception as error:
+        attach_app_scan_error(error, context, native=True)
+        raise
 
 
 def _run_native_software(backend, settings, *, cancel_event=None, item_callback=None,
-                         prepared_callback=None, before_install=None):
+                         prepared_callback=None, before_install=None, scan_context):
+    started = time.time()
     if _cancelled(cancel_event):
-        return {'items': [], 'failed_items': 0, 'cancelled': True,
-                'installer_started': False, 'outcomeKnown': True}
-    scan = backend.updates_scan()
+        return with_app_scan({'items': [], 'failed_items': 0, 'cancelled': True,
+                'installer_started': False, 'outcomeKnown': True}, native=True,
+                not_started='Cancelled before the app update search started.')
+    try:
+        scan = backend.updates_scan()
+    except Exception as error:
+        error.app_scan = app_scan_evidence(native=True, started=started, error=error)
+        raise
+    if not isinstance(scan, dict):
+        error = ValueError('Invalid native application update metadata.')
+        error.app_scan = app_scan_evidence(native=True, started=started, error=error)
+        raise error
+    scan_context.update(scan=scan, started=started)
     policy = settings.get('software_update_policy', 'review')
     result = {'review_only': policy == 'review', 'scan': scan, 'items': [], 'failed_items': 0,
               'cancelled': False, 'note': 'Only currently offered native-manager packages within saved approvals can install. Native authorization may still ask for each privileged action.'}
+    scan_context['items'] = result['items']
     if scan.get('complete') is not True or scan.get('structured') is not True or scan.get('exitCode') != 0:
         result.update(review_only=True, failed_items=1, note='Package metadata is incomplete; no installer ran.')
-        return result
+        return with_app_scan(result, native=True, started=started)
     if policy == 'review':
         prepared_callback({'operation': 'software', 'scan_complete': True, 'candidate_count': 0, 'review_only': True})
-        return result
+        return with_app_scan(result, native=True, started=started, selected=[])
     if settings.get('setup_version') != CURRENT_SETUP_VERSION or settings.get('software_update_agreements_accepted') is not True:
         raise ValueError('Complete native setup and approve package-update agreements first.')
     if policy == 'all_supported' and settings.get('software_update_all_approved') is not True:
@@ -58,6 +79,7 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
     wanted = set(settings.get('software_update_ids', []))
     excluded = set(settings.get('software_update_exclude_ids', []))
     selected = [row for row in scan['updates'] if row['id'] not in excluded and (policy == 'all_supported' or row['id'] in wanted)]
+    scan_context['selected'] = list(selected)
     state = {'operation': 'software', 'scan_complete': True, 'candidate_count': len(selected), 'review_only': False}
     prepared_callback(state)
     if selected and before_install and before_install(state) is not True:
@@ -65,7 +87,7 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
                       installer_started=False, outcomeKnown=True,
                       deferred_ids=[row['id'] for row in selected],
                       note='Approved native updates were deferred at the maintenance/installer checkpoint; no installer ran.')
-        return result
+        return with_app_scan(result, native=True, started=started, selected=selected)
     for index, row in enumerate(selected):
         if _cancelled(cancel_event):
             result['cancelled'] = True
@@ -92,7 +114,9 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
             result['items'].append({'id': row['id'], 'status': 'failed', 'error': str(error)})
             result['failed_items'] += 1
             break
-    return result
+    processed = {item['id'] for item in result['items']}
+    result['deferred_ids'] = [row['id'] for row in selected if row['id'] not in processed]
+    return with_app_scan(result, native=True, started=started, selected=selected)
 
 
 def run_native_duplicates(backend, settings, *, cancel_event=None):

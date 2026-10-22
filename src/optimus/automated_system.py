@@ -5,9 +5,10 @@ only normalized descriptors collected from a fresh user-reviewed inventory.
 """
 from __future__ import annotations
 import copy
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import re
+import time
 import uuid
 from .automation import CURRENT_SETUP_VERSION
 
@@ -182,6 +183,7 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None,*,prepared_c
     callback is evidence that an installer has started.
     """
     notified=False
+    latest_evidence={}
     def prepared(**values):
         nonlocal notified
         if notified:return
@@ -190,13 +192,26 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None,*,prepared_c
         state.update(values)
         if prepared_callback is not None:prepared_callback(state)
     try:
-        return _run_drivers(backend,config,cancel_event,item_callback,prepared=prepared,
-                            before_install=before_install,phased=prepared_callback is not None or before_install is not None)
+        result = _run_drivers(backend,config,cancel_event,item_callback,prepared=prepared,
+                              before_install=before_install,phased=prepared_callback is not None or before_install is not None,
+                              latest_evidence=latest_evidence)
+        if 'driver_scan' not in result:
+            from .driver_coverage import driver_scan_evidence
+            proof = driver_scan_evidence(None)
+            proof.update(status='not_started', errors=[], summary='Driver search did not run. '
+                         + str(result.get('reason') or 'Cancelled before driver discovery.'))
+            result['driver_scan'] = proof
+        return result
+    except Exception as error:
+        if latest_evidence:
+            try:error.driver_scan=dict(latest_evidence)
+            except (AttributeError,TypeError):pass
+        raise
     finally:
         prepared()
 
 
-def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_install,phased):
+def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_install,phased,latest_evidence):
     policy=config.get('driver_policy','review')
     if config.get('driver_updates_enabled') is not True:return _finish(policy,[],skipped=True,review_only=True,reason='Driver maintenance is off; saved approvals are inactive.')
     if policy not in ('review','install_approved','install_matching'):raise ValueError('Unsupported driver policy.')
@@ -216,13 +231,43 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     approved_scope=copy.deepcopy({key:config.get(key) for key in ('setup_version','driver_updates_enabled','driver_policy',
         'driver_changes_approved','driver_update_agreements_accepted','driver_approved_updates','driver_approved_devices')})
     if _cancel(cancel_event):return _finish(policy,[],cancelled=True)
-    scan=backend.driver_updates_scan()
-    if not isinstance(scan,dict) or type(scan.get('resultCode')) is not int or scan['resultCode']!=2 or not isinstance(scan.get('updates'),list):
-        return _finish(policy,[{'binding':{'stage':'driver-scan'},'status':'failed','error':'Windows Update did not return a complete successful fresh driver scan.','result':scan,
-            'installer_started':False,'outcomeKnown':True}],skipped=True,scan=scan,installer_started=False,outcomeKnown=True)
+    from .driver_coverage import driver_scan_evidence
+    scan_started_utc=datetime.now(timezone.utc).isoformat()
+    scan_clock=time.monotonic()
+    try:
+        scan=backend.driver_updates_scan()
+    except Exception as error:
+        # Preserve the existing preparation/exception contract. Owners can save
+        # bounded evidence without mistaking this failed call for an empty scan.
+        failed=driver_scan_evidence({'updates': [], 'resultCode': 4,
+                                    'source': 'Windows Update', 'error': str(error)})
+        failed.update(started_utc=scan_started_utc,
+                      completed_utc=datetime.now(timezone.utc).isoformat(),
+                      duration_seconds=max(0,time.monotonic()-scan_clock))
+        try:error.driver_scan=failed
+        except (AttributeError,TypeError):pass
+        raise
+    scan_completed_utc=datetime.now(timezone.utc).isoformat()
+    scan_duration=max(0,time.monotonic()-scan_clock)
+    def proof(eligible_count=None):
+        value=driver_scan_evidence(scan,eligible_count=eligible_count)
+        # The native WUA search times are authoritative. If its bridge failed
+        # before returning them, preserve the timing of this attempted call.
+        if not value['started_utc']:value['started_utc']=scan_started_utc
+        if not value['completed_utc']:value['completed_utc']=scan_completed_utc
+        if value['duration_seconds'] is None:value['duration_seconds']=scan_duration
+        latest_evidence.clear()
+        latest_evidence.update(value)
+        return value
+    evidence=proof()
+    def finish(items, **extra):
+        return _finish(policy,items,scan=scan,driver_scan=dict(evidence),**extra)
+    if not evidence['complete']:
+        return finish([{'binding':{'stage':'driver-scan'},'status':'failed','error':'Windows Update did not return a complete successful fresh driver scan.','result':scan,
+            'installer_started':False,'outcomeKnown':True}],skipped=True,installer_started=False,outcomeKnown=True)
     if policy=='review':
         prepared(scan_complete=True)
-        return _finish(policy,[],review_only=True,scan=scan)
+        return finish([],review_only=True)
     fresh=[]
     for value in scan['updates']:
         try:fresh.append(driver_descriptor(value))
@@ -254,10 +299,11 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
         if counts[(value['id'],value['revision'])]!=1 or value.get('canRequestUserInput') is not False or value.get('rebootBehavior') not in (0,2):
             items.append({'binding':value,'status':'skipped','reason':'Ambiguous, interactive, unknown, or restart-requiring updates are excluded from unattended installation.'})
         else:eligible.append(value)
+    evidence=proof(eligible_count=len(eligible))
     prepared(scan_complete=True,candidate_count=len(eligible),review_only=False)
-    if not eligible or _cancel(cancel_event):return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False,installer_started=False,outcomeKnown=True)
+    if not eligible or _cancel(cancel_event):return finish(items,cancelled=_cancel(cancel_event),review_only=False,installer_started=False,outcomeKnown=True)
     def deferred(reason,**extra):
-        return _finish(policy,items,skipped=True,review_only=False,deferred=eligible,
+        return finish(items,skipped=True,review_only=False,deferred=eligible,
             cancelled=_cancel(cancel_event),reason=reason,stop_reason=reason,
             installer_started=False,outcomeKnown=True,**extra)
     if before_install is not None:
@@ -278,7 +324,7 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             return deferred('Saved driver approvals changed; review the current scope before installing.')
     backup=backend.driver_backup_automatic()
     if not isinstance(backup,dict) or type(backup.get('exit_code')) is not int or backup['exit_code']!=0 or not isinstance(backup.get('destination'),str) or not backup['destination']:
-        return _finish(policy,items+[{'status':'failed','binding':{'stage':'driver-backup'},'result':backup,'error':'A successful third-party driver backup is required before installation.',
+        return finish(items+[{'status':'failed','binding':{'stage':'driver-backup'},'result':backup,'error':'A successful third-party driver backup is required before installation.',
             'installer_started':False,'outcomeKnown':True}],backup=backup,installer_started=False,outcomeKnown=True)
     processed=0
     for index,value in enumerate(eligible):
@@ -298,6 +344,6 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             items.append({'binding':value,'status':'failed','error':str(error),'uncertain':True})
             break
     lifecycle={'installer_started':False,'outcomeKnown':True} if processed==0 else {}
-    return _finish(policy,items,cancelled=_cancel(cancel_event),review_only=False,backup=backup,deferred=eligible[processed:],
+    return finish(items,cancelled=_cancel(cancel_event),review_only=False,backup=backup,deferred=eligible[processed:],
         **lifecycle,note='Only approved applicable update identities or exact device/provider/class rules were used. No automatic reboot or elevation was requested.')
 

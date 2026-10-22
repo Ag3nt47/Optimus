@@ -18,6 +18,8 @@ Optimus combines previewed cleanup, browser privacy tools, resource management, 
 
 ## Download and run
 
+Version **0.9.5** records what each update search actually checked. Driver discovery explicitly queries the configured Windows Update service online and retains its result code, timing, applicable offers and present-device coverage. App discovery reports offered, recognized and approved candidates separately from installer outcomes. Worker cards and saved journals distinguish a successful zero-offer search from partial, failed or deferred checks. Unsupported version text stays marked for review; neither a successful installer nor an empty parsed list establishes that every app or driver is current. Windows Update does not cover every OEM catalog, and WinGet does not cover every installed app.
+
 Version **0.9.4** keeps each update worker's elapsed time through discovery, waiting and completion, and shows the concrete reason for a known pre-install refusal. The progress raccoon is twice as wide. Content windows resize to the available desktop and retain the size you choose during the session. Cancel and Auto continue remain visible while detailed content scrolls; the Sandbox toolbar wraps as its window narrows.
 
 Version **0.9.2** keeps deferred-worker messages readable at smaller window sizes and groups repeated installer warnings once. It also adds [audited recovery for a proven legacy update preflight error](docs/UPDATE_RECOVERY.md), preserving the original records and successful installation receipts. Unknown installer outcomes remain blocked; recovery never launches an installer.

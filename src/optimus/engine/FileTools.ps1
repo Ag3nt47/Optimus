@@ -400,10 +400,36 @@ function Test-SCMWuaRebootPending {
     return [bool]$system.RebootRequired
 }
 function Get-SCMDriverUpdateScan {
-    $session=New-SCMWuaSession
-    $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
-    $updates=@(foreach($update in $result.Updates){ConvertTo-SCMDriverUpdateDescriptor -Update $update})
-    [pscustomobject]@{updates=$updates;source='Windows Update';resultCode=[int]$result.ResultCode;includesOptional=$true;note='Exact update identity/revision and available device/provider/class metadata. A hardware or compatible ID can cover multiple devices; matching rules are not a physical device instance identity.'}
+    # Read-only search. Online explicitly requests the configured update service;
+    # it never overrides organization policy or downloads/installs an update.
+    $started=[datetime]::UtcNow.ToString('o');$clock=[Diagnostics.Stopwatch]::StartNew()
+    $criteria="IsInstalled=0 and Type='Driver' and IsHidden=0"
+    $updates=@();$errors=@();$warnings=@();$code=4;$online=$false;$server=$null;$service=''
+    try {
+        $session=New-SCMWuaSession
+        $searcher=$session.CreateUpdateSearcher()
+        $searcher.Online=$true
+        $online=[bool]$searcher.Online
+        $server=Get-SCMWuaProperty $searcher 'ServerSelection'
+        $service=[string](Get-SCMWuaProperty $searcher 'ServiceID' '')
+        $result=$searcher.Search($criteria)
+        if($null -eq $result -or $null -eq $result.Updates){throw 'Windows Update returned no usable driver offer collection.'}
+        $code=[int]$result.ResultCode
+        $updates=@(foreach($update in $result.Updates){ConvertTo-SCMDriverUpdateDescriptor -Update $update})
+        $warnings=@(foreach($warning in @((Get-SCMWuaProperty $result 'Warnings' @()) | Select-Object -First 20)){
+            [pscustomobject]@{source='Windows Update';message=[string](Get-SCMWuaProperty $warning 'Message' 'Update search reported a warning.');hresult=(Get-SCMWuaProperty $warning 'HResult')}
+        })
+    } catch {
+        $errors=@([pscustomobject]@{source='Windows Update';error=$_.Exception.Message})
+    }
+    $clock.Stop()
+    [pscustomobject]@{
+        updates=@($updates);source='Windows Update';resultCode=$code;includesOptional=$true
+        started_utc=$started;completed_utc=[datetime]::UtcNow.ToString('o');duration_seconds=$clock.Elapsed.TotalSeconds
+        online=$online;criteria=$criteria;server_selection=$server;service_id=$service
+        returned_offer_count=$updates.Count;errors=@($errors);warnings=@($warnings)
+        note='Online read-only search of applicable required and optional non-hidden drivers from the configured Windows Update service. No download or installation. OEM catalogs are not exhaustively searched. A hardware or compatible ID can cover multiple devices; matching rules are not a physical device instance identity.'
+    }
 }
 function ConvertTo-SCMDriverDate {
     param($Value)

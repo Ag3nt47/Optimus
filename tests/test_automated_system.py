@@ -171,6 +171,99 @@ def test_failed_or_unknown_fresh_driver_scan_is_a_reported_failure():
         value.driver_backup_automatic.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
 
 
+@pytest.mark.parametrize('policy', ['review', 'install_approved', 'install_matching'])
+def test_empty_completed_scan_keeps_zero_offer_proof_and_never_installs(policy):
+    value=backend()
+    scan={'resultCode':2,'updates':[],'online':True,'duration_seconds':46.0,
+          'started_utc':'2026-10-22T22:00:00Z','completed_utc':'2026-10-22T22:00:46Z',
+          'coverage':{'inventoryComplete':True,'summary':{'devices':164,'deviceProblems':0}}}
+    value.driver_updates_scan.return_value=scan
+    config=driver_config(driver_policy=policy,driver_approved_devices=[system.driver_device_rule(driver())])
+    result=system.run_drivers(value,config)
+    value.driver_updates_scan.assert_called_once()
+    value.driver_backup_automatic.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
+    assert result['scan'] is scan
+    proof=result['driver_scan']
+    assert proof['complete'] and proof['offers_count']==0 and proof['devices_checked']==164
+    assert proof['eligible_count']==(None if policy=='review' else 0)
+    assert proof['duration_seconds']==46.0 and proof['online']
+    assert 'No applicable drivers were offered' in proof['summary']
+
+
+def test_available_unapproved_drivers_are_not_misrepresented_as_zero_offers():
+    value=backend()
+    scan={'resultCode':2,'updates':[driver(provider='Different provider')]}
+    value.driver_updates_scan.return_value=scan
+    result=system.run_drivers(value,driver_config(driver_policy='install_matching',
+        driver_approved_devices=[system.driver_device_rule(driver())]))
+    assert result['scan'] is scan
+    assert result['driver_scan']['offers_count']==1 and result['driver_scan']['eligible_count']==0
+    assert 'No applicable drivers were offered' not in result['driver_scan']['summary']
+    value.driver_backup_automatic.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
+
+
+@pytest.mark.parametrize('changes', [dict(updates=None),dict(updates=[None]),dict(error='Fixture access denied'),
+    dict(warnings=[{'message':'Fixture source incomplete'}]),dict(online=False)])
+def test_malformed_or_partial_driver_scan_preserves_proof_and_blocks_install(changes):
+    value=backend();scan={'resultCode':2,'updates':[]};scan.update(changes)
+    value.driver_updates_scan.return_value=scan
+    result=system.run_drivers(value,driver_config())
+    assert result['failed_items']==1 and not result['driver_scan']['complete']
+    assert result['scan'] is scan and result['driver_scan']['errors']
+    value.driver_backup_automatic.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
+
+
+def test_successful_install_and_post_scan_deferral_keep_scan_evidence():
+    value=backend();result=system.run_drivers(value,driver_config())
+    assert result['driver_scan']['complete'] and result['driver_scan']['offers_count']==1
+    assert result['driver_scan']['eligible_count']==1 and result['scan']['updates']
+    value=backend();value.is_admin.return_value=False
+    result=system.run_drivers(value,driver_config(),prepared_callback=lambda _:None)
+    assert result['skipped'] and result['driver_scan']['complete']
+    assert result['driver_scan']['offers_count']==1 and result['driver_scan']['eligible_count']==1
+    value.driver_update_apply_unattended.assert_not_called()
+
+
+def test_unstarted_driver_search_is_explicit_and_never_claims_zero_offers():
+    value=backend();value.is_admin.return_value=False
+    result=system.run_drivers(value,driver_config())
+    assert result['driver_scan']['status']=='not_started' and not result['driver_scan']['complete']
+    assert result['driver_scan']['offers_count'] is None
+    value.driver_updates_scan.assert_not_called()
+
+
+def test_driver_bridge_error_keeps_attempt_timing_without_claiming_online_search_succeeded():
+    value=backend();value.driver_updates_scan.side_effect=RuntimeError('Fixture bridge failure')
+    with pytest.raises(RuntimeError,match='Fixture bridge failure') as captured:
+        system.run_drivers(value,driver_config())
+    proof=captured.value.driver_scan
+    assert not proof['complete'] and proof['status']=='failed' and proof['online'] is None
+    assert proof['started_utc'] and proof['completed_utc'] and proof['duration_seconds']>=0
+    assert 'Fixture bridge failure' in str(proof['errors'])
+    value.driver_backup_automatic.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
+
+
+@pytest.mark.parametrize('failure', ['backup', 'gate', 'readiness'])
+def test_post_scan_exception_preserves_successful_discovery_proof_without_installing(failure):
+    value=backend()
+    failure_error=RuntimeError('Fixture post-scan '+failure+' failure')
+    options={}
+    if failure=='backup':
+        value.driver_backup_automatic.side_effect=failure_error
+    elif failure=='gate':
+        options['before_install']=Mock(side_effect=failure_error)
+    else:
+        value.update_disk_readiness=Mock(side_effect=failure_error)
+        options['prepared_callback']=lambda _:None
+    with pytest.raises(RuntimeError,match='Fixture post-scan') as captured:
+        system.run_drivers(value,driver_config(),**options)
+    proof=captured.value.driver_scan
+    assert proof['complete'] and proof['offers_count']==proof['eligible_count']==1
+    assert proof['started_utc'] and proof['completed_utc']
+    value.driver_updates_scan.assert_called_once()
+    value.driver_update_apply_unattended.assert_not_called()
+
+
 @pytest.mark.parametrize('outcome',[RuntimeError('fixture timeout; still running'),{'resultCode':3,'hresult':1},{'resultCode':2,'aggregateResultCode':3,'hresult':0}])
 def test_install_failure_or_uncertainty_defers_remaining_driver_ids(outcome):
     value=backend();second=driver(id='00000000-0000-0000-0000-000000000002',title='Second fixture')

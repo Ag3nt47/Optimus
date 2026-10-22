@@ -16,7 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from optimus.automation import CURRENT_SETUP_VERSION
-from optimus.ui import OptimizationProgressWindow, OptimusWindow, _report_preview
+from optimus.ui import OptimizationProgressWindow, OptimusWindow, DetailedSettingsWindow, _report_preview
 from optimus.widgets.theme import build_qss
 from optimus.widgets.header_controls import PanelRevealOverlay
 from optimus.workflow import DEFAULTS
@@ -96,6 +96,31 @@ def test_foreground_and_two_update_jobs_show_independent_observed_status(progres
     assert 'Queued behind application updates' in driver.details.text()
     assert driver.progress.value() == 0 and driver.progress.maximum() == 2
     assert progress.title.text() == 'OPTIMIZATION IN PROGRESS'
+
+
+@pytest.mark.parametrize('identity,noun', [('driver_updates', 'driver'), ('software_updates', 'app')])
+def test_completed_discovery_cards_show_zero_offers_and_failed_searches_stay_unknown(progress, identity, noun):
+    progress.update_progress({'stage': 'Continue maintenance', 'percentage': 40,
+        'jobs': [{'id': identity, 'status': 'completed', 'description': 'Fixture catalog search succeeded; no applicable offers.',
+                  'current': 0, 'total': 0, 'scan_label': f'0 {noun} updates found', 'elapsed_seconds': 46}]})
+    card = progress.worker_cards[identity]
+    assert card.status.text() == 'Completed'
+    assert card.progress.format() == f'0 {noun} updates found'
+    assert card.elapsed.text() == 'Elapsed: 46s'
+    progress.update_progress({'stage': 'Continue maintenance', 'percentage': 41,
+        'jobs': [{'id': identity, 'status': 'needs_review', 'description': 'Fixture catalog search failed; availability unknown.',
+                  'current': 0, 'total': 0, 'scan_label': 'Availability not confirmed', 'elapsed_seconds': 46}]})
+    assert card.status.text() == 'Needs review'
+    assert card.progress.format() == 'Availability not confirmed'
+    assert 'failed' in card.details.text()
+
+
+def test_settings_driver_failure_does_not_describe_a_zero_offer_success():
+    panel = SimpleNamespace(driver_updates_table=Mock(), driver_tabs=Mock(), driver_update_note=Mock())
+    DetailedSettingsWindow._driver_updates_ready(panel, {'resultCode': 4, 'updates': [], 'error': 'Fixture network error'})
+    text = panel.driver_update_note.setText.call_args.args[0]
+    assert 'incomplete' in text and 'could not be verified' in text
+    assert '0 driver candidates' not in text and 'No applicable drivers' not in text
 
 
 def test_driver_lane_wait_and_handoff_preserve_cards_and_cancel(progress):

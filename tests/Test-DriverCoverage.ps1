@@ -49,7 +49,7 @@ Assert-Test (-not $result.complete -and $result.devices.Count -eq 3 -and -not $r
 Reset-Fixture;$script:FailClass='Win32_BaseBoard';$result=Get-SCMDeviceCoverageInventory
 Assert-Test ($result.complete -and $result.errors[0].source -eq 'Win32_BaseBoard') 'optional board failure shown without discarding full device coverage'
 # The original unrestricted required+optional scan criteria remain exact; no IsAssigned/BrowseOnly filter.
-$script:FixtureSearcher=New-Object PSObject
+$script:FixtureSearcher=[pscustomobject]@{Online=$false;ServerSelection=0;ServiceID='fixture-policy-service'}
 $script:FixtureSearcher|Add-Member ScriptMethod Search {param($query)
     Assert-Test ($query -ceq "IsInstalled=0 and Type='Driver' and IsHidden=0") 'required and optional criteria retained'
     return [pscustomobject]@{ResultCode=[int]2;Updates=@()}
@@ -59,5 +59,21 @@ $script:FixtureSession|Add-Member ScriptMethod CreateUpdateSearcher {return $scr
 function New-SCMWuaSession {return $script:FixtureSession}
 $scan=Get-SCMDriverUpdateScan
 Assert-Test ($scan.includesOptional -and $scan.resultCode -eq 2) 'scan advertises optional coverage without claiming vendor coverage'
+Assert-Test ($scan.online -and $script:FixtureSearcher.Online) 'scan explicitly requests online configured update service'
+Assert-Test ($scan.criteria -ceq "IsInstalled=0 and Type='Driver' and IsHidden=0") 'exact search criteria recorded'
+Assert-Test ($scan.returned_offer_count -eq 0 -and $scan.updates.Count -eq 0) 'confirmed empty result counted'
+Assert-Test ($scan.started_utc -and $scan.completed_utc -and $scan.duration_seconds -ge 0) 'UTC timestamps and duration recorded'
+Assert-Test ($scan.server_selection -eq 0 -and $scan.service_id -eq 'fixture-policy-service') 'configured source metadata retained'
+Assert-Test ($scan.errors.Count -eq 0 -and $scan.warnings.Count -eq 0) 'complete clean scan retains explicit empty error collections'
+$script:FixtureSearcher|Add-Member ScriptMethod Search {param($query) return [pscustomobject]@{ResultCode=[int]2;Updates=@();Warnings=@([pscustomobject]@{Message='Fixture source warning';HResult=123})}} -Force
+$warningScan=Get-SCMDriverUpdateScan
+Assert-Test ($warningScan.warnings.Count -eq 1 -and $warningScan.warnings[0].message -eq 'Fixture source warning') 'partial source warning retained'
+$script:FixtureSearcher|Add-Member ScriptMethod Search {param($query) throw 'Fixture online service unavailable'} -Force
+$failedScan=Get-SCMDriverUpdateScan
+Assert-Test ($failedScan.resultCode -eq 4 -and $failedScan.errors.Count -eq 1 -and $failedScan.errors[0].error -match 'Fixture online service unavailable') 'online search failure recorded without success'
+Assert-Test ($failedScan.started_utc -and $failedScan.completed_utc -and $failedScan.duration_seconds -ge 0 -and $failedScan.online) 'failed online attempt retains timed evidence'
+$script:FixtureSearcher|Add-Member ScriptMethod Search {param($query) return [pscustomobject]@{ResultCode=[int]2}} -Force
+$malformedScan=Get-SCMDriverUpdateScan
+Assert-Test ($malformedScan.resultCode -eq 4 -and $malformedScan.errors.Count -eq 1) 'missing offer collection cannot be reported as a successful zero'
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealScans=0;RealDownloads=0;RealInstalls=0;RealDeviceChanges=0;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress
 

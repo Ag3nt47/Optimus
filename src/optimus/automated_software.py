@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import copy
 import re
+import time
 from typing import Any
+
+from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
 
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _VERSION = re.compile(r'[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}')
@@ -101,16 +104,23 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
         state.update(values)
         if prepared_callback is not None:
             prepared_callback(state)
+    context = {}
     try:
-        return _run_software(backend, configuration, cancel_event=cancel_event, item_callback=item_callback,
-                             prepared=prepared, before_install=before_install,
-                             phased=prepared_callback is not None or before_install is not None)
-    finally:
-        prepared()
+        try:
+            outcome = _run_software(backend, configuration, cancel_event=cancel_event, item_callback=item_callback,
+                                 prepared=prepared, before_install=before_install, scan_context=context,
+                                 phased=prepared_callback is not None or before_install is not None)
+            context['outcome'] = outcome
+            return outcome
+        finally:
+            prepared()
+    except Exception as error:
+        attach_app_scan_error(error, context)
+        raise
 
 
 def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, item_callback,
-                  prepared, before_install, phased) -> dict[str, Any]:
+                  prepared, before_install, phased, scan_context) -> dict[str, Any]:
     """Apply only a current scan's exact IDs under the saved selected/all scope.
 
     The native updater checks pins again before each installation. No generic
@@ -118,23 +128,35 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     separate saved compatibility choice may add the non-security force flag.
     """
     cancelled = lambda: cancel_event is not None and cancel_event.is_set()
+    started = time.time()
     if configuration.get('software_updates_enabled') is not True:
-        return {'review_only': True, 'skipped': True, 'items': [], 'failed_items': 0,
-                'note': 'Software Updater is off; no scan or installer was started.'}
+        return with_app_scan({'review_only': True, 'skipped': True, 'items': [], 'failed_items': 0,
+                'note': 'Software Updater is off; no scan or installer was started.'},
+                not_started='Software Updater is off; no update search was started.')
     if cancelled():
-        return {'review_only': True, 'cancelled': True, 'items': [], 'failed_items': 0}
-    scan = backend.updates_scan()
+        return with_app_scan({'review_only': True, 'cancelled': True, 'items': [], 'failed_items': 0},
+                             not_started='Cancelled before the app update search started.')
+    try:
+        scan = backend.updates_scan()
+    except Exception as error:
+        error.app_scan = app_scan_evidence(started=started, error=error)
+        raise
     if not isinstance(scan, dict):
-        raise RuntimeError('The software update scan returned invalid metadata.')
+        error = RuntimeError('The software update scan returned invalid metadata.')
+        error.app_scan = app_scan_evidence(started=started, error=error)
+        raise error
+    scan_context.update(scan=scan, started=started)
     code_ok = type(scan.get('exitCode')) is int and scan['exitCode'] == 0
     scan_items = scan.get('updates', scan.get('packages'))
     untrusted = (not code_ok or scan.get('structured') is not True or scan.get('source', 'winget') != 'winget'
                  or not isinstance(scan_items, list) or len(scan_items) > 1000)
+    partial_scan = untrusted or bool(scan.get('excluded'))
     policy = configuration['software_update_policy']
     if policy == 'review':
         prepared(scan_complete=not untrusted)
-        return {'review_only': True, 'scan': scan, 'failed_items': int(untrusted),
-                'note': 'Software update review only; no installer was started. Failed, incomplete or unrecognized scans require review.'}
+        return with_app_scan({'review_only': True, 'scan': scan, 'failed_items': int(partial_scan),
+                'note': 'Software update review only; no installer was started. Failed, incomplete or unrecognized scans require review.'},
+                started=started, selected=[])
     if configuration.get('software_update_agreements_accepted') is not True:
         raise ValueError('Unattended software updates require saved agreement acceptance.')
     if policy == 'all_supported' and configuration.get('software_update_all_approved') is not True:
@@ -147,16 +169,18 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     selected = ([identity for identity in candidates if identity.casefold() not in exclusions]
                 if policy == 'all_supported' else [canonical_ids[identity.casefold()] for identity in configuration['software_update_ids']
                 if identity.casefold() in canonical_ids and identity.casefold() not in exclusions])
+    scan_context['selected'] = list(selected)
     approved_scope = copy.deepcopy({key: configuration.get(key) for key in ('software_updates_enabled',
         'software_update_policy', 'software_update_ids', 'software_update_all_approved',
         'software_update_exclude_ids', 'software_update_agreements_accepted', 'update_compatibility_mode_enabled')})
     prepared(scan_complete=not untrusted, candidate_count=len(selected), review_only=False)
+    approved_ids = list(selected)
     preflight_items = []
-    def defer(reason, *, failed=0, refreshed_scan=None):
-        return {'review_only': False, 'scan': scan if refreshed_scan is None else refreshed_scan,
-                'policy': policy, 'items': [], 'failed_items': failed, 'skipped': True,
+    def defer(reason, *, failed=0, refreshed_scan=None, error=None):
+        return with_app_scan({'review_only': False, 'scan': scan if refreshed_scan is None else refreshed_scan,
+                'policy': policy, 'items': [], 'failed_items': failed + int(partial_scan), 'skipped': True,
                 'deferred_ids': list(selected), 'cancelled': cancelled(), 'stop_reason': reason,
-                'installer_started': False, 'outcomeKnown': True}
+                'installer_started': False, 'outcomeKnown': True}, started=started, selected=approved_ids, error=error)
     if selected and not cancelled() and before_install is not None:
         if before_install({'operation': 'software', 'scan_complete': not untrusted,
                            'candidate_count': len(selected), 'review_only': False}) is not True:
@@ -172,7 +196,7 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
         try:
             refreshed_scan = backend.updates_scan()
         except Exception as error:
-            return defer('Software revalidation failed before any installer started (' + type(error).__name__ + ').', failed=1)
+            return defer('Software revalidation failed before any installer started (' + type(error).__name__ + ').', failed=1, error=error)
         if cancelled():
             return defer('Cancelled while revalidating application updates.', refreshed_scan=refreshed_scan)
         refreshed = fresh_candidates(refreshed_scan)
@@ -196,7 +220,10 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
         selected = unchanged
         candidates = {identity: refreshed[identity] for identity in selected}
         scan = refreshed_scan
+        scan_context['scan'] = scan
+        partial_scan = partial_scan or bool(scan.get('excluded'))
     results, deferred = preflight_items, []
+    scan_context['items'] = results
     restart_needed = False
     interrupted = False
     stop_reason = ''
@@ -284,8 +311,8 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
         lifecycle['outcomeKnown'] = all(value['outcomeKnown'] for value in evidence)
         if all(type(value.get('installer_started')) is bool for value in evidence):
             lifecycle['installer_started'] = any(value['installer_started'] for value in evidence)
-    return {'review_only': not bool(selected), 'scan': scan, 'policy': policy, 'items': results,
-            'failed_items': sum(item['status'] == 'failed' for item in results) + needs_review + int(untrusted),
+    return with_app_scan({'review_only': not bool(selected), 'scan': scan, 'policy': policy, 'items': results,
+            'failed_items': sum(item['status'] == 'failed' for item in results) + needs_review + int(partial_scan),
             'skipped_items': sum(item['status'] == 'skipped' for item in results), 'requires_review_items': needs_review,
             'cancelled': cancelled() or interrupted, 'deferred_ids': deferred, 'restartNeeded': restart_needed,
             'stop_reason': stop_reason,
@@ -295,4 +322,5 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
             **lifecycle,
             'note': ('Only complete identities with a provably newer version from a successful fresh winget-source scan may be updated. Equal, older or incomparable versions are skipped. Saved exclusions and native pin checks remain in effect. '
                      + ('The saved compatibility choice adds WinGet --force for non-security issues; it cannot bypass an installer hard block. ' if configuration.get('update_compatibility_mode_enabled') is True else 'No force option is requested. ')
-                     + 'Hash/signature checks remain enabled; no pin override, unknown-version update, blind retry or automatic restart is requested. Unsupported applications require their publisher updater.')}
+                     + 'Hash/signature checks remain enabled; no pin override, unknown-version update, blind retry or automatic restart is requested. Unsupported applications require their publisher updater.')},
+                     started=started, selected=approved_ids)

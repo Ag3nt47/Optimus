@@ -138,6 +138,7 @@ class ProgressMux:
                                            or ('Driver' if job_id == 'driver_updates' else 'Application') + ' update worker: ' + status)[:2000],
                         'current': state.get('current', previous.get('current', 0)),
                         'total': state.get('total', previous.get('total', 0)),
+                        'scan_label': str(state.get('scan_label', previous.get('scan_label', '')))[:200],
                         'current_package': package}
             # Serialize emission too, so an older background event cannot
             # replace a newer foreground stage in the queued UI callbacks.
@@ -292,7 +293,84 @@ def _journal_result(result):
                      for row in result.get('items', []) if isinstance(row, dict)][:1000]
     if _restart_needed(result):
         saved['restartNeeded'] = True
+    for key in ('driver_scan', 'app_scan'):
+        evidence = result.get(key)
+        if isinstance(evidence, dict):
+            saved[key] = _bounded_scan_evidence(evidence)
     return saved
+
+
+def _bounded_scan_evidence(evidence):
+    """Keep compact scan proof without persisting a device/package inventory."""
+    fields = ('schema', 'complete', 'status', 'source', 'criteria', 'online',
+              'started_utc', 'completed_utc', 'duration_seconds', 'offers_count',
+              'eligible_count', 'result_code', 'invalid_offer_count', 'inventory_complete',
+              'devices_checked', 'device_problems', 'recognized_offers_count',
+              'installed_packages_checked', 'source_reported_offers_count', 'completed_count', 'verified_count',
+              'failed_count', 'skipped_count', 'deferred_count', 'remaining_count',
+              'no_more_offered', 'coverage_limit', 'summary')
+    saved = {}
+    for key in fields:
+        value = evidence.get(key)
+        if key in evidence and (value is None or isinstance(value, (bool, int, float, str))):
+            saved[key] = value[:2000] if isinstance(value, str) else value
+    errors = evidence.get('errors')
+    if isinstance(errors, list):
+        saved['errors'] = [{key: str(row[key])[:1000] for key in ('source', 'error') if key in row}
+                           for row in errors[:20] if isinstance(row, dict)]
+    return saved
+
+
+def update_completion_state(result):
+    """Describe observed availability separately from installer item counts."""
+    result = result if isinstance(result, dict) else {}
+    key = next((key for key in ('driver_scan', 'app_scan') if isinstance(result.get(key), dict)), None)
+    evidence = result[key] if key else {}
+    reason = str(result.get('stop_reason') or '')
+    summary = str(evidence.get('summary') or '')
+    description = reason or summary or 'Update checks completed; item results are ready.'
+    if reason and summary and summary not in reason:
+        description += ' ' + summary
+    errors = evidence.get('errors')
+    if isinstance(errors, list):
+        notes = [str(row.get('error') or '')[:500] for row in errors[:3] if isinstance(row, dict)]
+        notes = [note for note in notes if note and note not in description]
+        if notes:
+            description += ' Details: ' + '; '.join(notes)
+    label = ''
+    offers = evidence.get('offers_count')
+    complete = evidence.get('complete') is True
+    if evidence:
+        if complete and type(offers) is int and offers >= 0:
+            label = str(offers) + (' driver' if key == 'driver_scan' else ' app') + (' update found' if offers == 1 else ' updates found')
+        elif evidence.get('status') == 'not_started':
+            label = 'Scan not started'
+        elif (key == 'app_scan' and type(evidence.get('recognized_offers_count')) is int
+              and evidence['recognized_offers_count'] > 0):
+            label = str(evidence['recognized_offers_count']) + ' recognized; incomplete'
+        else:
+            label = 'Availability not confirmed'
+    items = result.get('items')
+    state = {'description': description[:2000], 'current': len(items) if isinstance(items, list) else 0,
+             'id': None,
+             'scan_label': label}
+    # Existing per-installer totals remain distinct from the number discovered.
+    if not isinstance(items, list) or not items:
+        state['total'] = 0
+    return state
+
+
+def update_completion_status(result):
+    if result.get('cancelled'):
+        return 'cancelled'
+    evidence = next((result[key] for key in ('driver_scan', 'app_scan') if isinstance(result.get(key), dict)), {})
+    if installer_barrier(result) or result.get('failed_items') or evidence.get('status') in ('failed', 'incomplete'):
+        return 'needs_review'
+    if evidence and evidence.get('complete') is not True:
+        return 'deferred'
+    if evidence and (result.get('skipped') is True or result.get('deferred') or result.get('deferred_ids')):
+        return 'deferred'
+    return 'completed'
 
 
 def record_installer_outcome(backend, run_id, title, result):
@@ -434,6 +512,7 @@ class ParallelAppUpdates:
         from .runtime_priority import lower_worker_priority
         restore_priority = lower_worker_priority()
         worker = None
+        worker_kind = 'driver' if self.title in DRIVER_TITLES else 'application'
         try:
             self.record['status'] = 'running'
             self.record['execution_started_at'] = time.time()
@@ -444,17 +523,21 @@ class ParallelAppUpdates:
             worker = isolated_backend(self.backend, isolate_bridge=self.isolate_bridge)
             self.result = self.operation(worker, self.item_progress)
             if not isinstance(self.result, dict):
-                raise ValueError('The application updater returned an unknown result.')
+                raise ValueError('The ' + worker_kind + ' updater returned an unknown result.')
         except BaseException as error:
             self.result = {'items': [], 'failed_items': 1,
                            'uncertain': self.record['installer_prepared'],
-                           'stop_reason': ('The application worker raised an error; verify installer state before continuing.'
+                           'stop_reason': ('The ' + worker_kind + ' worker raised an error; verify installer state before continuing.'
                                            if self.record['installer_prepared'] else
-                                           'The application scan failed before any installer was prepared; review the saved error.'),
+                                           'The ' + worker_kind + ' worker failed before any installer was prepared; review the saved error.'),
                            'error': str(error)[:4000]}
             if not self.record['installer_prepared'] or (getattr(error, 'installer_started', None) is False
                                                         and getattr(error, 'outcomeKnown', None) is True):
                 self.result.update(installer_started=False, outcomeKnown=True, running=False, uncertain=False)
+            for key in ('driver_scan', 'app_scan'):
+                evidence = getattr(error, key, None)
+                if isinstance(evidence, dict):
+                    self.result[key] = _bounded_scan_evidence(evidence)
         finally:
             if worker is not None and getattr(worker, 'bridge', None) is not getattr(self.backend, 'bridge', None):
                 # Never close the shared backend (its sampler/controller belongs
@@ -471,16 +554,14 @@ class ParallelAppUpdates:
         try:
             journal_result = _journal_result(self.result)
             self.record.update(status='uncertain' if _uncertain(self.result, native=native) else
-                               'needs_review' if installer_barrier(self.result) or self.result.get('failed_items') else 'completed',
+                               'needs_review' if update_completion_status(self.result) == 'needs_review' else 'completed',
                                finished_at=time.time(), result=journal_result)
             self._write()
         except BaseException as error:
             self.result = dict(self.result, failed_items=max(1, self.result.get('failed_items', 0)), uncertain=True,
                                stop_reason='The application outcome journal could not be saved; verify installer state before continuing.',
                                journal_error=str(error)[:2000])
-        self.mux.background('needs_review' if installer_barrier(self.result) or self.result.get('failed_items') else 'completed',
-                            {'description': str(self.result.get('stop_reason') or 'Update checks completed; item results are ready.'),
-                             'current': len(self.result.get('items', []))})
+        self.mux.background(update_completion_status(self.result), update_completion_state(self.result))
 
     def join(self, *, next_stage=None):
         if self.joined:
@@ -502,9 +583,7 @@ class ParallelAppUpdates:
         self.joined = True
         if status == 'failed':
             self.stage['error'] = 'One or more application update checks failed; review the saved item results.'
-        self.mux.background('cancelled' if result.get('cancelled') else 'needs_review' if installer_barrier(result) or result.get('failed_items') else 'completed',
-                            {'description': str(result.get('stop_reason') or 'Update checks completed; item results are ready.'),
-                             'current': len(result.get('items', []))})
+        self.mux.background(update_completion_status(result), update_completion_state(result))
         return self.stage
 
 

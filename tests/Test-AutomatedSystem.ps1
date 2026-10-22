@@ -20,7 +20,7 @@ function Reset-Fixture {
  $script:Update=[pscustomobject]@{Identity=[pscustomobject]@{UpdateID='00000000-0000-0000-0000-000000000001';RevisionNumber=[int]1};Title='Fixture driver';IsDownloaded=$false;EulaAccepted=$false;DriverHardwareID='PCI\VEN_1234&DEV_5678';DriverProvider='Fixture provider';DriverClass='Display';DriverManufacturer='Fixture';DriverModel='Fixture model';DriverVerDate=[datetime]'2026-10-20';InstallationBehavior=[pscustomobject]@{CanRequestUserInput=$false;RebootBehavior=[int]2}}
  $script:Update|Add-Member ScriptMethod AcceptEula {$script:Accepts++;$this.EulaAccepted=$true}
  $script:SearchResult=[pscustomobject]@{ResultCode=[int]2;Updates=@($script:Update)}
- $script:Searcher=New-Object PSObject;$script:Searcher|Add-Member ScriptMethod Search {param($query) if($query -cne "IsInstalled=0 and Type='Driver' and IsHidden=0"){throw 'Unexpected search'};return $script:SearchResult}
+ $script:Searcher=[pscustomobject]@{Online=$false};$script:Searcher|Add-Member ScriptMethod Search {param($query) if($query -cne "IsInstalled=0 and Type='Driver' and IsHidden=0"){throw 'Unexpected search'};return $script:SearchResult}
  $script:DownloadItem=[pscustomobject]@{ResultCode=[int]2;HResult=0}
  $script:DownloadResult=[pscustomobject]@{ResultCode=[int]2};$script:DownloadResult|Add-Member ScriptMethod GetUpdateResult {param($index) if($index -ne 0){throw 'Wrong index'};return $script:DownloadItem}
  $script:Downloader=[pscustomobject]@{Updates=$null;IsForced=$true};$script:Downloader|Add-Member ScriptMethod Download {$script:Downloads++;return $script:DownloadResult}

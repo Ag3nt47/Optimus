@@ -3,7 +3,7 @@ from copy import deepcopy
 from unittest.mock import Mock
 import pytest
 
-from optimus.driver_coverage import build_driver_coverage, is_trusted_support_url, support_links
+from optimus.driver_coverage import build_driver_coverage, driver_scan_evidence, is_trusted_support_url, support_links
 
 
 def device(**changes):
@@ -68,6 +68,54 @@ def test_no_offer_does_not_claim_current_or_missing_driver():
     assert 'newer vendor release may exist' in row['statusDescription']
     assert not row['missingDriver'] and row['driverMetadataMissing']
     assert result['summary']['missingDriver'] == 0
+
+
+def test_scan_evidence_reports_successful_zero_only_with_valid_completed_search():
+    scan = dict(resultCode=2, updates=[], online=True,
+                criteria="IsInstalled=0 and Type='Driver' and IsHidden=0",
+                started_utc='2026-10-22T22:00:00Z', completed_utc='2026-10-22T22:00:46Z',
+                duration_seconds=46.125, returned_offer_count=0, errors=[], warnings=[])
+    scan['coverage'] = report(offers=[])
+    proof = driver_scan_evidence(scan, eligible_count=0)
+    assert proof['complete'] and proof['status'] == 'completed'
+    assert proof['offers_count'] == 0 and proof['eligible_count'] == 0
+    assert proof['online'] and proof['duration_seconds'] == 46.125
+    assert proof['started_utc'] == scan['started_utc'] and proof['completed_utc'] == scan['completed_utc']
+    assert proof['inventory_complete'] and proof['devices_checked'] == 1
+    assert 'No applicable drivers were offered' in proof['summary']
+    assert 'OEM tools may offer other' in proof['summary']
+
+
+@pytest.mark.parametrize('changes', [
+    dict(resultCode=3), dict(resultCode=True), dict(resultCode=4), dict(updates=None),
+    dict(updates=[None]), dict(updates=[offer(id='invalid')]), dict(updates=[offer(), offer()]),
+    dict(error='Fixture denied'), dict(errors=[{'error': 'Fixture policy error'}]),
+    dict(warnings=[{'message': 'Fixture partial source'}]), dict(online=False),
+    dict(online='true'), dict(returned_offer_count=2), dict(criteria='IsInstalled=0'),
+])
+def test_scan_evidence_never_turns_malformed_partial_or_failed_into_zero_offers(changes):
+    scan = dict(resultCode=2, updates=[])
+    scan.update(changes)
+    proof = driver_scan_evidence(scan)
+    assert not proof['complete'] and proof['errors']
+    assert 'No applicable drivers were offered' not in proof['summary']
+    assert 'available updates could not be verified' in proof['summary']
+    coverage = build_driver_coverage(dict(complete=True, devices=[device()]), scan)
+    assert not coverage['updateScanComplete'] and coverage['summary']['noOffer'] == 0
+
+
+def test_partial_driver_offers_retained_without_claiming_full_availability():
+    result = report(scan={'resultCode': 3})
+    assert result['devices'][0]['updateOffers']
+    assert result['devices'][0]['status'] == 'scan_incomplete'
+    assert not result['updateScanComplete']
+
+
+def test_driver_scan_proof_bounds_error_and_text_payload():
+    proof = driver_scan_evidence(dict(resultCode=4, updates=[], source='x' * 3000,
+        errors=[{'source': 'y' * 3000, 'error': 'z' * 3000}] * 3000))
+    assert len(proof['errors']) <= 20 and len(proof['source']) <= 200
+    assert all(len(row['source']) <= 120 and len(row['error']) <= 500 for row in proof['errors'])
 
 
 @pytest.mark.parametrize('code', [28, 22, 43, 52, 65])

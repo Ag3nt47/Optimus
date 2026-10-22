@@ -5,7 +5,103 @@ release. This module does not download, install, disable or delete any device.
 """
 from __future__ import annotations
 
+import math
 import re
+
+DRIVER_SEARCH_CRITERIA = "IsInstalled=0 and Type='Driver' and IsHidden=0"
+
+
+def driver_scan_evidence(scan, *, eligible_count=None):
+    """Bounded scan proof; empty offers are conclusive only after valid success.
+
+    Device inventory completeness and Windows Update availability are separate
+    observations. Neither is evidence of every vendor's latest driver release.
+    """
+    from .automated_system import driver_descriptor
+    value = scan if isinstance(scan, dict) else {}
+    errors = []
+    def error(message, source='Windows Update'):
+        if len(errors) < 20:
+            errors.append({'source': str(source)[:120], 'error': str(message)[:500]})
+    if not isinstance(scan, dict):
+        error('No usable driver scan report was returned.')
+    code = value.get('resultCode')
+    if type(code) is not int or code != 2:
+        error('Windows Update did not report a complete successful scan (result code 2).')
+    updates = value.get('updates')
+    invalid = 0
+    if not isinstance(updates, list):
+        error('The driver offer collection is missing or malformed.')
+    else:
+        identities = set()
+        for row in updates:
+            try:
+                candidate = driver_descriptor(row)
+                identity = (candidate['id'], candidate['revision'])
+                if identity in identities:
+                    raise ValueError('Ambiguous duplicate driver identity/revision.')
+                identities.add(identity)
+            except (ValueError, TypeError):
+                invalid += 1
+        if invalid:
+            error(f'{invalid} driver offer records are malformed or ambiguous; availability remains unverified.')
+    if value.get('error'):
+        error(value['error'])
+    for field in ('errors', 'warnings'):
+        rows = value.get(field, [])
+        if not isinstance(rows, list):
+            error('The scan ' + field + ' collection is malformed.')
+        else:
+            for row in rows[:20]:
+                if isinstance(row, dict):
+                    error(row.get('error') or row.get('message') or str(row), row.get('source', 'Windows Update'))
+                else:
+                    error(row)
+    online = value.get('online') if type(value.get('online')) is bool else None
+    if online is False:
+        error('This was an offline catalog query; online driver availability was not verified.')
+    if 'online' in value and online is None:
+        error('The online query state is malformed.')
+    if value.get('criteria') and value['criteria'] != DRIVER_SEARCH_CRITERIA:
+        error('The driver query did not cover the expected installed/hidden driver scope.')
+    if 'returned_offer_count' in value and (type(value['returned_offer_count']) is not int
+            or not isinstance(updates, list) or value['returned_offer_count'] != len(updates)):
+        error('The returned driver offer count does not match the scan collection.')
+    complete = not errors
+    coverage = value.get('coverage') if isinstance(value.get('coverage'), dict) else {}
+    counts = coverage.get('summary') if isinstance(coverage.get('summary'), dict) else {}
+    def count(name):
+        number = counts.get(name)
+        return number if type(number) is int and 0 <= number <= 1000000 else None
+    offers_count = len(updates) if isinstance(updates, list) else None
+    eligible = eligible_count if type(eligible_count) is int and eligible_count >= 0 else None
+    if complete:
+        summary = (f'Windows Update search completed: {offers_count} applicable driver offers'
+                   + (f'; {eligible} eligible under saved approvals' if eligible is not None else '') + '.')
+        if offers_count == 0:
+            summary += ' No applicable drivers were offered by the configured Windows Update service.'
+    else:
+        summary = 'Driver search incomplete; available updates could not be verified.'
+    devices = count('devices')
+    if devices is not None:
+        summary += f' {devices} present devices inventoried.'
+    if coverage.get('inventoryComplete') is not True:
+        summary += ' Device inventory coverage is incomplete.'
+    summary += ' OEM tools may offer other driver or firmware releases.'
+    duration = value.get('duration_seconds')
+    duration = (float(duration) if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                and math.isfinite(duration) and 0 <= duration < 3155760000 else None)
+    status = 'completed' if complete else 'failed' if type(code) is int and code in (4, 5) else 'incomplete'
+    return {'schema': 1, 'complete': complete, 'status': status,
+            'source': str(value.get('source') or 'Windows Update')[:200],
+            'criteria': str(value.get('criteria') or DRIVER_SEARCH_CRITERIA)[:512],
+            'online': online, 'started_utc': str(value.get('started_utc') or '')[:80],
+            'completed_utc': str(value.get('completed_utc') or '')[:80], 'duration_seconds': duration,
+            'result_code': code if type(code) is int else None,
+            'offers_count': offers_count, 'eligible_count': eligible, 'invalid_offer_count': invalid,
+            'inventory_complete': coverage.get('inventoryComplete') is True,
+            'devices_checked': devices, 'device_problems': count('deviceProblems'),
+            'summary': summary, 'errors': errors}
 
 # Fixed navigation destinations; never URLs supplied by driver/update metadata.
 _SUPPORT = {
@@ -121,7 +217,8 @@ def build_driver_coverage(inventory, scan):
     inventory = inventory if isinstance(inventory, dict) else {}
     scan = scan if isinstance(scan, dict) else {}
     inventory_ok = inventory.get('complete') is True
-    scan_ok = type(scan.get('resultCode')) is int and scan['resultCode'] == 2
+    scan_evidence = driver_scan_evidence(scan)
+    scan_ok = scan_evidence['complete']
     offers = _rows(scan.get('updates'))
     offered_by_hardware = {}
     for index, offer in enumerate(offers):
@@ -175,8 +272,7 @@ def build_driver_coverage(inventory, scan):
     routes = list({route['url']: route for route in routes}.values())
     unmatched = [dict(offer) for index, offer in enumerate(offers) if index not in matched]
     errors = _rows(inventory.get('errors'))
-    if scan.get('error'):
-        errors.append({'source': 'Windows Update', 'error': _text(scan['error'])})
+    errors.extend(row for row in scan_evidence['errors'] if row not in errors)
     return {
         'devices': devices, 'inventoryComplete': inventory_ok, 'updateScanComplete': scan_ok,
         'inventoryErrors': errors, 'unmatchedUpdates': unmatched,
