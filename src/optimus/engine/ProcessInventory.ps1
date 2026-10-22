@@ -340,30 +340,45 @@ function Get-SCMSystemSummary {
     [CmdletBinding()]
     param()
     $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-    $processors = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue)
+    $measurementErrors = New-Object 'System.Collections.Generic.List[string]'
+    $processors = @()
+    try { $processors = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop) }
+    catch { $measurementErrors.Add('CPU measurement unavailable: '+$_.Exception.Message) }
+    $cpuAvailable = $processors.Count -gt 0 -and @($processors | Where-Object { $null -eq $_.LoadPercentage -or $_.LoadPercentage -lt 0 -or $_.LoadPercentage -gt 100 }).Count -eq 0
+    if (-not $cpuAvailable -and $measurementErrors.Count -eq 0) { $measurementErrors.Add('CPU load counters were not reported.') }
     $totalMemory = [double]$operatingSystem.TotalVisibleMemorySize * 1KB
     $availableMemory = [double]$operatingSystem.FreePhysicalMemory * 1KB
     $usedMemory = [Math]::Max(0.0, $totalMemory - $availableMemory)
-    $disks = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3' -ErrorAction SilentlyContinue | ForEach-Object {
+    $disks = @()
+    $diskComplete = $true
+    try { $disks = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3' -ErrorAction Stop | ForEach-Object {
         $size = [double]$_.Size
         [pscustomobject]@{
             Drive = [string]$_.DeviceID
             Label = [string]$_.VolumeName
+            SizeBytes = [long]$_.Size
+            FreeBytes = [long]$_.FreeSpace
             SizeGB = [Math]::Round($size / 1GB, 1)
             FreeGB = [Math]::Round([double]$_.FreeSpace / 1GB, 1)
             FreePercent = $(if ($size -gt 0) { [Math]::Round([double]$_.FreeSpace / $size * 100, 1) } else { 0 })
         }
-    })
-    $cpuAverage = 0.0
-    if ($processors.Count -gt 0) { $cpuAverage = [double](($processors | Measure-Object -Property LoadPercentage -Average).Average) }
+    }) } catch { $diskComplete=$false; $measurementErrors.Add('Fixed-disk measurements unavailable: '+$_.Exception.Message) }
+    if ($disks.Count -eq 0 -and $diskComplete) { $diskComplete=$false; $measurementErrors.Add('No fixed-disk measurements were reported.') }
+    $cpuAverage = $null
+    if ($cpuAvailable) { $cpuAverage = [Math]::Round([double](($processors | Measure-Object -Property LoadPercentage -Average).Average),1) }
     [pscustomobject]@{
         CapturedAtUtc = [datetime]::UtcNow.ToString('o')
         ComputerName = [Environment]::MachineName
         Windows = [string]$operatingSystem.Caption
         CpuName = (($processors | ForEach-Object { [string]$_.Name }) -join '; ')
-        CpuPercent = [Math]::Round($cpuAverage, 1)
+        CpuPercent = $cpuAverage
+        CpuMeasurementAvailable = [bool]$cpuAvailable
+        DiskInventoryComplete = [bool]$diskComplete
+        MeasurementErrors = @($measurementErrors.ToArray())
         LogicalProcessors = [Environment]::ProcessorCount
         MemoryTotalGB = [Math]::Round($totalMemory / 1GB, 2)
+        MemoryTotalBytes = [long]$totalMemory
+        MemoryAvailableBytes = [long]$availableMemory
         MemoryUsedGB = [Math]::Round($usedMemory / 1GB, 2)
         MemoryAvailableGB = [Math]::Round($availableMemory / 1GB, 2)
         MemoryUsedPercent = $(if ($totalMemory -gt 0) { [Math]::Round($usedMemory / $totalMemory * 100, 1) } else { 0 })

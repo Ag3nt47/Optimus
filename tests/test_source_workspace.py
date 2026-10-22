@@ -50,6 +50,25 @@ def test_file_names_are_forward_slash_relative_paths(workspace):
     assert all('\\' not in name and not Path(name).is_absolute() for name in names)
 
 
+def test_powershell_modules_survive_edit_history_restore_and_export(project):
+    source, data = project
+    module = source / 'tools' / 'angerona-cleanup' / 'Fixture.psm1'
+    module.parent.mkdir(parents=True)
+    original = 'throw "Fixture source must never execute"\n'
+    module.write_text(original, encoding='utf-8')
+    workspace = SourceWorkspace(source, data)
+    relative = 'tools/angerona-cleanup/Fixture.psm1'
+    assert relative in workspace.files()
+    assert workspace.read(relative) == original
+    workspace.save(relative, '# Edited module fixture\n')
+    assert workspace.versions(relative)
+    destination = data.parent / 'exported-modules'
+    workspace.export(destination)
+    assert (destination / relative).read_text() == '# Edited module fixture\n'
+    assert workspace.restore_original(relative) == original
+    assert module.read_text() == original
+
+
 def test_seed_skips_private_build_reports_and_binary_files(project):
     source, data = project
     for name in ('private', 'reports', 'build', 'dist', '.git', '.venv'):

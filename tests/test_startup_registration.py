@@ -117,6 +117,21 @@ $definition.Principal.UserId=$sid;$trigger.UserId='NT AUTHORITY\SYSTEM'
 if($null -ne (Test-Owned $definition $manifest $sid)){throw 'A foreign trigger user was accepted.'};$checks++
 if(Test-TaskUser ('OptimusNoSuchAccount-'+[guid]::NewGuid().ToString('N')) $sid){throw 'An unresolved username was accepted.'};$checks++
 if(Test-TaskUser $short 'S-1-5-18'){throw 'Short username text was accepted without matching the owner SID.'};$checks++
+$definition.Principal.UserId=$sid;$trigger.UserId=$sid
+$definition.Principal.RunLevel=1
+if($null -ne (Test-Owned $definition $manifest $sid)){throw 'A highest-privilege task was accepted as the least-privilege launcher.'};$checks++
+$definition.Principal.RunLevel=0;$definition.Principal.LogonType=1
+if($null -ne (Test-Owned $definition $manifest $sid)){throw 'A password-backed task was accepted as an interactive launcher.'};$checks++
+$definition.Principal.LogonType=3;$trigger.Delay='PT2M'
+if($null -ne (Test-Owned $definition $manifest $sid)){throw 'An altered startup delay was accepted.'};$checks++
+$trigger.Delay='PT1M'
+$extra=$definition.Actions.Create(0);$extra.Path='C:\Windows\System32\cmd.exe'
+if($null -ne (Test-Owned $definition $manifest $sid)){throw 'An extra task action was accepted.'};$checks++
+$definition.Actions.Remove(2)
+$definition.RegistrationInfo.Source='Unrecognized owner'
+if($null -ne (Test-Owned $definition $manifest $sid)){throw 'An unrecognized task owner was accepted.'};$checks++
+$definition.RegistrationInfo.Source='Optimus/SignIn/1'
+if($null -eq (Test-Owned $definition $manifest $sid)){throw 'Restoring the original least-privilege definition did not restore ownership.'};$checks++
 @{result='PASS';checks=$checks;principal_readback=$nativePrincipal;registrations=0;deletions=0}|ConvertTo-Json -Compress
 ''',encoding='utf-8')
     executable=Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe'

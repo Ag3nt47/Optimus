@@ -245,7 +245,7 @@ class InitialSetupWizard(QWizard):
         body.addWidget(self.optimization_mode)
         body.addWidget(_label('Full selects temporary and browser cleanup, supported update checks, selected consumer-app removal, Windows privacy preferences and security checks, followed by reviewed recommendations. It runs at each app startup after you save. Update installation still needs your existing package/device scopes and agreement approvals. Browser cookie cleanup can sign you out. You can change any choice below; saved choices are retained on later opens.'))
         self._check(body, 'launch_at_sign_in', 'Launch Optimus when I sign in to Windows')
-        body.addWidget(_label('Save choices enables or disables the managed Windows sign-in entry. Launching the app is separate from the maintenance cadence below. It starts as your regular user; the existing administrator-startup choice may show a Windows UAC prompt, which you decide separately. Full does not turn on sign-in launch automatically.'))
+        body.addWidget(_label('Save choices enables or disables the managed Windows sign-in entry. Launching the app is separate from the maintenance cadence below. Windows starts Optimus as your regular user about one minute after sign-in. The administrator option below requests normal Windows UAC consent once per app launch; already elevated sessions do not ask again, and declining keeps standard access. Full does not turn on sign-in launch automatically.'))
         self._check(body, 'request_admin_on_startup', 'Ask Windows for administrator access once when Optimus starts (UAC); a denial keeps standard-user mode')
         self.cadence_group = QButtonGroup(self)
         self.cadence_buttons = {}
@@ -1171,6 +1171,8 @@ class InitialSetupWizard(QWizard):
         actions = []
         if settings.get('launch_at_sign_in'):
             actions.append('Launch Optimus at Windows sign-in using a managed startup entry; maintenance still follows the selected cadence and any Windows UAC prompt remains yours to approve')
+        if settings.get('request_admin_on_startup'):
+            actions.append('Request administrator access once at each normal app launch using Windows UAC; declining keeps Optimus open with standard access')
         if settings.get('cleanup_enabled'):
             actions.append('Permanently delete eligible old user temporary files')
         if settings.get('browser_cache_enabled'):

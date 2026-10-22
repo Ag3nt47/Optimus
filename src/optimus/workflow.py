@@ -97,7 +97,7 @@ def full_optimization_settings(settings=None):
     })
     if not value.get('browser_cleanup_browsers'):
         value['browser_cleanup_browsers'] = copy.deepcopy(DEFAULTS['browser_cleanup_browsers'])
-    value['cleanup_category_ids'] = list(dict.fromkeys([*value.get('cleanup_category_ids', []), 'windows-temp']))
+    value['cleanup_category_ids'] = list(dict.fromkeys([*value.get('cleanup_category_ids', []), 'windows-temp', 'canonical-user-temp']))
     # Selecting the preset is not agreement acceptance or an invented device,
     # account, file, startup or update approval.
     if not value.get('software_update_agreements_accepted'):
@@ -467,6 +467,13 @@ class Workflow:
                             'note': 'Potential background overhead is presented after completion. Pausing, startup changes and program removal require a selected action; memory use alone does not establish that a program is unnecessary.'}
                 stages.append(('Prepare background-program recommendations',
                                'Inspecting every accessible process and its launch evidence; protecting Windows, security software and Bing Wallpaper. No process is stopped or program uninstalled.', process_review))
+            def maintenance_insights():
+                from .maintenance_insights import build_insights
+                result = dict(build_insights(report, self.backend.data_dir), review_only=True)
+                report['maintenance_insights'] = result
+                return result
+            stages.append(('Summarize resource and startup changes',
+                           'Comparing the existing before/after measurements and verified supported startup registrations. Observations do not prove a speed gain, and no startup entry is changed.', maintenance_insights))
             def final_verification():
                 try:
                     result = self.backend.verify_optimization(report, cancel_event=cancel_event, timeout=30)
@@ -517,10 +524,15 @@ class Workflow:
                 if report['cancelled']:
                     percentage = min(99, percentage)
                 description = stage.get('error', f"{title}: {stage['status']}")
+                insight_summary = ''
+                if title == 'Summarize resource and startup changes' and isinstance(stage.get('result'), dict):
+                    insight_summary = str(stage['result'].get('summary', ''))[:4000]
+                    if insight_summary:
+                        description = insight_summary
                 if title == FINAL_VERIFICATION_STAGE and isinstance(stage.get('result'), dict):
                     description = str(stage['result'].get('summary') or 'Final verification: ' + str(stage['result'].get('status', 'unverified')).replace('_', ' ') + '. Review the outcome details before recommendations.')
                 progress_callback({'percentage': percentage, 'stage': title, 'description': description,
-                                   'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ''), 'completed': completed, 'total': len(stages)})
+                                   'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': len(stages)})
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(item['status'] == 'failed' for item in report['stages'])
             report['log_path'] = str(log_path)

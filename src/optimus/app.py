@@ -22,9 +22,10 @@ def parser():
     commands.add_argument('--audit', action='store_true', help='Save a read-only audit without opening the interface.')
     commands.add_argument('--process-scan', action='store_true', help='Export a read-only process and launch-evidence report; no actions are applied.')
     commands.add_argument('--verify-run', type=_run_identity, metavar='RUN_ID', help='Verify a completed saved workflow without repeating its actions or opening the interface.')
+    commands.add_argument('--startup-probe', action='store_true', help='Inspect GUI startup without UAC, setup, background analysis or maintenance, then exit.')
     commands.add_argument('--startup-mode', choices=('on', 'off', 'status'), help='Configure or inspect this user\'s Windows sign-in launch without running maintenance.')
     result.add_argument('--output', type=Path, help='Report destination folder.')
-    result.add_argument('--smoke-test', action='store_true', help='Build and inspect the interface without changing settings.')
+    commands.add_argument('--smoke-test', action='store_true', help='Build and inspect the interface without changing settings.')
     result.add_argument('--screenshot', type=Path)
     result.add_argument('--source-workspace', type=Path, help=argparse.SUPPRESS)
     result.add_argument('--restart-ready-file', type=Path, help=argparse.SUPPRESS)
@@ -123,11 +124,14 @@ def main(argv=None):
     app.setApplicationDisplayName('Optimus: Computer optimization tool')
     app.setOrganizationName('Optimus')
     app.setWindowIcon(QIcon(str(Path(__file__).with_name('assets') / 'optimus.svg')))
-    window = OptimusWindow(backend, smoke_test=args.smoke_test)
+    read_only_gui = args.smoke_test or args.startup_probe
+    window = OptimusWindow(backend, smoke_test=read_only_gui)
+    if args.startup_probe:
+        window.setEnabled(False)
     if args.no_orb:
         window.setProperty('disable_orb', True)
     window.show()
-    if not args.smoke_test:
+    if not read_only_gui:
         try:
             _resume_saved_analysis(backend)
         except Exception as error:
@@ -142,7 +146,7 @@ def main(argv=None):
         marker.parent.mkdir(parents=True, exist_ok=True)
         QTimer.singleShot(750, lambda: marker.write_text(json.dumps({'ready': True, 'pid': os.getpid()}), encoding='utf-8'))
     app.aboutToQuit.connect(backend.close)
-    if not args.smoke_test:
+    if not read_only_gui:
         from .gui_startup import SetupAutomationController
         controller = SetupAutomationController(backend, window, modal_active=lambda: app.activeModalWidget() is not None)
         window._automation_controller = controller
@@ -154,7 +158,7 @@ def main(argv=None):
         timer.start()
         window._automation_timer = timer
         QTimer.singleShot(1500, controller.tick)
-    if args.smoke_test:
+    if read_only_gui:
         def inspect():
             try:
                 if window.windowTitle() != 'Optimus: Computer optimization tool':
@@ -163,13 +167,13 @@ def main(argv=None):
                     args.screenshot.parent.mkdir(parents=True, exist_ok=True)
                     if not window.grab().save(str(args.screenshot)):
                         raise AssertionError('Screenshot could not be saved.')
-                print(json.dumps({'status': 'passed', 'title': window.windowTitle(), 'width': window.width(), 'height': window.height(), 'mutations': 0}))
+                print(json.dumps({'status': 'passed', 'title': window.windowTitle(), 'width': window.width(), 'height': window.height(), 'mutations': 0, 'read_only': True}))
             except Exception as error:
                 print(json.dumps({'status': 'failed', 'error': str(error)}))
                 app.exit(1)
                 return
             app.quit()
-        QTimer.singleShot(11000, inspect)
+        QTimer.singleShot(750 if args.startup_probe else 11000, inspect)
     return app.exec()
 
 if __name__ == '__main__':

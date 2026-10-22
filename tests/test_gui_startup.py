@@ -101,3 +101,99 @@ def test_previous_setup_version_must_approve_new_actions_before_automatic_runs(t
     controller.tick()
     window.open_initial_setup.assert_called_once_with(first_run=True)
     window.start_optimization.assert_not_called()
+
+
+def test_two_app_sessions_cannot_rearm_each_other_through_shared_state(tmp_path, monkeypatch):
+    from optimus import automation
+    settings = {'setup_version':startup.CURRENT_SETUP_VERSION,'automation_mode':'startup'}
+    sessions = ['a'*32,'b'*32]
+    instances = []
+    def complete(backend):
+        with automation.RunLease(tmp_path):
+            started = automation.record_attempt(tmp_path, settings, now=1000)
+            finished = automation.record_attempt(tmp_path, settings, status='completed', now=1001,
+                                                 run_id=started['run_id'])
+        backend.workflow.last_report = {'id':started['run_id'],'status':'completed'}
+        return finished
+    for session in sessions:
+        with monkeypatch.context() as context:
+            context.setattr(automation, 'SESSION_ID', session)
+            controller, backend, window = fixture(tmp_path, settings)
+            window.start_optimization.side_effect = lambda service=backend: complete(service)
+            instances.append((session,controller,window))
+    for _ in range(5):
+        for session, controller, window in instances:
+            with monkeypatch.context() as context:
+                context.setattr(automation, 'SESSION_ID', session)
+                controller.tick()
+    assert automation.load_attempt(tmp_path)['session_id'] == sessions[1]
+    assert [window.start_optimization.call_count for _,_,window in instances] == [1,1]
+    # A genuinely new app session keeps its own one-startup-run entitlement.
+    with monkeypatch.context() as context:
+        context.setattr(automation, 'SESSION_ID', 'c'*32)
+        new_controller, new_backend, new_window = fixture(tmp_path, settings)
+        new_window.start_optimization.side_effect = lambda: complete(new_backend)
+        new_controller.tick()
+        new_controller.tick()
+        new_window.start_optimization.assert_called_once_with()
+
+
+@pytest.mark.parametrize('status', ['configured','completed','failed','cancelled'])
+def test_observed_own_attempt_stays_consumed_after_other_session_overwrites_it(tmp_path, monkeypatch, status):
+    from optimus import automation
+    settings = {'setup_version':startup.CURRENT_SETUP_VERSION,'automation_mode':'startup'}
+    controller, _, window = fixture(tmp_path, settings)
+    own = {'schema':1,'attempted_at':10,'session_id':controller._session_id,
+           'mode':'startup','status':status,'run_id':None if status=='configured' else '1'*32}
+    if status != 'configured':
+        own['finished_at'] = 11
+    states = Mock(side_effect=[own,dict(own, session_id='b'*32)])
+    monkeypatch.setattr(startup, 'load_attempt', states)
+    controller.tick()
+    controller.tick()
+    window.start_optimization.assert_not_called()
+    assert states.call_count == 1
+
+
+def test_manual_attempt_in_this_window_counts_even_if_shared_state_was_overwritten(tmp_path, monkeypatch):
+    controller, backend, window = fixture(tmp_path, {'setup_version':startup.CURRENT_SETUP_VERSION,'automation_mode':'startup'})
+    backend.workflow.last_report = {'status':'failed','error':'Fixture lease was unavailable.'}
+    monkeypatch.setattr(startup, 'load_attempt', lambda _: None)
+    controller.tick()
+    window.start_optimization.assert_not_called()
+
+
+def test_startup_dispatch_failure_does_not_repeat_but_explicit_retry_remains_available(tmp_path, monkeypatch):
+    controller, _, window = fixture(tmp_path, {'setup_version':startup.CURRENT_SETUP_VERSION,'automation_mode':'startup'})
+    monkeypatch.setattr(startup, 'load_attempt', lambda _: None)
+    window.start_optimization.side_effect = RuntimeError('Fixture launch failed')
+    controller.tick()
+    controller.tick()
+    window.start_optimization.assert_called_once_with()
+    assert 'Fixture launch failed' in window.status.setText.call_args.args[0]
+    window.start_optimization.side_effect = None
+    window.start_optimization()
+    assert window.start_optimization.call_count == 2
+
+
+@pytest.mark.parametrize('mode', ['daily','weekly'])
+def test_startup_memory_does_not_change_elapsed_daily_or_weekly_policy(tmp_path, monkeypatch, mode):
+    settings = {'setup_version':startup.CURRENT_SETUP_VERSION,'automation_mode':mode}
+    controller, _, window = fixture(tmp_path, settings)
+    controller._startup_attempted = True
+    previous = {'attempted_at':1}
+    monkeypatch.setattr(startup, 'load_attempt', lambda _: previous)
+    check = Mock(side_effect=[False,True])
+    monkeypatch.setattr(startup, 'due', check)
+    controller.tick()
+    window.start_optimization.assert_not_called()
+    controller.tick()
+    window.start_optimization.assert_called_once_with()
+    assert check.call_count == 2
+
+
+def test_startup_memory_does_not_enable_manual_mode(tmp_path):
+    controller, _, window = fixture(tmp_path, {'setup_version':startup.CURRENT_SETUP_VERSION,'automation_mode':'manual'})
+    controller._startup_attempted = True
+    controller.tick()
+    window.start_optimization.assert_not_called()

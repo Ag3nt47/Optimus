@@ -55,6 +55,13 @@ class Cleaner:
             Category('amd-dx-cache', 'AMD DirectX shader cache', local / 'AMD/DxCache', 'Optional rebuildable graphics cache. Clearing it can temporarily increase game loading time or shader stutter.'),
             Category('amd-dxc-cache', 'AMD shader compiler cache', local / 'AMD/DxcCache', 'Optional rebuildable graphics cache; locked or changed files are skipped.'),
         ]
+        # Redirecting TEMP does not migrate old files out of LocalAppData\Temp.
+        # Offer that distinct, fixed category for review instead of silently
+        # widening the existing saved user-temp approval to a second directory.
+        canonical_temp = local / 'Temp'
+        if os.path.normcase(os.path.abspath(canonical_temp)) != os.path.normcase(os.path.abspath(definitions[0].path)):
+            definitions.insert(1, Category('canonical-user-temp', 'Original user temporary files', canonical_temp,
+                'The standard LocalAppData temporary folder, separate from redirected TEMP. Active, changed and locked files are skipped.'))
         chromium = [
             ('edge', 'Microsoft Edge', local / 'Microsoft/Edge/User Data', ('msedge.exe',)),
             ('chrome', 'Google Chrome', local / 'Google/Chrome/User Data', ('chrome.exe',)),

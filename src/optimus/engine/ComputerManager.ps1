@@ -179,7 +179,11 @@ function Get-SCMAppTotals {
 function Get-SCMFullAudit {
     $errors=New-Object 'System.Collections.Generic.List[string]'
     $startup=@();$services=@();$tasks=@();$apps=@();$plans=@()
-    try { $startup=@(Get-SCMStartupEntries) } catch { $errors.Add('Startup: '+$_.Exception.Message) }
+    $startupCoverage = $null
+    try {
+        $startup=@(Get-SCMStartupEntries -Coverage ([ref]$startupCoverage))
+        if ($startupCoverage) { foreach ($inventoryError in @($startupCoverage.Errors)) { $errors.Add('Startup: '+$inventoryError) } }
+    } catch { $errors.Add('Startup: '+$_.Exception.Message) }
     try { $services=@(Get-SCMServiceEntries) } catch { $errors.Add('Services: '+$_.Exception.Message) }
     try { $tasks=@(Get-SCMScheduledEntries) } catch { $errors.Add('Scheduled tasks: '+$_.Exception.Message) }
     try { $apps=@(Get-SCMInstalledApps) } catch { $errors.Add('Apps: '+$_.Exception.Message) }
@@ -189,6 +193,8 @@ function Get-SCMFullAudit {
         ToolVersion=$script:SCMVersion;CapturedUtc=[datetime]::UtcNow.ToString('o');Elevated=(Test-SCMAdministrator)
         System=(Get-SCMSystemSummary);Processes=$processes;AppTotals=@(Get-SCMAppTotals $processes)
         Startup=$startup;Services=$services;ScheduledTasks=$tasks;InstalledApps=$apps;PowerPlans=$plans;InventoryErrors=@($errors.ToArray())
+        StartupInventoryComplete=($null -ne $startupCoverage -and $startupCoverage.Complete -eq $true)
+        StartupInventoryErrors=$(if ($startupCoverage) { @($startupCoverage.Errors) } else { @('Startup inventory coverage was not established.') })
         Notes=@('CPU is sampled and normalized across all logical CPUs.','Working sets include shared pages; totals can double-count shared RAM. Private bytes are committed memory, not necessarily resident RAM.','Parent and startup/task matches are evidence, not proof of the historical launch source.','Old start time alone does not identify an obsolete or unwanted process.','Protected and inaccessible processes are included in the full audit. Raw process command lines are omitted. Startup and task commands are included; keep reports private.')
     }
 }

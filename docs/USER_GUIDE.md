@@ -20,6 +20,14 @@ Save the configuration, return to the main window, and use **1 click Optimize an
 
 **Cancel after current stage** requests a stop at a workflow boundary. A stage already applying changes must finish; cancellation does not roll back earlier stages.
 
+For launch at Windows sign-in followed by automatic one-click maintenance, enable the sign-in launch and startup administrator-request switches, choose **Each Optimus startup**, and save your choices. Settings can check the effective task and explicitly apply/repair the sign-in choice. Windows requests normal consent once; Yes enables administrator operations for that session. Browsers still receive close-or-skip prompts, and updates retain their separately approved scopes.
+
+The completion window also shows **maintenance observations**: before/after CPU, available memory and disk free space, plus enabled supported startup entries added, removed or changed since the last complete baseline. The first complete inventory establishes that baseline. Unavailable or partial observations remain labelled, and no startup entry is disabled by this comparison. Concurrent applications affect these measurements, so they are distinct from verified deleted bytes and are not proof of a speed gain.
+
+When TEMP has moved, **Original user temporary files** separately covers the previous LocalAppData temporary folder. Full selects it when you choose that preset; existing saved scopes are preserved. Active, locked, changed, linked and unavailable files retain the existing cleanup protections.
+
+`Optimus.exe --startup-probe` initializes and inspects the interface without UAC, setup, automatic maintenance or saved background sampling, then exits. A real Sandbox restart remains a normal app session and follows its saved behavior.
+
 ## Security, privacy and legacy support
 
 Full can request administrator access at normal app startup. Approve the Windows UAC prompt once for that session; denial keeps standard access. You can disable the request in setup or Settings. Read-only CLI reports, build smoke checks and source-restart readiness checks never request UAC.

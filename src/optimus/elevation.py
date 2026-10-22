@@ -63,7 +63,7 @@ def request_administrator(argv=None, *, shell_execute=None):
 
 def startup_administrator(backend, args, argv=None):
     """Attempt startup elevation once, only for a normal interactive GUI session."""
-    if any(getattr(args, name, False) for name in ('audit', 'process_scan', 'verify_run', 'startup_mode', 'smoke_test', 'restart_ready_file')):
+    if any(getattr(args, name, False) for name in ('audit', 'process_scan', 'verify_run', 'startup_mode', 'startup_probe', 'smoke_test', 'restart_ready_file')):
         return {'started': False, 'status': 'skipped'}
     try:
         if backend.is_admin():

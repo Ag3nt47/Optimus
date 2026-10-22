@@ -28,6 +28,56 @@ def test_preview_is_read_only(tmp_path):
     assert target.read_bytes() == b'fixture'
     assert len(plan['files']) == 1
 
+
+def test_redirected_temp_keeps_original_temp_as_a_separate_opt_in(tmp_path, monkeypatch):
+    local = tmp_path / 'LocalAppData'
+    canonical = local / 'Temp'
+    redirected = tmp_path / 'RedirectedTemp'
+    canonical.mkdir(parents=True)
+    redirected.mkdir()
+    (canonical / 'old-location.tmp').write_bytes(b'keep until selected')
+    selected = redirected / 'current-location.tmp'
+    selected.write_bytes(b'eligible fixture')
+    monkeypatch.setenv('LOCALAPPDATA', str(local))
+    monkeypatch.setenv('TEMP', str(redirected))
+    cleaner = Cleaner(tmp_path / 'data')
+    categories = {item['id']: item for item in cleaner.categories()}
+    assert categories['canonical-user-temp']['path'] == str(canonical)
+    assert categories['user-temp']['path'] == str(redirected)
+    plan = cleaner.scan(['user-temp'], 0)
+    assert [item['path'] for item in plan['files']] == [str(selected)]
+    assert (canonical / 'old-location.tmp').exists()
+
+
+def test_identical_original_and_active_temp_are_not_offered_twice(tmp_path, monkeypatch):
+    local = tmp_path / 'LocalAppData'
+    monkeypatch.setenv('LOCALAPPDATA', str(local))
+    monkeypatch.setenv('TEMP', str(local / 'Temp'))
+    assert 'canonical-user-temp' not in {item['id'] for item in Cleaner(tmp_path / 'data').categories()}
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Actual guarded Windows fixture deletion.')
+def test_both_temp_scopes_can_be_explicitly_cleaned_without_touching_documents(tmp_path, monkeypatch):
+    local = tmp_path / 'LocalAppData'
+    canonical = local / 'Temp'
+    redirected = tmp_path / 'RedirectedTemp'
+    canonical.mkdir(parents=True)
+    redirected.mkdir()
+    original = canonical / 'old-location.tmp'
+    current = redirected / 'current-location.tmp'
+    original.write_bytes(b'old fixture')
+    current.write_bytes(b'new fixture')
+    document = local / 'preserved.txt'
+    document.write_text('personal fixture')
+    monkeypatch.setenv('LOCALAPPDATA', str(local))
+    monkeypatch.setenv('TEMP', str(redirected))
+    cleaner = Cleaner(tmp_path / 'data')
+    plan = cleaner.scan(['user-temp', 'canonical-user-temp'], 0)
+    outcome = cleaner.apply(plan)
+    assert outcome['deleted_count'] == 2, outcome
+    assert not original.exists() and not current.exists()
+    assert document.read_text() == 'personal fixture'
+
 def test_fresh_files_excluded(tmp_path):
     cleaner, root = engine(tmp_path)
     (root / 'fresh.tmp').write_text('fixture')

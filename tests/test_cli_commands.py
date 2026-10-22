@@ -115,3 +115,10 @@ def test_verification_cli_returns_before_uac_gui_and_maintenance(tmp_path, monke
     request.assert_not_called()
     service.optimize.assert_not_called()
     service.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize('diagnostic', ['--startup-probe','--smoke-test'])
+@pytest.mark.parametrize('command', (['--audit'], ['--process-scan'], ['--startup-mode','on'], ['--verify-run',RUN]))
+def test_read_only_gui_diagnostics_cannot_combine_with_cli_commands(diagnostic, command):
+    with pytest.raises(SystemExit):
+        app.parser().parse_args([diagnostic,*command])

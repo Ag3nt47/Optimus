@@ -138,3 +138,34 @@ def test_cancelled_run_without_verification_has_no_post_run_prompts(qapp, tmp_pa
         main._offer_post_optimization_reviews.assert_not_called()
     finally:
         dispose(main, qapp)
+
+
+def test_read_only_observed_changes_are_prominent_with_expanded_evidence(qapp, tmp_path):
+    main, progress = window(qapp, tmp_path)
+    try:
+        insights = {'schema':1,'read_only':True,
+            'summary':'Available RAM 2.0 to 2.5 GB; one new startup entry was observed. Measurements do not prove a speed gain.',
+            'resource_changes':{'memory_available_bytes':{'before':2000000000,'after':2500000000}},
+            'startup_changes':{'new_count':1}}
+        main._workflow_result(result(maintenance_insights=insights))
+        main._workflow_finished()
+        assert progress.insights_summary.isVisible()
+        assert insights['summary'] in progress.insights_summary.text()
+        assert 'READ-ONLY MAINTENANCE OBSERVATIONS' in progress.verification_details.toPlainText()
+        assert '"new_count": 1' in progress.verification_details.toPlainText()
+        assert progress.verification_details.isReadOnly()
+        assert progress.verification_summary.isVisible()
+        assert len(main.main_buttons) == 3
+    finally:
+        dispose(main, qapp)
+
+
+def test_missing_or_unattested_observations_do_not_invent_resource_results(qapp, tmp_path):
+    main, progress = window(qapp, tmp_path)
+    try:
+        main._workflow_result(result(maintenance_insights={'summary':'Unattested fixture speed claim'}))
+        main._workflow_finished()
+        assert progress.insights_summary.isHidden()
+        assert 'Unattested fixture speed claim' not in progress.verification_details.toPlainText()
+    finally:
+        dispose(main, qapp)

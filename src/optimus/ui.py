@@ -1611,6 +1611,12 @@ class OptimizationProgressWindow(QDialog):
         self.description = QLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
         self.description.setWordWrap(True)
         layout.addWidget(self.description)
+        self.insights_summary = QLabel()
+        self.insights_summary.setObjectName('SectionTitle')
+        self.insights_summary.setTextFormat(Qt.PlainText)
+        self.insights_summary.setWordWrap(True)
+        self.insights_summary.hide()
+        layout.addWidget(self.insights_summary)
         self.verification_summary = QLabel()
         self.verification_summary.setWordWrap(True)
         self.verification_summary.hide()
@@ -1654,6 +1660,8 @@ class OptimizationProgressWindow(QDialog):
     def finish(self, result, error=None):
         self.completed = True
         self.spinner.stop()
+        self.insights_summary.clear()
+        self.insights_summary.hide()
         if error:
             self.stage.setText('WORKFLOW STOPPED')
             self.description.setText(str(error))
@@ -1674,6 +1682,13 @@ class OptimizationProgressWindow(QDialog):
             else:
                 self.verification_summary.setText('Final verification was not run because the workflow was cancelled.' if cancelled else 'Final verification is unavailable; optimization outcomes have not been confirmed.')
                 self.verification_details.setPlainText('No final verification report was produced. Review the recorded stage outcomes below.')
+            insights = field(result, 'maintenance_insights', default=None)
+            if isinstance(insights, dict) and insights.get('read_only') is True:
+                observed_summary = insights.get('summary')
+                if isinstance(observed_summary, str) and observed_summary.strip():
+                    self.insights_summary.setText('Observed resource and startup changes: ' + observed_summary)
+                    self.insights_summary.show()
+                self.verification_details.appendPlainText('\nREAD-ONLY MAINTENANCE OBSERVATIONS\n' + json.dumps(insights, indent=2, ensure_ascii=False, default=str))
             self.verification_summary.show()
             self.verification_details.show()
             self.description.setText('Review the final verification and any skipped or failed stages. Recommendations open only after you continue; closing this window skips those prompts.')
@@ -2286,9 +2301,43 @@ class OptimusWindow(QMainWindow):
             controls[key]=checkbox
             toggles.addWidget(checkbox,index//2,index%2)
         layout.addLayout(toggles)
-        sign_in_note = QLabel('Saving the sign-in option enables or disables the managed Windows startup entry. It starts Optimus as your regular user and is separate from maintenance cadence; existing administrator-startup preferences can still show a Windows UAC prompt. A failed registration leaves the saved preference unchanged.')
+        sign_in_note = QLabel('Saving the sign-in option enables or disables the managed Windows startup entry. Windows starts Optimus as your regular user about one minute after sign-in; maintenance follows its separate cadence. The administrator option requests normal Windows UAC consent once per app launch. Already elevated sessions do not ask again; declining keeps standard access. A failed registration leaves the saved preference unchanged. A startup entry you disable manually stays disabled until you explicitly apply this choice again.')
         sign_in_note.setWordWrap(True)
         layout.addWidget(sign_in_note)
+        sign_in_status = QLabel('Windows sign-in launch status has not been checked in this session.')
+        sign_in_status.setObjectName('SignInLaunchStatus')
+        sign_in_status.setWordWrap(True)
+        layout.addWidget(sign_in_status)
+        sign_in_buttons = QHBoxLayout()
+        check_sign_in = QPushButton('Check sign-in launch status')
+        apply_sign_in = QPushButton('Apply sign-in launch choice now')
+        check_sign_in.setObjectName('CheckSignInLaunch')
+        apply_sign_in.setObjectName('ApplySignInLaunch')
+        sign_in_buttons.addWidget(check_sign_in)
+        sign_in_buttons.addWidget(apply_sign_in)
+        sign_in_buttons.addStretch()
+        layout.addLayout(sign_in_buttons)
+        def show_sign_in_status(result):
+            if not isinstance(result, dict):
+                sign_in_status.setText('Windows sign-in launch could not be checked. No startup change was made.')
+                return
+            states = {'enabled':'Enabled', 'disabled':'Disabled', 'absent':'Missing',
+                      'foreign':'Unrecognized entry; Optimus will preserve it', 'unavailable':'Unavailable'}
+            state = states.get(result.get('state'), 'Unavailable')
+            reason = str(result.get('reason') or '')[:600]
+            sign_in_status.setText('Windows sign-in entry: ' + state + ('. ' + reason if reason else '.'))
+        def apply_sign_in_choice():
+            enabled = controls['launch_at_sign_in'].isChecked()
+            action = 'Enable' if enabled else 'Disable'
+            if not window._confirm('Windows sign-in launch', action + ' the managed Optimus sign-in launch for this user now? This saves only the sign-in option. Administrator access still uses a normal Windows UAC prompt when its separate startup option is saved and enabled.'):
+                return
+            def applied(result):
+                window.workflow_control_baseline['launch_at_sign_in'] = enabled
+                self.workflow_settings['launch_at_sign_in'] = enabled
+                show_sign_in_status(result)
+            window._run('set_startup_launch', enabled, done=applied)
+        check_sign_in.clicked.connect(lambda: window._run('startup_launch_status', done=show_sign_in_status))
+        apply_sign_in.clicked.connect(apply_sign_in_choice)
         privacy_layout = QVBoxLayout()
         privacy_layout.addWidget(QLabel('INDIVIDUAL WINDOWS PRIVACY CHOICES'))
         for key, label in (

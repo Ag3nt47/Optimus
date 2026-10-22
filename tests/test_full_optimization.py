@@ -15,6 +15,7 @@ def test_new_install_selects_full_but_setup_must_be_saved(tmp_path):
     assert settings['optimization_mode'] == 'full'
     assert settings['automation_mode'] == 'startup'
     assert settings['cleanup_age_days'] == 0
+    assert 'canonical-user-temp' in settings['cleanup_category_ids']
     assert settings['consumer_debloat_enabled']
     assert settings['consumer_debloat_package_names'] == list(CONSUMER_PACKAGE_NAMES)
     assert settings['software_updates_enabled'] and settings['driver_updates_enabled']

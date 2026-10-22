@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from .filesystem import replace_with_retry, resolve_data_root, default_data_root
 
-TEXT_SUFFIXES = {'.py', '.ps1', '.toml', '.yml', '.yaml', '.md', '.txt', '.bat', '.json', '.svg', '.qss'}
+TEXT_SUFFIXES = {'.py', '.ps1', '.psm1', '.toml', '.yml', '.yaml', '.md', '.txt', '.bat', '.json', '.svg', '.qss'}
 ASSET_SUFFIXES = {'.ico', '.png'}
 MAX_ASSET_BYTES = 8 * 1024 * 1024
 SKIP_DIRS = {'.git', '.venv', 'venv', '__pycache__', '.pytest_cache', 'build', 'dist', 'test-artifacts', 'reports', 'private', '.history'}

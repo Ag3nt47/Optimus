@@ -132,7 +132,9 @@ function Get-SCMStartupProtection {
 }
 
 function Get-SCMStartupEntries {
+    param([ref]$Coverage)
     $entries = @()
+    $inventoryErrors = New-Object 'System.Collections.Generic.List[string]'
     $admin = Test-SCMAdministrator
     $views = @('Registry32')
     if ([Environment]::Is64BitOperatingSystem) { $views = @('Registry64','Registry32') }
@@ -163,24 +165,32 @@ function Get-SCMStartupEntries {
                         }
                     }
                 }
-            } catch { Write-Verbose ('Cannot inspect '+$hive+' '+$view+': '+$_.Exception.Message) }
+            } catch {
+                $inventoryErrors.Add('Cannot inspect '+$hive+' '+$view+': '+$_.Exception.Message)
+                Write-Verbose $inventoryErrors[$inventoryErrors.Count-1]
+            }
             finally { if ($key) { $key.Dispose() } }
         }
     }
     $shell = $null
-    try { $shell = New-Object -ComObject WScript.Shell } catch { }
+    try { $shell = New-Object -ComObject WScript.Shell } catch { $inventoryErrors.Add('Startup shortcut target reader is unavailable: '+$_.Exception.Message) }
     try {
-        foreach ($folder in @(Get-SCMStartupFolders)) {
-            if (-not (Test-Path -LiteralPath $folder.Path -PathType Container)) { continue }
-            foreach ($file in @(Get-ChildItem -LiteralPath $folder.Path -Filter '*.lnk' -File -Force -ErrorAction SilentlyContinue)) {
+        $startupFolders = @(Get-SCMStartupFolders)
+        if (@($startupFolders | Where-Object Scope -eq 'User').Count -ne 1 -or @($startupFolders | Where-Object Scope -eq 'Machine').Count -ne 1) { $inventoryErrors.Add('Not all supported Startup folder locations were resolved.') }
+        foreach ($folder in $startupFolders) {
+            try {
+                if (-not (Test-Path -LiteralPath $folder.Path -PathType Container -ErrorAction Stop)) { continue }
+                $shortcutFiles = @(Get-ChildItem -LiteralPath $folder.Path -Filter '*.lnk' -File -Force -ErrorAction Stop)
+            } catch { $inventoryErrors.Add('Cannot enumerate Startup folder '+$folder.Scope+': '+$_.Exception.Message); continue }
+            foreach ($file in $shortcutFiles) {
                 $command = $file.FullName
                 if ($shell) {
                     $shortcut = $null
                     try { $shortcut = $shell.CreateShortcut($file.FullName); $command = ('"'+$shortcut.TargetPath+'" '+$shortcut.Arguments).Trim() }
-                    catch { } finally { if ($shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) } }
+                    catch { $inventoryErrors.Add('Cannot resolve startup shortcut '+$file.Name+': '+$_.Exception.Message) } finally { if ($shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) } }
                 }
                 $fingerprint = ''
-                try { $fingerprint = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch { }
+                try { $fingerprint = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch { $inventoryErrors.Add('Cannot identify startup shortcut '+$file.Name+': '+$_.Exception.Message) }
                 $canManage = ($folder.Scope -eq 'User' -or $admin) -and -not ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -and [bool]$fingerprint
                 $reason = 'Windows opens this shortcut when you sign in; its target may create additional background processes.'
                 if (-not $canManage) { $reason += ' Administrator access, a readable file, and a regular shortcut are required to change this entry.' }
@@ -208,6 +218,9 @@ function Get-SCMStartupEntries {
         if ($record.State -eq 'Removed') { $copy.Source += ' [removed; backup]'; $copy.Reason='Startup registration removed, with a backup retained. Enable restores the registration; the application remains installed.' }
         $copy | Add-Member -NotePropertyName BackupState -NotePropertyValue $record.State -Force
         $entries += $copy
+    }
+    if ($null -ne $Coverage) {
+        $Coverage.Value = [pscustomobject]@{ Complete=($inventoryErrors.Count -eq 0); Errors=@($inventoryErrors.ToArray()); Scope='Live Run registry registrations and Startup folder shortcuts; excludes scheduled tasks, services and unavailable backup history.' }
     }
     return @($entries | Sort-Object Name, Source)
 }
