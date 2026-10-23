@@ -14,6 +14,7 @@ import time
 import uuid
 
 from .filesystem import _ordinary_data_path
+from .item_progress import normalize_item_progress
 from .navigation import local_skip, shared_update_refusal, can_fail_forward
 
 WINDOWS_SOFTWARE = 'Review or update configured software'
@@ -98,11 +99,13 @@ class ProgressMux:
 
     def _event(self):
         event = dict(self.foreground)
+        event['item_progress'] = normalize_item_progress(event.get('item_progress'))
         if self.jobs:
             event['jobs'] = []
             processes = list(event.get('processes', []))
             for job_id, job in self.jobs.items():
                 current = dict(job)
+                current['item_progress'] = normalize_item_progress(current.get('item_progress'))
                 if job_id in self.worker_started:
                     finished = self.worker_finished.get(job_id)
                     current['elapsed_seconds'] = max(0, (time.monotonic() if finished is None else finished)
@@ -132,7 +135,7 @@ class ProgressMux:
 
     def __call__(self, event):
         with self.lock:
-            self.foreground = dict(event)
+            self.foreground = dict(event, item_progress=normalize_item_progress(event.get('item_progress')))
             self.callback(self._event())
 
     def background(self, status, state=None, *, job_id='software_updates'):
@@ -153,7 +156,8 @@ class ProgressMux:
                         'current': state.get('current', previous.get('current', 0)),
                         'total': state.get('total', previous.get('total', 0)),
                         'scan_label': str(state.get('scan_label', previous.get('scan_label', '')))[:200],
-                        'current_package': package}
+                        'current_package': package,
+                        'item_progress': normalize_item_progress(state.get('item_progress'))}
             for key in ('scan_complete', 'installation_blocked', 'blocked_by_prior_installer'):
                 if type(state.get(key)) is bool:
                     self.jobs[job_id][key] = state[key]
@@ -197,7 +201,7 @@ class ProgressMux:
                            + 'Background updates are still running. '
                            + ('Waiting before: ' + str(next_stage) + '. ' if next_stage else '')
                            + 'The current installer is not restarted; Cancel stops further package attempts.')
-            self.foreground = dict(self.foreground, stage=WAITING_FOR_UPDATES,
+            self.foreground = dict(self.foreground, item_progress=None, stage=WAITING_FOR_UPDATES,
                 stage_status='waiting', waiting_for='installer_updates', next_stage=next_stage, description=description,
                 processes=['Optimus foreground worker: waiting for background updates'],
                 log='WAITING: Background updates before ' + str(next_stage or 'workflow completion'))
@@ -210,7 +214,7 @@ class ProgressMux:
     def wait_for_preparation(self):
         with self.lock:
             description = 'Waiting for app and driver discovery to finish before cleaning shared temporary files. No installer has started.'
-            self.foreground = dict(self.foreground, maintenance_status='waiting_for_preparation',
+            self.foreground = dict(self.foreground, item_progress=None, maintenance_status='waiting_for_preparation',
                 maintenance_wait_reason=description, description=description,
                 processes=['Optimus maintenance worker: waiting for update discovery'])
             self.heartbeat()
@@ -925,15 +929,25 @@ class ParallelAppUpdates:
         state = state if isinstance(state, dict) else {'description': str(state)}
         if 'id' not in state and isinstance(state.get('binding'), dict):
             state = dict(state, id=state['binding'].get('id'))
+        progress = normalize_item_progress(state.get('item_progress'))
+        if state.get('progress_only') is True:
+            if self.record.get('status') != 'running' or self.result is not None:
+                return
+            previous = self.record.get('current_item', {}).get('item_progress')
+            if progress is None or not isinstance(previous, dict) or progress['key'] != previous.get('key'):
+                return  # A late tick cannot revive an older package or create intent.
+            state = dict(state, item_progress=progress)
         backing_up = self.title in DRIVER_TITLES and state.get('phase') == 'backup'
         rechecking = (self.title == WINDOWS_SOFTWARE
                       and state.get('phase') in ('source_refresh', 'metadata_recheck'))
         if self.title in DRIVER_TITLES and not backing_up and type(state.get('current')) is int:
             state = dict(state, current=max(0, state['current'] - 1))
-        self.record['current_item'] = {key: state[key] for key in ('id', 'description', 'current', 'total', 'item', 'phase') if key in state}
-        if not backing_up and not rechecking:
-            self.record['installer_prepared'] = True
-        self._write()  # Read-only rechecks never create or clear installer intent.
+        if state.get('progress_only') is not True:
+            self.record['current_item'] = {key: state[key] for key in ('id', 'description', 'current', 'total', 'item', 'phase') if key in state}
+            self.record['current_item']['item_progress'] = progress
+            if not backing_up and not rechecking:
+                self.record['installer_prepared'] = True
+            self._write()  # Only the original item boundary persists intent, never progress ticks.
         if rechecking:
             state = dict(state, current=0, total=0, scan_label='Rechecking publisher metadata')
         self.mux.background('scanning' if rechecking else 'preparing' if backing_up else

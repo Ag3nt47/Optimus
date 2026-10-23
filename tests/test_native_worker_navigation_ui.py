@@ -192,24 +192,93 @@ def test_history_keeps_live_status_and_shows_recorded_result(progress):
     assert 'Next saved result' in card.navigation_buttons['next'].accessibleName()
 
 
-def test_worker_activity_has_separate_progress_cpu_and_waiting_state(progress):
+def test_worker_has_overall_and_current_item_progress_independent_of_cpu(progress):
     window, backend = progress
     window.update_progress({'stage': 'Measured operation', 'percentage': 50,
-        'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 4}]})
+        'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 4,
+                  'item_progress': {'key': 'Fixture.App', 'label': 'Fixture App',
+                                    'phase': 'download', 'percent': 62}}]})
     card = window.worker_cards['software_updates']
     card.set_live_metrics({'cpu_percent': 2.5, 'scope': 'Thread CPU only'}, {'pressure': 'normal'})
-    assert card.completion.text() == 'Progress: 25%'
-    assert card.activity_ring.value_text() == '2.5%'
+    assert card.completion.text() == 'Overall: 25%'
+    assert card.activity_ring.value_text() == '62%'
     assert card.activity_ring.health == 'working'
-    card.update_state({'status': 'waiting_for_installer', 'current': 1, 'total': 4})
     card.set_live_metrics({'cpu_percent': 0.0}, {'pressure': 'normal'})
-    assert card.activity_ring.value_text() == '0.0%'
+    assert card.activity_ring.value_text() == '62%'
+    card.update_state({'status': 'waiting_for_installer', 'current': 1, 'total': 4})
+    assert card.activity_ring.value_text() == '—'
     assert card.activity_ring.health == 'waiting'
     assert 'Waiting' in card.activity_state.text()
     card.update_state({'status': 'running'})
     card.set_live_metrics({'cpu_percent': None}, {'pressure': 'high'})
     assert card.activity_ring.health == 'pressure'
     assert card.activity_ring.value_text() == '—'
+
+
+@pytest.mark.parametrize('identity', ['software_updates', 'driver_updates'])
+def test_item_ring_resets_for_each_package_and_phase_and_does_not_fake_terminal_success(progress, identity):
+    window, backend = progress
+    def publish(key, phase, percent, *, current=0, status='installing'):
+        window.update_progress({'stage': 'Maintenance continues', 'percentage': 40,
+            'jobs': [{'id': identity, 'status': status, 'current': current, 'total': 2,
+                'item_progress': {'key': key, 'label': key, 'phase': phase, 'percent': percent}}]})
+    card = window.worker_cards[identity]
+    publish('Fixture.A', 'download', 100)
+    assert card.activity_ring.value_text() == '100%'
+    assert card.completion.text() == 'Overall: 0%'
+    assert card.activity_ring.phase_caption == 'Download'
+    publish('Fixture.A', 'install', None)
+    assert card.activity_ring.value_text() == '—' and card.activity_ring.timer.isActive()
+    assert card.activity_ring.phase_caption == 'Install'
+    publish('Fixture.A', 'install', 77)
+    assert card.activity_ring.value_text() == '77%'
+    publish('Fixture.B', 'download', 0, current=1)
+    assert card.activity_ring.value_text() == '0%'
+    assert card.completion.text() == 'Overall: 50%'
+    publish('Fixture.B', 'install', None, current=1)
+    assert card.activity_ring.value_text() == '—'
+    publish('Fixture.B', 'install', 99.99, current=1)
+    assert card.activity_ring.value_text() == '99%'
+    for status in ('failed', 'needs_review', 'cancelled', 'deferred', 'completed_with_errors', 'completed'):
+        publish('Fixture.B', 'install', 100, current=2, status=status)
+        assert card.activity_ring.value_text() == '—'
+        assert not card.activity_ring.timer.isActive()
+    # An omitted item is not permission to retain a previous item's percent.
+    card.update_state({'status': 'installing', 'current': 0, 'total': 2})
+    assert card.activity_ring.value_text() == '—'
+
+
+def test_foreground_maintenance_and_sequential_updates_route_current_item_percentage(progress):
+    window, backend = progress
+    item = {'key': 'Fixture.Drive', 'label': 'Fixture drive', 'phase': 'optimize', 'percent': 72}
+    window.update_progress({'stage': 'Optimize eligible internal drives', 'percentage': 44,
+                           'item_progress': item})
+    card = window.worker_cards['maintenance']
+    assert card.completion.text() == 'Overall: 44%'
+    assert card.activity_ring.value_text() == '72%'
+    assert 'Fixture drive' in card.activity_ring.toolTip()
+    item = {'key': 'Fixture.App', 'label': 'Fixture App', 'phase': 'install', 'percent': 18}
+    window.update_progress({'stage': 'Review or update configured software', 'percentage': 46,
+                           'item_progress': item})
+    assert window.worker_cards['software_updates'].activity_ring.value_text() == '18%'
+    window.update_progress({'stage': 'Capture final resource report', 'percentage': 90})
+    assert card.activity_ring.value_text() == '—'
+
+
+
+
+def test_native_byte_counter_estimate_is_labeled_and_does_not_replace_overall(progress):
+    window, backend = progress
+    window.update_progress({'stage': 'Maintenance continues', 'percentage': 37,
+        'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 4,
+                  'item_progress': {'key': 'Fixture.App', 'label': 'Fixture App',
+                                    'phase': 'download', 'percent': 62.5, 'estimated': True}}]})
+    card = window.worker_cards['software_updates']
+    assert card.activity_ring.value_text() == '~62%'
+    assert card.completion.text() == 'Overall: 25%'
+    assert 'Approximate' in card.activity_ring.toolTip()
+    card.set_live_metrics({'cpu_percent': 99})
+    assert card.activity_ring.value_text() == '~62%'
 
 
 def test_connection_strip_reports_cached_internet_state_and_passive_rate(app):
@@ -233,7 +302,7 @@ def test_activity_ring_pauses_hidden_and_honors_reduced_motion(app, monkeypatch)
     from optimus.widgets.live_activity import WorkerActivityRing
     monkeypatch.setattr('optimus.widgets.header_controls.motion_allowed', lambda config=None: True)
     ring = WorkerActivityRing()
-    ring.set_activity(1.2, 'working', active=True)
+    ring.set_progress(None, 'working', active=True)
     ring.show()
     app.processEvents()
     assert ring.timer.isActive()
@@ -244,7 +313,7 @@ def test_activity_ring_pauses_hidden_and_honors_reduced_motion(app, monkeypatch)
     app.processEvents()
     assert ring.timer.isActive()
     monkeypatch.setattr('optimus.widgets.header_controls.motion_allowed', lambda config=None: False)
-    ring.set_activity(0, 'waiting', active=True)
+    ring.set_progress(None, 'waiting', active=True)
     assert not ring.timer.isActive()
     ring.close()
 

@@ -1,4 +1,4 @@
-"""Measured activity displays. Sampling is owned separately by the live run."""
+"""Current-item progress and separately measured system activity displays."""
 from __future__ import annotations
 
 import math
@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 def number(value, minimum=0, maximum=100):
     return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and minimum <= value <= maximum else None)
+            and minimum <= value <= maximum and math.isfinite(value) else None)
 
 
 class WorkerActivityRing(QWidget):
@@ -19,29 +19,40 @@ class WorkerActivityRing(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(66, 72)
-        self.cpu_percent, self.health, self.active, self.angle = None, 'unverified', False, 0
+        self.value_percent, self.health, self.active, self.angle = None, 'unverified', False, 0
+        self.phase_caption = 'Current item'
+        self.estimated = False
         self.timer = QTimer(self)
         self.timer.setInterval(65)
         self.timer.timeout.connect(self._tick)
-        self.setAccessibleName('Measured worker CPU activity')
+        self.setAccessibleName('Current item progress')
 
-    def set_activity(self, cpu_percent, health, *, active=False):
-        self.cpu_percent = number(cpu_percent)
+    def set_progress(self, value_percent, health, *, active=False, description='', phase='', estimated=False):
+        self.value_percent = number(value_percent)
+        self.estimated = estimated is True
         self.health = health if health in self.COLORS else 'unverified'
         self.active = active is True
-        self.setAccessibleDescription('Worker thread CPU: ' + self.value_text() + '. ' + self.health + '.')
+        self.phase_caption = {'download': 'Download', 'install': 'Install', 'backup': 'Backup',
+            'verify': 'Verify', 'scan': 'Scan', 'cleanup': 'Clean', 'optimize': 'Optimize',
+            'prepare': 'Prepare', 'downloading': 'Download', 'installing': 'Install',
+            'backing_up': 'Backup', 'verifying': 'Verify', 'scanning': 'Scan'}.get(phase, 'Current item')
+        detail = str(description or 'The current operation has not reported a percentage.')[:2000]
+        self.setToolTip(detail)
+        self.setAccessibleDescription('Current item: ' + self.value_text() + '. ' + detail)
         self._sync()
         self.update()
 
     def value_text(self):
-        return '—' if self.cpu_percent is None else f'{self.cpu_percent:.1f}%'
+        # Reserve 100 for a reporter's actual 100; 99.9 must not round to done.
+        return '—' if self.value_percent is None else ('~' if self.estimated else '') + f'{int(self.value_percent)}%'
 
     def _sync(self):
         from .header_controls import motion_allowed
         owner = self
         while owner is not None and not hasattr(owner, 'config'):
             owner = owner.parentWidget()
-        if self.isVisible() and not self.window().isMinimized() and self.active and motion_allowed(getattr(owner, 'config', None)):
+        if (self.isVisible() and not self.window().isMinimized() and self.active
+                and self.value_percent is None and motion_allowed(getattr(owner, 'config', None))):
             self.timer.start()
         else:
             self.timer.stop()
@@ -68,7 +79,9 @@ class WorkerActivityRing(QWidget):
         pen.setColor(QColor(self.COLORS[self.health]))
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
-        if self.active:
+        if self.value_percent is not None:
+            painter.drawArc(ellipse, 90 * 16, -int(self.value_percent * 360 * 16 / 100))
+        elif self.active:
             painter.drawArc(ellipse, int((90 - self.angle) * 16), -255 * 16)
         else:
             painter.drawEllipse(ellipse)
@@ -81,7 +94,7 @@ class WorkerActivityRing(QWidget):
         font.setPointSize(7)
         font.setBold(False)
         painter.setFont(font)
-        painter.drawText(QRectF(0, 59, 66, 12), Qt.AlignCenter, 'CPU activity')
+        painter.drawText(QRectF(0, 59, 66, 12), Qt.AlignCenter, self.phase_caption)
 
 
 class LiveSystemStatus(QWidget):
@@ -92,7 +105,7 @@ class LiveSystemStatus(QWidget):
         layout.setSpacing(3)
         self.computer = QLabel('Computer: measuring CPU and RAM…')
         self.network = QLabel('Network: measuring connection and receive rate…')
-        self.note = QLabel('Worker colors describe observed activity, waiting, resource pressure or errors.')
+        self.note = QLabel('Rings show the current item or phase; bars show queue or workflow progress. — means no percentage is reported.')
         for label in (self.computer, self.network, self.note):
             label.setTextFormat(Qt.PlainText)
             label.setWordWrap(True)

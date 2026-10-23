@@ -328,6 +328,12 @@ class NativeWorkflow:
             def serial_item_progress(state):
                 if serial_job is not None:
                     serial_job.item_progress(state)
+                if isinstance(state, dict):
+                    from .item_progress import normalize_item_progress
+                    value = normalize_item_progress(state.get('item_progress'))
+                    if value is not None:
+                        progress_callback(dict(progress_callback.foreground, item_progress=value,
+                            description=str(state.get('description') or value['label'])))
 
             stages = [('Inspect native resources and process identities', self.backend.audit)]
             if configuration.get('applications_review_enabled'):

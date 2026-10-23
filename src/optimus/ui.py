@@ -1923,7 +1923,7 @@ class WorkflowWorkerCard(QFrame):
         self.heading.setMinimumWidth(0)
         self.heading.setStyleSheet('font-weight:700;color:#78c8ff;')
         heading_layout.addWidget(self.heading)
-        self.completion = QLabel('Progress: —')
+        self.completion = QLabel('Overall: —')
         self.completion.setTextFormat(Qt.PlainText)
         heading_layout.addWidget(self.completion)
         self.activity_ring = WorkerActivityRing(self)
@@ -1932,6 +1932,9 @@ class WorkflowWorkerCard(QFrame):
         layout.addLayout(header)
         self._raw_status = 'not_started'
         self._last_progress = None
+        self._item_progress = None
+        self._live_worker_metrics = {}
+        self._live_computer_metrics = {}
         self._progress_activity = QElapsedTimer()
         self.status = QLabel('Not started')
         self.status.setTextFormat(Qt.PlainText)
@@ -2075,6 +2078,10 @@ class WorkflowWorkerCard(QFrame):
         state = state if isinstance(state, dict) else {}
         raw_status = str(state.get('status', 'not_started'))
         self._raw_status = raw_status
+        from .item_progress import normalize_item_progress
+        # Every snapshot supplies its own item. Missing/unknown progress must
+        # clear the old phase rather than inheriting the last package's value.
+        self._item_progress = normalize_item_progress(state.get('item_progress'))
         self._finished_with_skips = (not maintenance and state.get('presentation_status') == 'finished_with_skips'
             and state.get('worker_finished') is True and state.get('continuation_blocked') is False
             and raw_status in ('needs_review', 'completed', 'completed_with_errors'))
@@ -2087,11 +2094,11 @@ class WorkflowWorkerCard(QFrame):
             if percentage != self._last_progress:
                 self._progress_activity.start()
             self._last_progress = percentage
-            self.completion.setText(f'Progress: {percentage:.0f}%')
+            self.completion.setText(f'Overall: {percentage:.0f}%')
         elif raw_status == 'completed':
-            self.completion.setText('Progress: 100%')
+            self.completion.setText('Overall: 100%')
         else:
-            self.completion.setText('Progress: —')
+            self.completion.setText('Overall: —')
         installation_blocked = state.get('installation_blocked') is True
         scan_complete = state.get('scan_complete') is True
         offers = state.get('offers_count')
@@ -2178,10 +2185,12 @@ class WorkflowWorkerCard(QFrame):
                                              'waiting_for_maintenance', 'waiting_for_installer', 'waiting_for_preparation')
         self._elapsed_clock.start()
         self.refresh_elapsed()
+        self.set_live_metrics(self._live_worker_metrics, self._live_computer_metrics)
 
     def set_live_metrics(self, metrics, computer=None):
         metrics = metrics if isinstance(metrics, dict) else {}
         computer = computer if isinstance(computer, dict) else {}
+        self._live_worker_metrics, self._live_computer_metrics = dict(metrics), dict(computer)
         cpu = metrics.get('cpu_percent')
         terminal = self._raw_status in ('completed', 'completed_with_errors', 'failed', 'needs_review',
             'cancelled', 'stopped', 'not_started', 'not_selected', 'not_run', 'deferred')
@@ -2204,13 +2213,24 @@ class WorkflowWorkerCard(QFrame):
             health, label = ('working', 'Activity observed') if observed else ('waiting', 'Waiting / external work')
         else:
             health, label = 'unverified', 'Activity not yet measurable'
-        self.activity_ring.set_activity(cpu, health, active=not terminal)
+        item = self._item_progress if not terminal else None
+        percent = item.get('percent') if item is not None else None
+        estimated = item.get('estimated') is True if item is not None else False
+        phase = item.get('phase', '').replace('_', ' ') if item is not None else ''
+        detail = ((item['label'] + ' · ' + phase.capitalize() + '. ') if item is not None else '')
+        detail += (('Approximate current operation: ' + str(int(percent)) + '% from native byte counters.' if estimated else
+                    'Current operation: ' + str(int(percent)) + '% reported.') if percent is not None else
+                   'This operation has not reported a percentage; the ring is indeterminate while running.')
+        detail += ' Queue and workflow totals are shown separately in the bars.'
+        self.activity_ring.set_progress(percent, health, active=not terminal, description=detail,
+            phase=item.get('phase', '') if item is not None else '', estimated=estimated)
         self.activity_state.setText(label)
         self.activity_state.setStyleSheet('color:' + self.activity_ring.COLORS[health] + ';')
-        detail = str(metrics.get('reason') or metrics.get('scope') or
-            'Worker-thread CPU uses total computer capacity. Windows Update and vendor installers can work in other processes.')
-        self.activity_ring.setToolTip(label + '. ' + detail[:1500])
-        self.activity_ring.setAccessibleDescription(label + '. ' + detail[:1500])
+        # CPU observations can explain activity or pressure, but cannot replace
+        # the current operation's reported percentage inside the ring.
+        activity_detail = str(metrics.get('reason') or metrics.get('scope') or
+            'Worker-thread activity excludes work performed by Windows Update or vendor installer processes.')
+        self.activity_state.setToolTip(label + '. ' + activity_detail[:1500])
 
     def refresh_elapsed(self):
         if self._elapsed_base is not None:
@@ -2483,7 +2503,8 @@ class OptimizationProgressWindow(QDialog):
         self.worker_cards['maintenance'].update_state({'status': maintenance_phase,
             'description': maintenance_details,
             'waiting_for': waiting_kind,
-            'percentage': percentage, 'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
+            'percentage': percentage, 'item_progress': state.get('item_progress'),
+            'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
         jobs = state.get('jobs')
         job_ids = {job.get('id') for job in jobs if isinstance(job, dict)} if isinstance(jobs, list) else set()
         sequential_worker = self._update_stage_worker(stage)
@@ -2497,6 +2518,7 @@ class OptimizationProgressWindow(QDialog):
                 clock = self._foreground_update_clocks[sequential_worker] = QElapsedTimer()
                 clock.start()
             self.worker_cards[sequential_worker].update_state({'status': status, 'description': description or stage,
+                'item_progress': state.get('item_progress'),
                 'elapsed_seconds': clock.elapsed() / 1000})
         if isinstance(jobs, list):
             descriptions = []

@@ -9,6 +9,7 @@ $WarningPreference='SilentlyContinue'
 . (Join-Path $PSScriptRoot 'ComputerManager.ps1') -LibraryOnly -OutputPath $DataRoot
 . (Join-Path $PSScriptRoot 'SafeRecycle.ps1')
 . (Join-Path $PSScriptRoot 'FileTools.ps1')
+. (Join-Path $PSScriptRoot 'UpdateProgress.ps1')
 . (Join-Path $PSScriptRoot 'MaintenanceOperations.ps1')
 . (Join-Path $PSScriptRoot 'RegistryTools.ps1')
 function Test-OptimusSameExecutableFile {
@@ -52,6 +53,16 @@ function Restore-OptimusRegistryChange {
     $result=Restore-OptimusRegistryIssue -Undo $saved[0].Undo
     Set-SCMChangeStatus -Change $saved[0] -Status Restored
     [pscustomobject]@{restored=$true;detail=$result}
+}
+function New-OptimusProgressCallback {
+    param([Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{32}$')][string]$RequestId)
+    # Capture the exact request identity, not a mutable outer loop variable.
+    $boundRequestId=$RequestId
+    return {
+        param($Progress)
+        $frame=[ordered]@{kind='progress';id=$boundRequestId;progress=$Progress}
+        [Console]::WriteLine((ConvertTo-Json -InputObject $frame -Depth 6 -Compress))
+    }.GetNewClosure()
 }
 function Invoke-OptimusRequest {
     param($Request)
@@ -100,7 +111,11 @@ function Invoke-OptimusRequest {
         'driver_device_inventory' { Get-SCMDeviceCoverageInventory }
         'driver_update_apply' {
             $record=if($arg.record){$arg.record}else{[pscustomobject]@{id=[string]$arg.id;revision=[int]$arg.revision}}
-            Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true)
+            $progressCallback=$null
+            if($arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
+                $progressCallback=New-OptimusProgressCallback -RequestId ([string]$Request.id)
+            }
+            Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true) -ProgressCallback $progressCallback
         }
         default { Invoke-OptimusMaintenanceRequest -Operation ([string]$Request.operation) -Arguments $arg }
     }

@@ -386,7 +386,7 @@ class Backend(ExtendedMaintenanceBackend):
     def update_app(self, package_id):
         return self.maintenance.updates_apply(package_id, confirmed=True)
 
-    def update_app_unattended(self, package_id, *, cancel_event=None, compatibility_mode=False):
+    def update_app_unattended(self, package_id, *, cancel_event=None, compatibility_mode=False, progress_callback=None):
         """Saved scope/agreements authorize updates; cancellation still gates installation."""
         from .maintenance import UpdatePreflightError
         before_install = {'installer_started': False, 'outcomeKnown': True, 'running': False}
@@ -400,6 +400,8 @@ class Backend(ExtendedMaintenanceBackend):
             return {'skipped': True, 'requiresReview': True, 'exitCode': 0,
                     'status': 'deferred', 'note': readiness.get('reason', 'Installation space could not be established.'), 'disk_readiness': readiness, **before_install}
         options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+        if progress_callback is not None:
+            options['progress_callback'] = progress_callback
         if type(compatibility_mode) is not bool:
             raise UpdatePreflightError('Choose an explicit compatibility mode.')
         if compatibility_mode:
@@ -495,11 +497,16 @@ class Backend(ExtendedMaintenanceBackend):
         from .driver_update_backup import DriverUpdateBackup
         return DriverUpdateBackup(self).backup(offers, cancel_event=cancel_event, item_callback=item_callback)
 
-    def driver_update_apply_unattended(self, record, accept_eula=False):
+    def driver_update_apply_unattended(self, record, accept_eula=False, *, progress_callback=None):
         if accept_eula is not True:
             raise ValueError('Saved driver agreement approval is required.')
+        options = {}
+        if progress_callback is not None:
+            if not callable(progress_callback):
+                raise ValueError('An optional driver progress callback must be callable.')
+            options.update(progress_callback=progress_callback, reportProgress=True)
         return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
-                                   unattended=True, acceptEula=True, record=record, timeout=900)
+                                   unattended=True, acceptEula=True, record=record, timeout=900, **options)
 
     def driver_update_apply(self, record):
         return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'], timeout=900)

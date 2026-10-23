@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any
 
+from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
 from .update_holds import load_update_holds, matching_update_hold, held_update_result, is_known_update_hold
 from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal
@@ -406,11 +407,14 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
         current = candidates[identity]
         work = WorkItem(navigation, 'software:update:' + identity, 'Update ' + identity,
                         external=cancel_event, kind='mutation')
+        progress_key = 'software:update:' + identity
+        progress_state = {'current': index, 'total': len(selected), 'item': index + 1,
+            'items': len(selected), 'id': identity,
+            'description': f'Updating approved package {index + 1}/{len(selected)}: {identity} ({current["version"]} to {current["available"]})',
+            'log': 'Updating approved exact ID: ' + identity}
         if item_callback:
-            item_callback({'current': index, 'total': len(selected), 'item': index + 1,
-                           'items': len(selected), 'id': identity,
-                           'description': f'Updating approved package {index + 1}/{len(selected)}: {identity} ({current["version"]} to {current["available"]})',
-                           'log': 'Updating approved exact ID: ' + identity})
+            item_callback(dict(progress_state, item_progress=normalize_item_progress({
+                'key': progress_key, 'label': identity, 'phase': 'checking', 'percent': None})))
         # Progress handlers can deliver cancellation before a mutation begins.
         if cancelled():
             work.finish('cancelled', mutation_started=False)
@@ -421,8 +425,11 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
             deferred = selected[index:]
             stop_reason = 'Saved software approvals changed; remaining applications require a fresh review.'
             break
+        reporter = BoundItemProgress(item_callback, progress_key, identity, progress_state)
         try:
             options = {'cancel_event': work.cancel_event} if work.cancel_event is not None else {}
+            if callable(item_callback) and accepts_progress_callback(backend.update_app_unattended):
+                options['progress_callback'] = reporter
             if configuration.get('update_compatibility_mode_enabled') is True:
                 options['compatibility_mode'] = True
             if work.requested():
@@ -509,6 +516,8 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
             stop_reason = ('Update preflight failed; no installer was started for this application. Remaining packages need a fresh review.' if preflight else
                            'The updater raised an error; verify installer state before continuing.')
             break
+        finally:
+            reporter.close()
     needs_review = sum(item.get('result', {}).get('requiresReview') is True for item in results if isinstance(item.get('result'), dict))
     lifecycle = {}
     evidence = [item.get('result') for item in results]

@@ -322,7 +322,13 @@ class Workflow:
                     total = state.get('total', state.get('items', 0))
                     fraction = max(0, min(1, current / total)) if type(current) in (int, float) and type(total) in (int, float) and total > 0 else 0
                     description = str(state.get('description', state.get('item', title)))
-                    progress_callback({'percentage': min(99, int((completed + fraction) * 100 / total_stages)),
+                    from .item_progress import normalize_item_progress
+                    current_progress = normalize_item_progress(state.get('item_progress'))
+                    if current_progress is None:
+                        current_progress = normalize_item_progress({'key': 'maintenance:' + title,
+                            'label': description, 'phase': str(state.get('phase') or 'working'), 'percent': None})
+                    progress_callback({'item_progress': current_progress,
+                                       'percentage': min(99, int((completed + fraction) * 100 / total_stages)),
                                        'stage': title, 'stage_status': 'running', 'description': description,
                                        'processes': ['Optimus maintenance worker', description],
                                        'log': str(state.get('log', description)), 'completed': completed, 'total': total_stages,

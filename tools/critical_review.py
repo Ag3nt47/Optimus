@@ -51,7 +51,7 @@ OPTIONAL_OPERATIONS = ('configure_smart_maintenance', 'activate_smart_maintenanc
     'change_history_scan', 'change_history_revert')
 MANUAL_GAPS = [
     {'area': 'CPU and RAM', 'review': 'Run representative workloads and compare measured CPU, memory pressure and responsiveness. Fixture configuration readback cannot establish a speed gain or identify every unnecessary process.'},
-    {'area': 'Live CPU and network metrics', 'review': 'Displayed fixture values prove rendering only. Worker CPU covers identified Optimus threads and excludes external installers. Passive adapter traffic, reported link speed and cached OS connectivity do not measure Internet capacity or prove maximum computer performance.'},
+    {'area': 'Item progress and live metrics', 'review': 'Fixture phase percentages prove rendering and reset behavior only. Verify real package-manager/installer progress on supported hosts; an unknown percentage must remain unavailable. Computer CPU, passive adapter traffic, reported link speed and cached OS connectivity do not measure Internet capacity or prove maximum performance.'},
     {'area': 'GPU', 'review': 'Check actual GPU utilization, VRAM, temperatures and graphics drivers separately. GPU/shader cache cleanup is not GPU tuning; no overclock or unsupported voltage change is tested.'},
     {'area': 'One-click scope', 'review': 'Confirm that saved approvals match the intended computer. Browser close-or-skip, restarts, vendor installers, process removal and native permissions may still require a decision; maximum automation is not universal unattended support.'},
     {'area': 'Updates and security', 'review': 'Validate real signed catalogs, hardware, reboot state and effective security controls on representative machines. No driver, firmware, Windows upgrade, compatibility workaround or security change is applied by this bot. Validate a future GitHub release update and actual restart/UAC handoff on a disposable managed installation; prompt/progress fixtures do not prove a live self-update.'},
@@ -619,7 +619,7 @@ class CriticalReview:
             drain(self.app)
 
     def review_worker_controls_and_metrics(self, window, backend, dimensions, prefix):
-        """Production navigation plus cached metric payloads; no live sampler."""
+        """Production item progress/navigation and cached metrics; no sampler."""
         hub, cursors = backend.navigation, {}
         hub.begin('c' * 32)
         for identity, title in (('maintenance', 'Maintenance'), ('software_updates', 'App updates'),
@@ -643,11 +643,18 @@ class CriticalReview:
             self.check(prefix + '.worker-controls.no-live-sampler', progress._live_metrics_service is None,
                 'Smoke-test progress must not construct or start a machine metrics sampler.')
             progress._live_metrics_service = cached
-            progress.update_progress({'stage': 'Fixture maintenance', 'percentage': 37, 'stage_status': 'running',
+            state = {'stage': 'Fixture maintenance', 'percentage': 37, 'stage_status': 'running',
+                'item_progress': {'key': 'fixture-maintenance', 'label': 'Fixture resource inventory',
+                                  'phase': 'scan', 'percent': 42.},
                 'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 4,
-                          'description': 'Fixture installer owns the update lane.'},
+                          'description': 'Download approved Fixture.AppOne.',
+                          'item_progress': {'key': 'fixture-app-one', 'label': 'Fixture.AppOne',
+                                            'phase': 'download', 'percent': 25.}},
                          {'id': 'driver_updates', 'status': 'waiting_for_installer', 'current': 0, 'total': 2,
-                          'description': 'Waiting for the fixture app installer.'}]})
+                          'description': 'Waiting for the fixture app installer.',
+                          'item_progress': {'key': 'fixture-driver', 'label': 'Fixture.Network driver',
+                                            'phase': 'waiting', 'percent': None}}]}
+            progress.update_progress(state)
             progress._update_live_metrics()
             progress.worker_navigation.refresh()
             cards = progress.worker_cards
@@ -657,20 +664,70 @@ class CriticalReview:
                 'Each of the three live workers must expose labelled Back, Next and Cancel controls.')
             self.buttons(progress, dimensions, prefix + '.worker-controls',
                 [button for identity in cursors for button in cards[identity].navigation_buttons.values()])
-            self.check(prefix + '.metrics.measured-values', cards['maintenance'].activity_ring.cpu_percent == 2.5
-                and cards['software_updates'].activity_ring.cpu_percent == 0
-                and cards['driver_updates'].activity_ring.cpu_percent is None
+            self.check(prefix + '.item-progress.current-item', cards['maintenance'].activity_ring.value_percent == 42
+                and cards['software_updates'].activity_ring.value_percent == 25
+                and cards['driver_updates'].activity_ring.value_percent is None
+                and cards['software_updates'].activity_ring.accessibleName() == 'Current item progress'
+                and 'download' in cards['software_updates'].activity_ring.accessibleDescription().casefold()
                 and '37%' in cards['maintenance'].completion.text()
                 and cards['software_updates'].activity_ring.health != 'error'
                 and cards['driver_updates'].activity_ring.health == 'waiting',
-                'CPU rings must retain measured zero versus unavailable values, separate progress, and a waiting state without inventing an error.')
+                'Each ring must use the named current item phase, independently of CPU and overall/queue progress; an unknown driver percentage stays unavailable.')
             strip = progress.live_system_status
             self.check(prefix + '.metrics.system-network', all(text in strip.computer.text() for text in ('73.5%', '42.0%', '3.20 GHz'))
                 and all(text in strip.network.text() for text in ('Wi-Fi', '8.00 Mbps', '866 Mbps', 'unverified')),
                 'The computer/network strip must show cached CPU, RAM, clock, passive Mbps and explicit Internet uncertainty.')
             progress.content_scroll.verticalScrollBar().setValue(0)
             drain(self.app)
-            self.screenshot(progress, prefix + '-worker-cpu-network')
+            self.screenshot(progress, prefix + '-worker-item-progress')
+
+            def app_phase(key, label, phase, percent, *, current=1):
+                event = copy.deepcopy(state)
+                event['jobs'][0].update(current=current,
+                    description=phase.title() + ' approved ' + label + '.',
+                    item_progress={'key': key, 'label': label, 'phase': phase, 'percent': percent})
+                progress.update_progress(event)
+
+            app_phase('fixture-app-one', 'Fixture.AppOne', 'install', None)
+            self.check(prefix + '.item-progress.phase-reset',
+                cards['software_updates'].activity_ring.value_percent is None
+                and cards['software_updates'].activity_ring.value_text() == '—',
+                'A new install phase without native progress must clear the previous download 25%, not inherit it.')
+            app_phase('fixture-app-one', 'Fixture.AppOne', 'install', 75.)
+            self.check(prefix + '.item-progress.phase-value',
+                cards['software_updates'].activity_ring.value_percent == 75
+                and cards['software_updates'].progress.value() == 1
+                and cards['software_updates'].progress.maximum() == 4,
+                'The current install 75% must remain distinct from one of four processed packages.')
+            cached.status.return_value['workers']['software_updates']['cpu_percent'] = 98.
+            progress._update_live_metrics()
+            self.check(prefix + '.item-progress.cpu-isolation',
+                cards['software_updates'].activity_ring.value_percent == 75
+                and cards['maintenance'].activity_ring.value_percent == 42
+                and cards['driver_updates'].activity_ring.value_percent is None,
+                'Later worker CPU observations must never overwrite current-item percentages or fill an unknown ring.')
+            app_phase('fixture-app-one', 'Fixture.AppOne', 'install', 100.)
+            app_phase('fixture-app-two', 'Fixture.AppTwo', 'download', 0., current=2)
+            self.check(prefix + '.item-progress.next-package-reset',
+                cards['software_updates'].activity_ring.value_percent == 0
+                and cards['software_updates'].activity_ring.value_text() == '0%'
+                and 'Fixture.AppTwo' in cards['software_updates'].activity_ring.accessibleDescription(),
+                'The next package must begin at its reported 0%, independently of the previous package 100% and queue counts.')
+            drain(self.app)
+            self.screenshot(progress, prefix + '-worker-item-progress-reset')
+            app_phase('fixture-app-two', 'Fixture.AppTwo', 'download', None, current=3)
+            self.check(prefix + '.item-progress.unknown',
+                cards['software_updates'].activity_ring.value_percent is None
+                and cards['software_updates'].activity_ring.value_text() == '—'
+                and cards['software_updates'].activity_ring.active,
+                'An active package without native percentage must use an indeterminate ring; reduced motion can stop animation without inventing a percentage.')
+            self.check(prefix + '.item-progress.queue-isolation',
+                cards['software_updates'].progress.value() == 3
+                and cards['software_updates'].progress.maximum() == 4
+                and cards['software_updates'].activity_ring.value_percent is None,
+                'Three of four processed queue entries must not fabricate 75% progress for the current package.')
+            drain(self.app)
+            self.screenshot(progress, prefix + '-worker-item-progress-unknown')
             stale = dict(cards['software_updates']._navigation_state)
             cursors['software_updates'].phase('waiting_for_installer')
             progress.worker_navigation.request('software_updates', 'next', stale)

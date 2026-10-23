@@ -9,16 +9,21 @@ import time
 import uuid
 from pathlib import Path
 
+from .item_progress import normalize_item_progress
+
 class PowerShellBridge:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.script = Path(__file__).with_name('engine') / 'OptimusBridge.ps1'
         self._process = None
+        self._closing_process = None
         self._replies = queue.Queue()
         self._lock = threading.RLock()
         self._busy = False
         self._pending_lock = threading.Lock()
         self._pending = {}
+        self._progress_active = set()
+        self._progress = {}
         self._errors: list[str] = []
 
     def _start(self):
@@ -34,6 +39,7 @@ class PowerShellBridge:
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
                                    bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), env=child_environment)
         self._process = process
+        self._closing_process = None
         target_queue = self._replies
         def read_output():
             try:
@@ -41,15 +47,50 @@ class PowerShellBridge:
                     try:
                         value = json.loads(line.lstrip('\ufeff'))
                         if isinstance(value, dict) and 'id' in value:
+                            identity = value.get('id')
+                            if (not isinstance(identity, str) or len(identity) != 32
+                                    or any(char not in '0123456789abcdef' for char in identity)):
+                                continue
+                            if value.get('kind') == 'progress':
+                                payload = value.get('progress')
+                                normalized = normalize_item_progress(dict(payload, key='native', label='Native operation')) if isinstance(payload, dict) else None
+                                if normalized is not None:
+                                    with self._pending_lock:
+                                        pending = self._pending.get(identity)
+                                        if identity in self._progress_active and pending is not None and pending[1] == process.pid:
+                                            # Coalesce display-only ticks: timeout/slow consumers cannot
+                                            # build an unbounded stdout queue or block the installer.
+                                            self._progress[identity] = {key: normalized[key] for key in ('phase', 'percent')}
+                                continue
+                            if value.get('kind') not in (None, 'result') or type(value.get('ok')) is not bool:
+                                continue
                             with self._pending_lock:
-                                self._pending.pop(value.get('id'), None)
+                                self._pending.pop(identity, None)
                             target_queue.put(value)
                     except json.JSONDecodeError:
                         continue
             finally:
-                with self._pending_lock:
-                    self._pending = {key: value for key, value in self._pending.items() if value[1] != process.pid}
-                target_queue.put({'id': None, 'ok': False, 'error': 'PowerShell engine exited.'})
+                def clear_exited_pending():
+                    with self._pending_lock:
+                        self._pending = {key: value for key, value in self._pending.items() if value[1] != process.pid}
+                try:
+                    exited = process.poll() is not None
+                except OSError:
+                    exited = False
+                if exited:
+                    clear_exited_pending()
+                else:
+                    if self._closing_process is not process:
+                        def await_native_exit():
+                            try:
+                                process.wait()
+                                if process.poll() is not None:
+                                    clear_exited_pending()
+                            except Exception:
+                                pass  # No EOF/observer error proves an active native child stopped.
+                        threading.Thread(target=await_native_exit, daemon=True).start()
+                target_queue.put({'id': None, 'ok': False, 'error': ('PowerShell engine exited.' if exited else
+                    'PowerShell output ended while native engine exit remains unverified; check the operation before retrying.')})
         def read_errors():
             for line in process.stderr:
                 self._errors.append(line.rstrip())
@@ -57,7 +98,9 @@ class PowerShellBridge:
         threading.Thread(target=read_output, daemon=True).start()
         threading.Thread(target=read_errors, daemon=True).start()
 
-    def request(self, operation: str, timeout: float = 180, **arguments):
+    def request(self, operation: str, timeout: float = 180, *, progress_callback=None, **arguments):
+        if progress_callback is not None and not callable(progress_callback):
+            raise ValueError('An optional progress callback must be callable.')
         with self._lock:
             if self._process is None or self._process.poll() is not None:
                 self._start()
@@ -65,6 +108,16 @@ class PowerShellBridge:
             self._busy = True
             with self._pending_lock:
                 self._pending[request_id] = (operation, self._process.pid)
+                if progress_callback is not None:
+                    self._progress_active.add(request_id)
+            def emit_progress():
+                with self._pending_lock:
+                    value = self._progress.pop(request_id, None)
+                if value is not None and progress_callback is not None:
+                    try:
+                        progress_callback(value)
+                    except Exception:
+                        pass  # Display failure cannot cancel or replay a native operation.
             try:
                 self._process.stdin.write(json.dumps({'id': request_id, 'operation': operation, 'arguments': arguments}, separators=(',', ':')) + '\n')
                 self._process.stdin.flush()
@@ -73,10 +126,14 @@ class PowerShellBridge:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError('The operation is still running. Check its outcome before retrying; Optimus does not replay changes.')
+                    emit_progress()
                     try:
-                        response = self._replies.get(timeout=remaining)
+                        response = self._replies.get(timeout=min(remaining, 0.1) if progress_callback is not None else remaining)
                     except queue.Empty as error:
+                        if progress_callback is not None:
+                            continue
                         raise TimeoutError('Operation timeout. Check the outcome before trying again.') from error
+                    emit_progress()
                     if response.get('id') not in (None, request_id):
                         continue
                     if not response.get('ok'):
@@ -86,6 +143,15 @@ class PowerShellBridge:
                         raise RuntimeError(detail)
                     return response.get('result')
             finally:
+                try:
+                    exited_pid = self._process.pid if self._process.poll() is not None else None
+                except OSError:
+                    exited_pid = None
+                with self._pending_lock:
+                    if exited_pid is not None:
+                        self._pending = {key: value for key, value in self._pending.items() if value[1] != exited_pid}
+                    self._progress_active.discard(request_id)
+                    self._progress.pop(request_id, None)
                 self._busy = False
 
     def close(self):
@@ -98,6 +164,7 @@ class PowerShellBridge:
                     return
             process = self._process
             if process and process.poll() is None:
+                self._closing_process = process
                 process.stdin.close()
                 try:
                     process.wait(timeout=3)

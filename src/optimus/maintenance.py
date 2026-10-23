@@ -221,7 +221,10 @@ class Maintenance:
         return self._request("driver_update_apply", id=parsed, revision=revision)
 
     @staticmethod
-    def _run(arguments: list[str], *, timeout: float = 120) -> subprocess.CompletedProcess[str]:
+    def _run(arguments: list[str], *, timeout: float = 120, progress_callback=None) -> subprocess.CompletedProcess[str]:
+        if progress_callback is not None:
+            from .winget_progress import run_winget_with_progress
+            return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback)
         return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     @staticmethod
@@ -427,13 +430,15 @@ class Maintenance:
                 if row['name'].casefold() == name.casefold():
                     return False, 'This application has an installed-version WinGet pin; Optimus preserves it.', False
         return True, '', False
-    def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False, cancel_event=None, compatibility_mode: bool = False) -> dict[str, Any]:
+    def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False, cancel_event=None, compatibility_mode: bool = False, progress_callback=None) -> dict[str, Any]:
         if confirmed is not True:
             raise UpdatePreflightError("Confirm the selected software update before installing it.", failure_scope='shared', failureKind='approvals_changed')
         if type(unattended) is not bool:
             raise UpdatePreflightError("Choose an explicit unattended mode.", failure_scope='shared', failureKind='approvals_changed')
         if type(compatibility_mode) is not bool:
             raise UpdatePreflightError("Choose an explicit non-security compatibility mode.", failure_scope='shared', failureKind='approvals_changed')
+        if progress_callback is not None and not callable(progress_callback):
+            raise ValueError('An optional update progress callback must be callable.')
         if not isinstance(package_id, str) or not _PACKAGE_ID.fullmatch(package_id):
             raise UpdatePreflightError("Select an exact package ID from a fresh update scan.", failure_scope='package', failureKind='package_unavailable')
         current = self._last_update_packages.get(package_id)
@@ -514,7 +519,10 @@ class Maintenance:
                 return interrupted
             if (held := held_result()) is not None:
                 return held
-            result = self._run(arguments, timeout=1800)
+            run_options = {'timeout': 1800}
+            if progress_callback is not None:
+                run_options['progress_callback'] = progress_callback
+            result = self._run(arguments, **run_options)
         except subprocess.TimeoutExpired:
             # The vendor child can outlive WinGet. Never retry or replay here.
             raise UpdateOutcomeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
@@ -524,6 +532,8 @@ class Maintenance:
             raise UpdatePreflightError("WinGet could not be started; no installer was launched.",
                 failure_scope='shared' if isinstance(error, PermissionError) else 'app_batch',
                 failureKind='authorization' if isinstance(error, PermissionError) else 'manager_unavailable') from error
+        if getattr(result, 'capture_complete', True) is not True:
+            raise UpdateOutcomeError('The WinGet transcript was incomplete or exceeded its bound. Restart and installer state could not be verified; no automatic retry is authorized.')
         output = _ANSI.sub("", result.stdout or "")
         stderr = _ANSI.sub("", result.stderr or "")
         native_code = result.returncode & 0xffffffff
@@ -535,6 +545,11 @@ class Maintenance:
                        'installation failed. restart your pc then try again.')))
         installer_running = (native_code in (1618, 0x8A150102)
                              or 'another installation is already in progress.' in (output + '\n' + stderr).casefold())
+        if progress_callback is not None and result.returncode == 0 and not restart and not installer_running:
+            try:
+                progress_callback({'phase': 'install', 'percent': 100.0, 'item_terminal': True})
+            except Exception:
+                pass  # A verified native phase end is display-only, not app-version verification.
         return {"id": package_id, "package_id": package_id, "source": "winget", "exitCode": result.returncode,
                 "status": "completed" if result.returncode in (0, 3010, 1641) else "failed", "unattended": unattended,
                 "compatibility_mode": compatibility_mode,

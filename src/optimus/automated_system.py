@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 from .automation import CURRENT_SETUP_VERSION
+from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
 from .navigation import WorkItem, cursor_for, navigation_skip, local_skip, can_fail_forward, shared_update_refusal
 
 _HEX64 = re.compile(r'^[0-9a-fA-F]{64}$')
@@ -405,7 +406,10 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
         if _cancel(cancel_event):break
         if phased and {key:config.get(key) for key in approved_scope}!=approved_scope:break
         work=WorkItem(navigation,'driver:update:'+value['id']+':'+str(value['revision']),value['title'],external=cancel_event,kind='mutation')
-        if item_callback:item_callback({'operation':'driver','current':index+1,'index':index+1,'total':len(eligible),'description':value['title'],'binding':value})
+        progress_key='driver:update:'+value['id']+':'+str(value['revision'])
+        progress_state={'operation':'driver','current':index+1,'index':index+1,'total':len(eligible),'description':value['title'],'binding':value}
+        if item_callback:item_callback(dict(progress_state,item_progress=normalize_item_progress({
+            'key':progress_key,'label':value['title'],'phase':'checking','percent':None})))
         if _cancel(cancel_event):
             work.finish('cancelled',mutation_started=False)
             break
@@ -413,12 +417,16 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             work.finish('skipped',mutation_started=False)
             break
         processed=index+1
+        reporter=BoundItemProgress(item_callback,progress_key,value['title'],progress_state)
         try:
             if work.requested():
                 outcome=navigation_skip()
             else:
                 work.installing()
-                outcome=backend.driver_update_apply_unattended(value,accept_eula=True)
+                options={'accept_eula':True}
+                if callable(item_callback) and accepts_progress_callback(backend.driver_update_apply_unattended):
+                    options['progress_callback']=reporter
+                outcome=backend.driver_update_apply_unattended(value,**options)
             if shared_update_refusal(outcome):outcome=dict(outcome,shared_barrier=True)
             success=(isinstance(outcome,dict) and type(outcome.get('resultCode')) is int and outcome['resultCode']==2
                      and outcome.get('hresult',0)==0 and outcome.get('aggregateResultCode',2)==2 and outcome.get('aggregateHresult',0)==0)
@@ -441,6 +449,8 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             work.finish('failed',result=items[-1],mutation_started=not known,outcome_known=known,message=str(error))
             if can_fail_forward(receipt):continue
             break
+        finally:
+            reporter.close()
     lifecycle={'installer_started':False,'outcomeKnown':True,'running':False} if processed==0 else {}
     if processed:
         outcomes=[row.get('result') for row in items[-processed:]]

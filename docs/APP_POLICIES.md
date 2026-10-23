@@ -60,13 +60,17 @@ Automatic backup targets only the installed packages matched to approved offers.
 
 Only an exact offer with verified backup evidence can reach Windows Update installation. Unsupported identities, trust or copy failures remain per-offer skips; other eligible offers continue. A backup prerequisite is reported separately from failed driver installations. Quiet-install, hardware/provider/date, agreements, permissions, space and restart checks still apply.
 
-## Activity indicators
+## Current-item progress and system status
 
-![Worker controls and measured activity display](optimus-workers.png)
+![Worker controls and current-item progress](optimus-workers.png)
 
 This interface example uses disposable fixture values; it is not a benchmark or a reading from your computer.
 
-Worker completion percentages and measured worker CPU activity have separate labels. Worker CPU covers attributable Optimus runner threads; Windows Update services and vendor installers can do work outside those threads. Missing or ambiguous attribution stays unavailable.
+The **Current item** ring shows the reported percentage for the named operation and phase. It resets when a different package or phase starts: download 25% is not install 25%, and finishing one package does not carry 100% into the next. The ring stays indeterminate when the native operation does not expose reliable progress. Reduced motion can stop its animation while the percentage remains unavailable. CPU use, elapsed time and package counts never fill in a missing percentage.
+
+An approximate download value, such as **~62%**, comes from the updater's own downloaded/total counters in the same unit. Those displayed counters can be rounded, so the estimate is labelled explicitly. It is not a time estimate or a measurement of installation progress. An opaque installer still shows an indeterminate ring until it reports usable progress or returns its actual outcome.
+
+The separate bars show completed workflow stages or processed queue entries. Three of four packages processed does not establish 75% completion of the current installer. A phase reaching 100% also does not prove that installation succeeded; the recorded native outcome and verification determine the result. Reviewing an earlier item with Back does not replay its operation.
 
 The live status area reports computer CPU use, available clock information, RAM use and passive network receive/transmit rates. Wi-Fi identification and link rates depend on available native interface information. A zero receive rate can mean no download is occurring. These counters do not run an internet speed test or establish that every remote update server is reachable. Status colors explain observed work, waiting, resource pressure and errors; they are not a universal performance score.
 

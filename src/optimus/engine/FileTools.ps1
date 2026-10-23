@@ -513,7 +513,7 @@ function New-SCMDriverPreflightRefusal {
     }
 }
 function Invoke-SCMDriverUpdateApply {
-    param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false)
+    param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false,[scriptblock]$ProgressCallback)
     if(-not(Test-SCMAdministrator)){throw 'Administrator access is required; no automatic elevation was requested.'}
     if($Unattended -and -not $AcceptEula){throw 'Saved driver license agreement approval is required for unattended installation.'}
     $parsed=[guid]::Empty
@@ -570,7 +570,9 @@ function Invoke-SCMDriverUpdateApply {
         try { Assert-SCMDriverQuietMode -Installer $installer }
         catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception) }
     }
-    $download=$downloader.Download()
+    $download=if($null -ne $ProgressCallback){
+        Invoke-SCMUpdateProgress -Owner $downloader -Phase Download -ProgressCallback $ProgressCallback
+    }else{$downloader.Download()}
     $downloadItem=$download.GetUpdateResult(0)
     # https://learn.microsoft.com/windows/win32/wua_sdk/idownloadresult-properties
     # https://learn.microsoft.com/windows/win32/api/wuapi/nn-wuapi-iupdatedownloadresult
@@ -595,7 +597,9 @@ function Invoke-SCMDriverUpdateApply {
         catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception) }
     }
     try {
-        $installed=$installer.Install()
+        $installed=if($null -ne $ProgressCallback){
+            Invoke-SCMUpdateProgress -Owner $installer -Phase Install -ProgressCallback $ProgressCallback
+        }else{$installer.Install()}
     } catch {
         # These exact synchronous handler rejections establish a terminal quiet
         # failure. All other COM errors/timeouts remain unknown to the caller.
