@@ -56,6 +56,20 @@ class Backend(ExtendedMaintenanceBackend):
     def preferences(self):
         return self.preference_store.load()
 
+    def retention_cleanup(self, kind, settings, *, progress_callback=None, cancel_event=None):
+        from .retention_cleanup import RetentionCleanup
+        return RetentionCleanup(self.data_dir, scope_reader=self.preferences).run(kind, settings,
+            progress_callback=progress_callback, cancel_event=cancel_event)
+
+    def codex_archive_cleanup(self, settings, *, progress_callback=None, cancel_event=None):
+        from .codex_archives import run_archive_cleanup
+        return run_archive_cleanup(self, settings, progress_callback=progress_callback, cancel_event=cancel_event)
+
+    @staticmethod
+    def space_guard_check(settings):
+        from .volume_guard import check_drive_buffers
+        return check_drive_buffers(settings)
+
     def save_preferences(self, settings, *, _force_startup_launch=False):
         candidate = self.preference_store.validate(settings)
         with self.preference_store.lock:
@@ -530,8 +544,19 @@ class Backend(ExtendedMaintenanceBackend):
             if not callable(progress_callback):
                 raise ValueError('An optional driver progress callback must be callable.')
             options.update(progress_callback=progress_callback, reportProgress=True)
-        return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
-                                   unattended=True, acceptEula=True, record=record, timeout=900, **options)
+        result = self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
+                                     unattended=True, acceptEula=True, record=record, timeout=900, **options)
+        if isinstance(result, dict) and isinstance(result.get('download_progress'), dict):
+            from .item_progress import normalize_item_progress
+            observed = normalize_item_progress(dict(result['download_progress'],
+                key='driver:update:' + str(record['id']) + ':' + str(record['revision']),
+                label=str(record.get('title') or record['id'])))
+            result = dict(result)
+            if observed is not None and 'downloaded_bytes' in observed:
+                result['download_progress'] = observed
+            else:
+                result.pop('download_progress', None)
+        return result
 
     def driver_update_apply(self, record):
         return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'], timeout=900)

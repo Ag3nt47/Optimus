@@ -644,10 +644,13 @@ class CriticalReview:
                 'Smoke-test progress must not construct or start a machine metrics sampler.')
             progress._live_metrics_service = cached
             state = {'stage': 'Fixture maintenance', 'percentage': 37, 'stage_status': 'running',
+                'resource_totals': {'removed_known': True, 'removed_bytes': 157286400, 'removed_files': 137},
                 'item_progress': {'key': 'fixture-maintenance', 'label': 'Fixture resource inventory',
                                   'phase': 'scan', 'percent': 42.},
                 'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 4,
                           'description': 'Download approved Fixture.AppOne.',
+                          'resource_totals': {'installed_known': True, 'installed_items': 1,
+                              'downloaded_known': True, 'downloaded_bytes': 83886080, 'downloaded_partial': True},
                           'item_progress': {'key': 'fixture-app-one', 'label': 'Fixture.AppOne',
                                             'phase': 'download', 'percent': 25.}},
                          {'id': 'driver_updates', 'status': 'waiting_for_installer', 'current': 0, 'total': 2,
@@ -673,6 +676,15 @@ class CriticalReview:
                 and cards['software_updates'].activity_ring.health != 'error'
                 and cards['driver_updates'].activity_ring.health == 'waiting',
                 'Each ring must use the named current item phase, independently of CPU and overall/queue progress; an unknown driver percentage stays unavailable.')
+            self.check(prefix + '.worker-totals.confirmed-amounts',
+                'Removed: 150.0 MiB' in cards['maintenance'].totals.text()
+                and '137 files' in cards['maintenance'].totals.text()
+                and 'Completed installs: 1 app' in cards['software_updates'].totals.text()
+                and 'Downloaded: 80.0 MiB observed' in cards['software_updates'].totals.text()
+                and 'Installs: not reported' in cards['driver_updates'].totals.text()
+                and cards['software_updates'].status.text() == 'Downloading'
+                and '— downloading' in progress.background_status.text(),
+                'Worker totals must show confirmed removed-file lengths, successful installed items and observed transfer bytes separately; unknown drivers cannot acquire a fabricated zero or installed size.')
             strip = progress.live_system_status
             self.check(prefix + '.metrics.system-network', all(text in strip.computer.text() for text in ('73.5%', '42.0%', '3.20 GHz'))
                 and all(text in strip.network.text() for text in ('Wi-Fi', '8.00 Mbps', '866 Mbps', 'unverified')),

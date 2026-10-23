@@ -23,6 +23,8 @@ PORTABLE_SUITES = (
     'test_change_history.py', 'test_revert_dialog.py',
     'test_live_metrics.py', 'test_app_presence.py', 'test_driver_update_backup.py',
     'test_software_app_rules.py',
+    'test_codex_archives.py', 'test_retention_cleanup.py', 'test_retention_choices_ui.py',
+    'test_worker_resource_totals.py',
 )
 
 

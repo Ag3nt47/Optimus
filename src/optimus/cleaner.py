@@ -38,7 +38,7 @@ def _cleanup_progress(callback, identity):
         raise ValueError('An optional progress callback must be callable.')
     previous_phase, previous_time = None, None
 
-    def emit(phase, percent, description, *, force=False):
+    def emit(phase, percent, description, *, force=False, deleted_bytes=None, deleted_count=None):
         nonlocal previous_phase, previous_time
         if callback is None:
             return
@@ -48,10 +48,13 @@ def _cleanup_progress(callback, identity):
             return
         previous_phase, previous_time = phase, now
         try:
-            callback({'item_progress': {'key': 'cleanup:' + identity,
+            event = {'item_progress': {'key': 'cleanup:' + identity,
                 'label': 'Cleanup preview' if phase == 'scan' else 'Cleanup file checks',
                 'phase': phase, 'percent': percent},
-                'description': str(description)[:1500], 'progress_only': True})
+                'description': str(description)[:1500], 'progress_only': True}
+            if phase == 'cleanup' and type(deleted_bytes) is int and type(deleted_count) is int:
+                event.update(deleted_bytes=deleted_bytes, deleted_count=deleted_count)
+            callback(event)
         except Exception:
             pass  # A display callback cannot replay or abandon file operations.
     return emit
@@ -544,7 +547,8 @@ class Cleaner:
         # A complete preview journal must exist before any deletion.
         log_path.write_text(json.dumps({'state': 'prepared', 'plan': plan}, indent=2), encoding='utf-8')
         total = len(plan['files'])
-        emit('cleanup', 0, f'Checking {total} preview-approved files before removal.', force=True)
+        emit('cleanup', 0, f'Checking {total} preview-approved files before removal.', force=True,
+             deleted_bytes=0, deleted_count=0)
         for processed, record in enumerate(plan['files'], 1):
             try:
                 category = choices.get(record['category_id'])
@@ -575,10 +579,12 @@ class Cleaner:
                 result['skipped_count'] += 1
                 result['errors'].append(f'{record["path"]}: {error}')
             emit('cleanup', min(99, processed * 100 / total),
-                 f'{processed}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved.')
+                 f'{processed}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved.',
+                 deleted_bytes=result['deleted_bytes'], deleted_count=result['deleted_count'])
         result['log_path'] = str(log_path)
         log_path.write_text(json.dumps({'state': 'completed', 'plan_id': plan['id'], 'result': result}, indent=2), encoding='utf-8')
-        emit('cleanup', 100, f'{total}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved. Results saved.', force=True)
+        emit('cleanup', 100, f'{total}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved. Results saved.', force=True,
+             deleted_bytes=result['deleted_bytes'], deleted_count=result['deleted_count'])
         return result
 
 

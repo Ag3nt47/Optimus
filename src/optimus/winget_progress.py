@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import codecs
+from decimal import Decimal
 import re
 import subprocess
 import threading
@@ -13,24 +14,28 @@ _BAR = r'[\s\u2580-\u259f\u2500-\u2501]*'
 _PERCENT = re.compile(_BAR + r'(?P<percent>[0-9]{1,3}(?:\.[0-9]{1,2})?)\s*%')
 _BYTES = re.compile(_BAR + r'(?P<done>[0-9]{1,12}(?:\.[0-9]{1,4})?)\s*(?P<unit>B|KB|MB|GB|TB)\s*/\s*'
     r'(?P<total>[0-9]{1,12}(?:\.[0-9]{1,4})?)\s*(?P<total_unit>B|KB|MB|GB|TB)')
+_UNITS = {name: 1 << power for name, power in (('B', 0), ('KB', 10), ('MB', 20), ('GB', 30), ('TB', 40))}
 
 
 class WinGetProgressParser:
     """Accept explicit native progress bars only within a recognized phase.
 
-    Rounded same-unit native byte counters are explicitly marked estimated.
+    Rounded native byte counters are explicitly marked estimated. WinGet
+    formats current and maximum independently, using binary KB/MB/GB units.
     Arbitrary installer log percentages and unknown text remain indeterminate.
     """
     def __init__(self, callback):
         self.callback, self.phase, self.buffer, self.overflow = callback, 'checking', '', False
         self.byte_total, self.byte_total_invalid = None, False
 
-    def _emit(self, phase, percent=None, *, estimated=False):
+    def _emit(self, phase, percent=None, *, estimated=False, byte_progress=None):
         self.phase = phase
         try:
             value = {'phase': phase, 'percent': percent}
             if estimated:
                 value['estimated'] = True
+            if byte_progress is not None:
+                value.update(byte_progress)
             self.callback(value)
         except Exception:
             pass
@@ -52,11 +57,14 @@ class WinGetProgressParser:
             # this parser never synthesizes a terminal success percentage.
             self._emit(self.phase, value if 0 <= value < 100 else None)
         elif self.phase == 'download' and (match := _BYTES.fullmatch(text)) is not None:
-            done, total = float(match['done']), float(match['total'])
-            if (match['unit'] != match['total_unit'] or total <= 0 or done > total):
+            # ExecutionProgress.cpp::OutputBytes formats each side separately.
+            # Mixed units such as 512 KB / 1 GB are normal native output.
+            done = int(Decimal(match['done']) * _UNITS[match['unit']])
+            total = int(Decimal(match['total']) * _UNITS[match['total_unit']])
+            if total <= 0 or not 0 <= done <= total <= 2 ** 50:
                 self._emit('download')
                 return
-            identity = (match['unit'], total)
+            identity = total
             if self.byte_total is not None and identity != self.byte_total:
                 self.byte_total_invalid = True
             self.byte_total = identity
@@ -65,7 +73,9 @@ class WinGetProgressParser:
             else:
                 # These are rounded native transfer counters, never queue/time
                 # estimates. Even equal displays cannot prove phase completion.
-                self._emit('download', min(99.0, done * 100.0 / total), estimated=True)
+                self._emit('download', min(99.0, done * 100.0 / total), estimated=True,
+                    byte_progress={'downloaded_bytes': done, 'download_total_bytes': total,
+                                   'bytes_estimated': True, 'bytes_source': 'winget_native'})
         else:
             self._emit('working')
 
@@ -123,9 +133,15 @@ def run_winget_with_progress(arguments, *, timeout, progress_callback):
     output, errors, reporting = _Capture(), _Capture(), threading.Event()
     read_fault, ready, progress_lock, latest = threading.Event(), threading.Event(), threading.Lock(), []
     reporting.set()
+    download_progress = []
     def remember(value):
         if reporting.is_set():
             with progress_lock:
+                if value.get('phase') == 'download' and type(value.get('downloaded_bytes')) is int:
+                    # Preserve a last measured receipt even when display ticks
+                    # are coalesced or a vendor immediately starts installing.
+                    if not download_progress or value['downloaded_bytes'] >= download_progress[0]['downloaded_bytes']:
+                        download_progress[:] = [dict(value)]
                 latest[:] = [value]
             ready.set()
     parser = WinGetProgressParser(remember)
@@ -184,6 +200,9 @@ def run_winget_with_progress(arguments, *, timeout, progress_callback):
             ready.set()
             result = subprocess.CompletedProcess(arguments, returncode, output.value(), errors.value())
             result.capture_complete = not read_fault.is_set() and output.complete() and errors.complete()
+            with progress_lock:
+                if download_progress:
+                    result.download_progress = dict(download_progress[0])
             return result
         if time.monotonic() >= deadline:
             reporting.clear()

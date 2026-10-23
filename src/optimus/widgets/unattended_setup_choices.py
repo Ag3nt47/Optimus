@@ -13,7 +13,9 @@ class UnattendedSetupChoices:
             'sign-in launch with startup maintenance. Later launches skip the launch warning and post-run prompts '
             'only while that scope still matches. Temporary files, selected browser history/cookies and selected '
             'apps can be permanently removed; cookies can sign you out. Per-app rules can reinstall missing '
-            'apps or uninstall selected installed apps. Review all choices before Save. '
+            'apps. Individually selected retention cleanup can permanently remove archived personal Codex conversations, '
+            'inactive Angerona logs and old incomplete or paused-download fragments. Per-app rules can also uninstall selected '
+            'installed apps. Review all choices before Save. '
             'Changed scopes require fresh approval. Unknown installers, missing permissions and restarts are deferred.')
         label = QLabel('Open browsers during unattended runs')
         label.setWordWrap(True)

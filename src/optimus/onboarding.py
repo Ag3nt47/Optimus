@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
     QPlainTextEdit, QPushButton, QRadioButton, QButtonGroup, QScrollArea,
-    QSpinBox, QVBoxLayout, QWidget, QWizard, QWizardPage, QListWidget, QListWidgetItem,
+    QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget, QWizard, QWizardPage, QListWidget, QListWidgetItem,
 )
 
 SETUP_VERSION = 2
@@ -302,6 +302,8 @@ class InitialSetupWizard(QWizard):
             try:
                 if isinstance(control, QCheckBox):
                     control.setChecked(bool(preset[key]))
+                elif isinstance(control, QDoubleSpinBox):
+                    control.setValue(float(preset[key]))
                 elif isinstance(control, QSpinBox):
                     control.setValue(int(preset[key]))
                 elif isinstance(control, QComboBox):
@@ -431,6 +433,14 @@ class InitialSetupWizard(QWizard):
             self._category(body, identifier, identifier + ' (saved category)', True, False)
         if not self.category_controls:
             body.addWidget(_label('No additional categories were reported. The Cleaner page can preview the available categories later.'))
+        from .widgets.retention_cleanup_choices import RetentionCleanupChoices
+        self.retention_cleanup = RetentionCleanupChoices(body, self.initial,
+            add_check=lambda key, text: self._check(body, key, text),
+            add_note=lambda text: body.addWidget(_label(text)), controls=self.controls)
+        from .widgets.drive_guard_choices import DriveGuardChoices
+        self.drive_guard = DriveGuardChoices(body, self.initial,
+            add_check=lambda key, text: self._check(body, key, text, default=True),
+            add_note=lambda text: body.addWidget(_label(text)), controls=self.controls)
         from .widgets.smart_setup_choices import SmartSetupChoices
         self.smart_setup = SmartSetupChoices(body, self.initial,
             add_check=lambda key, text: self._check(body, key, text),
@@ -1136,7 +1146,7 @@ class InitialSetupWizard(QWizard):
         for key, control in self.controls.items():
             if isinstance(control, QCheckBox):
                 result[key] = control.isChecked()
-            elif isinstance(control, QSpinBox):
+            elif isinstance(control, (QSpinBox, QDoubleSpinBox)):
                 result[key] = control.value()
             elif isinstance(control, QComboBox):
                 result[key] = control.currentText()
@@ -1242,6 +1252,12 @@ class InitialSetupWizard(QWizard):
             actions.append('Request administrator access once at each normal app launch using Windows UAC; declining keeps Optimus open with standard access')
         if settings.get('cleanup_enabled'):
             actions.append('Permanently delete eligible old user temporary files')
+        from .retention_configuration import retention_actions
+        actions.extend(retention_actions(settings))
+        if settings.get('drive_space_guard_enabled') is True:
+            actions.append('Read-only drive-space checks before and after maintenance; warn below '
+                + str(settings.get('drive_space_guard_target_gib', 2.0))
+                + ' GiB free. This is not an exclusive disk reservation and grants no extra deletion.')
         if settings.get('smart_cleaning_enabled'):
             actions.append('Smart Cleaning while Optimus is open after session approval: check only saved junk categories every '
                 + str(settings['smart_maintenance_poll_seconds']) + ' seconds; clean at '

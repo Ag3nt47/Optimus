@@ -16,6 +16,7 @@ import uuid
 
 from .filesystem import _ordinary_data_path
 from .item_progress import normalize_item_progress
+from .worker_totals import WorkerResourceTotals, download_observation, normalize_resource_totals
 from .navigation import local_skip, shared_update_refusal, can_fail_forward
 
 WINDOWS_SOFTWARE = 'Review or update configured software'
@@ -29,6 +30,7 @@ ACTIVE_JOB_STATES = frozenset({'pending', 'running', 'waiting', 'scanning', 'pre
 BEFORE_UPDATES = frozenset({
     'Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
     'Clean approved native temporary files and caches', 'Clean selected browser data after close or skip choice',
+    'Clean archived Codex conversations', 'Clean inactive Angerona logs', 'Clean incomplete download leftovers',
 })
 INDEPENDENT = frozenset({
     'Review installed applications', 'Identify programs contributing to slowdowns',
@@ -53,6 +55,7 @@ BLOCKED_STAGES = INSTALLER_STAGES | frozenset({
     'Disable approved startup entries', 'Scan for spyware and malware',
     'Review or disable approved user startup entries', 'Find or recycle approved duplicate copies',
     'Clean approved native temporary files and caches', 'Clean selected browser data after close or skip choice',
+    'Clean archived Codex conversations', 'Clean inactive Angerona logs', 'Clean incomplete download leftovers',
 })
 
 
@@ -97,15 +100,22 @@ class ProgressMux:
         self.jobs = {}
         self.worker_started = {}
         self.worker_finished = {}
+        self.maintenance_totals = WorkerResourceTotals()
+        self.job_totals = {}
+        self.space_guard = None
 
     def _event(self):
         event = dict(self.foreground)
+        event['resource_totals'] = self.maintenance_totals.snapshot()
+        if isinstance(self.space_guard, dict):
+            event['space_guard'] = copy.deepcopy(self.space_guard)
         event['item_progress'] = normalize_item_progress(event.get('item_progress'))
         if self.jobs:
             event['jobs'] = []
             processes = list(event.get('processes', []))
             for job_id, job in self.jobs.items():
                 current = dict(job)
+                current['resource_totals'] = self.job_totals[job_id].snapshot()
                 current['item_progress'] = normalize_item_progress(current.get('item_progress'))
                 if job_id in self.worker_started:
                     finished = self.worker_finished.get(job_id)
@@ -136,12 +146,42 @@ class ProgressMux:
 
     def __call__(self, event):
         with self.lock:
+            self.maintenance_totals.observe(event)
             self.foreground = dict(event, item_progress=normalize_item_progress(event.get('item_progress')))
             self.callback(self._event())
+
+    def removal_receipt(self, key, result):
+        with self.lock:
+            self.maintenance_totals.removal_receipt(key, result)
+
+    def resource_snapshot(self):
+        with self.lock:
+            return self.maintenance_totals.snapshot()
+
+    def update_space_guard(self, result):
+        with self.lock:
+            self.space_guard = copy.deepcopy(result) if isinstance(result, dict) else None
+
+    def worker_resource_snapshots(self):
+        with self.lock:
+            return {key: ledger.snapshot() for key, ledger in self.job_totals.items()}
+
+    def item_receipt(self, row, *, job_id='software_updates'):
+        with self.lock:
+            self.job_totals.setdefault(job_id, WorkerResourceTotals(job_id)).receipt(row)
+
+    def update_result(self, result, *, job_id='software_updates'):
+        with self.lock:
+            self.job_totals.setdefault(job_id, WorkerResourceTotals(job_id)).result(result)
+
+    def job_resource_snapshot(self, *, job_id='software_updates'):
+        with self.lock:
+            return self.job_totals.setdefault(job_id, WorkerResourceTotals(job_id)).snapshot()
 
     def background(self, status, state=None, *, job_id='software_updates'):
         state = state if isinstance(state, dict) else {}
         with self.lock:
+            self.job_totals.setdefault(job_id, WorkerResourceTotals(job_id)).observe(state)
             previous = self.jobs.get(job_id, {})
             package = state.get('id', previous.get('current_package'))
             now = time.monotonic()
@@ -236,6 +276,12 @@ class ProgressMux:
                 parent.wait_for_updates(next_stage)
             def heartbeat(self):
                 parent.heartbeat()
+            def item_receipt(self, row):
+                parent.item_receipt(row, job_id=job_id)
+            def update_result(self, result):
+                parent.update_result(result, job_id=job_id)
+            def resource_snapshot(self):
+                return parent.job_resource_snapshot(job_id=job_id)
         return JobProgress()
 
 
@@ -391,6 +437,9 @@ def _journal_result(result):
              'shared_barrier', 'failure_scope', 'backup_unavailable') if key in result}
     if isinstance(result.get('error'), str):
         saved['error'] = result['error'][:4000]
+    totals = normalize_resource_totals(result.get('resource_totals'))
+    if totals is not None:
+        saved['resource_totals'] = totals
     saved['items'] = [{'id': str(row.get('id') or _bounded_item_binding(row).get('id', ''))[:280],
                       'binding': _bounded_item_binding(row),
                       **{key: row[key] for key in ('installer_started', 'outcomeKnown', 'running')
@@ -411,6 +460,18 @@ def _journal_result(result):
     rows = [row for row in result.get('items', []) if isinstance(row, dict)][:1000]
     for row, compact in zip(rows, saved['items']):
         outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+        if type(outcome.get('installation_reported')) is bool:
+            compact['result']['installation_reported'] = outcome['installation_reported']
+        observation = outcome.get('download_progress')
+        if isinstance(observation, dict):
+            observation = download_observation(observation)
+            if observation is not None:
+                compact['result']['download_progress'] = observation
+        else:
+            observation = download_observation(dict(outcome, phase='download'), key='receipt:download')
+            if observation is not None:
+                compact['result'].update({key: observation[key] for key in
+                    ('downloaded_bytes', 'download_total_bytes', 'bytes_estimated', 'bytes_source')})
         if isinstance(outcome.get('automatic_recheck'), dict):
             compact['result']['automatic_recheck'] = _bounded_automatic_recheck(outcome['automatic_recheck'])
     rechecks = result.get('automatic_update_rechecks')
@@ -648,6 +709,9 @@ def update_completion_state(result):
     state = {'description': description[:2000], 'current': len(items) if isinstance(items, list) else 0,
              'id': None,
              'scan_label': label}
+    totals = normalize_resource_totals(result.get('resource_totals'))
+    if totals is not None:
+        state['resource_totals'] = totals
     if automatic_rechecks:
         state['automatic_recheck_count'] = len(automatic_rechecks)
     # Existing per-installer totals remain distinct from the number discovered.
@@ -993,6 +1057,8 @@ class ParallelAppUpdates:
             if finished_package_attempt(proposed):
                 self.record['package_attempt'] = attempt
         self._write()
+        if hasattr(self.mux, 'item_receipt'):
+            self.mux.item_receipt(row)  # Display accounting follows the durable receipt.
 
     def _run(self):
         from .runtime_priority import lower_worker_priority
@@ -1053,6 +1119,9 @@ class ParallelAppUpdates:
                 self.result.setdefault('outcomeKnown', True)
         native = getattr(self.backend, 'system', 'win32') != 'win32'
         try:
+            if hasattr(self.mux, 'update_result'):
+                self.mux.update_result(self.result)
+                self.result['resource_totals'] = self.mux.resource_snapshot()
             journal_result = _journal_result(self.result)
             self.record.update(status='uncertain' if _uncertain(self.result, native=native) else
                                'needs_review' if update_completion_status(self.result) == 'needs_review' else 'completed',
@@ -1323,11 +1392,13 @@ def parallel_installer_stages(stages, titles):
     if not operations:
         return stages, [], None
     remaining = [row for row in stages[1:] if row[0] not in titles]
+    early_checks = [row for row in remaining if row[0] == 'Check drive space buffers']
+    remaining = [row for row in remaining if row[0] != 'Check drive space buffers']
     cleanup = [row for row in remaining if row[0] in BEFORE_UPDATES]
     independent = [row for row in remaining if independent_stage(row[0])]
     queued = [row for row in remaining if row[0] not in BEFORE_UPDATES and not independent_stage(row[0])]
-    launch_after = (cleanup[-1] if cleanup else stages[0])[0]
-    return [stages[0], *cleanup, *independent, *queued], operations, launch_after
+    launch_after = (cleanup[-1] if cleanup else early_checks[-1] if early_checks else stages[0])[0]
+    return [stages[0], *early_checks, *cleanup, *independent, *queued], operations, launch_after
 
 
 def parallel_stages(stages, software_title):

@@ -60,7 +60,8 @@ class PowerShellBridge:
                                         if identity in self._progress_active and pending is not None and pending[1] == process.pid:
                                             # Coalesce display-only ticks: timeout/slow consumers cannot
                                             # build an unbounded stdout queue or block the installer.
-                                            self._progress[identity] = {key: normalized[key] for key in ('phase', 'percent')}
+                                            self._progress[identity] = {key: field for key, field in normalized.items()
+                                                                       if key not in ('key', 'label')}
                                 continue
                             if value.get('kind') not in (None, 'result') or type(value.get('ok')) is not bool:
                                 continue

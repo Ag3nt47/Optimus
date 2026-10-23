@@ -13,10 +13,10 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, 
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+    QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter, QScrollArea,
-    QSizePolicy, QStackedWidget, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget,
+    QSizePolicy, QStackedWidget, QStyle, QStyleOptionProgressBar, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget,
     QVBoxLayout, QWidget,
 )
 from optimus.widgets.theme import THEMES, build_qss
@@ -1833,15 +1833,16 @@ def _compact_worker_reason(text):
 
 class WorkflowSummaryLabel(QLabel):
     """Paint at most two fitting lines while retaining complete accessible text."""
-    def __init__(self, text='', parent=None):
+    def __init__(self, text='', parent=None, *, max_lines=2):
         super().__init__(parent)
+        self._max_lines = 1 if max_lines == 1 else 2
         self._summary = ''
         self.visible_text = ''
         self.setTextFormat(Qt.PlainText)
         self.setWordWrap(False)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.setFixedHeight(self.fontMetrics().lineSpacing() * 2 + 4)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * self._max_lines + 4)
         self.setText(text)
 
     def setText(self, text):
@@ -1861,6 +1862,10 @@ class WorkflowSummaryLabel(QLabel):
 
     def _fit_summary(self):
         text, metrics, width = self._summary, self.fontMetrics(), max(1, self.contentsRect().width())
+        if self._max_lines == 1:
+            self.visible_text = metrics.elidedText(' '.join(text.split()), Qt.ElideRight, width)
+            self.update()
+            return
         first, separator, rest = text.partition('\n')
         if separator and metrics.horizontalAdvance(first) <= width:
             self.visible_text = first + '\n' + metrics.elidedText(' '.join(rest.split()), Qt.ElideRight, width)
@@ -1893,13 +1898,67 @@ class WorkflowSummaryLabel(QLabel):
     def changeEvent(self, event):
         super().changeEvent(event)
         if hasattr(self, '_summary') and event.type() in (QEvent.FontChange, QEvent.StyleChange):
-            self.setFixedHeight(self.fontMetrics().lineSpacing() * 2 + 4)
+            self.setFixedHeight(self.fontMetrics().lineSpacing() * self._max_lines + 4)
             self._fit_summary()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setPen(self.palette().color(self.foregroundRole()))
         painter.drawText(self.contentsRect(), Qt.AlignLeft | Qt.AlignVCenter, self.visible_text)
+
+
+class WorkflowProgressBar(QProgressBar):
+    """Keep the full counter accessible while painting a caption that fits."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.visible_text = ''
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._fit_caption()
+
+    def _fit_caption(self):
+        text = self.text()
+        self.visible_text = self.fontMetrics().elidedText(text, Qt.ElideRight, max(1, self.width() - 12))
+        self.setToolTip(text)
+        self.setAccessibleDescription(text)
+        self.setFixedHeight(max(18, self.fontMetrics().height() + 8))
+        self.update()
+
+    def setFormat(self, text):
+        super().setFormat(text)
+        self._fit_caption()
+
+    def setValue(self, value):
+        super().setValue(value)
+        self._fit_caption()
+
+    def setRange(self, minimum, maximum):
+        super().setRange(minimum, maximum)
+        self._fit_caption()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_caption()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._fit_caption()
+
+    def paintEvent(self, event):
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+        option.text = self.visible_text
+        painter = QPainter(self)
+        self.style().drawControl(QStyle.CE_ProgressBar, option, painter, self)
+
+
+def _worker_bytes(value):
+    """Format confirmed logical bytes without claiming an installed footprint."""
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'):
+        if value < 1024 or unit == 'PiB':
+            return (f'{value:,} B' if unit == 'B' else f'{value:.1f} {unit}')
+        value /= 1024
 
 
 class WorkflowWorkerCard(QFrame):
@@ -1910,21 +1969,21 @@ class WorkflowWorkerCard(QFrame):
         super().__init__(parent)
         self.setObjectName('WorkflowWorkerCard')
         self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.setStyleSheet('QFrame#WorkflowWorkerCard {background:#101925;border:1px solid #293c4f;border-radius:7px;}')
         layout = QVBoxLayout(self)
         layout.setContentsMargins(9, 7, 9, 7)
-        layout.setSpacing(3)
+        layout.setSpacing(5)
+        layout.setAlignment(Qt.AlignTop)
         from .widgets.live_activity import WorkerActivityRing
         header = QHBoxLayout()
         heading_layout = QVBoxLayout()
         heading_layout.setSpacing(2)
-        self.heading = QLabel(title)
-        self.heading.setWordWrap(True)
+        self.heading = WorkflowSummaryLabel(title)
         self.heading.setMinimumWidth(0)
         self.heading.setStyleSheet('font-weight:700;color:#78c8ff;')
         heading_layout.addWidget(self.heading)
-        self.completion = QLabel('Overall: —')
-        self.completion.setTextFormat(Qt.PlainText)
+        self.completion = WorkflowSummaryLabel('Overall: —', max_lines=1)
         heading_layout.addWidget(self.completion)
         self.activity_ring = WorkerActivityRing(self)
         header.addLayout(heading_layout, 1)
@@ -1936,26 +1995,29 @@ class WorkflowWorkerCard(QFrame):
         self._live_worker_metrics = {}
         self._live_computer_metrics = {}
         self._progress_activity = QElapsedTimer()
-        self.status = QLabel('Not started')
-        self.status.setTextFormat(Qt.PlainText)
+        self.status = WorkflowSummaryLabel('Not started')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.details = WorkflowSummaryLabel('Waiting for this run to start.')
         layout.addWidget(self.details)
-        self.progress = QProgressBar()
+        self.progress = WorkflowProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.progress.setFormat('No item count yet')
-        self.progress.setMaximumHeight(18)
         layout.addWidget(self.progress)
-        self.elapsed = QLabel('Elapsed: —')
+        self.totals = WorkflowSummaryLabel()
+        self.totals.setObjectName('WorkerResourceTotals')
+        self._resource_totals = {}
+        self._resource_scope = ''
+        self._maintenance = False
+        layout.addWidget(self.totals)
+        self.reset_resource_totals()
+        self.elapsed = WorkflowSummaryLabel('Elapsed: —', max_lines=1)
         self._elapsed_base = None
         self._elapsed_clock = QElapsedTimer()
         self._elapsed_active = False
         layout.addWidget(self.elapsed)
-        self.activity_state = QLabel('Activity: unverified')
-        self.activity_state.setTextFormat(Qt.PlainText)
-        self.activity_state.setWordWrap(True)
+        self.activity_state = WorkflowSummaryLabel('Activity: unverified')
         layout.addWidget(self.activity_state)
         self._navigation_state = {}
         self._navigation_revision = None
@@ -2044,26 +2106,82 @@ class WorkflowWorkerCard(QFrame):
             self.set_navigation_message(message)
         else:
             self.navigation_note.setVisible(bool(self.navigation_note.text()))
+        self._fit_status()
 
     def set_navigation_message(self, message):
         message = str(message)[:1500]
         self.navigation_note.setText(message)
         self.navigation_note.setVisible(bool(message))
+        self._fit_status()
 
     def _fit_status(self):
-        # A wrapping label inside a shared horizontal row needs an explicit
-        # measured height; otherwise its extra line can overlap fixed details.
+        self.status._fit_summary()
+        margins = self.contentsMargins()
+        height = self.layout().minimumSize().height() + margins.top() + margins.bottom()
+        if self.minimumHeight() != height:
+            self.setMinimumHeight(height)
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() == QEvent.LayoutRequest and hasattr(self, 'navigation_note'):
+            self._fit_status()
+        return result
+
+    def minimum_readable_width(self):
+        # Font scaling may need fewer columns even when the window width is
+        # unchanged. Full long captions remain available through accessibility.
+        metrics = self.completion.fontMetrics()
         margins = self.layout().contentsMargins()
-        width = max(1, self.contentsRect().width() - margins.left() - margins.right())
-        height = max(self.status.fontMetrics().lineSpacing(), self.status.heightForWidth(width))
-        if self.status.minimumHeight() == height and self.status.maximumHeight() == height:
-            return
-        # Resizing the scroll body also resizes every card. Invalidating an
-        # unchanged card here queues another body layout and can move focused
-        # content after QScrollArea has already scrolled it into view.
-        self.status.setFixedHeight(height)
-        self.layout().invalidate()
-        self.setMinimumHeight(self.layout().minimumSize().height())
+        return max(245, metrics.horizontalAdvance('Overall: blocked') + self.activity_ring.width()
+            + margins.left() + margins.right() + 12,
+            metrics.horizontalAdvance('Downloaded: size not reported') + margins.left() + margins.right(),
+            metrics.horizontalAdvance('Completed installs: 999 apps') + margins.left() + margins.right())
+
+    def reset_resource_totals(self):
+        self._resource_scope = ''
+        self._set_resource_totals({}, maintenance=self._maintenance or self.heading.text() == 'Maintenance')
+
+    def _set_resource_totals(self, value, *, maintenance=False, scope=None):
+        if isinstance(value, dict):
+            self._resource_totals = dict(value)
+        if isinstance(scope, str):
+            self._resource_scope = scope if scope == 'last_check' else ''
+        if self._resource_scope == 'last_check':
+            maintenance = True
+        values = self._resource_totals
+        valid = lambda key: type(values.get(key)) is int and 0 <= values[key] <= 2 ** 63 - 1
+        removed_known = values.get('removed_known') is True and valid('removed_bytes') and valid('removed_files')
+        downloaded_known = values.get('downloaded_known') is True and valid('downloaded_bytes')
+        installed_known = values.get('installed_known') is True and valid('installed_items')
+        lines, details = [], []
+        if maintenance or removed_known:
+            lines.append(('Removed: ' + _worker_bytes(values['removed_bytes'])
+                + f" · {values['removed_files']:,} " + ('file' if values['removed_files'] == 1 else 'files'))
+                if removed_known else 'Removed: size not reported')
+            details.append('Removed size is the logical length of confirmed removed files, not a measurement of free disk space gained.')
+        if not maintenance or installed_known or downloaded_known:
+            lines.append(('Completed installs: ' + f"{values['installed_items']:,} "
+                + ('app' if self.heading.text() == 'App updates' and values['installed_items'] == 1 else
+                   'apps' if self.heading.text() == 'App updates' else
+                   'update' if values['installed_items'] == 1 else 'updates'))
+                if installed_known else 'Installs: not reported')
+            download = ('Downloaded: ' + ('~' if values.get('downloaded_estimated') is True else '')
+                + _worker_bytes(values['downloaded_bytes'])
+                + (' observed' if values.get('downloaded_partial') is True else '')) if downloaded_known else 'Downloaded: size not reported'
+            # Update cards reserve two aligned rows. Maintenance can include
+            # installations without treating their download size as disk usage.
+            if maintenance and len(lines) == 2:
+                details.append(download)
+            else:
+                lines.append(download)
+            details.append('Completed install counts include only successful native completion receipts or independently verified installations. Downloaded bytes are reported transfer bytes, not installed disk size.'
+                + (' Some successful completions were reported by the package provider without an independent installed-version readback.' if values.get('installed_reported') is True else '')
+                + (' Some package transfer sizes are unavailable or incomplete.' if values.get('downloaded_partial') is True else '')
+                + (' The native transfer reporter supplied approximate bytes.' if values.get('downloaded_estimated') is True else ''))
+        if self._resource_scope == 'last_check':
+            lines.append('Latest smart check')
+            details.append('These totals cover only the latest Smart Maintenance check; they are separate from this one-click run and lifetime totals.')
+        self.totals.set_summary('\n'.join(lines[:2]), '\n'.join(lines + details))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2076,6 +2194,9 @@ class WorkflowWorkerCard(QFrame):
 
     def update_state(self, state, *, maintenance=False):
         state = state if isinstance(state, dict) else {}
+        self._maintenance = maintenance
+        self._set_resource_totals(state.get('resource_totals'), maintenance=maintenance,
+            scope=state.get('resource_totals_scope'))
         raw_status = str(state.get('status', 'not_started'))
         self._raw_status = raw_status
         from .item_progress import normalize_item_progress
@@ -2127,6 +2248,9 @@ class WorkflowWorkerCard(QFrame):
         self.status.setText({'software_updates': 'Waiting for application updates', 'driver_updates': 'Waiting for driver updates'}
                             .get(state.get('waiting_for'), 'Waiting for update lane') if maintenance and raw_status == 'waiting' else
                             labels.get(raw_status, raw_status.replace('_', ' ').capitalize()))
+        if (not maintenance and raw_status in ('running', 'installing') and self._item_progress is not None
+                and self._item_progress.get('phase') in ('download', 'downloading')):
+            self.status.setText('Downloading')
         if self._finished_with_skips:
             self.status.setText('Finished with skips' + ('; scan incomplete' if state.get('scan_complete') is not True else ''))
         self.status.setStyleSheet('color:#e8b34b;' if self._finished_with_skips else '')
@@ -2322,6 +2446,25 @@ class OptimizationProgressWindow(QDialog):
         from .widgets.live_activity import LiveSystemStatus
         self.live_system_status = LiveSystemStatus(self)
         layout.addWidget(self.live_system_status)
+        self.space_guard_panel = QWidget()
+        guard_row = QHBoxLayout(self.space_guard_panel)
+        guard_row.setContentsMargins(0, 2, 0, 2)
+        guard_row.setSpacing(7)
+        self.space_guard_icon = QLabel()
+        self.space_guard_icon.setFixedSize(24, 24)
+        self.space_guard_icon.setPixmap(self.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(22, 22))
+        self.space_guard_icon.setAccessibleName('Drive-space warning')
+        guard_row.addWidget(self.space_guard_icon, 0, Qt.AlignTop)
+        self.space_guard_status = QLabel()
+        self.space_guard_status.setObjectName('DriveSpaceGuardStatus')
+        self.space_guard_status.setTextFormat(Qt.PlainText)
+        self.space_guard_status.setWordWrap(True)
+        self.space_guard_status.setMinimumWidth(0)
+        self.space_guard_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.space_guard_status.hide()
+        guard_row.addWidget(self.space_guard_status, 1)
+        self.space_guard_panel.hide()
+        layout.addWidget(self.space_guard_panel)
         self._live_metrics_service = None
         if getattr(owner, 'smoke_test', True) is False:
             from .live_metrics import LiveMetrics
@@ -2399,6 +2542,48 @@ class OptimizationProgressWindow(QDialog):
         self.worker_navigation.refresh(enabled=not self.completed and not self.cancel.is_set())
         self._update_live_metrics()
 
+    def _update_space_guard(self, payload):
+        if not isinstance(payload, dict) or type(payload.get('enabled')) is not bool:
+            return
+        if payload['enabled'] is False:
+            self.space_guard_status.clear()
+            self.space_guard_status.hide()
+            self.space_guard_panel.hide()
+            return
+        def byte_text(value):
+            return f'{value / 1073741824:.2f} GiB' if type(value) is int and 0 <= value <= 2 ** 63 - 1 else 'unknown'
+        volumes = payload.get('volumes')
+        volumes = volumes if isinstance(volumes, list) else []
+        warnings = payload.get('warnings')
+        attention = (isinstance(warnings, list) and any(isinstance(text, str) and text.strip() for text in warnings)
+            or any(isinstance(row, dict) and row.get('below_target') is True for row in volumes))
+        lines = ['WARNING: Drive space below target' if attention else
+            'Drive-space check needs review' if payload.get('complete') is not True else 'Drive-space check']
+        for row in volumes[:64]:
+            if not isinstance(row, dict):
+                continue
+            name = ' '.join(str(row.get('name') or row.get('mountpoint') or 'Unidentified drive').split())[:160]
+            target = row.get('target_bytes', payload.get('target_bytes'))
+            lines.append(name + (' ' if name.endswith(':') else ': ') + 'free ' + byte_text(row.get('free_bytes')) + ' · target ' + byte_text(target)
+                + ' · shortfall ' + byte_text(row.get('shortfall_bytes')))
+        if len(volumes) > 64:
+            lines.append(f'{len(volumes) - 64} additional volume results are retained in the report.')
+        if not volumes:
+            lines.append('Free-space target: ' + byte_text(payload.get('target_bytes'))
+                + '; no verified volume measurement is available.')
+        if payload.get('complete') is not True or not volumes:
+            summary = payload.get('summary')
+            lines.append(str(summary)[:1000] if isinstance(summary, str) and summary.strip()
+                else 'Free-space verification is incomplete; unknown volumes are not confirmed healthy.')
+        text = '\n'.join(lines)
+        self.space_guard_status.setText(text)
+        self.space_guard_status.setToolTip(text + '\nRead-only observation; this does not reserve disk space or authorize extra deletion.')
+        self.space_guard_status.setAccessibleDescription(self.space_guard_status.toolTip())
+        self.space_guard_status.setStyleSheet('color:#e8b34b;' if attention or payload.get('complete') is not True else '')
+        self.space_guard_icon.setVisible(bool(attention or payload.get('complete') is not True))
+        self.space_guard_status.show()
+        self.space_guard_panel.show()
+
     def _update_live_metrics(self):
         service = self._live_metrics_service
         payload = service.status() if service is not None else {}
@@ -2442,6 +2627,8 @@ class OptimizationProgressWindow(QDialog):
 
     def configure_workers(self, settings):
         self._worker_selection = dict(settings) if isinstance(settings, dict) else {}
+        for card in self.worker_cards.values():
+            card.reset_resource_totals()
         for identity, key in (('software_updates', 'software_updates_enabled'),
                               ('driver_updates', 'driver_updates_enabled')):
             selected = self._worker_selection.get(key) is not False
@@ -2459,6 +2646,7 @@ class OptimizationProgressWindow(QDialog):
 
     @Slot(object)
     def update_progress(self, state):
+        self._update_space_guard(state.get('space_guard') if isinstance(state, dict) else None)
         if not isinstance(state, dict):
             self.log.appendPlainText(display(state))
             return
@@ -2510,6 +2698,7 @@ class OptimizationProgressWindow(QDialog):
             'description': maintenance_details,
             'waiting_for': waiting_kind,
             'percentage': percentage, 'item_progress': state.get('item_progress'),
+            'resource_totals': state.get('resource_totals'),
             'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
         jobs = state.get('jobs')
         job_ids = {job.get('id') for job in jobs if isinstance(job, dict)} if isinstance(jobs, list) else set()
@@ -2531,6 +2720,10 @@ class OptimizationProgressWindow(QDialog):
             compact_descriptions = []
             reason_groups = {}
             def job_status_text(job):
+                item = job.get('item_progress')
+                if (job.get('status') in ('running', 'installing') and isinstance(item, dict)
+                        and item.get('phase') in ('download', 'downloading')):
+                    return 'downloading'
                 if (job.get('presentation_status') == 'finished_with_skips' and job.get('worker_finished') is True
                         and job.get('continuation_blocked') is False):
                     return 'finished with skips' + ('; scan incomplete' if job.get('scan_complete') is not True else '')
@@ -2613,6 +2806,7 @@ class OptimizationProgressWindow(QDialog):
         return f'Cancellation requested. The current {kind} update must return before the workflow stops.'
 
     def finish(self, result, error=None):
+        self._update_space_guard(field(result, 'space_guard', default=None))
         self.completed = True
         self._sync_live_metrics(False)
         self.worker_navigation.refresh(enabled=False)
@@ -2665,6 +2859,7 @@ class OptimizationProgressWindow(QDialog):
         self.worker_cards['maintenance'].update_state({'status': 'stopped' if error else
             'cancelled' if field(result, 'cancelled', 'canceled', default=False) else field(result, 'status', default='completed'),
             'description': self.stage.text(), 'percentage': self.progress.value(),
+            'resource_totals': field(result, 'resource_totals', default=None),
             'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
         # Sequential mode and supported follow-ups report to these same panels;
         # a stage returning is distinct from every package being fixed.
@@ -2694,6 +2889,12 @@ class OptimizationProgressWindow(QDialog):
             elif error and card._elapsed_active:
                 card.update_state({'status': 'needs_review',
                     'description': 'The run stopped before a final updater status was reported. Review the saved outcome before retrying.'})
+        worker_totals = field(result, 'worker_resource_totals', default={})
+        if isinstance(worker_totals, dict):
+            for identity, totals in worker_totals.items():
+                card = self.worker_cards.get(identity)
+                if card is not None and isinstance(totals, dict):
+                    card._set_resource_totals(totals, maintenance=identity == 'maintenance')
         self.cancel_button.setText('Close results')
         self.cancel_button.setEnabled(True)
         self._update_live_metrics()
@@ -3409,6 +3610,8 @@ class OptimusWindow(QMainWindow):
                         value = self.workflow_settings[key]
                         if isinstance(control, QCheckBox):
                             control.setChecked(bool(value))
+                        elif isinstance(control, QDoubleSpinBox):
+                            control.setValue(float(self.workflow_settings[key]))
                         elif isinstance(control, QSpinBox):
                             control.setValue(int(value))
                         elif isinstance(control, QComboBox):
@@ -3419,12 +3622,17 @@ class OptimusWindow(QMainWindow):
                     finally:
                         control.blockSignals(previous)
                 if settings_window is not None:
+                    for name in ('retention_cleanup', 'drive_guard'):
+                        helper = getattr(settings_window, name, None)
+                        if helper is not None:
+                            helper.sync_enabled()
+                if settings_window is not None:
                     settings_window.workflow_mode_overlay = {}
                     settings_window.workflow_force_keys = set()
                     for name, control in getattr(settings_window, 'consumer_package_controls', {}).items():
                         control.setChecked(name in self.workflow_settings.get('consumer_debloat_package_names', []))
                     settings_window.workflow_control_baseline = {
-                        key: control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox)
+                        key: control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,(QSpinBox,QDoubleSpinBox))
                         else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
                         for key,control in getattr(settings_window, 'workflow_controls', {}).items()}
                     settings_window.workflow_consumer_baseline = [name for name,control in getattr(settings_window, 'consumer_package_controls', {}).items() if control.isChecked()]
@@ -3597,6 +3805,29 @@ class OptimusWindow(QMainWindow):
             controls[key]=checkbox
             toggles.addWidget(checkbox,index,0)
         layout.addLayout(toggles)
+        from .widgets.retention_cleanup_choices import RetentionCleanupChoices
+        def add_retention_check(key, text):
+            control = WrappingCheckBox(text)
+            control.setChecked(settings.get(key, False) is True)
+            controls[key] = control
+            layout.addWidget(control)
+            return control
+        def add_retention_note(text):
+            label = QLabel(text)
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        window.retention_cleanup = RetentionCleanupChoices(layout, settings,
+            add_check=add_retention_check, add_note=add_retention_note, controls=controls)
+        from .widgets.drive_guard_choices import DriveGuardChoices
+        def add_guard_check(key, text):
+            control = WrappingCheckBox(text)
+            control.setChecked(settings.get(key, True) is True)
+            controls[key] = control
+            layout.addWidget(control)
+            return control
+        window.drive_guard = DriveGuardChoices(layout, settings,
+            add_check=add_guard_check, add_note=add_retention_note, controls=controls)
         unattended = WrappingCheckBox('Auto clean with these settings — launch at sign-in and run without Optimus prompts')
         unattended.setChecked(settings.get('unattended_auto_clean_enabled', False) is True)
         controls['unattended_auto_clean_enabled'] = unattended
@@ -3609,6 +3840,7 @@ class OptimusWindow(QMainWindow):
         layout.addWidget(unattended_browser)
         unattended_note = QLabel('Saving this opt-in approves the selected temporary/browser deletion, app removals, updates and privacy actions '
                                 'for unattended launches. It enables sign-in launch and startup cadence. Windows administrator consent can still appear. '
+                                'Individually selected retention cleanup can permanently delete archived Codex conversations, inactive Angerona logs and old incomplete or paused-download fragments. '
                                 'Choosing graceful browser close can close windows and lose unsaved forms; the default skips open browsers. '
                                 'Unsupported or interactive actions remain in results. No automatic reboot or forced browser termination is requested. '
                                 'Changing saved scopes elsewhere invalidates this approval until you save it again here or in setup.')
@@ -3742,7 +3974,7 @@ class OptimusWindow(QMainWindow):
             current = dict(self._settings())
             current.update(window.workflow_mode_overlay)
             for key, control in controls.items():
-                current[key] = control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
+                current[key] = control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,(QSpinBox,QDoubleSpinBox)) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
             current['consumer_debloat_package_names'] = [name for name, control in consumer_controls.items() if control.isChecked()]
             preset = full_optimization_settings(current)
             window.workflow_force_keys.update(controls)
@@ -3755,6 +3987,8 @@ class OptimusWindow(QMainWindow):
                 try:
                     if isinstance(control,QCheckBox):
                         control.setChecked(bool(preset[key]))
+                    elif isinstance(control,QDoubleSpinBox):
+                        control.setValue(float(preset[key]))
                     elif isinstance(control,QSpinBox):
                         control.setValue(int(preset[key]))
                     elif key in ('optimization_mode','automation_mode'):
@@ -3775,7 +4009,7 @@ class OptimusWindow(QMainWindow):
             value = dict(current_settings)
             value.update(window.workflow_mode_overlay)
             for key,control in controls.items():
-                chosen = control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
+                chosen = control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,(QSpinBox,QDoubleSpinBox)) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
                 if key in window.workflow_force_keys or chosen != window.workflow_control_baseline.get(key) or key not in value:
                     value[key] = chosen
             chosen_consumers = [name for name,control in consumer_controls.items() if control.isChecked()]
@@ -3799,7 +4033,7 @@ class OptimusWindow(QMainWindow):
             def saved(result):
                 window.workflow_mode_overlay = {}
                 window.workflow_force_keys = set()
-                window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
+                window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,(QSpinBox,QDoubleSpinBox)) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
                 window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
                 self.workflow_settings=result if isinstance(result,dict) else value
                 from .launch_review import scope_fingerprint
@@ -3825,7 +4059,7 @@ class OptimusWindow(QMainWindow):
         window.workflow_controls=controls
         from .launch_review import scope_fingerprint
         window.workflow_review_baseline = scope_fingerprint(settings)
-        window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
+        window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,(QSpinBox,QDoubleSpinBox)) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
         window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
 
     def apply_appearance(self, settings):

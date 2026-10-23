@@ -92,7 +92,7 @@ def test_explicit_settings_save_stamps_normalized_complete_scope_only(windows, p
     args, kwargs = captured[0]
     assert args[0] == 'save_preferences'
     payload = args[1]
-    assert len(payload) == len(DEFAULTS) == 91
+    assert len(payload) == len(DEFAULTS) == 99
     assert payload['software_app_rules'] == []
     assert matches_unattended(payload) and matches_unattended(Preferences.validate(payload))
     assert payload['unattended_browser_policy'] == policy
@@ -145,3 +145,28 @@ def test_settings_cannot_approve_external_removal_scope_not_shown_in_form(window
     assert not captured, 'An external scope change needs a fresh visible review before persistent approval.'
     detail._error.assert_called_once()
     assert not matches_unattended(backend.preferences())
+
+
+def test_retention_and_drive_settings_save_only_the_explicit_scopes_and_fractional_target(windows):
+    main, detail, backend, captured, save = windows
+    controls = detail.workflow_controls
+    for prefix in ('codex_archives', 'angerona_logs', 'failed_downloads'):
+        assert not controls[prefix + '_cleanup_enabled'].isChecked()
+        assert controls[prefix + '_retention_days'].value() == 7
+    assert controls['drive_space_guard_enabled'].isChecked()
+    controls['codex_archives_cleanup_enabled'].setChecked(True)
+    controls['codex_archives_retention_days'].setValue(30)
+    controls['failed_downloads_cleanup_enabled'].setChecked(True)
+    controls['failed_downloads_retention_days'].setValue(14)
+    controls['drive_space_guard_target_gib'].setValue(1.25)
+    controls['unattended_auto_clean_enabled'].setChecked(True)
+    before = backend.preferences()
+    save.click()
+    assert len(captured) == 1
+    payload = captured[0][0][1]
+    assert len(payload) == 99
+    assert payload['codex_archives_cleanup_enabled'] is True and payload['codex_archives_retention_days'] == 30
+    assert payload['failed_downloads_cleanup_enabled'] is True and payload['failed_downloads_retention_days'] == 14
+    assert payload['angerona_logs_cleanup_enabled'] is False
+    assert payload['drive_space_guard_target_gib'] == 1.25 and matches_unattended(payload)
+    assert backend.preferences() == before

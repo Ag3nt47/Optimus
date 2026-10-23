@@ -227,6 +227,17 @@ def _tls_probe_command(destination=None):
 
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
+    if actual_arguments and actual_arguments[0] == '--winget-console-monitor':
+        # Private child transport only: no Qt, UAC, setup, instance lease or
+        # saved startup/maintenance actions may run inside the supervisor.
+        from .winget_console import monitor_main
+        return monitor_main(actual_arguments[1:])
+    if actual_arguments[:1] == ['--console-progress-fixture-child']:
+        from .winget_console import probe_child_main
+        return probe_child_main() if len(actual_arguments) == 1 else 2
+    if actual_arguments[:1] == ['--console-progress-probe']:
+        from .winget_console import console_progress_probe
+        return console_progress_probe(actual_arguments[1]) if len(actual_arguments) == 2 else 2
     args = parser().parse_args(actual_arguments)
     if args.tls_probe:
         try:

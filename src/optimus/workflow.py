@@ -2,6 +2,7 @@
 from __future__ import annotations
 import copy
 import json
+import math
 import ntpath
 import os
 import re
@@ -53,6 +54,10 @@ DEFAULTS = {
     'software_update_all_approved': False, 'software_update_exclude_ids': [],
     'software_update_agreements_accepted': False, 'driver_updates_enabled': False,
     'cleanup_category_ids': [],
+    'codex_archives_cleanup_enabled': False, 'codex_archives_retention_days': 7,
+    'angerona_logs_cleanup_enabled': False, 'angerona_logs_retention_days': 7,
+    'failed_downloads_cleanup_enabled': False, 'failed_downloads_retention_days': 7,
+    'drive_space_guard_enabled': True, 'drive_space_guard_target_gib': 2.0,
     'post_process_review_enabled': False,
     'privacy_advertising_enabled': False, 'privacy_diagnostics_enabled': False,
     'privacy_block_silent_consumer_apps_enabled': False,
@@ -186,6 +191,12 @@ class Preferences:
             raise ValueError('Cleanup age must be 0 to 3650 days (0 includes all eligible temporary files).')
         if type(result['analysis_interval']) is not int or not 2 <= result['analysis_interval'] <= 60:
             raise ValueError('Analysis interval must be 2 to 60 seconds.')
+        from .retention_configuration import validate_retention_scope
+        validate_retention_scope(result, require_all=True)
+        if (type(result['drive_space_guard_target_gib']) not in (int, float)
+                or not math.isfinite(result['drive_space_guard_target_gib'])
+                or not 1 <= result['drive_space_guard_target_gib'] <= 2):
+            raise ValueError('Drive space buffer target must be a finite number from 1 to 2 GiB.')
         if type(result['setup_version']) is not int or not 0 <= result['setup_version'] <= CURRENT_SETUP_VERSION:
             raise ValueError('Unsupported setup version.')
         if result['automation_mode'] not in ('manual', 'startup', 'daily', 'weekly', 'monthly'):
@@ -263,6 +274,26 @@ def _fresh_software_candidates(scan):
     from .automated_software import fresh_candidates
     return fresh_candidates(scan)
 
+
+def _space_guard_result(backend, settings):
+    """Read-only guard failures remain visible without starting extra cleanup."""
+    operation = getattr(backend, 'space_guard_check', None)
+    if not callable(operation):
+        return {'schema': 1, 'review_only': True, 'enabled': settings.get('drive_space_guard_enabled') is True,
+                'complete': False, 'status': 'unsupported', 'volumes': [],
+                'warnings': ['Drive-space buffer verification is unavailable for this backend.'],
+                'errors': [], 'summary': 'Drive-space buffer verification is unavailable for this backend.'}
+    try:
+        result = operation(settings)
+        if not isinstance(result, dict) or result.get('review_only') is not True or not isinstance(result.get('volumes'), list):
+            raise ValueError('The drive-space check returned incomplete read-only evidence.')
+        return result
+    except Exception as error:
+        return {'schema': 1, 'review_only': True, 'enabled': True, 'complete': False, 'status': 'needs_review',
+                'volumes': [], 'warnings': ['Drive-space buffers could not be verified; review available free space.'],
+                'errors': [{'error': str(error)[:500]}], 'failed_items': 1,
+                'summary': 'Drive-space buffers could not be verified; review available free space.'}
+
 class Workflow:
     def __init__(self, backend):
         self.backend = backend
@@ -307,8 +338,21 @@ class Workflow:
             def review(operation, note):
                 return {'review_only': True, 'result': operation(), 'note': note}
 
+            def space_guard(*, initial=False):
+                result = _space_guard_result(self.backend, configuration)
+                report['space_guard'] = result
+                if initial:
+                    report['initial_space_guard'] = result
+                progress_callback.update_space_guard(result)
+                return result
+
             serial_job = None
             stages = [('Inspect current resource usage', 'Reading running programs, memory, storage, startup entries and services.', self.backend.audit)]
+            has_space_guard = configuration['drive_space_guard_enabled'] and callable(getattr(self.backend, 'space_guard_check', None))
+            if has_space_guard:
+                stages.append(('Check drive space buffers', 'Checking the saved temporary-space target before cleanup and installers; no reserve file or disk setting is changed.', lambda: space_guard(initial=True)))
+            elif configuration['drive_space_guard_enabled']:
+                space_guard(initial=True)
             if configuration['applications_review_enabled']:
                 stages.append(('Review installed applications', 'Collecting installed-program metadata; no uninstaller is launched.', lambda: review(self.backend.installed_apps, 'Review only; no applications were uninstalled.')))
             if configuration['performance_review_enabled']:
@@ -328,6 +372,8 @@ class Workflow:
                         current_progress = normalize_item_progress({'key': 'maintenance:' + title,
                             'label': description, 'phase': str(state.get('phase') or 'working'), 'percent': None})
                     progress_callback({'item_progress': current_progress,
+                                       'deleted_bytes': state.get('deleted_bytes'),
+                                       'deleted_count': state.get('deleted_count'),
                                        'percentage': min(99, int((completed + fraction) * 100 / total_stages)),
                                        'stage': title, 'stage_status': 'running', 'description': description,
                                        'processes': ['Optimus maintenance worker', description],
@@ -403,6 +449,8 @@ class Workflow:
                 if cancelled():
                     return {'cancelled': True, 'reason': 'Cancelled after preview; no files were deleted.'}
                 outcome = progress_operation(self.backend.cleanup_apply, plan, title=title) if plan.get('files') else {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0}
+                if isinstance(plan.get('id'), str):
+                    progress_callback.removal_receipt('cleanup:' + plan['id'], outcome)
                 errors = plan.get('errors', [])
                 preview_partial = plan.get('complete') is not True or bool(errors)
                 refusals = max(outcome.get('skipped_count', 0), len(outcome.get('errors', [])))
@@ -433,6 +481,22 @@ class Workflow:
                     lambda: run_browser_cleanup(self.backend, configuration, clean=clean,
                         browser_prompt=browser_prompt, cancel_event=cancel_event,
                         item_callback=item_progress('Clean selected browser data'))))
+            for retention_kind, retention_title in (
+                ('codex_archives', 'Clean archived Codex conversations'),
+                ('angerona_logs', 'Clean inactive Angerona logs'),
+                ('failed_downloads', 'Clean incomplete download leftovers'),
+            ):
+                if configuration[retention_kind + '_cleanup_enabled']:
+                    def retention_operation(kind=retention_kind, title=retention_title):
+                        operation = (self.backend.codex_archive_cleanup if kind == 'codex_archives' else
+                                     lambda settings, **options: self.backend.retention_cleanup(kind, settings, **options))
+                        result = operation(configuration, progress_callback=item_progress(title), cancel_event=cancel_event)
+                        if isinstance(result, dict) and isinstance(result.get('cleanup_id'), str):
+                            progress_callback.removal_receipt('cleanup:' + result['cleanup_id'], result)
+                        return result
+                    stages.append((retention_title,
+                        f'Applying only this explicitly enabled retention scope, older than {configuration[retention_kind + "_retention_days"]} days; active, unknown and unsupported items are preserved.',
+                        retention_operation))
             if configuration['drive_optimization_enabled']:
                 stages.append(('Optimize eligible internal drives',
                                'Checking eligible internal drives and running the native SSD TRIM/HDD optimization only when current power, space, health and cadence checks allow it.',
@@ -555,6 +619,8 @@ class Workflow:
                 return result
             stages.append(('Summarize resource and startup changes',
                            'Comparing the existing before/after measurements and verified supported startup registrations. Observations do not prove a speed gain, and no startup entry is changed.', maintenance_insights))
+            if has_space_guard:
+                stages.append(('Recheck drive space buffers', 'Rechecking free space after the selected maintenance; any remaining shortfall is reported without broader deletion.', space_guard))
             def final_verification():
                 try:
                     result = self.backend.verify_optimization(report, cancel_event=cancel_event, timeout=30)
@@ -723,6 +789,8 @@ class Workflow:
                 else:
                     report['stages'].append(stage)
                 completed += 1
+                report['resource_totals'] = progress_callback.resource_snapshot()
+                report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
                 atomic_json(log_path, report)
                 if navigation_item:
                     maintenance_navigation.finish(stage['status'],
@@ -749,6 +817,8 @@ class Workflow:
                         description = insight_summary
                 if title == FINAL_VERIFICATION_STAGE and isinstance(stage.get('result'), dict):
                     description = str(stage['result'].get('summary') or 'Final verification: ' + str(stage['result'].get('status', 'unverified')).replace('_', ' ') + '. Review the outcome details before recommendations.')
+                if title in ('Check drive space buffers', 'Recheck drive space buffers') and isinstance(stage.get('result'), dict):
+                    description = str(stage['result'].get('summary') or description)
                 progress_callback({'percentage': percentage, 'stage': title, 'description': description,
                                    'stage_status': stage['status'],
                                    'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': total_stages})
@@ -758,6 +828,8 @@ class Workflow:
             report['cancelled_stages'] = sum(item['status'] == 'cancelled' for item in report['stages'])
             report['log_path'] = str(log_path)
             report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] or report['cancelled_stages'] else 'completed'
+            report['resource_totals'] = progress_callback.resource_snapshot()
+            report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
             atomic_json(log_path, report)
             if attempt_started:
                 record_attempt(self.backend.data_dir, configuration, status='cancelled' if report['cancelled'] else 'failed' if report['failed_stages'] else 'completed', run_id=run_id,
@@ -770,6 +842,9 @@ class Workflow:
             if report is None:
                 report = {'settings': configuration, 'stages': [], 'cancelled': False}
             report.update({'status': 'failed', 'error': str(error), 'finished_at': time.time()})
+            if hasattr(progress_callback, 'resource_snapshot'):
+                report['resource_totals'] = progress_callback.resource_snapshot()
+                report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
             if log_path is not None:
                 report['log_path'] = str(log_path)
                 try:

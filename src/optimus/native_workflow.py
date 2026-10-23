@@ -9,7 +9,7 @@ import time
 import uuid
 
 from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
-from .workflow import atomic_json
+from .workflow import atomic_json, _space_guard_result
 from .native_operations import sha256_file
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
 from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal
@@ -312,16 +312,31 @@ class NativeWorkflow:
                            validator=self.backend.preference_store.validate)
             attempted = True
 
+            def space_guard(*, initial=False):
+                result = _space_guard_result(self.backend, configuration)
+                report['space_guard'] = result
+                if initial:
+                    report['initial_space_guard'] = result
+                progress_callback.update_space_guard(result)
+                return result
+
             def clean(categories):
                 if _cancelled(cancel_event):
                     return {'cancelled': True, 'failed_items': 0}
-                plan = self.backend.cleanup_scan(categories, configuration.get('cleanup_age_days', 7))
+                from .item_progress import accepts_progress_callback
+                scan_options = ({'progress_callback': serial_item_progress}
+                                if accepts_progress_callback(self.backend.cleanup_scan) else {})
+                plan = self.backend.cleanup_scan(categories, configuration.get('cleanup_age_days', 7), **scan_options)
                 if plan.get('complete') is not True:
                     return {'preview_summary': {'complete': False, 'total_bytes': plan.get('total_bytes', 0)},
                             'failed_items': 1, 'note': 'Incomplete cleanup preview; no files were deleted.'}
                 if _cancelled(cancel_event):
                     return {'cancelled': True, 'failed_items': 0}
-                applied = self.backend.cleanup_apply(plan)
+                apply_options = ({'progress_callback': serial_item_progress}
+                                 if accepts_progress_callback(self.backend.cleanup_apply) else {})
+                applied = self.backend.cleanup_apply(plan, **apply_options)
+                if isinstance(plan.get('id'), str):
+                    progress_callback.removal_receipt('cleanup:' + plan['id'], applied)
                 return {'result': applied, 'failed_items': len(applied.get('errors', []))}
 
             serial_job = None
@@ -333,9 +348,15 @@ class NativeWorkflow:
                     value = normalize_item_progress(state.get('item_progress'))
                     if value is not None:
                         progress_callback(dict(progress_callback.foreground, item_progress=value,
+                            deleted_bytes=state.get('deleted_bytes'), deleted_count=state.get('deleted_count'),
                             description=str(state.get('description') or value['label'])))
 
             stages = [('Inspect native resources and process identities', self.backend.audit)]
+            has_space_guard = configuration.get('drive_space_guard_enabled') is True and callable(getattr(self.backend, 'space_guard_check', None))
+            if has_space_guard:
+                stages.append(('Check drive space buffers', lambda: space_guard(initial=True)))
+            elif configuration.get('drive_space_guard_enabled') is True:
+                space_guard(initial=True)
             if configuration.get('applications_review_enabled'):
                 stages.append(('Review installed native applications', lambda: {'review_only': True, 'items': self.backend.installed_apps()}))
             if configuration.get('performance_review_enabled'):
@@ -362,6 +383,20 @@ class NativeWorkflow:
                 stages.append(('Clean selected browser data after close or skip choice',
                                lambda: run_browser_cleanup(self.backend, configuration, clean=clean,
                                                             browser_prompt=browser_prompt, cancel_event=cancel_event)))
+            for retention_kind, retention_title in (
+                ('codex_archives', 'Clean archived Codex conversations'),
+                ('angerona_logs', 'Clean inactive Angerona logs'),
+                ('failed_downloads', 'Clean incomplete download leftovers'),
+            ):
+                if configuration.get(retention_kind + '_cleanup_enabled') is True:
+                    def retention_operation(kind=retention_kind):
+                        operation = (self.backend.codex_archive_cleanup if kind == 'codex_archives' else
+                                     lambda settings, **options: self.backend.retention_cleanup(kind, settings, **options))
+                        result = operation(configuration, progress_callback=serial_item_progress, cancel_event=cancel_event)
+                        if isinstance(result, dict) and isinstance(result.get('cleanup_id'), str):
+                            progress_callback.removal_receipt('cleanup:' + result['cleanup_id'], result)
+                        return result
+                    stages.append((retention_title, retention_operation))
             if configuration.get('software_updates_enabled'):
                 stages.append(('Review or install approved native package updates', lambda: run_native_software(self.backend, configuration, cancel_event=cancel_event, item_callback=serial_item_progress)))
             if configuration.get('driver_updates_enabled'):
@@ -376,6 +411,8 @@ class NativeWorkflow:
             if configuration.get('post_process_review_enabled'):
                 stages.append(('Prepare optional background-program recommendations', lambda: self.backend.process_harness_scan(cancel_event=cancel_event)))
             stages.append(('Capture final native resource report', self.backend.audit))
+            if has_space_guard:
+                stages.append(('Recheck drive space buffers', space_guard))
             stages.append(('Verify optimization outcomes', lambda: self.backend.verify_optimization(report, cancel_event=cancel_event)))
             parallel_spec = None
             parallel_launch_after = None
@@ -504,6 +541,8 @@ class NativeWorkflow:
                 else:
                     report['stages'].append(stage)
                 completed += 1
+                report['resource_totals'] = progress_callback.resource_snapshot()
+                report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
                 atomic_json(path, report)
                 if navigation_item:
                     maintenance_navigation.finish(stage['status'],
@@ -521,7 +560,10 @@ class NativeWorkflow:
                     parallel_job.release_maintenance(prior_barrier)
                 progress_callback({'percentage': int(completed * 100 / total_stages), 'stage': title,
                                    'stage_status': stage['status'],
-                                   'description': stage.get('error') or title + ': ' + stage['status'],
+                                   'description': (str((stage.get('result') or {}).get('summary'))
+                                       if title in ('Check drive space buffers', 'Recheck drive space buffers')
+                                       and isinstance(stage.get('result'), dict) and stage['result'].get('summary')
+                                       else stage.get('error') or title + ': ' + stage['status']),
                                    'processes': ['Optimus native maintenance worker'],
                                    'log': stage['status'].upper() + ': ' + title,
                                    'completed': completed, 'total': total_stages})
@@ -532,6 +574,8 @@ class NativeWorkflow:
             report['failed_stages'] = sum(row['status'] == 'failed' for row in report['stages'])
             report['cancelled_stages'] = sum(row['status'] == 'cancelled' for row in report['stages'])
             report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] or report['cancelled_stages'] else 'completed'
+            report['resource_totals'] = progress_callback.resource_snapshot()
+            report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
             atomic_json(path, report)
             record_attempt(self.backend.data_dir, configuration, status='cancelled' if report['cancelled'] else 'failed' if report['failed_stages'] else 'completed',
                            run_id=identifier, validator=self.backend.preference_store.validate)
@@ -542,6 +586,9 @@ class NativeWorkflow:
                 parallel_job.join()
             if report is not None:
                 report.update(status='failed', error=str(error), finished_at=time.time())
+                if hasattr(progress_callback, 'resource_snapshot'):
+                    report['resource_totals'] = progress_callback.resource_snapshot()
+                    report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
                 if path is not None:
                     atomic_json(path, report)
                 if attempted:

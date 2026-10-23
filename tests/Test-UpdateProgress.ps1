@@ -25,6 +25,7 @@ function Reset-Fixture {
     $script:Begins=0; $script:Ends=0; $script:Sleeps=0; $script:Polls=0; $script:Reads=0
     $script:BeginFailure=$false; $script:EndFailure=$false; $script:NullJob=$false
     $script:Completion=@($false,$false,$true); $script:Percent=@(12,67,100)
+    $script:DownloadBytes=$null; $script:DownloadTotalBytes=$null
     $script:Events = New-Object 'System.Collections.Generic.List[object]'
     $script:Result = New-Result
     $script:Job = [pscustomobject]@{}
@@ -39,7 +40,8 @@ function Reset-Fixture {
         $value=$script:Percent[[Math]::Min($index,$script:Percent.Count-1)]
         if ($value -is [Exception]) { throw $value }
         if ($value -ceq 'missing') { return [pscustomobject]@{} }
-        return [pscustomobject]@{CurrentUpdatePercentComplete=$value}
+        return [pscustomobject]@{CurrentUpdatePercentComplete=$value;
+            CurrentUpdateBytesDownloaded=$script:DownloadBytes;CurrentUpdateBytesToDownload=$script:DownloadTotalBytes}
     }
     $script:Owner = [pscustomobject]@{}
     $script:Owner | Add-Member ScriptMethod BeginDownload { param($Changed,$Completed,$State)
@@ -156,5 +158,25 @@ foreach($invalidResult in @('failed','partial','missing-hresult','item-failed','
 Reset-Fixture; $script:Percent=@(10,20,90)
 $result=Run-Fixture
 Assert-Fixture (@($script:Events|Where-Object percent -eq 100).Count -eq 0) 'successful End does not invent an unobserved percentage'
+foreach($valid in @(@(0,0),@([long]512,[long]1024),@([decimal]1048576,[decimal]2097152),@('1234','5678'))) {
+    Reset-Fixture; $script:DownloadBytes=$valid[0]; $script:DownloadTotalBytes=$valid[1]
+    $result=Run-Fixture Download
+    $observed=@($script:Events | Where-Object {$_.PSObject.Properties.Name -contains 'downloaded_bytes'})
+    Assert-Fixture ($observed.Count -eq 4) 'only real download snapshots and terminal snapshot contain byte observations'
+    Assert-Fixture ($observed[0].downloaded_bytes -eq [long]$valid[0] -and $observed[0].download_total_bytes -eq [long]$valid[1]) 'DECIMAL/string COM byte counters preserved exactly'
+    Assert-Fixture ($observed[0].bytes_source -eq 'windows_update' -and $observed[0].bytes_estimated -eq $false) 'native byte provenance is explicit'
+}
+foreach($invalid in @($true,-1,1.5,'123.0','1e3',[double]::NaN,[double]::PositiveInfinity,[decimal]1125899906842625)) {
+    Reset-Fixture; $script:DownloadBytes=$invalid; $script:DownloadTotalBytes=10000
+    $result=Run-Fixture Download
+    Assert-Fixture (@($script:Events | Where-Object {$_.PSObject.Properties.Name -contains 'downloaded_bytes'}).Count -eq 0) 'invalid native byte count cannot appear as measured data'
+    Assert-Fixture ([object]::ReferenceEquals($result,$script:Result)) 'invalid byte observation never alters native result'
+}
+Reset-Fixture; $script:DownloadBytes=2048; $script:DownloadTotalBytes=1024
+$result=Run-Fixture Download
+Assert-Fixture (@($script:Events | Where-Object {$_.PSObject.Properties.Name -contains 'downloaded_bytes'}).Count -eq 0) 'contradictory native total is not reported'
+Reset-Fixture; $script:DownloadBytes=512; $script:DownloadTotalBytes=1024
+$result=Run-Fixture Install
+Assert-Fixture (@($script:Events | Where-Object {$_.PSObject.Properties.Name -contains 'downloaded_bytes'}).Count -eq 0) 'installation never reuses download counters as installed footprint'
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealScans=0;RealDownloads=0;RealInstalls=0;
     CallbackInterfaces=4;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress

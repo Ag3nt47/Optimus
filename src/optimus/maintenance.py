@@ -223,6 +223,9 @@ class Maintenance:
     @staticmethod
     def _run(arguments: list[str], *, timeout: float = 120, progress_callback=None) -> subprocess.CompletedProcess[str]:
         if progress_callback is not None:
+            if os.name == 'nt':
+                from .winget_console import run_winget_console
+                return run_winget_console(arguments, timeout=timeout, progress_callback=progress_callback)
             from .winget_progress import run_winget_with_progress
             return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback)
         return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -532,6 +535,12 @@ class Maintenance:
             raise UpdatePreflightError("WinGet could not be started; no installer was launched.",
                 failure_scope='shared' if isinstance(error, PermissionError) else 'app_batch',
                 failureKind='authorization' if isinstance(error, PermissionError) else 'manager_unavailable') from error
+        except Exception as error:
+            if (getattr(error, 'installer_started', None) is False and getattr(error, 'outcomeKnown', None) is True
+                    and getattr(error, 'running', None) is False):
+                raise UpdatePreflightError('The progress console could not be prepared; no application installer was launched.',
+                    failure_scope='app_batch', failureKind='manager_unavailable') from error
+            raise
         if getattr(result, 'capture_complete', True) is not True:
             raise UpdateOutcomeError('The WinGet transcript was incomplete or exceeded its bound. Restart and installer state could not be verified; no automatic retry is authorized.')
         output = _ANSI.sub("", result.stdout or "")
@@ -550,16 +559,25 @@ class Maintenance:
                 progress_callback({'phase': 'install', 'percent': 100.0, 'item_terminal': True})
             except Exception:
                 pass  # A verified native phase end is display-only, not app-version verification.
-        return {"id": package_id, "package_id": package_id, "source": "winget", "exitCode": result.returncode,
+        receipt = {"id": package_id, "package_id": package_id, "source": "winget", "exitCode": result.returncode,
                 "status": "completed" if result.returncode in (0, 3010, 1641) else "failed", "unattended": unattended,
                 "compatibility_mode": compatibility_mode,
                 "restartNeeded": True if restart else None, "running": installer_running,
                 "installer_started": True, "outcomeKnown": not installer_running,
+                "installation_reported": result.returncode == 0 and not restart and not installer_running,
                 "from_version": current["version"], "to_version": current["available"],
                 "text": output, "stderr": stderr,
                 "note": (("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."
                           if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")
                          + (" Saved compatibility mode adds WinGet --force for non-security issues only. Hash/signature verification and installer hard blocks remain in effect." if compatibility_mode else ""))}
+        from .item_progress import normalize_item_progress
+        observed = getattr(result, 'download_progress', None)
+        if isinstance(observed, dict):
+            observed = normalize_item_progress(dict(observed,
+                key='software:update:' + package_id, label=package_id))
+            if observed is not None and 'downloaded_bytes' in observed:
+                receipt['download_progress'] = observed
+        return receipt
 
     @staticmethod
     def windows_update_open() -> dict[str, str]:

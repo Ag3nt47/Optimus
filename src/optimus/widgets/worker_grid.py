@@ -1,7 +1,7 @@
 """Equal-width, responsive worker cards without starting work or extra windows."""
 from __future__ import annotations
 import re
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QTimer
 from PySide6.QtWidgets import QGridLayout, QLayout, QLabel, QVBoxLayout, QWidget
 
 
@@ -14,6 +14,9 @@ class WorkerGrid(QWidget):
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(7)
         self.setMinimumWidth(0)
+        self._reflow_timer = QTimer(self)
+        self._reflow_timer.setSingleShot(True)
+        self._reflow_timer.timeout.connect(self._reflow_after_style)
 
     def ensure(self, identity, title):
         if identity in self.cards:
@@ -21,6 +24,7 @@ class WorkerGrid(QWidget):
         if not isinstance(identity, str) or not re.fullmatch(r'[a-z][a-z0-9_.-]{0,63}', identity) or len(self.cards) >= 12:
             return None
         self.cards[identity] = self.factory(str(title)[:100], self)
+        self.cards[identity].installEventFilter(self)
         self.reflow(force=True)
         return self.cards[identity]
 
@@ -34,7 +38,10 @@ class WorkerGrid(QWidget):
                     card.update_state(job)
 
     def reflow(self, *, force=False):
-        columns = max(1, min(3, self.width() // 245))
+        minimum = max((card.minimum_readable_width() if callable(getattr(card, 'minimum_readable_width', None))
+            else 245 for card in self.cards.values()), default=245)
+        spacing = self.grid.horizontalSpacing()
+        columns = max(1, min(3, (self.width() + spacing) // (minimum + spacing)))
         if columns == self._columns and not force:
             return
         self._columns = columns
@@ -47,6 +54,14 @@ class WorkerGrid(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.reflow()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange, QEvent.LayoutRequest) and not self._reflow_timer.isActive():
+            self._reflow_timer.start(0)
+        return super().eventFilter(watched, event)
+
+    def _reflow_after_style(self):
         self.reflow()
 
 
@@ -86,9 +101,11 @@ class WorkerBoard(QWidget):
         if callable(monitor):
             saved = monitor()
             if isinstance(saved, dict) and (saved.get('running') is True or 'smart_cleaning' in self.grid.cards):
+                from ..worker_totals import resource_totals_from_smart_actions
                 self.grid.update_jobs([dict(id='smart_cleaning', title='Smart cleaning',
                     status=saved.get('status', 'waiting'), description=saved.get('note', ''),
-                    current=None, total=None)])
+                    current=None, total=None, resource_totals=resource_totals_from_smart_actions(saved),
+                    resource_totals_scope='last_check')])
 
     def shutdown(self):
         self._closed = True

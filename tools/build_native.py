@@ -41,6 +41,10 @@ def build_command(source, destination, system=None, machine=None):
     system = sys.platform if system is None else system
     target = target_name(system, machine)
     source, destination = Path(source), Path(destination)
+    if system == 'win32':
+        return [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
+                '--distpath', str(destination), '--workpath', str(destination.parent / 'pyinstaller-work'),
+                str(source / 'tools/optimus_windows.spec')]
     command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
                '--name', 'Optimus', '--paths', str(source / 'src'), '--collect-all', 'optimus',
                '--collect-data', 'certifi',
@@ -49,8 +53,6 @@ def build_command(source, destination, system=None, machine=None):
                '--specpath', str(destination.parent)]
     if system in ('win32', 'darwin'):
         command.append('--windowed')
-    if system == 'win32':
-        command.extend(['--icon', str(source / 'src/optimus/assets/optimus.ico')])
     if system == 'darwin':
         command.extend(['--osx-bundle-identifier', 'io.github.Ag3nt47.Optimus',
                         '--target-arch', 'arm64' if target.endswith('arm64') else 'x86_64'])
@@ -126,6 +128,31 @@ def _verified_tls_report(directory):
     return value
 
 
+def _verified_console_report(directory):
+    path = directory / 'console-progress-probe.json'
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 65536:
+        raise RuntimeError('The packaged Windows progress probe report is missing or exceeds its limit.')
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError('The packaged Windows progress probe report is malformed.') from error
+    receipt = value.get('console_receipt') if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1
+            or value.get('probe') != 'windows-console-progress' or value.get('status') != 'passed'
+            or value.get('frozen') is not True or value.get('maintenance_applied') is not False
+            or any(type(value.get(name)) is not int or value[name] != 0
+                   for name in ('network_requests', 'real_winget_invocations', 'target_exit_code'))
+            or any(value.get(name) is not True for name in ('console_query_verified',
+                'download_progress_before_exit', 'install_progress_before_exit', 'private_receipt_verified', 'capture_complete'))
+            or not isinstance(receipt, dict) or type(receipt.get('schema')) is not int or receipt['schema'] != 1
+            or any(receipt.get(name) is not True for name in ('verified', 'quiescent', 'output_eof', 'job_verified'))
+            or any(type(receipt.get(name)) is not int or receipt[name] != expected
+                   for name, expected in (('console_client_count', 1), ('job_active_processes', 0),
+                                          ('supervisor_exit_code', 0), ('target_exit_code', 0)))):
+        raise RuntimeError('The packaged Windows progress console did not prove measured fixture progress and safe native completion.')
+    return value
+
+
 def verify_package(executable, *, output=None):
     """Exercise the real packaged UI and inventory without maintenance/UAC."""
     environment = dict(os.environ)
@@ -147,6 +174,11 @@ def verify_package(executable, *, output=None):
         subprocess.run([str(executable), '--tls-probe', '--output', str(root / 'tls')],
                        check=True, timeout=150, env=_tls_probe_environment(environment, root))
         tls_trust = _verified_tls_report(root / 'tls')
+        console_progress = None
+        if sys.platform == 'win32':
+            subprocess.run([str(executable), '--console-progress-probe', str(root / 'console-progress')],
+                           check=True, timeout=45, env=environment)
+            console_progress = _verified_console_report(root / 'console-progress')
         if screenshot is not None and (not screenshot.is_file() or not screenshot.stat().st_size):
             raise RuntimeError('The packaged interface screenshot was not produced.')
         reports = sorted((root / 'scan').rglob('*.json'))
@@ -164,6 +196,8 @@ def verify_package(executable, *, output=None):
                   'tls_trust': tls_trust,
                   'json_reports': len(reports), 'process_rows': sum(len(value['processes']) for value in inventories),
                   'inventory_complete': [value.get('complete') for value in inventories], 'maintenance_applied': False}
+        if console_progress is not None:
+            result['console_progress'] = console_progress
         if screenshot is not None:
             result['interface_screenshot'] = str(screenshot)
         if output is not None:

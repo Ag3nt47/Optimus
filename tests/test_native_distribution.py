@@ -36,6 +36,14 @@ publish = load_tool('publish_release')
 def test_artifact_identity_uses_actual_platform_architecture(system, machine, expected):
     assert build.target_name(system, machine) == expected
     command = build.build_command(Path('project'), Path('dist'), system, machine)
+    if system == 'win32':
+        assert command[-1] == str(Path('project/tools/optimus_windows.spec'))
+        specification = (TOOLS / 'optimus_windows.spec').read_text(encoding='utf-8')
+        assert "name='Optimus', console=False" in specification
+        assert "name='OptimusConsole', console=True" in specification
+        assert 'COLLECT(gui, console, a.binaries, a.datas' in specification
+        assert "collect_data_files('certifi')" in specification
+        return
     assert '--collect-submodules' in command
     assert 'send2trash' in command
     assert command[command.index('--collect-data') + 1] == 'certifi'
@@ -115,7 +123,27 @@ def ready_tls_payload():
             'network_requests': 0, 'maintenance_applied': False}
 
 
-def fake_packaged_commands(monkeypatch, payload, tls_payload=None):
+def ready_console_payload():
+    return dict(schema=1, probe='windows-console-progress', status='passed', frozen=True, maintenance_applied=False,
+                network_requests=0, real_winget_invocations=0, console_query_verified=True,
+                download_progress_before_exit=True, install_progress_before_exit=True,
+                private_receipt_verified=True, capture_complete=True, target_exit_code=0,
+                console_receipt=dict(schema=1, verified=True, quiescent=True, output_eof=True, job_verified=True,
+                                     job_active_processes=0, console_client_count=1, supervisor_exit_code=0, target_exit_code=0))
+
+
+@pytest.mark.parametrize('key,value', [('schema', True), ('frozen', False), ('network_requests', True),
+    ('real_winget_invocations', 1), ('download_progress_before_exit', False), ('install_progress_before_exit', False),
+    ('capture_complete', False), ('private_receipt_verified', False), ('target_exit_code', True), ('console_receipt', {})])
+def test_packaged_progress_report_rejects_unproven_completion(tmp_path, key, value):
+    payload = ready_console_payload()
+    payload[key] = value
+    (tmp_path / 'console-progress-probe.json').write_text(json.dumps(payload), encoding='utf-8')
+    with pytest.raises(RuntimeError, match='did not prove'):
+        build._verified_console_report(tmp_path)
+
+
+def fake_packaged_commands(monkeypatch, payload, tls_payload=None, console_payload=None):
     commands = []
     # Keep standalone fixture runs independent of platform.machine()'s native
     # subprocess fallback while subprocess.run is intentionally mocked below.
@@ -139,6 +167,11 @@ def fake_packaged_commands(monkeypatch, payload, tls_payload=None):
             assert not list(Path(options['env']['SSL_CERT_DIR']).iterdir())
             assert 'REQUESTS_CA_BUNDLE' not in options['env']
             assert 'CURL_CA_BUNDLE' not in options['env']
+        if '--console-progress-probe' in argv:
+            destination = Path(argv[argv.index('--console-progress-probe') + 1])
+            destination.mkdir(parents=True)
+            (destination / 'console-progress-probe.json').write_text(json.dumps(
+                ready_console_payload() if console_payload is None else console_payload), encoding='utf-8')
     monkeypatch.setattr(build.subprocess, 'run', run)
     return commands
 
@@ -147,8 +180,13 @@ def test_packaged_verification_uses_only_read_only_commands_and_real_report(monk
     calls = fake_packaged_commands(monkeypatch, {'processes': [{'pid': 123}], 'complete': False,
                                                'actions': [{'selected': False}]})
     result = build.verify_package(tmp_path / 'Optimus', output=tmp_path / 'evidence.json')
-    assert [arguments[1] for arguments, _ in calls] == ['--smoke-test', '--startup-probe', '--process-scan', '--tls-probe']
-    assert all(options['check'] and options['timeout'] == 150 for _, options in calls)
+    expected = ['--smoke-test', '--startup-probe', '--process-scan', '--tls-probe']
+    if sys.platform == 'win32':
+        expected.append('--console-progress-probe')
+        assert result['console_progress'] == ready_console_payload()
+    assert [arguments[1] for arguments, _ in calls] == expected
+    assert all(options['check'] and options['timeout'] == (45 if arguments[1] == '--console-progress-probe' else 150)
+               for arguments, options in calls)
     assert result['process_rows'] == 1 and result['inventory_complete'] == [False]
     assert result['maintenance_applied'] is False
     assert result['tls_trust'] == ready_tls_payload()

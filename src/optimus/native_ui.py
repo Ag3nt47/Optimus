@@ -210,6 +210,19 @@ class NativeSetupWizard(QWizard):
              'Safari databases and macOS protected app containers are excluded. Broad /tmp and system folder purges are not used. '
              'Native user temporary files retain a seven-day minimum even in Full mode; recent or observed open files '
              'and coordination files stay protected. Missing process access can defer that temporary-file scope.')
+        from .widgets.retention_cleanup_choices import RetentionCleanupChoices
+        self.retention_cleanup = RetentionCleanupChoices(body, self.initial,
+            add_check=lambda key, text: self.check(body, key, text),
+            add_note=lambda text: note(body, text))
+        unsupported = self.retention_cleanup.toggles['angerona_logs_cleanup_enabled']
+        unsupported.setChecked(False)
+        unsupported.setEnabled(False)
+        unsupported.setToolTip('Angerona log retention is currently supported only for verified Windows log locations.')
+        note(body, 'Angerona log retention is unavailable on this platform; no replacement log location is guessed.')
+        from .widgets.drive_guard_choices import DriveGuardChoices
+        self.drive_guard = DriveGuardChoices(body, self.initial,
+            add_check=lambda key, text: self.check(body, key, text),
+            add_note=lambda text: note(body, text))
         from .widgets.smart_setup_choices import SmartSetupChoices
         self.smart_setup = SmartSetupChoices(body, self.initial,
             add_check=lambda key, text: self.check(body, key, text),
@@ -373,6 +386,26 @@ class NativeSetupWizard(QWizard):
         for control in self.smart_setup.numbers.values():
             control.valueChanged.connect(smart_summary)
         smart_summary()
+        self.retention_summary = note(body, '')
+        def retention_summary(*_):
+            from .retention_configuration import retention_actions
+            actions = retention_actions(self.retention_cleanup.collect())
+            self.retention_summary.setText('Optional retention cleanup:\n' + ('\n'.join(actions) if actions else
+                'Disabled. Personal archived conversations, Angerona logs and incomplete download fragments are not selected.'))
+        for control in self.retention_cleanup.toggles.values():
+            control.toggled.connect(retention_summary)
+        for control in self.retention_cleanup.days.values():
+            control.valueChanged.connect(retention_summary)
+        retention_summary()
+        self.drive_guard_summary = note(body, '')
+        def drive_guard_summary(*_):
+            self.drive_guard_summary.setText('Drive-space check: '
+                + ('read-only warnings below ' + str(self.drive_guard.target.value())
+                    + ' GiB free before and after maintenance; no exclusive reservation or additional deletion.'
+                   if self.drive_guard.enabled.isChecked() else 'disabled.'))
+        self.drive_guard.enabled.toggled.connect(drive_guard_summary)
+        self.drive_guard.target.valueChanged.connect(drive_guard_summary)
+        drive_guard_summary()
         self.unattended_summary = note(body, '')
         def unattended_summary(*_):
             self.unattended_summary.setText('Unattended Auto Clean: ' + (
@@ -416,7 +449,8 @@ class NativeSetupWizard(QWizard):
         for key, control in self.controls.items():
             if key in value and key not in ('launch_at_sign_in', 'software_update_all_approved',
                     'software_update_agreements_accepted', 'startup_changes_approved', 'duplicate_changes_approved',
-                    'smart_cleaning_enabled', 'browser_exit_cleaning_enabled', 'unattended_auto_clean_enabled'):
+                    'smart_cleaning_enabled', 'browser_exit_cleaning_enabled', 'unattended_auto_clean_enabled',
+                    'angerona_logs_cleanup_enabled'):
                 control.setChecked(bool(value[key]))
         self.intensity.setCurrentText('High')
         self.age.setValue(0)
@@ -446,6 +480,8 @@ class NativeSetupWizard(QWizard):
         value = dict(self.initial)
         value.update({key: control.isChecked() for key, control in self.controls.items()})
         value.update(self.smart_setup.collect())
+        value.update(self.retention_cleanup.collect())
+        value.update(self.drive_guard.collect())
         value.update(self.unattended_setup.collect())
         value.update(optimization_mode=self.mode.currentData(), automation_mode=self.cadence.currentData(),
                      setup_version=CURRENT_SETUP_VERSION, cleanup_age_days=self.age.value(),

@@ -146,8 +146,8 @@ def test_native_percent_parsing_is_phase_bound_and_never_infers_terminal_success
 
 @pytest.mark.parametrize('line,expected', [('12.5 MB / 25.0 MB',50.0),('0 KB / 25 KB',0.0),
     ('25 MB / 25 MB',99.0),('25 KB / 0 KB',None),('26 MB / 25 MB',None),
-    ('512 KB / 1 MB',None),('12,5 MB / 25,0 MB',None),('-1 MB / 25 MB',None)])
-def test_same_unit_native_byte_counters_are_marked_approximate(line,expected):
+    ('512 KB / 1 MB',50.0),('12,5 MB / 25,0 MB',None),('-1 MB / 25 MB',None)])
+def test_native_byte_counters_are_marked_approximate(line,expected):
     events=[];parser=winget.WinGetProgressParser(events.append)
     parser.feed('Downloading https://example.invalid/app\n'+line+'\r')
     assert events[-1]['percent']==expected
@@ -159,7 +159,9 @@ def test_inconsistent_totals_stay_unknown_until_a_new_native_download_starts():
     parser.feed('Downloading A\n5 MB / 10 MB\r5 MB / 20 MB\r6 MB / 20 MB\r')
     assert events[-1]['percent'] is None and events[-2]['percent'] is None
     parser.feed('Downloading B\n5 MB / 20 MB\r')
-    assert events[-1]=={'phase':'download','percent':25.0,'estimated':True}
+    assert events[-1]['phase']=='download' and events[-1]['percent']==25.0 and events[-1]['estimated'] is True
+    assert events[-1]['downloaded_bytes']==5*1024**2
+    assert events[-1]['download_total_bytes']==20*1024**2
     parser.feed('x'*9000+'80%\r')
     assert events[-1]['percent']==25.0
 
@@ -171,7 +173,8 @@ def test_stream_runner_reports_before_process_exit_and_preserves_complete_output
         progress_callback=lambda value:observed.append((time.monotonic(),value)))
     assert result.returncode==0 and result.capture_complete is True
     assert '12.5 MB / 25.0 MB' in result.stdout and result.stderr=='fixture stderr'
-    assert any(value=={'phase':'download','percent':50.0,'estimated':True} for _,value in observed)
+    assert any(value['phase']=='download' and value['percent']==50.0 and value.get('estimated') is True
+               and value.get('downloaded_bytes')==int(12.5*1024**2) for _,value in observed)
     assert observed and observed[0][0]<time.monotonic()-.1
 
 

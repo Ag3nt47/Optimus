@@ -70,6 +70,12 @@ def launch_warning(settings):
         age = max(30, age) if settings.get('intensity') == 'Low' and type(age) is int else age
         actions.append('Permanently delete eligible temporary/cache files in saved categories: '
                        + _listed(list(dict.fromkeys(categories))) + f'. Saved minimum file age: {age} day(s).')
+    from .retention_configuration import retention_actions
+    actions.extend(retention_actions(settings))
+    if settings.get('drive_space_guard_enabled', True) is True:
+        checks.append('Read-only drive-space check before and after maintenance; warn below '
+            + str(settings.get('drive_space_guard_target_gib', 2.0))
+            + ' GiB free. This does not reserve space or authorize additional deletion; installers may require more space.')
     browser_categories = [title for key, title in (
         ('browser_cache_enabled', 'cache'), ('browser_history_enabled', 'history'),
         ('browser_cookies_enabled', 'cookies'), ('browser_download_history_enabled', 'download-list records'))
@@ -164,6 +170,7 @@ def launch_warning(settings):
               if any(settings.get(key) is True for key in ('cleanup_enabled', 'browser_cache_enabled', 'browser_history_enabled',
                   'browser_cookies_enabled', 'browser_download_history_enabled', 'consumer_debloat_enabled',
                   'm365_debloat_enabled', 'outlook_debloat_enabled', 'edge_debloat_enabled',
+                  'codex_archives_cleanup_enabled', 'angerona_logs_cleanup_enabled', 'failed_downloads_cleanup_enabled',
                   'privacy_disable_recall_snapshots_enabled')) or categories or rule_scope['enabled'] and rule_scope['keep_uninstalled']
               else 'Auto Clean runs the saved checks and approved actions below. Native eligibility and saved scopes still apply.')
     lines = [header, '', *('• ' + action for action in actions)]

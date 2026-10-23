@@ -11,12 +11,15 @@ UNATTENDED_DEFAULTS = {'unattended_auto_clean_enabled': False,
                        'unattended_scope_hash': '', 'unattended_browser_policy': 'skip_open'}
 UNATTENDED_SETUP_VERSION = 2
 _EXCLUDED = frozenset(('unattended_scope_hash', 'reduce_motion', 'theme', 'motion',
-                       'ui_theme', 'ui_motion_enabled'))
+                       'ui_theme', 'ui_motion_enabled',
+                       'drive_space_guard_enabled', 'drive_space_guard_target_gib'))
 
 
 def validate_unattended_configuration(settings):
     if not isinstance(settings, dict):
         raise ValueError('Unattended choices must be an object.')
+    from .retention_configuration import validate_retention_scope
+    validate_retention_scope(settings)
     result = {key: copy.deepcopy(settings.get(key, value)) for key, value in UNATTENDED_DEFAULTS.items()}
     if type(result['unattended_auto_clean_enabled']) is not bool:
         raise ValueError('Unattended Auto Clean must be explicitly on or off.')
@@ -57,6 +60,8 @@ def approve_unattended_settings(settings):
         raise ValueError('Select unattended Auto Clean explicitly before approving its scope.')
     if type(settings.get('setup_version')) is not int or settings['setup_version'] != UNATTENDED_SETUP_VERSION:
         raise ValueError('Complete the current setup before approving unattended Auto Clean.')
+    from .retention_configuration import validate_retention_scope
+    validate_retention_scope(settings, require_all=True)
     value = copy.deepcopy(settings)
     value.update(configuration)
     value.update(launch_at_sign_in=True, automation_mode='startup')
@@ -68,6 +73,8 @@ def matches_unattended(settings):
     """Return False for missing, revoked, changed or unverifiable approvals."""
     try:
         configuration = validate_unattended_configuration(settings)
+        from .retention_configuration import validate_retention_scope
+        validate_retention_scope(settings, require_all=True)
         return (configuration['unattended_auto_clean_enabled'] is True
             and type(settings.get('setup_version')) is int
             and settings['setup_version'] == UNATTENDED_SETUP_VERSION

@@ -37,10 +37,27 @@ namespace Optimus.UpdateProgress {
 '@
 }
 
+function ConvertTo-SCMProgressByteCount {
+    param($Value)
+    # WUA exposes DECIMAL counters (some COM projections return a string).
+    # Reject fractions, booleans, nonfinite values and oversized observations.
+    if ($Value -is [string]) {
+        if ($Value -notmatch '^[0-9]{1,16}$') { return $null }
+        $Value = [decimal]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -isnot [int] -and $Value -isnot [long] -and $Value -isnot [double] -and
+        $Value -isnot [single] -and $Value -isnot [decimal]) { return $null }
+    try {
+        if ([double]::IsNaN([double]$Value) -or [double]::IsInfinity([double]$Value) -or
+            $Value -lt 0 -or $Value -gt 1125899906842624 -or [decimal]$Value -ne [decimal]::Truncate([decimal]$Value)) { return $null }
+        return [long]$Value
+    } catch { return $null }
+}
+
 function Publish-SCMUpdateProgress {
     param([scriptblock]$ProgressCallback,
         [Parameter(Mandatory=$true)][ValidateSet('downloading','installing')][string]$Phase,
-        $Percent)
+        $Percent, $DownloadedBytes, $DownloadTotalBytes)
     if ($null -eq $ProgressCallback) { return }
     $value = $null
     if (($Percent -is [int] -or $Percent -is [long] -or $Percent -is [double] -or $Percent -is [single] -or $Percent -is [decimal]) -and
@@ -51,7 +68,18 @@ function Publish-SCMUpdateProgress {
     try {
         # Discard observer output as well as observer errors. A display callback
         # must neither replace the result nor abandon an update operation.
-        $null = & $ProgressCallback ([pscustomobject]@{phase=$Phase;percent=$value})
+        $payload = [ordered]@{phase=$Phase;percent=$value}
+        if ($Phase -eq 'downloading') {
+            $done = ConvertTo-SCMProgressByteCount $DownloadedBytes
+            $total = ConvertTo-SCMProgressByteCount $DownloadTotalBytes
+            if ($null -ne $done -and ($null -eq $DownloadTotalBytes -or ($null -ne $total -and $total -ge $done))) {
+                $payload.downloaded_bytes = $done
+                $payload.bytes_source = 'windows_update'
+                $payload.bytes_estimated = $false
+                if ($null -ne $total) { $payload.download_total_bytes = $total }
+            }
+        }
+        $null = & $ProgressCallback ([pscustomobject]$payload)
     } catch { }
 }
 
@@ -73,6 +101,8 @@ function Invoke-SCMUpdateProgress {
     }
     if ($null -eq $job) { throw 'Windows Update did not return its asynchronous job. Verify its outcome before continuing.' }
     $reportedComplete = $false
+    $downloadedBytes = $null
+    $downloadTotalBytes = $null
     while ($true) {
         $complete = $false
         try {
@@ -86,7 +116,17 @@ function Invoke-SCMUpdateProgress {
         try {
             # GetProgress returns a snapshot: obtain a fresh one every poll.
             $snapshot = $job.GetProgress()
-            if ($null -ne $snapshot) { $percent = $snapshot.CurrentUpdatePercentComplete }
+            if ($null -ne $snapshot) {
+                $percent = $snapshot.CurrentUpdatePercentComplete
+                if ($Phase -eq 'Download') {
+                    # Current-update counters belong to this exact offer;
+                    # never turn catalog maximum size into transferred bytes.
+                    try {
+                        $downloadedBytes = $snapshot.CurrentUpdateBytesDownloaded
+                        $downloadTotalBytes = $snapshot.CurrentUpdateBytesToDownload
+                    } catch { $downloadedBytes = $null; $downloadTotalBytes = $null }
+                }
+            }
         } catch { }
         if (($percent -is [int] -or $percent -is [long] -or $percent -is [double] -or $percent -is [single] -or $percent -is [decimal]) -and $percent -eq 100) {
             $reportedComplete = $true
@@ -94,7 +134,7 @@ function Invoke-SCMUpdateProgress {
             # Await the terminal native receipt rather than displaying success.
             $percent = $null
         }
-        Publish-SCMUpdateProgress -ProgressCallback $ProgressCallback -Phase $progressPhase -Percent $percent
+        Publish-SCMUpdateProgress -ProgressCallback $ProgressCallback -Phase $progressPhase -Percent $percent -DownloadedBytes $downloadedBytes -DownloadTotalBytes $downloadTotalBytes
         if ($complete) { break }
         Start-Sleep -Milliseconds 1000
     }
@@ -115,7 +155,7 @@ function Invoke-SCMUpdateProgress {
             }
         } catch { }
         if ($verified -and $reportedComplete) {
-            Publish-SCMUpdateProgress -ProgressCallback $ProgressCallback -Phase $progressPhase -Percent 100
+            Publish-SCMUpdateProgress -ProgressCallback $ProgressCallback -Phase $progressPhase -Percent 100 -DownloadedBytes $downloadedBytes -DownloadTotalBytes $downloadTotalBytes
         }
         return $result
     } finally {

@@ -617,8 +617,29 @@ function Invoke-SCMDriverUpdateApply {
         try { Assert-SCMDriverQuietMode -Installer $installer }
         catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception) }
     }
+    $downloadState = @{last=$null}
     $download=if($null -ne $ProgressCallback){
-        Invoke-SCMUpdateProgress -Owner $downloader -Phase Download -ProgressCallback $ProgressCallback
+        $displayCallback = $ProgressCallback
+        # Windows PowerShell 5.1 closures use a dynamic module: retain the
+        # normalizer itself instead of relying on script-scope name lookup.
+        $byteNormalizer = ${function:ConvertTo-SCMProgressByteCount}
+        $downloadCallback = {
+            param($Progress)
+            if ($Progress.phase -eq 'downloading' -and $null -ne $Progress.downloaded_bytes) {
+                $done = & $byteNormalizer $Progress.downloaded_bytes
+                $total = & $byteNormalizer $Progress.download_total_bytes
+                if ($null -ne $done -and ($null -eq $Progress.download_total_bytes -or ($null -ne $total -and $total -ge $done))) {
+                    if ($null -eq $downloadState.last -or $done -ge $downloadState.last.downloaded_bytes) {
+                        $saved = [ordered]@{phase='downloading';percent=$Progress.percent;
+                            downloaded_bytes=$done;bytes_source='windows_update';bytes_estimated=$false}
+                        if ($null -ne $total) { $saved.download_total_bytes=$total }
+                        $downloadState.last = [pscustomobject]$saved
+                    }
+                }
+            }
+            try { $null = & $displayCallback $Progress } catch { }
+        }.GetNewClosure()
+        Invoke-SCMUpdateProgress -Owner $downloader -Phase Download -ProgressCallback $downloadCallback
     }else{$downloader.Download()}
     $downloadItem=$download.GetUpdateResult(0)
     # https://learn.microsoft.com/windows/win32/wua_sdk/idownloadresult-properties
@@ -633,7 +654,9 @@ function Invoke-SCMDriverUpdateApply {
     }
     if($download.ResultCode -ne 2 -or $downloadItem.ResultCode -ne 2 -or $downloadItem.HResult -ne 0 -or $download.HResult -ne 0){
         if($Unattended){
-            return New-SCMDriverPreflightRefusal -Record $fresh -FailureKind download_failed -ResultCode $downloadItem.ResultCode -AggregateResultCode $download.ResultCode -HResult $downloadItem.HResult -AggregateHResult $download.HResult -RestartNeeded (Test-SCMWuaRebootPending) -Note 'Windows Update returned a terminal failure downloading this driver. No driver installer was started. The exact download result is retained; no retry or forced installation was requested.'
+            $refusal = New-SCMDriverPreflightRefusal -Record $fresh -FailureKind download_failed -ResultCode $downloadItem.ResultCode -AggregateResultCode $download.ResultCode -HResult $downloadItem.HResult -AggregateHResult $download.HResult -RestartNeeded (Test-SCMWuaRebootPending) -Note 'Windows Update returned a terminal failure downloading this driver. No driver installer was started. The exact download result is retained; no retry or forced installation was requested.'
+            if ($null -ne $downloadState.last) { $refusal | Add-Member -NotePropertyName download_progress -NotePropertyValue $downloadState.last }
+            return $refusal
         }
         throw 'Windows Update did not completely download the selected driver.'
     }
@@ -671,7 +694,7 @@ function Invoke-SCMDriverUpdateApply {
        $item.RebootRequired -isnot [bool] -or $installed.RebootRequired -isnot [bool]){
         throw 'Windows Update returned an incomplete or nonterminal driver installation result. Verify installer state before continuing.'
     }
-    [pscustomobject]@{
+    $receipt = [ordered]@{
         id=$fresh.id;revision=$fresh.revision;title=$fresh.title
         resultCode=[int]$item.ResultCode;aggregateResultCode=[int]$installed.ResultCode
         restartNeeded=([bool]$installed.RebootRequired -or [bool]$item.RebootRequired)
@@ -680,5 +703,7 @@ function Invoke-SCMDriverUpdateApply {
         requiresReview=([int]$item.ResultCode -ne 2 -or [int]$item.HResult -ne 0 -or [int]$installed.ResultCode -ne 2 -or [int]$installed.HResult -ne 0)
         note='Windows Update returned the selected applicable driver installation result. No interactive fallback, forced installation, reboot API or automatic elevation was invoked.'
     }
+    if ($null -ne $downloadState.last) { $receipt.download_progress = $downloadState.last }
+    [pscustomobject]$receipt
 }
 

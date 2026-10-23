@@ -30,6 +30,19 @@ def normalize_item_progress(value):
     normalized = {'key': key, 'label': ' '.join(label.split())[:512], 'phase': phase, 'percent': percent}
     if value.get('estimated') is True:
         normalized['estimated'] = True
+    # Download counters describe observed package bytes, never installed disk
+    # footprint. Keep them phase-bound and bounded across the native bridge.
+    if phase in ('download', 'downloading'):
+        done, total = value.get('downloaded_bytes'), value.get('download_total_bytes')
+        source = value.get('bytes_source')
+        if (type(done) is int and 0 <= done <= 2 ** 50
+                and source in ('winget_native', 'windows_update')
+                and type(value.get('bytes_estimated', False)) is bool
+                and (total is None or type(total) is int and done <= total <= 2 ** 50)):
+            normalized.update(downloaded_bytes=done, bytes_source=source,
+                              bytes_estimated=value.get('bytes_estimated', False))
+            if total is not None:
+                normalized['download_total_bytes'] = total
     return normalized
 
 

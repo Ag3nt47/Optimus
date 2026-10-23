@@ -70,6 +70,26 @@ Assert-Test ($frames[0].progress.phase -ceq 'downloading' -and $null -eq $frames
 Assert-Test ($frames[2].progress.phase -ceq 'installing' -and $null -eq $frames[2].progress.percent -and $frames[3].progress.percent -eq 64) 'install phase reset and actual progress'
 Assert-Test (@($frames|Where-Object {$_.PSObject.Properties.Name -contains 'ok' -or $_.PSObject.Properties.Name -contains 'result'}).Count -eq 0) 'progress frame can never masquerade as terminal response'
 
+Reset-Fixture;Add-AsyncFixture
+$script:DownloadJob | Add-Member -Force ScriptMethod GetProgress {
+    return [pscustomobject]@{CurrentUpdatePercentComplete=36;CurrentUpdateBytesDownloaded=[decimal]360;
+        CurrentUpdateBytesToDownload=[decimal]1000}
+}
+$frames=@(Invoke-BridgeFixture)
+Assert-Test ($frames[1].progress.downloaded_bytes -eq 360 -and $frames[1].progress.download_total_bytes -eq 1000) 'exact native download bytes reach progress wire'
+Assert-Test ($script:BridgeResult.download_progress.downloaded_bytes -eq 360 -and $script:BridgeResult.download_progress.bytes_source -eq 'windows_update') 'last measured download counter remains in terminal receipt'
+Assert-Test ($script:BridgeResult.resultCode -eq 2 -and $script:AsyncInstalls -eq 1) 'download observation does not change native install outcome'
+Assert-Test (@($frames | Where-Object {$_.progress.phase -eq 'installing' -and $_.progress.PSObject.Properties.Name -contains 'downloaded_bytes'}).Count -eq 0) 'install phase never relabels download size'
+
+Reset-Fixture;Add-AsyncFixture
+$script:DownloadJob | Add-Member -Force ScriptMethod GetProgress {
+    return [pscustomobject]@{CurrentUpdatePercentComplete=36;CurrentUpdateBytesDownloaded=[decimal]360;
+        CurrentUpdateBytesToDownload=[decimal]1000}
+}
+$script:DownloadItem.ResultCode=4;$script:DownloadResult.ResultCode=4
+$frames=@(Invoke-BridgeFixture)
+Assert-Test ($script:BridgeResult.failureKind -eq 'download_failed' -and $script:BridgeResult.download_progress.downloaded_bytes -eq 360 -and $script:AsyncInstalls -eq 0) 'failed download retains observed bytes and never counts an installation'
+
 foreach($flag in @($false,'true',$null)) {
     Reset-Fixture;Add-AsyncFixture
     $frames=@(Invoke-BridgeFixture -ProgressFlag $flag)

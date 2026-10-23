@@ -62,6 +62,14 @@ Only an exact offer with verified backup evidence can reach Windows Update insta
 
 ## Current-item progress and system status
 
+Worker cards adapt their columns and row heights to window width and font size. Long descriptions and counter captions fit the card, with the full text available through accessibility and tooltips.
+
+Maintenance displays the logical byte lengths and count of files actually removed in this run. Previewed files, skipped or locked files, browser database rows and recycled duplicates do not become claimed disk savings. App and driver cards show completed installs separately from download bytes. A completed install follows an explicit successful provider receipt; where available, independent installed-version verification is retained. Download sizes use observed native counters, with rounded or incomplete observations marked. These numbers do not claim an application's installed disk footprint, a complete network traffic total or the change in volume free space.
+
+Current WinGet suppresses progress visualizers when its output is a file or pipe. Optimus uses a hidden console supervisor to obtain its native download/install output without changing the approved installer arguments. The supervisor retains the console while attached clients remain, including after a timeout; it never kills an installer or retries it to obtain progress. WinGet formats downloaded and total bytes independently, so mixed-unit counters are converted before computing their displayed percentage. See [WinGet's reporter](https://github.com/microsoft/winget-cli/blob/v1.29.380/src/AppInstallerCLICore/ExecutionReporter.cpp) and [native progress formatting](https://github.com/microsoft/winget-cli/blob/v1.29.380/src/AppInstallerCLICore/ExecutionProgress.cpp).
+
+Driver downloads and installations use Windows Update's actual progress snapshots. App installers can publish a real installation percentage, but many silent EXE installers—including Ollama's current handler—provide only a running state and final result. Those phases display **Installing** with an unknown percentage. A driver waiting for the shared installer lane displays **Waiting**, and its overall completed-item count remains separate. Elapsed time, CPU usage, queue position and a spinner never substitute for a measured installation percentage.
+
 ![Worker controls and current-item progress](optimus-workers.png)
 
 This interface example uses disposable fixture values; it is not a benchmark or a reading from your computer.
@@ -70,7 +78,7 @@ The **Current item** ring shows the reported percentage for the named operation 
 
 Cleanup uses the number of preview-approved file decisions completed; preserved/locked files remain explicit and are not counted as deleted. Privacy controls show the number of durably checked selected settings; a completed check can be unsupported or refused. Driver offer/device record processing uses the returned collection size. Native Windows Update catalog searching exposes no intermediate percentage, so that phase remains a labeled scanning indicator rather than a time-based estimate.
 
-An approximate download value, such as **~62%**, comes from the updater's own downloaded/total counters in the same unit. Those displayed counters can be rounded, so the estimate is labelled explicitly. It is not a time estimate or a measurement of installation progress. An opaque installer still shows an indeterminate ring until it reports usable progress or returns its actual outcome.
+An approximate download value, such as **~62%**, comes from the updater's own downloaded/total counters after converting both to bytes. Those displayed counters can be rounded, so the estimate is labelled explicitly. It is not a time estimate or a measurement of installation progress. An opaque installer still shows an indeterminate ring until it reports usable progress or returns its actual outcome.
 
 The separate bars show completed workflow stages or processed queue entries. Three of four packages processed does not establish 75% completion of the current installer. A phase reaching 100% also does not prove that installation succeeded; the recorded native outcome and verification determine the result. Reviewing an earlier item with Back does not replay its operation.
 
@@ -85,6 +93,20 @@ The app above is a disposable review fixture. Real rules take effect only after 
 Stable Unity editor releases use the documented final-release `f` version order only within the exact `Unity.Unity.<major>` package track. A numeric installed-version upper bound such as `< 3.21.0.65535` is accepted only when an exact numeric offer is strictly greater than that bound. Unknown, prerelease, mixed-track and ambiguous versions stay excluded. Fresh exact-pair validation, exclusions, pins and saved scope still apply.
 
 Selected held offers receive at most one bounded metadata pass per approved run, with a six-hour cooldown and five-offer limit. Optimus verifies and refreshes only the existing official WinGet source, then checks exact offer metadata. It does not reset/add sources, clear holds, accept new licences or run an installer based on metadata alone. A publisher correction is awaited automatically on later approved runs; this is not a separate background timer. A failed or uncertain source check is recorded durably and prevents affected app installs until trust and a fresh approved-pair scan succeed. Independent maintenance and driver work continue.
+
+## Optional retention cleanup and drive-space warnings
+
+Initial setup's Cleanup page and the saved one-click configuration expose three separate deletion choices. Each starts **off**, with its own **7-day** minimum age, adjustable from **1 to 3650 days**. General cleanup intensity does not change these ages. Full mode and Cleanup Select all do not select personal archive deletion or the other retention choices. Saving a changed deletion toggle or retention age invalidates an earlier unattended deletion approval; reviewing or constructing these controls never deletes data.
+
+| Choice | Eligible scope and limits |
+| --- | --- |
+| Archived Codex chats | Verified archived conversations older than the selected age, through the supported official Codex CLI/API route. These are personal conversation records. Deletion is permanent and has no automatic undo; active and unarchived conversations remain protected. Missing/unknown archive evidence or an active Codex session prevents deletion. Supported Codex integration is required on each platform. |
+| Inactive Angerona logs | Eligible old ordinary files only in verified supported Windows Angerona log locations. Active/open, protected and unrecognized files are skipped. This option is visibly unavailable on macOS/Linux; Optimus does not guess replacement log roots. |
+| Incomplete download leftovers | Only old top-level `.crdownload`, `.part` and `.partial` fragments in the verified Downloads folder, after process, open-file, age and exact-file checks. This also discards old paused-download fragments. Completed downloads, directory bundles, arbitrary caches and active/unknown downloads are preserved. |
+
+The **drive-space check** is separate and read-only. It starts **on**, with a **2 GiB** free-space target adjustable from **1 to 2 GiB** in 0.25 GiB steps. Optimus checks supported eligible volumes before and after maintenance. A native warning icon and readable warning text mark insufficient space; the progress and final-results views retain each volume's observed free space, selected target and shortfall. Unavailable measurements remain **unknown**, and a successful scan can still report a drive below target.
+
+The target is a warning threshold, not an exclusive storage reservation or RAM allocation. The check never creates a reserve file, moves user files or authorizes extra deletion. It does not promise enough working space for every installer; existing installer-specific free-space checks remain in force. Changing these two read-only warning preferences does not grant a new deletion scope or revoke the independently approved unattended mutation scope. Changing a retention deletion choice still requires fresh approval.
 
 ## Fresh startup and previous failures
 
