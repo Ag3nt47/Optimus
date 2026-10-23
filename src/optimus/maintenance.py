@@ -409,6 +409,17 @@ class Maintenance:
             return None
         if (interrupted := cancelled_result()) is not None:
             return interrupted
+        def held_result():
+            if not unattended:
+                return None
+            from .update_holds import load_update_holds, matching_update_hold, held_update_result
+            hold = matching_update_hold(current, load_update_holds(self.data_dir))
+            return held_update_result(current, hold) if hold else None
+        # Avoid a known bad exact offer before any network/pin revalidation.
+        # Read again at the final launch boundary in case an operator added a
+        # hold while the source or pin checks were running.
+        if (held := held_result()) is not None:
+            return held
         # Revalidate both manual and unattended updates. An external updater may
         # have already installed the offered version since the preview.
         try:
@@ -452,6 +463,8 @@ class Maintenance:
         try:
             if (interrupted := cancelled_result()) is not None:
                 return interrupted
+            if (held := held_result()) is not None:
+                return held
             result = self._run(arguments, timeout=1800)
         except subprocess.TimeoutExpired:
             # The vendor child can outlive WinGet. Never retry or replay here.

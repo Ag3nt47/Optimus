@@ -40,6 +40,8 @@ def test_deferred_cards_show_two_fitting_lines_without_overlapping_counts(progre
         assert card.details.geometry().bottom() < card.progress.geometry().top()
         assert card.progress.geometry().bottom() < card.elapsed.geometry().top()
         assert card.progress.value() == 0 and card.progress.maximum() > 0
+        assert card.progress.format() == 'Search not started'
+        assert card.elapsed.text() == 'Elapsed: —'
         assert_fitting_summary(card.details)
     assert progress.worker_cards['maintenance'].status.text() == 'Running'
     assert progress.progress.value() == 40 and progress.cancel_button.isEnabled()

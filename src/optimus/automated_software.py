@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
+from .update_holds import load_update_holds, matching_update_hold, held_update_result, is_known_update_hold
 
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _VERSION = re.compile(r'[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}')
@@ -173,14 +174,38 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     approved_scope = copy.deepcopy({key: configuration.get(key) for key in ('software_updates_enabled',
         'software_update_policy', 'software_update_ids', 'software_update_all_approved',
         'software_update_exclude_ids', 'software_update_agreements_accepted', 'update_compatibility_mode_enabled')})
-    prepared(scan_complete=not untrusted, candidate_count=len(selected), review_only=False)
     approved_ids = list(selected)
     preflight_items = []
+    # Exact bad offers remain visible in item results but do not acquire the
+    # installer lane or keep unrelated approved applications from proceeding.
+    # Maintenance re-reads the file immediately before every actual launch.
+    data_dir = getattr(backend, 'data_dir', None)
+    holds = load_update_holds(data_dir) if data_dir is not None else []
+    allowed = []
+    for identity in selected:
+        current = candidates[identity]
+        hold = matching_update_hold(current, holds)
+        if hold:
+            preflight_items.append({'id': identity, 'name': current.get('name', identity),
+                'from_version': current['version'], 'to_version': current['available'], 'status': 'skipped',
+                'result': held_update_result(current, hold)})
+        else:
+            allowed.append(identity)
+    selected = allowed
+    prepared(scan_complete=not untrusted, candidate_count=len(selected), review_only=False)
+    def hold_details(items):
+        rows = [{'id': item['id'], 'available_version': item.get('to_version'),
+                 'reason': item['result']['note']}
+                for item in items if is_known_update_hold(item.get('result'))]
+        return {'held_ids': [row['id'] for row in rows], 'held_count': len(rows),
+                'automatic_update_holds': rows}
     def defer(reason, *, failed=0, refreshed_scan=None, error=None):
         return with_app_scan({'review_only': False, 'scan': scan if refreshed_scan is None else refreshed_scan,
-                'policy': policy, 'items': [], 'failed_items': failed + int(partial_scan), 'skipped': True,
+                'policy': policy, 'items': preflight_items,
+                'failed_items': failed + len(preflight_items) + int(partial_scan), 'skipped': True,
                 'deferred_ids': list(selected), 'cancelled': cancelled(), 'stop_reason': reason,
-                'installer_started': False, 'outcomeKnown': True}, started=started, selected=approved_ids, error=error)
+                'installer_started': False, 'outcomeKnown': True, **hold_details(preflight_items)},
+                started=started, selected=approved_ids, error=error)
     if selected and not cancelled() and before_install is not None:
         if before_install({'operation': 'software', 'scan_complete': not untrusted,
                            'candidate_count': len(selected), 'review_only': False}) is not True:
@@ -267,6 +292,10 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 stop_reason = 'Cancelled before this installer started; remaining applications were deferred.'
                 deferred = selected[index + 1:]
                 break
+            if is_known_update_hold(outcome):
+                # This refusal proves that no installer started. A hold for a
+                # single exact offer is not a global unknown-installer barrier.
+                continue
             if isinstance(outcome, dict):
                 restart_needed = (outcome.get('restartNeeded') is True or
                                   known_exit and outcome['exitCode'] in (3010, 1641))
@@ -319,8 +348,11 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
             'excluded_ids': [identity for identity in candidates if identity.casefold() in exclusions],
             'not_available_ids': [identity for identity in configuration.get('software_update_ids', []) if identity.casefold() not in canonical_ids],
             'compatibility_mode': configuration.get('update_compatibility_mode_enabled') is True,
+            **hold_details(results),
             **lifecycle,
             'note': ('Only complete identities with a provably newer version from a successful fresh winget-source scan may be updated. Equal, older or incomparable versions are skipped. Saved exclusions and native pin checks remain in effect. '
                      + ('The saved compatibility choice adds WinGet --force for non-security issues; it cannot bypass an installer hard block. ' if configuration.get('update_compatibility_mode_enabled') is True else 'No force option is requested. ')
-                     + 'Hash/signature checks remain enabled; no pin override, unknown-version update, blind retry or automatic restart is requested. Unsupported applications require their publisher updater.')},
+                     + 'Hash/signature checks remain enabled; no pin override, unknown-version update, blind retry or automatic restart is requested. Unsupported applications require their publisher updater.'
+                     + (' Held offers: ' + '; '.join(row['reason'] for row in hold_details(results)['automatic_update_holds'])
+                        if hold_details(results)['held_count'] else ''))},
                      started=started, selected=approved_ids)

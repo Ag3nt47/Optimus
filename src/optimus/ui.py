@@ -1806,6 +1806,7 @@ class WorkflowWorkerCard(QFrame):
         layout.addWidget(self.heading)
         self.status = QLabel('Not started')
         self.status.setTextFormat(Qt.PlainText)
+        self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.details = WorkflowSummaryLabel('Waiting for this run to start.')
         layout.addWidget(self.details)
@@ -1821,9 +1822,41 @@ class WorkflowWorkerCard(QFrame):
         self._elapsed_active = False
         layout.addWidget(self.elapsed)
 
+    def _fit_status(self):
+        # A wrapping label inside a shared horizontal row needs an explicit
+        # measured height; otherwise its extra line can overlap fixed details.
+        margins = self.layout().contentsMargins()
+        width = max(1, self.contentsRect().width() - margins.left() - margins.right())
+        self.status.setFixedHeight(max(self.status.fontMetrics().lineSpacing(), self.status.heightForWidth(width)))
+        self.layout().invalidate()
+        self.setMinimumHeight(self.layout().minimumSize().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_status()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, 'status') and event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._fit_status()
+
     def update_state(self, state, *, maintenance=False):
         state = state if isinstance(state, dict) else {}
         raw_status = str(state.get('status', 'not_started'))
+        installation_blocked = state.get('installation_blocked') is True
+        scan_complete = state.get('scan_complete') is True
+        offers = state.get('offers_count')
+        scan_label = state.get('scan_label')
+        # Old saved workflows stopped at the prior-installer guard before any
+        # discovery ran. Their zero-second placeholder is not a completed search.
+        legacy_unsearched = (not any(key in state for key in ('scan_complete', 'scan_status', 'scan_started'))
+            and not scan_label and raw_status in ('deferred', 'needs_review')
+            and state.get('current', 0) == state.get('total', 0) == 0
+            and state.get('elapsed_seconds') == 0
+            and _compact_worker_reason(str(state.get('description', ''))).startswith('Previous installer needs review.'))
+        scan_not_started = (state.get('scan_status') == 'not_started'
+            or state.get('scan_started') is False or scan_label in ('Scan not started', 'Search not started')
+            or legacy_unsearched)
         labels = {'not_started': 'Not started', 'not_run': 'Not run', 'not_selected': 'Not selected', 'pending': 'Queued',
                   'running': 'Running', 'waiting': 'Running; maintenance is waiting',
                   'scanning': 'Scanning', 'preparing': 'Preparing', 'installing': 'Installing',
@@ -1835,21 +1868,34 @@ class WorkflowWorkerCard(QFrame):
                   'needs_review': 'Needs review', 'stopped': 'Stopped'}
         self.status.setText('Waiting for update lane' if maintenance and raw_status == 'waiting' else
                             labels.get(raw_status, raw_status.replace('_', ' ').capitalize()))
+        if installation_blocked and raw_status in ('deferred', 'needs_review', 'completed', 'completed_with_errors', 'not_run', 'failed'):
+            self.status.setText('Search not started; install blocked' if scan_not_started else
+                'Updates found; install blocked' if scan_complete and type(offers) is int and offers > 0 else
+                'Search complete; install blocked' if scan_complete else 'Search needs review; install blocked')
+        self._fit_status()
         description = display(state.get('description') or 'Waiting for this run to start.')
         reason = state.get('wait_reason')
         if isinstance(reason, str) and reason.strip() and reason not in description:
             description = (reason + ' — ' + description if raw_status.startswith('waiting_for_')
                            else description + ' — ' + reason)
+        block_reason = state.get('installation_block_reason')
+        if isinstance(block_reason, str) and block_reason.strip() and block_reason not in description:
+            description += ' — ' + block_reason
         package = state.get('current_package')
         if isinstance(package, str) and package.strip() and package not in description:
             description += ' — ' + package
-        self.details.set_summary(_compact_worker_reason(description), description)
+        summary = _compact_worker_reason(description)
+        if installation_blocked and scan_complete:
+            summary = (str(scan_label) + '\n' if isinstance(scan_label, str) and scan_label else '') + (
+                'Previous installer needs review.' if state.get('blocked_by_prior_installer') is True else
+                'Installation blocked. Review the saved reason.')
+        self.details.set_summary(summary, description)
         current, total = state.get('current'), state.get('total')
         if maintenance:
             self.progress.setRange(0, 100)
             self.progress.setValue(max(0, min(100, int(state.get('percentage') or 0))))
             self.progress.setFormat('%p% of workflow stages')
-        elif (type(current) is int and type(total) is int and 0 < total <= 1000000
+        elif not installation_blocked and (type(current) is int and type(total) is int and 0 < total <= 1000000
               and 0 <= current <= total):
             self.progress.setRange(0, total)
             self.progress.setValue(current)
@@ -1857,22 +1903,24 @@ class WorkflowWorkerCard(QFrame):
         else:
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
-            scan_label = state.get('scan_label')
-            self.progress.setFormat(str(scan_label)[:200] if isinstance(scan_label, str) and scan_label else
+            self.progress.setFormat('Search not started' if scan_not_started else
+                                    str(scan_label)[:200] if isinstance(scan_label, str) and scan_label else
                                     'Not selected' if raw_status == 'not_selected' else
                                     'Queued' if raw_status == 'pending' else
                                     'Waiting' if raw_status.startswith('waiting_for_') else
                                     'Scanning; total unknown' if raw_status == 'scanning' else
                                     'Preparing' if raw_status == 'preparing' else 'No item count reported')
         elapsed = state.get('elapsed_seconds')
-        if (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+        if scan_not_started:
+            self._elapsed_base = None
+        elif (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
                 and 0 <= elapsed < 3155760000):
             self._elapsed_base = float(elapsed)
         elif raw_status in ('not_started', 'not_selected', 'not_run'):
             self._elapsed_base = None
         elif self._elapsed_base is not None and self._elapsed_active and self._elapsed_clock.isValid():
             self._elapsed_base += self._elapsed_clock.elapsed() / 1000
-        self._elapsed_active = raw_status in ('pending', 'running', 'waiting', 'scanning', 'preparing', 'installing',
+        self._elapsed_active = not scan_not_started and raw_status in ('pending', 'running', 'waiting', 'scanning', 'preparing', 'installing',
                                              'waiting_for_maintenance', 'waiting_for_installer', 'waiting_for_preparation')
         self._elapsed_clock.start()
         self.refresh_elapsed()
@@ -2137,6 +2185,9 @@ class OptimizationProgressWindow(QDialog):
                     extra = job.get('wait_reason')
                     if isinstance(extra, str) and extra.strip() and extra not in reason:
                         reason += ' — ' + extra
+                    block_reason = job.get('installation_block_reason')
+                    if isinstance(block_reason, str) and block_reason.strip() and block_reason not in reason:
+                        reason += ' — ' + block_reason
                     if reason:
                         reason_groups.setdefault(reason, []).append(job)
             seen_reasons = set()
@@ -2149,6 +2200,9 @@ class OptimizationProgressWindow(QDialog):
                 extra = job.get('wait_reason')
                 if isinstance(extra, str) and extra.strip() and extra not in reason:
                     reason += ' — ' + extra
+                block_reason = job.get('installation_block_reason')
+                if isinstance(block_reason, str) and block_reason.strip() and block_reason not in reason:
+                    reason += ' — ' + block_reason
                 if job.get('status') in blocked_statuses and reason:
                     if reason in seen_reasons:
                         continue

@@ -325,6 +325,20 @@ class NativeWorkflow:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': cleanup_barrier,
                                   'note': 'No cleanup ran while update discovery still owned temporary files.'}
+                    elif parallel_barrier and title == NATIVE_SOFTWARE:
+                        # Search in serial mode too, while retaining the closed
+                        # installer gate and the unresolved installer's receipt.
+                        def discover_only(worker, item_callback, prepared_callback, before_install):
+                            return run_native_software(worker, configuration, cancel_event=cancel_event,
+                                item_callback=item_callback, prepared_callback=prepared_callback,
+                                before_install=before_install)
+                        guarded = ParallelInstallerQueue(self.backend, identifier, [(title, discover_only)],
+                            progress_callback, cancel_event=cancel_event, prior_barrier=parallel_barrier)
+                        guarded.start(inline=True)
+                        guarded.join()
+                        serial_job = guarded.jobs[0]
+                        result = serial_job.result
+                        stage['worker_log_path'] = str(serial_job.path)
                     elif parallel_barrier and title in BLOCKED_STAGES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,

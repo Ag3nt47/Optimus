@@ -238,7 +238,10 @@ def test_pending_journal_never_replays_and_still_allows_final_readonly_checks(tm
     result = Workflow(service).run(settings(), lambda _: None)
     assert not any(row.startswith('update:') for row in service.calls)
     stage = next(row for row in result['stages'] if row['title'] == WINDOWS_SOFTWARE)
-    assert stage['result']['uncertain'] and stage['result']['skipped']
+    assert stage['result']['blocked_by_prior_installer'] and stage['result']['skipped']
+    assert stage['result']['installer_started'] is False and stage['result']['outcomeKnown'] is True
+    assert stage['result']['app_scan']['complete'] is True
+    assert stage['result']['app_scan']['offers_count'] == 2
     assert 'verify' in service.calls
 
 

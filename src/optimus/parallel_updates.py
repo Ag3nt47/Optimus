@@ -140,6 +140,14 @@ class ProgressMux:
                         'total': state.get('total', previous.get('total', 0)),
                         'scan_label': str(state.get('scan_label', previous.get('scan_label', '')))[:200],
                         'current_package': package}
+            for key in ('scan_complete', 'installation_blocked', 'blocked_by_prior_installer'):
+                if type(state.get(key)) is bool:
+                    self.jobs[job_id][key] = state[key]
+            if type(state.get('offers_count')) is int and state['offers_count'] >= 0:
+                self.jobs[job_id]['offers_count'] = state['offers_count']
+            for key in ('scan_status', 'installation_block_reason', 'wait_reason'):
+                if isinstance(state.get(key), str):
+                    self.jobs[job_id][key] = state[key][:4000]
             # Serialize emission too, so an older background event cannot
             # replace a newer foreground stage in the queued UI callbacks.
             try:
@@ -285,7 +293,8 @@ def pending_updates_barrier(backend):
 
 def _journal_result(result):
     saved = {key: result[key] for key in ('failed_items', 'cancelled', 'restartNeeded', 'uncertain',
-             'stop_reason', 'installer_started', 'outcomeKnown', 'blocked_by_prior_installer') if key in result}
+             'stop_reason', 'installer_started', 'outcomeKnown', 'blocked_by_prior_installer',
+             'installation_blocked', 'installation_block_reason') if key in result}
     saved['items'] = [{'id': str(row.get('id') or row.get('binding', {}).get('id', ''))[:280],
                       'status': row.get('status'), 'uncertain': row.get('uncertain', False),
                       'error': str(row.get('error', ''))[:2000],
@@ -299,7 +308,22 @@ def _journal_result(result):
         evidence = result.get(key)
         if isinstance(evidence, dict):
             saved[key] = _bounded_scan_evidence(evidence)
+    if type(result.get('held_count')) is int and 0 <= result['held_count'] <= 1000:
+        saved['held_count'] = result['held_count']
+    if isinstance(result.get('held_ids'), list):
+        saved['held_ids'] = [value[:280] for value in result['held_ids'][:1000] if isinstance(value, str)]
+    if isinstance(result.get('automatic_update_holds'), list):
+        saved['automatic_update_holds'] = _bounded_update_holds(result)
     return saved
+
+
+def _bounded_update_holds(result):
+    values = result.get('automatic_update_holds')
+    if not isinstance(values, list):
+        return []
+    return [{key: row[key][:1000 if key == 'reason' else 280]
+             for key in ('id', 'available_version', 'reason') if isinstance(row.get(key), str)}
+            for row in values[:100] if isinstance(row, dict)]
 
 
 def _bounded_scan_evidence(evidence):
@@ -339,6 +363,14 @@ def update_completion_state(result):
         notes = [note for note in notes if note and note not in description]
         if notes:
             description += ' Details: ' + '; '.join(notes)
+    holds = _bounded_update_holds(result)
+    if holds:
+        count = result.get('held_count')
+        count = count if type(count) is int and count >= len(holds) else len(holds)
+        notes = [str(row.get('id') or 'Application') + ': ' + str(row.get('reason') or 'Saved automatic-update hold.')[:500]
+                 for row in holds[:2]]
+        description = (str(count) + ' app update' + ('' if count == 1 else 's') + ' held for review. '
+                       + '; '.join(notes) + ' ' + description)
     label = ''
     offers = evidence.get('offers_count')
     complete = evidence.get('complete') is True
@@ -359,6 +391,19 @@ def update_completion_state(result):
     # Existing per-installer totals remain distinct from the number discovered.
     if not isinstance(items, list) or not items:
         state['total'] = 0
+    if evidence:
+        state.update(scan_complete=complete, scan_status=str(evidence.get('status') or 'unknown'))
+        if type(offers) is int and offers >= 0:
+            state['offers_count'] = offers
+    if result.get('installation_blocked') is True or result.get('blocked_by_prior_installer') is True:
+        block_reason = str(result.get('installation_block_reason') or reason)
+        state.update(installation_blocked=True,
+                     blocked_by_prior_installer=result.get('blocked_by_prior_installer') is True,
+                     installation_block_reason=block_reason[:4000],
+                     scan_complete=complete,
+                     scan_status=str(evidence.get('status') or 'not_started'))
+        state['wait_reason'] = (('Search completed; ' if complete else 'Search needs review; ' if evidence else 'Search not started; ')
+                                + 'installation blocked until the previous installer is reviewed. ' + block_reason)[:4000]
     return state
 
 
@@ -414,6 +459,7 @@ class ParallelAppUpdates:
         self.joined = False
         self.stop_event = threading.Event()
         self.concurrent_preparation = False
+        self.prior_barrier = None
         class Cancellation:
             def is_set(inner):
                 return self.stop_event.is_set() or cancel_event is not None and cancel_event.is_set()
@@ -466,11 +512,15 @@ class ParallelAppUpdates:
 
     def start(self, *, inline=False, prior_barrier=None):
         reason = prior_barrier or self._pending()
+        self.prior_barrier = reason
         self.stage = {'title': self.title, 'name': self.title, 'status': 'running',
                       'started_at': self.record['started_at'], 'background': True,
                       'worker_log_path': str(self.path)}
         self._write()  # Prepared evidence is durable before the thread can mutate.
-        if reason:
+        # Only coordinated operations expose a mandatory before-install gate.
+        # They may search under an old installer barrier; unphased/serial calls
+        # retain their original refusal before executing an arbitrary operation.
+        if reason and not self.concurrent_preparation:
             self.defer(reason)
             return self.stage
         self.mux.background('pending', {'description': ('Driver updates queued in the background installer lane.'
@@ -492,12 +542,13 @@ class ParallelAppUpdates:
                        'requiresReview': not cancelled, 'cancelled': cancelled,
                        'installer_started': False, 'outcomeKnown': True,
                        'blocked_by_prior_installer': not cancelled, 'uncertain': not cancelled,
+                       'installation_blocked': not cancelled, 'installation_block_reason': reason,
                        'stop_reason': reason, 'note': reason}
         # A guarded deferral did not launch an installer, but retain the
         # barrier itself in the result so the workflow cannot clear it.
         self.record.update(status='deferred', result=self.result, finished_at=time.time())
         self._write()
-        self.mux.background('cancelled' if cancelled else 'deferred', {'description': reason})
+        self.mux.background('cancelled' if cancelled else 'deferred', update_completion_state(self.result))
 
     def item_progress(self, state):
         state = state if isinstance(state, dict) else {'description': str(state)}
@@ -552,6 +603,18 @@ class ParallelAppUpdates:
                 except Exception:
                     pass
             restore_priority()
+        block_reason = self.prior_barrier or (getattr(self, 'gate_refusal', None)
+                                             if not self.cancel_event.is_set() else None)
+        if self.concurrent_preparation and block_reason:
+            # Attach this before the first terminal event and durable receipt,
+            # including zero-offer and review-only searches that never call the
+            # install gate. Fresh scan evidence never resolves an old installer.
+            self.result.update(blocked_by_prior_installer=True, installation_blocked=True,
+                               installation_block_reason=block_reason, stop_reason=block_reason,
+                               requiresReview=True)
+            if not self.record['installer_prepared']:
+                self.result.setdefault('installer_started', False)
+                self.result.setdefault('outcomeKnown', True)
         native = getattr(self.backend, 'system', 'win32') != 'win32'
         try:
             journal_result = _journal_result(self.result)
@@ -629,15 +692,29 @@ class ParallelInstallerQueue:
                     lambda state: self._before_install(job, state))
             job.operation = coordinated
 
-    def start(self):
+    def start(self, *, inline=False):
         stages = []
         # Every job is durably prepared before ANY worker starts discovery.
         try:
             for job in self.jobs:
-                stages.append(job.start(inline=True, prior_barrier=self.prior_barrier))
+                stages.append(job.start(inline=True, prior_barrier=self.barrier))
+                # Discovering a pending journal here is as binding as a barrier
+                # supplied by the workflow. Capture it before ANY thread starts.
+                self.barrier = self.barrier or job.prior_barrier
+            self.prior_barrier = self.barrier
+            for job in self.jobs:
+                # A journal can become visible while the remaining jobs are
+                # being prepared. Even a zero-offer/review-only first search
+                # must report the final shared installation barrier.
+                job.prior_barrier = self.prior_barrier
+            if inline and not self.barrier:
+                raise ValueError('Inline discovery requires a closed installer gate.')
             for job in self.jobs:
                 if job.result is not None:
                     job.prepared.set()
+                    continue
+                if inline:
+                    self._run(job)
                     continue
                 job.thread = threading.Thread(target=self._run, args=(job,),
                     name='Optimus ' + job.job_id, daemon=False)
@@ -671,7 +748,7 @@ class ParallelInstallerQueue:
             job.will_install = bool(state.get('candidate_count')) and not state.get('review_only', True)
             job.prepared.set()
             self.condition.notify_all()
-        if job.will_install:
+        if job.will_install and not self.barrier:
             job.mux.background('waiting_for_maintenance', {
                 'description': 'Update discovery finished; waiting for initial resource checks and selected temporary-file cleanup.',
                 'total': state.get('candidate_count', 0)})
@@ -713,13 +790,6 @@ class ParallelInstallerQueue:
             with self.condition:
                 # _run saves the final journal before relinquishing the slot.
                 # A failed save produces an uncertain result and closes the gate.
-                if job.gate_refusal and not self.cancel_event.is_set() and job.result is not None:
-                    job.result.update(blocked_by_prior_installer=True, stop_reason=job.gate_refusal)
-                    job.record['result'] = _journal_result(job.result)
-                    try:
-                        job._write()
-                    except BaseException:
-                        job.result.update(uncertain=True, outcomeKnown=False)
                 self.barrier = self.barrier or installer_barrier(job.result)
                 job.will_install = False
                 job.prepared.set()  # Failures/empty/review paths also unblock cleanup.
@@ -742,7 +812,9 @@ class ParallelInstallerQueue:
                 with bridge._pending_lock:
                     if bridge._pending:
                         return 'Update discovery is still running in its Windows engine after a timeout; temporary-file cleanup and installers were deferred.'
-        return None
+        # Completion of a read-only search cannot authorize cleanup of another
+        # installer's staging files or clear an unresolved installer receipt.
+        return self.prior_barrier
 
     def release_maintenance(self, barrier=None):
         with self.condition:

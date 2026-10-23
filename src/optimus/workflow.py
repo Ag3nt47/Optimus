@@ -592,6 +592,24 @@ class Workflow:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': cleanup_barrier,
                                   'note': 'No cleanup ran while update discovery still owned temporary files.'}
+                    elif parallel_barrier and title in (WINDOWS_SOFTWARE, *DRIVER_TITLES):
+                        # Serial mode still searches for updates when an old
+                        # installer blocks mutation. The phased operation must
+                        # pass the same closed gate before backup/revalidation
+                        # or installation; no background thread is created.
+                        from .automated_software import run_software
+                        from .automated_system import run_drivers
+                        updater = run_drivers if title in DRIVER_TITLES else run_software
+                        def discover_only(worker, item_callback, prepared_callback, before_install):
+                            return updater(worker, configuration, cancel_event=cancel_event,
+                                item_callback=item_callback, prepared_callback=prepared_callback,
+                                before_install=before_install)
+                        guarded = ParallelInstallerQueue(self.backend, run_id, [(title, discover_only)],
+                            progress_callback, cancel_event=cancel_event, prior_barrier=parallel_barrier)
+                        guarded.start(inline=True)
+                        guarded.join()
+                        serial_job = guarded.jobs[0]
+                        result = serial_job.result
                     elif parallel_barrier and title in BLOCKED_STAGES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': parallel_barrier,
