@@ -303,7 +303,7 @@ def test_install_failure_or_uncertainty_defers_remaining_driver_ids(outcome):
 
 
 @pytest.mark.parametrize('started', [False, True])
-def test_synchronous_quiet_refusal_keeps_known_receipt_and_defers_remaining_drivers(started):
+def test_synchronous_quiet_refusal_keeps_known_receipts_and_checks_next_driver(started):
     from optimus.parallel_updates import _uncertain
     value=backend();second=driver(id='00000000-0000-0000-0000-000000000002',title='Second fixture')
     value.driver_updates_scan.return_value={'resultCode':2,'updates':[driver(canRequestUserInput=True),second]}
@@ -313,8 +313,8 @@ def test_synchronous_quiet_refusal_keeps_known_receipt_and_defers_remaining_driv
         'installer_started':started,'outcomeKnown':True,'running':False,'restartNeeded':False,
         'requiresReview':True,'failureKind':'quiet_mode_unavailable'}
     result=system.run_drivers(value,config)
-    assert result['failed_items']==1 and value.driver_update_apply_unattended.call_count==1
-    assert result['deferred'][0]['id']==second['id']
+    assert result['failed_items']==2 and value.driver_update_apply_unattended.call_count==2
+    assert result['deferred']==[] and result['items'][1]['binding']['id']==second['id']
     assert result['items'][0]['result']['hresult']==-2145116156
     assert result['items'][0]['result']['installer_started'] is started
     assert result['installer_started'] is started and result['outcomeKnown'] is True and result['running'] is False

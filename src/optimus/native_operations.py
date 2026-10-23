@@ -345,18 +345,21 @@ class NativePackages:
         if not isinstance(identity, str) or len(identity) > 280:
             raise ValueError('Choose one exact native package identity.')
         with self._lock:
+            no_install = {'installer_started': False, 'outcomeKnown': True, 'running': False}
+            if cancel_event is not None and cancel_event.is_set():
+                return dict(no_install, exitCode=0, skipped=True, cancelled=True)
             fresh = self.scan()
             candidates = [item for item in fresh['updates'] if item['id'] == identity]
             if len(candidates) != 1:
-                return {'skipped': True, 'exitCode': 0, 'status': 'no_update',
+                return {**no_install, 'skipped': True, 'exitCode': 0, 'status': 'no_update',
                         'note': 'This package no longer has an offered update; no installer ran.'}
             item = candidates[0]
             if self.manager == 'pacman':
                 raise UnsupportedOperation('Use the native full-system updater (pacman -Syu). Optimus does not create unsupported partial Arch upgrades.')
             if cancel_event is not None and cancel_event.is_set():
-                return {'exitCode': 0, 'skipped': True, 'cancelled': True}
+                return dict(no_install, exitCode=0, skipped=True, cancelled=True)
             if shutil.disk_usage(Path.home()).free < 2 * 1024 ** 3:
-                return {'exitCode': 0, 'skipped': True, 'requiresReview': True,
+                return {**no_install, 'exitCode': 0, 'skipped': True, 'requiresReview': True,
                         'note': 'At least 2 GiB free on the user filesystem is required before installation; individual packages may need more.'}
             if self.manager == 'brew':
                 argv = [self.executable, 'upgrade', '--formula' if item['kind'] == 'formula' else '--cask', '--', item['native_name']]
@@ -372,7 +375,8 @@ class NativePackages:
                 result = self.runner.privileged([self.executable, '--assumeyes', 'upgrade', target], timeout=900, cancel_event=cancel_event)
             result.update(id=identity, from_version=item['version'], offered_version=item['available'])
             if result.get('cancelled'):
-                return result
+                return dict(result, **no_install)
+            result.update(installer_started=True, outcomeKnown=True, running=False)
             after = next((row for row in self.installed() if row['id'] == identity), None)
             result['installed_version'] = after['version'] if after else None
             result['verified'] = bool(result['exitCode'] == 0 and after and after['version'] == item['available'] and after['version'] != item['version'])

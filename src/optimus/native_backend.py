@@ -383,6 +383,14 @@ class NativeBackend(Backend):
     def update_app_unattended(self, package_id, *, cancel_event=None):
         return self.native_packages.apply(package_id, confirmed=True, cancel_event=cancel_event)
 
+    def app_presence_inspect(self, package_id, source='winget'):
+        return {'id': package_id, 'source': source, 'supported': False, 'read_only': True,
+                'note': 'Automatic install/uninstall presence is not supported by this native manager. Native package updates remain separate.'}
+
+    def app_presence_capabilities(self):
+        return {'supported': False, 'installer_types': [],
+                'note': 'Native package updates are supported separately; saved application presence rules are reported without installing or removing native packages.'}
+
     def update_disk_readiness(self):
         try:
             free = shutil.disk_usage(Path.home()).free

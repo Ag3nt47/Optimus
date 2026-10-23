@@ -36,6 +36,7 @@ from optimus.ui import OptimizationProgressWindow, OptimusWindow
 from optimus.launch_review import ask_launch_review
 from optimus.widgets.recovery_panel import RecoveryPanel
 from optimus.widgets.questions import make_yes_no_dialog
+from optimus.navigation import NavigationHub
 from optimus.workflow import full_optimization_settings
 
 
@@ -49,6 +50,7 @@ OPTIONAL_OPERATIONS = ('configure_smart_maintenance', 'activate_smart_maintenanc
     'change_history_scan', 'change_history_revert')
 MANUAL_GAPS = [
     {'area': 'CPU and RAM', 'review': 'Run representative workloads and compare measured CPU, memory pressure and responsiveness. Fixture configuration readback cannot establish a speed gain or identify every unnecessary process.'},
+    {'area': 'Live CPU and network metrics', 'review': 'Displayed fixture values prove rendering only. Worker CPU covers identified Optimus threads and excludes external installers. Passive adapter traffic, reported link speed and cached OS connectivity do not measure Internet capacity or prove maximum computer performance.'},
     {'area': 'GPU', 'review': 'Check actual GPU utilization, VRAM, temperatures and graphics drivers separately. GPU/shader cache cleanup is not GPU tuning; no overclock or unsupported voltage change is tested.'},
     {'area': 'One-click scope', 'review': 'Confirm that saved approvals match the intended computer. Browser close-or-skip, restarts, vendor installers, process removal and native permissions may still require a decision; maximum automation is not universal unattended support.'},
     {'area': 'Updates and security', 'review': 'Validate real signed catalogs, hardware, reboot state and effective security controls on representative machines. No driver, firmware, Windows upgrade, compatibility workaround or security change is applied by this bot.'},
@@ -87,6 +89,15 @@ class FixtureBackend:
         self.smart_maintenance_status = Mock(return_value={'status': 'stopped', 'running': False,
             'note': 'Fixture monitoring remains stopped until launch approval.'})
         self.worker_status = Mock(return_value=[])
+        self.navigation = NavigationHub()
+        self.navigation_requests = []
+
+    def workflow_navigation_status(self):
+        return self.navigation.snapshot()
+
+    def request_workflow_navigation(self, session, job, revision, action):
+        self.navigation_requests.append((session, job, revision, action))
+        return self.navigation.request(session, job, revision, action)
 
     def preferences(self):
         return copy.deepcopy(self.settings)
@@ -606,6 +617,140 @@ class CriticalReview:
             progress.deleteLater()
             drain(self.app)
 
+    def review_worker_controls_and_metrics(self, window, backend, dimensions, prefix):
+        """Production navigation plus cached metric payloads; no live sampler."""
+        hub, cursors = backend.navigation, {}
+        hub.begin('c' * 32)
+        for identity, title in (('maintenance', 'Maintenance'), ('software_updates', 'App updates'),
+                                ('driver_updates', 'Driver updates')):
+            cursor = hub.cursor(identity, title)
+            cursor.begin_item(identity + ':previous', title + ' prior fixture check', kind='check')
+            cursor.finish('completed', mutation_started=False, outcome_known=True)
+            cursor.begin_item(identity + ':current', title + ' current fixture item', kind='mutation')
+            cursors[identity] = cursor
+        progress = OptimizationProgressWindow(window, threading.Event())
+        cached = SimpleNamespace(start=Mock(), stop=Mock(), status=Mock(return_value={
+            'computer': {'cpu_percent': 73.5, 'cpu_frequency_mhz': 3200, 'memory_percent': 42.},
+            'network': {'kind': 'wifi', 'adapter': 'Fixture radio', 'receive_mbps': 8., 'send_mbps': 1.,
+                'link_mbps': 866., 'is_up': True, 'internet_state': 'unverified',
+                'reason': 'Fixture passive adapter traffic. Internet capacity is unverified.'},
+            'workers': {'maintenance': {'cpu_percent': 2.5, 'reason': 'Fixture Optimus thread only.'},
+                'software_updates': {'cpu_percent': 0., 'reason': 'Fixture thread waiting on an external installer.'},
+                'driver_updates': {'cpu_percent': None, 'reason': 'No observed thread interval yet.'}}}))
+        try:
+            self.viewport(progress, dimensions, prefix + '.worker-controls')
+            self.check(prefix + '.worker-controls.no-live-sampler', progress._live_metrics_service is None,
+                'Smoke-test progress must not construct or start a machine metrics sampler.')
+            progress._live_metrics_service = cached
+            progress.update_progress({'stage': 'Fixture maintenance', 'percentage': 37, 'stage_status': 'running',
+                'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 4,
+                          'description': 'Fixture installer owns the update lane.'},
+                         {'id': 'driver_updates', 'status': 'waiting_for_installer', 'current': 0, 'total': 2,
+                          'description': 'Waiting for the fixture app installer.'}]})
+            progress._update_live_metrics()
+            progress.worker_navigation.refresh()
+            cards = progress.worker_cards
+            self.check(prefix + '.worker-controls.three-controls', all(set(cards[identity].navigation_buttons)
+                == {'back', 'next', 'cancel'} and all(button.isEnabled() and button.accessibleName()
+                    for button in cards[identity].navigation_buttons.values()) for identity in cursors),
+                'Each of the three live workers must expose labelled Back, Next and Cancel controls.')
+            self.buttons(progress, dimensions, prefix + '.worker-controls',
+                [button for identity in cursors for button in cards[identity].navigation_buttons.values()])
+            self.check(prefix + '.metrics.measured-values', cards['maintenance'].activity_ring.cpu_percent == 2.5
+                and cards['software_updates'].activity_ring.cpu_percent == 0
+                and cards['driver_updates'].activity_ring.cpu_percent is None
+                and '37%' in cards['maintenance'].completion.text()
+                and cards['software_updates'].activity_ring.health != 'error'
+                and cards['driver_updates'].activity_ring.health == 'waiting',
+                'CPU rings must retain measured zero versus unavailable values, separate progress, and a waiting state without inventing an error.')
+            strip = progress.live_system_status
+            self.check(prefix + '.metrics.system-network', all(text in strip.computer.text() for text in ('73.5%', '42.0%', '3.20 GHz'))
+                and all(text in strip.network.text() for text in ('Wi-Fi', '8.00 Mbps', '866 Mbps', 'unverified')),
+                'The computer/network strip must show cached CPU, RAM, clock, passive Mbps and explicit Internet uncertainty.')
+            progress.content_scroll.verticalScrollBar().setValue(0)
+            drain(self.app)
+            self.screenshot(progress, prefix + '-worker-cpu-network')
+            stale = dict(cards['software_updates']._navigation_state)
+            cursors['software_updates'].phase('waiting_for_installer')
+            progress.worker_navigation.request('software_updates', 'next', stale)
+            self.check(prefix + '.worker-controls.stale-revision', cursors['software_updates'].pending is None
+                and backend.navigation_requests[-1][2] == stale['revision'],
+                'A stale click must submit its old revision and be rejected instead of retargeting the new item phase.')
+            cards['software_updates'].navigation_buttons['back'].click()
+            self.check(prefix + '.worker-controls.history-only', cursors['software_updates'].view_index is not None
+                and not cursors['software_updates'].local_requested()
+                and 'prior fixture check' in cards['software_updates'].navigation_note.text(),
+                'Back must show the recorded prior item without rerunning or undoing its changes.')
+            self.screenshot(progress, prefix + '-worker-history')
+            cards['software_updates'].navigation_buttons['next'].click()
+            self.check(prefix + '.worker-controls.history-forward', cursors['software_updates'].view_index is None
+                and not cursors['software_updates'].local_requested(),
+                'Next while viewing history must return to the live item without cancelling it.')
+            cards['software_updates'].navigation_buttons['next'].click()
+            self.check(prefix + '.worker-controls.pending-local', cursors['software_updates'].local_requested()
+                and cursors['software_updates'].pending['item_key'] == 'software_updates:current'
+                and all(not button.isEnabled() for button in cards['software_updates'].navigation_buttons.values())
+                and cards['driver_updates'].navigation_buttons['next'].isEnabled() and not progress.cancel.is_set(),
+                'Next must bind to the exact current app item, disable duplicate requests, and leave other workers/global cancellation unchanged.')
+            self.screenshot(progress, prefix + '-worker-skip-pending')
+            old_session = dict(cards['driver_updates']._navigation_state)
+            hub.end('completed')
+            hub.begin('d' * 32)
+            hub.cursor('driver_updates').begin_item('new-run', 'Different workflow item')
+            progress.worker_navigation.request('driver_updates', 'cancel', old_session)
+            self.check(prefix + '.worker-controls.stale-session', not hub.cursor('driver_updates').local_requested()
+                and backend.navigation_requests[-1][0] == old_session['session_id'],
+                'A command captured in an old session must never cancel a different workflow.')
+            self.check(prefix + '.metrics.fixture-only', not cached.start.called and cached.status.called
+                and not backend.optimize.called and not backend.apply_available_fixes.called,
+                'Review metrics must use only the injected cached payload; navigation and rendering must not start maintenance or a live sampler.')
+        finally:
+            hub.end('completed')
+            progress.completed = True
+            progress._worker_elapsed_timer.stop()
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
+    def review_app_rules(self, backend, dimensions, prefix):
+        from optimus.widgets.app_rules_editor import AppRulesEditor, UPDATE_CHOICES, PRESENCE_CHOICES
+        from optimus.widgets.theme import build_qss
+        from PySide6.QtWidgets import QLabel, QVBoxLayout
+        original = backend.preferences()
+        settings = dict(original, software_updates_enabled=False, software_app_rules=[])
+        dialog = QDialog()
+        dialog.setStyleSheet(build_qss('cyber'))
+        body = QVBoxLayout(dialog)
+        editor = AppRulesEditor(settings, native=self.system != 'win32', parent=dialog)
+        body.addWidget(editor)
+        try:
+            self.viewport(dialog, dimensions, prefix + '.app-rules')
+            self.check(prefix + '.app-rules.exact-choices', {value for _, value in UPDATE_CHOICES}
+                == {'follow_global', 'always_update', 'always_ignore'} and {value for _, value in PRESENCE_CHOICES}
+                == {'keep_current', 'keep_installed', 'keep_uninstalled'},
+                'Per-app update and installed-state choices must be explicit and separate.')
+            source, identity = ('winget', 'Fixture.Reader') if self.system == 'win32' else ('apt', 'apt:fixture-reader')
+            editor.set_candidates([{'id': identity, 'source': source, 'name': 'Disposable fixture reader'}])
+            editor.table.selectRow(0)
+            editor.update_choice.setCurrentIndex(editor.update_choice.findData('always_update'))
+            if self.system == 'win32':
+                editor.presence_choice.setCurrentIndex(editor.presence_choice.findData('keep_uninstalled'))
+            draft = editor.apply_to(settings)
+            self.check(prefix + '.app-rules.master-off-draft', draft['software_updates_enabled'] is False
+                and backend.preferences() == original and not backend.optimize.called
+                and (draft['software_app_rules'][0]['update_policy'] == 'always_ignore' if self.system == 'win32'
+                     else not editor.presence_choice.isEnabled()),
+                'Editing is draft-only; the updater master remains off, uninstall implies ignore, and unsupported native presence is disabled.')
+            notes = ' '.join(label.text() for label in editor.findChildren(QLabel)).casefold()
+            self.check(prefix + '.app-rules.presence-warning', 'each maintenance run' in notes
+                and 'app-local data' in notes and 'does not restore' in notes and 'agreements' in notes,
+                'App rules must disclose repeated application, app-local data removal, limits of reinstall recovery and saved agreements.')
+            self.screenshot(dialog, prefix + '-app-policy-choices')
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            drain(self.app)
+
     def review_revert(self, window, backend, dimensions, prefix):
         window.open_revert()  # Smoke construction never queues inventory.
         dialog = window._revert_dialog
@@ -912,6 +1057,8 @@ class CriticalReview:
                 self.review_speed(window, backend, dimensions, prefix)
                 self.review_optional_tools(window, backend, dimensions, prefix)
                 self.review_additional_workers(window, backend, dimensions, prefix)
+                self.review_worker_controls_and_metrics(window, backend, dimensions, prefix)
+                self.review_app_rules(backend, dimensions, prefix)
                 self.review_revert(window, backend, dimensions, prefix)
                 self.review_update_wait(window, dimensions, prefix)
                 self.review_workflow(window, backend, dimensions, prefix)

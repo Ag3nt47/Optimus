@@ -8,6 +8,7 @@ from typing import Any
 
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
 from .update_holds import load_update_holds, matching_update_hold, held_update_result, is_known_update_hold
+from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal
 
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _VERSION = re.compile(r'[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}')
@@ -108,20 +109,41 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
     context = {}
     try:
         try:
+            from .software_app_rules import apply_update_rules
+            from .app_presence import run_app_presence
+            from .parallel_updates import installer_barrier
+            source_configuration = configuration
+            configuration = apply_update_rules(configuration)
+            navigation = cursor_for(backend, 'software_updates', 'App updates')
+            presence = None
+            if configuration.get('software_updates_enabled') is True and configuration.get('software_app_rules'):
+                presence = run_app_presence(backend, configuration, cancel_event=cancel_event,
+                    item_callback=item_callback, before_install=before_install, navigation=navigation)
+                context['app_presence'] = presence
+                if installer_barrier(presence):
+                    return with_app_scan(merge_presence({'items': [], 'failed_items': 0,
+                        'review_only': True, 'skipped': True, 'installer_started': False,
+                        'outcomeKnown': True, 'running': False,
+                        'stop_reason': 'Application presence needs review before updates can continue.'}, presence),
+                        not_started='Application presence stopped this software worker before update discovery.')
             outcome = _run_software(backend, configuration, cancel_event=cancel_event, item_callback=item_callback,
                                  prepared=prepared, before_install=before_install, scan_context=context,
-                                 phased=prepared_callback is not None or before_install is not None)
+                                 phased=prepared_callback is not None or before_install is not None,
+                                 navigation=navigation, scope_reader=lambda: apply_update_rules(source_configuration))
+            outcome = merge_presence(outcome, presence)
             context['outcome'] = outcome
             return outcome
         finally:
             prepared()
     except Exception as error:
+        if isinstance(context.get('app_presence'), dict):
+            error.app_presence = context['app_presence']
         attach_app_scan_error(error, context)
         raise
 
 
 def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, item_callback,
-                  prepared, before_install, phased, scan_context) -> dict[str, Any]:
+                  prepared, before_install, phased, scan_context, navigation=None, scope_reader=None) -> dict[str, Any]:
     """Apply only a current scan's exact IDs under the saved selected/all scope.
 
     The native updater checks pins again before each installation. No generic
@@ -137,11 +159,26 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     if cancelled():
         return with_app_scan({'review_only': True, 'cancelled': True, 'items': [], 'failed_items': 0},
                              not_started='Cancelled before the app update search started.')
+    discovery = WorkItem(navigation, 'software:discovery', 'Search for available app updates', external=cancel_event)
     try:
-        scan = backend.updates_scan()
+        cancellable_scan = getattr(backend, 'updates_scan_cancellable', None)
+        scan = cancellable_scan(discovery.cancel_event) if callable(cancellable_scan) else backend.updates_scan()
     except Exception as error:
+        discovery.finish('failed', message=str(error))
         error.app_scan = app_scan_evidence(started=started, error=error)
         raise
+    skipped_discovery = discovery.requested()
+    discovery.finish('cancelled' if skipped_discovery else 'completed', mutation_started=False)
+    if cancelled():
+        return with_app_scan({'items': [], 'failed_items': 0, 'review_only': True, 'cancelled': True,
+            'installer_started': False, 'outcomeKnown': True, 'running': False},
+            not_started='Cancelled during the app update search; no installer was started.')
+    if skipped_discovery:
+        return with_app_scan({'items': [], 'failed_items': 0, 'review_only': True,
+            'skipped': True, 'navigation_cancelled': True, 'navigation_cancelled_items': 1,
+            'installer_started': False, 'outcomeKnown': True, 'running': False,
+            'note': 'The app discovery item was skipped; no app installer was started.'},
+            not_started='The completed app search was discarded at your request; no installer ran.')
     if not isinstance(scan, dict):
         error = RuntimeError('The software update scan returned invalid metadata.')
         error.app_scan = app_scan_evidence(started=started, error=error)
@@ -156,6 +193,7 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     if policy == 'review':
         prepared(scan_complete=not untrusted)
         return with_app_scan({'review_only': True, 'scan': scan, 'failed_items': int(partial_scan),
+                'installer_started': False, 'outcomeKnown': True, 'running': False,
                 'note': 'Software update review only; no installer was started. Failed, incomplete or unrecognized scans require review.'},
                 started=started, selected=[])
     if configuration.get('software_update_agreements_accepted') is not True:
@@ -173,8 +211,11 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     scan_context['selected'] = list(selected)
     approved_scope = copy.deepcopy({key: configuration.get(key) for key in ('software_updates_enabled',
         'software_update_policy', 'software_update_ids', 'software_update_all_approved',
-        'software_update_exclude_ids', 'software_update_agreements_accepted', 'update_compatibility_mode_enabled')})
+        'software_update_exclude_ids', 'software_update_agreements_accepted', 'update_compatibility_mode_enabled', 'software_app_rules')})
     approved_ids = list(selected)
+    def current_scope():
+        current = scope_reader() if scope_reader is not None else configuration
+        return {key: current.get(key) for key in approved_scope}
     preflight_items = []
     # Exact bad offers remain visible in item results but do not acquire the
     # installer lane or keep unrelated approved applications from proceeding.
@@ -207,21 +248,35 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 'installer_started': False, 'outcomeKnown': True, **hold_details(preflight_items)},
                 started=started, selected=approved_ids, error=error)
     if selected and not cancelled() and before_install is not None:
-        if before_install({'operation': 'software', 'scan_complete': not untrusted,
-                           'candidate_count': len(selected), 'review_only': False}) is not True:
+        checkpoint = WorkItem(navigation, 'software:checkpoint', 'Wait for the application installer checkpoint', external=cancel_event, kind='check')
+        permitted = before_install({'operation': 'software', 'scan_complete': not untrusted,
+                           'candidate_count': len(selected), 'review_only': False}) is True
+        skipped_checkpoint = checkpoint.requested()
+        checkpoint.finish('cancelled' if skipped_checkpoint else 'completed', mutation_started=False)
+        if skipped_checkpoint:
+            return dict(defer('Application installation was skipped at your request.'),
+                        navigation_cancelled=True, navigation_cancelled_items=1, cancelled=cancelled())
+        if not permitted:
             return defer('The maintenance or exclusive installer gate did not permit application updates.')
     if selected and phased:
         if cancelled():
             return defer('Cancelled before the native application updater was started.')
-        if {key: configuration.get(key) for key in approved_scope} != approved_scope:
+        if current_scope() != approved_scope:
             return defer('Saved software approvals changed while waiting; review the current scope before installing.')
         # The native updater rejects stale discovery caches. Refresh only after
         # the gate, and retain the exact initially prepared version pairs rather
         # than enrolling a new application or release partway through the batch.
+        revalidation = WorkItem(navigation, 'software:revalidation', 'Recheck approved app versions before installation', external=cancel_event)
         try:
-            refreshed_scan = backend.updates_scan()
+            refreshed_scan = cancellable_scan(revalidation.cancel_event) if callable(cancellable_scan) else backend.updates_scan()
         except Exception as error:
+            revalidation.finish('failed', message=str(error))
             return defer('Software revalidation failed before any installer started (' + type(error).__name__ + ').', failed=1, error=error)
+        skipped_revalidation = revalidation.requested()
+        revalidation.finish('cancelled' if skipped_revalidation else 'completed', mutation_started=False)
+        if skipped_revalidation:
+            return dict(defer('Application revalidation was skipped at your request.'),
+                        navigation_cancelled=True, navigation_cancelled_items=1, cancelled=cancelled())
         if cancelled():
             return defer('Cancelled while revalidating application updates.', refreshed_scan=refreshed_scan)
         refreshed = fresh_candidates(refreshed_scan)
@@ -256,11 +311,13 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
         if cancelled():
             deferred = selected[index:]
             break
-        if phased and {key: configuration.get(key) for key in approved_scope} != approved_scope:
+        if phased and current_scope() != approved_scope:
             deferred = selected[index:]
             stop_reason = 'Saved software approvals changed; remaining applications require a fresh review.'
             break
         current = candidates[identity]
+        work = WorkItem(navigation, 'software:update:' + identity, 'Update ' + identity,
+                        external=cancel_event, kind='mutation')
         if item_callback:
             item_callback({'current': index, 'total': len(selected), 'item': index + 1,
                            'items': len(selected), 'id': identity,
@@ -268,18 +325,30 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                            'log': 'Updating approved exact ID: ' + identity})
         # Progress handlers can deliver cancellation before a mutation begins.
         if cancelled():
+            work.finish('cancelled', mutation_started=False)
             deferred = selected[index:]
             break
-        if phased and {key: configuration.get(key) for key in approved_scope} != approved_scope:
+        if phased and current_scope() != approved_scope:
+            work.finish('skipped', mutation_started=False)
             deferred = selected[index:]
             stop_reason = 'Saved software approvals changed; remaining applications require a fresh review.'
             break
         try:
-            options = {'cancel_event': cancel_event} if cancel_event is not None else {}
+            options = {'cancel_event': work.cancel_event} if work.cancel_event is not None else {}
             if configuration.get('update_compatibility_mode_enabled') is True:
                 options['compatibility_mode'] = True
-            outcome = backend.update_app_unattended(identity, **options)
+            if work.requested():
+                outcome = navigation_skip()
+            else:
+                work.installing()
+                outcome = backend.update_app_unattended(identity, **options)
+                if (work.requested() and isinstance(outcome, dict) and outcome.get('cancelled') is True
+                        and outcome.get('installer_started') is False and outcome.get('outcomeKnown') is True
+                        and outcome.get('running') is False):
+                    outcome = dict(outcome, navigation_cancelled=True)
             known_exit = isinstance(outcome, dict) and type(outcome.get('exitCode')) is int
+            if shared_update_refusal(outcome):
+                outcome = dict(outcome, shared_barrier=True)
             skipped = isinstance(outcome, dict) and outcome.get('skipped') is True
             successful = (known_exit and outcome['exitCode'] in (0, 3010, 1641)
                           and outcome.get('success', True) is not False)
@@ -287,6 +356,15 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                             'from_version': outcome.get('from_version', current['version']) if isinstance(outcome, dict) else current['version'],
                             'to_version': outcome.get('to_version', current['available']) if isinstance(outcome, dict) else current['available'],
                             'status': 'cancelled' if isinstance(outcome, dict) and outcome.get('cancelled') is True else 'skipped' if skipped else 'completed' if successful else 'failed', 'result': outcome})
+            if results[-1]['status'] == 'failed' and isinstance(outcome, dict):
+                diagnostic = outcome.get('stderr') or outcome.get('text') or outcome.get('note') or ''
+                results[-1]['error'] = ('App updater exit code ' + str(outcome.get('exitCode')) + '. '
+                    + ' '.join(str(diagnostic).split())[-1400:])[:1800]
+            work.finish(results[-1]['status'], result=results[-1], mutation_started=outcome.get('installer_started', successful) if isinstance(outcome, dict) else None,
+                        outcome_known=isinstance(outcome, dict) and outcome.get('outcomeKnown') is not False and outcome.get('running') is not True,
+                        message=outcome.get('note') if isinstance(outcome, dict) else None)
+            if local_skip(outcome):
+                continue
             if isinstance(outcome, dict) and outcome.get('cancelled') is True:
                 interrupted = True
                 stop_reason = 'Cancelled before this installer started; remaining applications were deferred.'
@@ -305,11 +383,17 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
             else:
                 uncertain = True
             if isinstance(outcome, dict) and outcome.get('requiresReview') is True:
+                if can_fail_forward(outcome):
+                    continue
                 stop_reason = 'The update safety checks need review before remaining applications can be updated.'
                 if (outcome.get('installer_started') is False and outcome.get('outcomeKnown') is True
                         and outcome.get('running') is False and isinstance(outcome.get('note'), str)
                         and outcome['note'].strip()):
                     stop_reason = 'Update deferred: ' + ' '.join(outcome['note'].split())[:800]
+                deferred = selected[index + 1:]
+                break
+            if shared_update_refusal(outcome):
+                stop_reason = shared_update_refusal(outcome)
                 deferred = selected[index + 1:]
                 break
             if restart_needed or uncertain or (not known_exit and not skipped):
@@ -321,10 +405,16 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
             preflight = (getattr(error, 'installer_started', None) is False
                          and getattr(error, 'outcomeKnown', None) is True)
             evidence = ({'installer_started': False, 'outcomeKnown': True, 'running': False,
-                         'failureKind': 'preflight_failed', 'status': 'blocked'} if preflight else
+                         'failureKind': getattr(error, 'failureKind', 'preflight_failed'),
+                         'failure_scope': getattr(error, 'failure_scope', 'shared'), 'status': 'blocked'} if preflight else
                         {'installer_started': getattr(error, 'installer_started', None),
                          'outcomeKnown': False, 'running': getattr(error, 'running', None)})
             results.append({'id': identity, 'status': 'failed', 'error': str(error), 'result': evidence})
+            if preflight and shared_update_refusal(dict(evidence, requiresReview=True)):
+                evidence['shared_barrier'] = True
+            work.finish('failed', result=results[-1], mutation_started=not preflight, outcome_known=preflight, message=str(error))
+            if preflight and can_fail_forward(evidence):
+                continue
             # Known pre-install refusals must not create an orphan-installer
             # record. Unclassified exceptions still cannot prove child exit.
             deferred = selected[index + 1:]
@@ -341,8 +431,10 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
         if all(type(value.get('installer_started')) is bool for value in evidence):
             lifecycle['installer_started'] = any(value['installer_started'] for value in evidence)
     return with_app_scan({'review_only': not bool(selected), 'scan': scan, 'policy': policy, 'items': results,
-            'failed_items': sum(item['status'] == 'failed' for item in results) + needs_review + int(partial_scan),
+            'failed_items': sum(item['status'] == 'failed' or isinstance(item.get('result'), dict)
+                                and item['result'].get('requiresReview') is True for item in results) + int(partial_scan),
             'skipped_items': sum(item['status'] == 'skipped' for item in results), 'requires_review_items': needs_review,
+            'navigation_cancelled_items': sum(isinstance(item.get('result'), dict) and item['result'].get('navigation_cancelled') is True for item in results),
             'cancelled': cancelled() or interrupted, 'deferred_ids': deferred, 'restartNeeded': restart_needed,
             'stop_reason': stop_reason,
             'excluded_ids': [identity for identity in candidates if identity.casefold() in exclusions],

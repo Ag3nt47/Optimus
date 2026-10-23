@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 from .automation import CURRENT_SETUP_VERSION
+from .navigation import WorkItem, cursor_for, navigation_skip, local_skip, can_fail_forward, shared_update_refusal
 
 _HEX64 = re.compile(r'^[0-9a-fA-F]{64}$')
 _STARTUP_ID = re.compile(r'^(Registry|Shortcut)-[0-9a-fA-F]{64}$')
@@ -212,6 +213,7 @@ def run_drivers(backend,config,cancel_event=None,item_callback=None,*,prepared_c
 
 
 def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_install,phased,latest_evidence):
+    navigation=cursor_for(backend,'driver_updates','Driver updates')
     policy=config.get('driver_policy','review')
     if config.get('driver_updates_enabled') is not True:return _finish(policy,[],skipped=True,review_only=True,reason='Driver maintenance is off; saved approvals are inactive.')
     if policy not in ('review','install_approved','install_matching'):raise ValueError('Unsupported driver policy.')
@@ -234,9 +236,11 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     from .driver_coverage import driver_scan_evidence
     scan_started_utc=datetime.now(timezone.utc).isoformat()
     scan_clock=time.monotonic()
+    discovery=WorkItem(navigation,'driver:discovery','Search Windows Update for applicable driver updates',external=cancel_event)
     try:
         scan=backend.driver_updates_scan()
     except Exception as error:
+        discovery.finish('failed',message=str(error))
         # Preserve the existing preparation/exception contract. Owners can save
         # bounded evidence without mistaking this failed call for an empty scan.
         failed=driver_scan_evidence({'updates': [], 'resultCode': 4,
@@ -247,6 +251,8 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
         try:error.driver_scan=failed
         except (AttributeError,TypeError):pass
         raise
+    skipped_discovery=discovery.requested()
+    discovery.finish('cancelled' if skipped_discovery else 'completed',mutation_started=False)
     scan_completed_utc=datetime.now(timezone.utc).isoformat()
     scan_duration=max(0,time.monotonic()-scan_clock)
     def proof(eligible_count=None):
@@ -262,6 +268,10 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     evidence=proof()
     def finish(items, **extra):
         return _finish(policy,items,scan=scan,driver_scan=dict(evidence),**extra)
+    if skipped_discovery:
+        return finish([],skipped=True,review_only=True,navigation_cancelled=True,navigation_cancelled_items=1,
+            installer_started=False,outcomeKnown=True,running=False,
+            reason='The driver discovery item was skipped; its completed search cannot authorize installation.')
     if not evidence['complete']:
         return finish([{'binding':{'stage':'driver-scan'},'status':'failed','error':'Windows Update did not return a complete successful fresh driver scan.','result':scan,
             'installer_started':False,'outcomeKnown':True}],skipped=True,installer_started=False,outcomeKnown=True)
@@ -312,7 +322,14 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             cancelled=_cancel(cancel_event),reason=reason,stop_reason=reason,
             installer_started=False,outcomeKnown=True,**extra)
     if before_install is not None:
-        if before_install({'operation':'driver','scan_complete':True,'candidate_count':len(eligible),'review_only':False}) is not True:
+        checkpoint=WorkItem(navigation,'driver:checkpoint','Wait for the driver installer checkpoint',external=cancel_event,kind='check')
+        permitted=before_install({'operation':'driver','scan_complete':True,'candidate_count':len(eligible),'review_only':False}) is True
+        skipped_checkpoint=checkpoint.requested()
+        checkpoint.finish('cancelled' if skipped_checkpoint else 'completed',mutation_started=False)
+        if skipped_checkpoint:
+            return dict(deferred('Driver installation was skipped at your request.'),cancelled=_cancel(cancel_event),
+                        navigation_cancelled=True,navigation_cancelled_items=1)
+        if not permitted:
             return deferred('The maintenance or exclusive installer gate did not permit driver changes.')
     if _cancel(cancel_event):return deferred('Cancelled before driver backup or installation.')
     if phased:
@@ -327,26 +344,85 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
         if _cancel(cancel_event):return deferred('Cancelled before driver backup or installation.')
         if {key:config.get(key) for key in approved_scope}!=approved_scope:
             return deferred('Saved driver approvals changed; review the current scope before installing.')
-    backup=backend.driver_backup_automatic()
-    if not isinstance(backup,dict) or type(backup.get('exit_code')) is not int or backup['exit_code']!=0 or not isinstance(backup.get('destination'),str) or not backup['destination']:
-        return finish(items+[{'status':'failed','binding':{'stage':'driver-backup'},'result':backup,'error':'A successful third-party driver backup is required before installation.',
-            'installer_started':False,'outcomeKnown':True}],backup=backup,installer_started=False,outcomeKnown=True)
+    backup_item=WorkItem(navigation,'driver:backup','Back up installed driver packages needed for these updates',external=cancel_event,kind='check')
+    try:
+        targeted=getattr(backend,'driver_backup_for_updates',None)
+        backup=(targeted(eligible,cancel_event=backup_item.cancel_event,item_callback=item_callback)
+                if callable(targeted) else backend.driver_backup_automatic())
+    except Exception as error:
+        backup_item.finish('failed',mutation_started=False,message=str(error))
+        error.installer_started=False
+        error.outcomeKnown=True
+        error.running=False
+        raise
+    skipped_backup=backup_item.requested()
+    backup_item.finish('cancelled' if skipped_backup else 'completed',mutation_started=False)
+    if skipped_backup:
+        return dict(deferred('Driver backup was stopped or skipped at your request; no driver installer started.'),
+            backup=backup,cancelled=_cancel(cancel_event),navigation_cancelled=True,navigation_cancelled_items=1)
+    targeted_result=isinstance(backup,dict) and isinstance(backup.get('backed_updates'),list) and isinstance(backup.get('blocked_updates'),list)
+    if targeted_result:
+        def binding_key(row):
+            if not isinstance(row,dict) or not isinstance(row.get('id'),str) or type(row.get('revision')) is not int:return None
+            return row['id'].casefold(),row['revision']
+        backed=[binding_key(row) for row in backup['backed_updates']]
+        blocked={binding_key(row):row for row in backup['blocked_updates'] if binding_key(row) is not None}
+        allowed=[]
+        for value in eligible:
+            key=binding_key(value)
+            if key is not None and backed.count(key)==1 and key not in blocked:
+                allowed.append(value)
+            else:
+                reason=str(blocked.get(key,{}).get('reason') or 'This exact offered driver has no verified matching installed-package backup.')
+                items.append({'binding':value,'status':'skipped','reason':reason,
+                    'result':{'installer_started':False,'outcomeKnown':True,'running':False,'skipped':True,'note':reason}})
+        eligible=allowed
+    if ((not isinstance(backup,dict) or type(backup.get('exit_code')) is not int or backup['exit_code']!=0)
+            or not isinstance(backup,dict) or not isinstance(backup.get('destination'),str) or not backup['destination']):
+        return finish(items+[{'status':'failed','binding':{'stage':'driver-backup'},'result':{
+            'installer_started':False,'outcomeKnown':True,'running':False,
+            'note':str(backup.get('reason') or backup.get('error') or 'Driver-package backup failed.')[:2000] if isinstance(backup,dict) else 'Invalid driver backup receipt.'},'error':'A successful third-party driver backup is required before installation.',
+            'installer_started':False,'outcomeKnown':True}],backup=backup,error=str(backup.get('error') or backup.get('reason') or backup.get('note') or 'The driver-package backup did not establish success.')[:4000] if isinstance(backup,dict) else 'Invalid driver backup receipt.',installer_started=False,outcomeKnown=True)
     processed=0
     for index,value in enumerate(eligible):
         if _cancel(cancel_event):break
         if phased and {key:config.get(key) for key in approved_scope}!=approved_scope:break
+        work=WorkItem(navigation,'driver:update:'+value['id']+':'+str(value['revision']),value['title'],external=cancel_event,kind='mutation')
         if item_callback:item_callback({'operation':'driver','current':index+1,'index':index+1,'total':len(eligible),'description':value['title'],'binding':value})
-        if _cancel(cancel_event):break
-        if phased and {key:config.get(key) for key in approved_scope}!=approved_scope:break
+        if _cancel(cancel_event):
+            work.finish('cancelled',mutation_started=False)
+            break
+        if phased and {key:config.get(key) for key in approved_scope}!=approved_scope:
+            work.finish('skipped',mutation_started=False)
+            break
         processed=index+1
         try:
-            outcome=backend.driver_update_apply_unattended(value,accept_eula=True)
+            if work.requested():
+                outcome=navigation_skip()
+            else:
+                work.installing()
+                outcome=backend.driver_update_apply_unattended(value,accept_eula=True)
+            if shared_update_refusal(outcome):outcome=dict(outcome,shared_barrier=True)
             success=(isinstance(outcome,dict) and type(outcome.get('resultCode')) is int and outcome['resultCode']==2
                      and outcome.get('hresult',0)==0 and outcome.get('aggregateResultCode',2)==2 and outcome.get('aggregateHresult',0)==0)
-            items.append({'binding':value,'status':'applied' if success else 'failed','result':outcome})
-            if not success or outcome.get('restartNeeded') is True:break
+            items.append({'binding':value,'status':'cancelled' if isinstance(outcome,dict) and outcome.get('navigation_cancelled') is True else 'applied' if success else 'failed','result':outcome})
+            work.finish(items[-1]['status'],result=items[-1],mutation_started=outcome.get('installer_started',success) if isinstance(outcome,dict) else None,
+                outcome_known=isinstance(outcome,dict) and outcome.get('outcomeKnown') is True and outcome.get('running') is False,
+                message=outcome.get('note') if isinstance(outcome,dict) else None)
+            if local_skip(outcome):continue
+            if not success and can_fail_forward(outcome):continue
+            if (not success or outcome.get('restartNeeded') is True or shared_update_refusal(outcome)
+                    or outcome.get('outcomeKnown') is False or outcome.get('running') is True):break
         except Exception as error:
-            items.append({'binding':value,'status':'failed','error':str(error),'uncertain':True})
+            known=(getattr(error,'installer_started',None) is False and getattr(error,'outcomeKnown',None) is True)
+            receipt={'installer_started':False,'outcomeKnown':True,'running':False,
+                'requiresReview':True,'failure_scope':getattr(error,'failure_scope','shared'),
+                'failureKind':getattr(error,'failureKind','preflight_failed'),'note':str(error)[:2000]} if known else {
+                'installer_started':getattr(error,'installer_started',None),'outcomeKnown':False,'running':getattr(error,'running',None)}
+            if shared_update_refusal(receipt):receipt['shared_barrier']=True
+            items.append({'binding':value,'status':'failed','error':str(error),'uncertain':not known,'result':receipt})
+            work.finish('failed',result=items[-1],mutation_started=not known,outcome_known=known,message=str(error))
+            if can_fail_forward(receipt):continue
             break
     lifecycle={'installer_started':False,'outcomeKnown':True,'running':False} if processed==0 else {}
     if processed:
@@ -357,5 +433,6 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             lifecycle={'installer_started':any(outcome['installer_started'] for outcome in outcomes),
                        'outcomeKnown':True,'running':False}
     return finish(items,cancelled=_cancel(cancel_event),review_only=False,backup=backup,deferred=eligible[processed:],
+        navigation_cancelled_items=sum(isinstance(row.get('result'),dict) and row['result'].get('navigation_cancelled') is True for row in items),
         **lifecycle,note='Only approved applicable update identities or exact device/provider/class rules were used. No automatic reboot or elevation was requested.')
 

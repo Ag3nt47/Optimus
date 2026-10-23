@@ -288,7 +288,7 @@ class NativeSetupWizard(QWizard):
             'Only updates currently offered by a recognized installed package manager are eligible.')
         self.check(body, 'software_updates_enabled', 'Check supported native package updates')
         self.software_policy = QComboBox()
-        for key, text in (('review', 'Review only'), ('selected', 'Update only my selected exact package IDs'),
+        for key, text in (('review', 'Global: review updates; saved per-app rules still apply'), ('selected', 'Update only my selected exact package IDs'),
                           ('all_supported', 'All supported installed packages, excluding my exceptions')):
             self.software_policy.addItem(text, key)
         self.software_policy.setCurrentIndex(max(0, self.software_policy.findData(self.initial.get('software_update_policy'))))
@@ -302,6 +302,9 @@ class NativeSetupWizard(QWizard):
         self.exclusions = QLineEdit(', '.join(self.initial.get('software_update_exclude_ids', [])))
         self.exclusions.setPlaceholderText('Exclude exact manager-qualified package IDs, separated by commas')
         body.addWidget(self.exclusions)
+        from .widgets.app_rules_editor import AppRulesEditor
+        self.software_app_rules = AppRulesEditor(self.initial, native=True)
+        body.addWidget(self.software_app_rules)
         self.check(body, 'software_update_all_approved', 'Approve all-supported native package scope, including future matching packages')
         self.check(body, 'software_update_agreements_accepted', 'Accept selected package-manager agreements and approve installing available newer versions')
         note(body, 'Linux OS repositories may include kernel, firmware and driver packages. macOS driver/security '
@@ -311,21 +314,31 @@ class NativeSetupWizard(QWizard):
         self.software_policy.currentIndexChanged.connect(self._revoke_software)
         self.software.itemChanged.connect(lambda _: self._revoke_software())
         self.exclusions.textChanged.connect(lambda _: self._revoke_software())
+        self.software_app_rules.changed.connect(self._revoke_software)
 
     def _revoke_software(self, *_):
         self.controls['software_update_agreements_accepted'].setChecked(False)
         self.controls['software_update_all_approved'].setChecked(False)
 
     def _software_ready(self, result):
+        prior = (checked_data(self.software) + list(getattr(self, '_software_unlisted_ids', []))
+                 if self._software_loaded else list(self.initial.get('software_update_ids', [])))
+        saved = {value.casefold() for value in prior}
+        self.software.blockSignals(True)
         self.software.clear()
-        saved = set(self.initial.get('software_update_ids', []))
         offers = result.get('updates', []) if isinstance(result, dict) else []
+        self.software_app_rules.set_candidates(offers)
+        offered = set()
         for row in offers:
             key = row.get('id') or row.get('Id')
             if not key:
                 continue
+            if row.get('eligible', True) is not False:
+                offered.add(key.casefold())
             label = str(row.get('name') or row.get('Name') or key) + ' | ' + str(row.get('installedVersion') or row.get('version') or '') + ' → ' + str(row.get('availableVersion') or row.get('available') or '')
-            check_item(self.software, label, key, key in saved, row.get('eligible', True) is not False)
+            check_item(self.software, label, key, key.casefold() in saved, row.get('eligible', True) is not False)
+        self._software_unlisted_ids = [value for value in prior if value.casefold() not in offered]
+        self.software.blockSignals(False)
         self._software_loaded = True
         self.probe_status.setText(str(result.get('note') or result.get('output') or 'Native update scan completed. Review available packages.')[:2000])
 
@@ -371,6 +384,22 @@ class NativeSetupWizard(QWizard):
         self.unattended_setup.enabled.toggled.connect(unattended_summary)
         self.unattended_setup.browser_policy.currentIndexChanged.connect(unattended_summary)
         unattended_summary()
+        self.app_rule_summary = note(body, '')
+        def app_rule_summary(*_):
+            from .software_app_rules import app_rules_summary
+            value = self.software_app_rules.apply_to(dict(self.initial,
+                software_updates_enabled=self.controls['software_updates_enabled'].isChecked()))
+            scope = app_rules_summary(value)
+            lines = ['Per-app rules: ' + ('enabled with Software Updater' if scope['enabled'] else 'paused; Software Updater is off')]
+            for key, title in (('always_update', 'Always update eligible newer offers'), ('always_ignore', 'Always ignore updates'),
+                               ('keep_installed', 'Install/reinstall if missing'), ('keep_uninstalled', 'Uninstall if installed; app data can be lost')):
+                if scope[key]:
+                    lines.append(title + ': ' + ', '.join(scope[key]))
+            lines.append('Automatic install/uninstall rules are unsupported on this native platform and remain review items.')
+            self.app_rule_summary.setText('\n'.join(lines))
+        self.software_app_rules.changed.connect(app_rule_summary)
+        self.controls['software_updates_enabled'].toggled.connect(app_rule_summary)
+        app_rule_summary()
         note(body, 'Native capability information explains what was measured, what is supported and what requires '
              'manual OS controls. Registry cleanup, Windows consumer-app removals, Defender scans and DPAPI-backed '
              'cloud sign-in are Windows-specific. No substitute is presented as an equivalent security fix.')
@@ -432,7 +461,8 @@ class NativeSetupWizard(QWizard):
         if self._startup_loaded:
             value['startup_approved_entries'] = [startup_descriptor(row) for row in checked_data(self.startup)]
         if self._software_loaded:
-            value['software_update_ids'] = checked_data(self.software)
+            value['software_update_ids'] = list(dict.fromkeys(checked_data(self.software) + list(self._software_unlisted_ids)))
+        value = self.software_app_rules.apply_to(value)
         return NativePreferences.validate(value)
 
     def accept(self):
@@ -685,6 +715,7 @@ class NativeSettingsWindow(DetailedSettingsWindow):
 
     def _build_native_updates(self):
         body = self.page('Updates')
+        self._build_app_rules_controls(body, native=True)
         note(body, 'Use setup questions to approve exact or all-supported package updates for one-click runs. '
              'Native package managers provide supported application, kernel and driver packages. Manufacturer-only '
              'and Apple updates are reported separately. No missing offer is described as fully up to date.')

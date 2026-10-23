@@ -104,6 +104,96 @@ def test_preview_is_pure_canonical_and_excludes_optional_process_actions(tmp_pat
         getattr(service, name).assert_not_called()
 
 
+@pytest.mark.parametrize('flags', [
+    {'navigation_cancelled': True}, {'navigation_cancelled_items': 1},
+    {'items': [{'result': {'navigation_cancelled': True}}]},
+    {'app_presence': {'navigation_cancelled_items': 1}},
+])
+def test_explicit_worker_skip_cannot_be_retried_by_auto_continue(tmp_path, flags):
+    settings = software_settings()
+    outcome = software_report(**flags)
+    source = parent(settings, software=outcome)
+    service = backend(tmp_path, settings, source)
+    preview = service.available_fixes(source, settings)
+    assert not any(row['id'] == 'software_updates' for row in preview['actions'])
+    assert any(row['id'] == 'software_updates' and 'skipped or cancelled' in row['reason'] for row in preview['manual_items'])
+    service.update_app_unattended.assert_not_called()
+
+
+def test_followup_preserves_exact_update_rules_but_never_repeats_presence(tmp_path):
+    from optimus.post_run_fixes import _narrow_settings, _authorized
+    rule = {'id': 'Fixture.One', 'source': 'winget', 'update_policy': 'always_update', 'presence': 'keep_installed'}
+    settings = software_settings(software_update_policy='review', software_app_rules=[rule])
+    service = backend(tmp_path, settings, parent(settings))
+    narrowed = _narrow_settings(service, settings, copy.deepcopy(settings))
+    assert _authorized(narrowed, 'software_updates')
+    assert narrowed['software_app_rules'] == [dict(rule, presence='keep_current')]
+    assert settings['software_app_rules'][0]['presence'] == 'keep_installed'
+    twice = _narrow_settings(service, narrowed, copy.deepcopy(settings))
+    assert twice['software_updates_enabled'] and _authorized(twice, 'software_updates')
+    assert twice['software_app_rules'] == narrowed['software_app_rules']
+
+
+def test_apply_followup_updates_unchanged_app_rule_without_executing_presence(tmp_path, monkeypatch):
+    rule = {'id': 'Fixture.One', 'source': 'winget', 'update_policy': 'always_update', 'presence': 'keep_installed'}
+    settings = software_settings(software_update_policy='review', software_app_rules=[rule])
+    source = parent(settings, software=software_report())
+    service = backend(tmp_path, settings, source)
+    presence = Mock(return_value={'items': [], 'failed_items': 0})
+    monkeypatch.setattr('optimus.app_presence.run_app_presence', presence)
+    result = service.apply_available_fixes(source, settings)
+    service.update_app_unattended.assert_called_once_with('Fixture.One')
+    assert result['counts']['completed'] == 1
+    assert presence.call_args.args[1]['software_app_rules'] == [dict(rule, presence='keep_current')]
+    service.uninstall.assert_not_called()
+
+
+def test_new_or_changed_app_rule_cannot_widen_a_followup(tmp_path):
+    from optimus.post_run_fixes import _narrow_settings
+    settings = software_settings()
+    current = copy.deepcopy(settings)
+    current['software_app_rules'] = [{'id': 'Fixture.New', 'source': 'winget',
+        'update_policy': 'always_ignore', 'presence': 'keep_uninstalled'}]
+    service = backend(tmp_path, settings, parent(settings))
+    narrowed = _narrow_settings(service, settings, current)
+    assert narrowed['software_updates_enabled'] is False
+    assert narrowed['software_app_rules'] == []
+
+
+def test_exclusion_union_overflow_cannot_reenable_an_old_excluded_app_via_rule(tmp_path):
+    from optimus.post_run_fixes import _narrow_settings, _authorized
+    from optimus.software_app_rules import apply_update_rules
+    rule = {'id': 'Fixture.Old0', 'source': 'winget', 'update_policy': 'always_update', 'presence': 'keep_current'}
+    settings = software_settings(software_update_policy='all_supported', software_update_all_approved=True,
+        software_update_exclude_ids=[f'Fixture.Old{index}' for index in range(100)], software_app_rules=[rule])
+    current = dict(copy.deepcopy(settings), software_update_exclude_ids=[f'Fixture.New{index}' for index in range(100)])
+    service = backend(tmp_path, settings, parent(settings))
+    narrowed = _narrow_settings(service, settings, current)
+    assert narrowed['software_updates_enabled'] is False
+    assert not _authorized(narrowed, 'software_updates')
+    assert apply_update_rules(narrowed)['software_updates_enabled'] is False
+    assert settings['software_update_exclude_ids'][0] == 'Fixture.Old0'
+    service.update_app_unattended.assert_not_called()
+
+
+def test_followup_has_its_own_live_navigation_session_and_ends_it(tmp_path):
+    from optimus.navigation import NavigationHub
+    settings = software_settings()
+    source = parent(settings, software=software_report())
+    service = backend(tmp_path, settings, source)
+    service.security_status.return_value = {'reboot_required': False, 'recommendations': []}
+    service.workflow.navigation = NavigationHub()
+    sessions = []
+    def observe(event):
+        snapshot = service.workflow.navigation.snapshot()
+        if snapshot['active']:
+            sessions.append(snapshot['session_id'])
+    service.apply_available_fixes(source, settings, progress_callback=observe)
+    assert sessions and len(set(sessions)) == 1
+    assert service.workflow.navigation.snapshot()['active'] is False
+    assert service.workflow.active is False
+
+
 @pytest.mark.parametrize('process, expected', [
     ({'actions': [], 'complete': True, 'errors': []}, False),
     ({'actions': [], 'complete': False, 'errors': []}, True),
@@ -270,6 +360,52 @@ def test_installer_failure_stops_later_channels(tmp_path, monkeypatch, outcome):
     result = service.apply_available_fixes(source, settings)
     service.windows_security_updates.assert_not_called()
     assert result['counts']['deferred'] == 1
+
+
+def terminal_failure(**changes):
+    receipt = {'exitCode': 1603, 'installer_started': True, 'outcomeKnown': True, 'running': False,
+               'requiresReview': True, 'failure_scope': 'package'}
+    receipt.update(changes)
+    return {'failed_items': 1, 'requiresReview': True, 'installer_started': False,
+            'items': [{'id': 'Fixture.One', 'status': 'failed', 'result': receipt}]}
+
+
+@pytest.mark.parametrize('unsafe', [None, {'failureKind': 'source_untrusted'}, {'outcomeKnown': False},
+    {'restartNeeded': True}, {'installer_started': None}])
+def test_followup_known_package_failure_continues_to_driver_but_shared_unknown_restart_do_not(tmp_path, monkeypatch, unsafe):
+    driver = {'id': '00000000-0000-0000-0000-000000000001', 'revision': 1, 'title': 'Fixture driver'}
+    settings = software_settings(driver_updates_enabled=True, driver_policy='install_approved',
+        driver_changes_approved=True, driver_update_agreements_accepted=True, driver_approved_updates=[driver])
+    source = parent(settings, software=software_report(), drivers={'scan': {'updates': [driver]}})
+    service = backend(tmp_path, settings, source)
+    monkeypatch.setattr('optimus.automated_software.run_software', Mock(return_value=terminal_failure(**(unsafe or {}))))
+    drivers = Mock(return_value={'items': [], 'failed_items': 0, 'installer_started': False, 'outcomeKnown': True, 'running': False})
+    monkeypatch.setattr('optimus.automated_system.run_drivers', drivers)
+    result = service.apply_available_fixes(source, settings)
+    assert result['counts']['failed'] + result['counts']['uncertain'] >= 1
+    if unsafe is None:
+        drivers.assert_called_once()
+        assert result['counts']['deferred'] == 0 and not result.get('stop_reason')
+    else:
+        drivers.assert_not_called()
+        assert result['counts']['deferred'] == 1 and result['stop_reason']
+
+
+def test_prior_native_proven_terminal_package_failure_is_allowed_but_missing_receipt_is_not(tmp_path):
+    from optimus.post_run_fixes import _prior_installer_barrier
+    settings = software_settings(software_update_ids=['apt:fixture'])
+    source = parent(settings, software=terminal_failure())
+    service = backend(tmp_path, settings, source, native=True)
+    assert _prior_installer_barrier(service, source) == ''
+    source['stages'][0]['result']['items'][0]['result'].pop('outcomeKnown')
+    assert _prior_installer_barrier(service, source)
+
+
+def test_wrapper_terminal_flags_cannot_substitute_for_actual_failed_item_receipts():
+    from optimus.post_run_fixes import _known_terminal_failure
+    wrapper = {'status': 'failed', 'result': {'installer_started': True, 'outcomeKnown': True, 'running': False,
+        'failed_items': 1, 'items': [{'status': 'failed', 'result': {'exitCode': 1603}}]}}
+    assert not _known_terminal_failure(wrapper)
 
 
 @pytest.mark.parametrize('old_outcome', [

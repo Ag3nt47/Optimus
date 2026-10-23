@@ -138,12 +138,27 @@ def _remaining(value, failed):
                and row.get('id', row.get('package_id')).casefold() not in completed for row in offers)
 
 
+def _navigation_skipped(value):
+    """Keep an explicit per-item skip out of automatic follow-up retries."""
+    if not isinstance(value, dict):
+        return False
+    count = value.get('navigation_cancelled_items')
+    if value.get('navigation_cancelled') is True or type(count) is int and count > 0:
+        return True
+    for item in value.get('items', []) if isinstance(value.get('items'), list) else []:
+        if isinstance(item, dict) and (item.get('navigation_skipped') is True or _navigation_skipped(item.get('result'))):
+            return True
+    return any(_navigation_skipped(value.get(key)) for key in ('app_presence', 'presence'))
+
+
 def _authorized(settings, channel):
     if channel == 'software_updates':
         return (settings.get('software_updates_enabled') is True
                 and settings.get('software_update_agreements_accepted') is True
                 and (settings.get('software_update_policy') == 'selected' and bool(settings.get('software_update_ids'))
-                     or settings.get('software_update_policy') == 'all_supported' and settings.get('software_update_all_approved') is True))
+                     or settings.get('software_update_policy') == 'all_supported' and settings.get('software_update_all_approved') is True
+                     or any(rule.get('update_policy') == 'always_update' and rule.get('presence') != 'keep_uninstalled'
+                            for rule in settings.get('software_app_rules', []) if isinstance(rule, dict))))
     if channel == 'windows_security_updates':
         return all(settings.get(key) is True for key in ('windows_security_updates_enabled',
                    'windows_security_updates_install_approved', 'windows_security_update_agreements_accepted'))
@@ -163,7 +178,12 @@ def _preview(backend, report, settings):
         if identity in identifiers:
             manual.append({'id': identity, 'title': title, 'reason': reason})
     for channel, (title, _) in CHANNELS.items():
-        if not any(_remaining(value, failed) for value, failed in _channel_results(report, channel)):
+        outcomes = _channel_results(report, channel)
+        if not any(_remaining(value, failed) for value, failed in outcomes):
+            continue
+        if any(_navigation_skipped(value) for value, failed in outcomes):
+            manual.append({'id': channel, 'title': title,
+                'reason': 'You skipped or cancelled an item in this worker. Automatic follow-up will not retry that channel in this run; review it before a new run.'})
             continue
         if _native(backend) and channel != 'software_updates':
             manual.append({'id': channel, 'title': title, 'reason': 'This Windows update channel is unavailable on this platform; use the native OS or vendor updater.'})
@@ -189,11 +209,20 @@ def available_fixes(backend, report, settings):
 def _narrow_settings(backend, approved, current):
     """A later preference change can narrow this click's authority, never widen it."""
     effective = copy.deepcopy(current)
+    # A follow-up never enrolls a new app rule or repeats install/removal
+    # presence policy. Only the exact originally approved update choices can
+    # survive; a changed rule set requires a fresh maintenance run.
+    old_rules = [dict(rule, presence='keep_current') for rule in approved.get('software_app_rules', [])]
+    current_rules = [dict(rule, presence='keep_current') for rule in current.get('software_app_rules', [])]
+    rules_unchanged = old_rules == current_rules
+    effective['software_app_rules'] = old_rules if rules_unchanged else []
     for key in ('software_updates_enabled', 'software_update_agreements_accepted', 'software_update_all_approved',
                 'windows_security_updates_enabled', 'windows_security_updates_install_approved',
                 'windows_security_update_agreements_accepted', 'driver_updates_enabled',
                 'driver_changes_approved', 'driver_update_agreements_accepted', 'update_compatibility_mode_enabled'):
         effective[key] = approved.get(key) is True and current.get(key) is True
+    if not rules_unchanged:
+        effective['software_updates_enabled'] = False
     fold = (lambda value: value) if _native(backend) else str.casefold
     old_policy, new_policy = approved.get('software_update_policy'), current.get('software_update_policy')
     if 'review' in (old_policy, new_policy):
@@ -211,6 +240,9 @@ def _narrow_settings(backend, approved, current):
         effective['software_update_exclude_ids'] = list(excluded.values())
     else:
         effective['software_update_policy'] = 'review'
+        # Exact Always update rules can authorize installs under global review.
+        # If every old/new exclusion cannot be retained, disable the channel.
+        effective['software_updates_enabled'] = False
     policy = current.get('driver_policy')
     if policy != approved.get('driver_policy') or policy == 'review':
         effective['driver_policy'] = 'review'
@@ -222,22 +254,51 @@ def _narrow_settings(backend, approved, current):
     return _settings(backend, effective)
 
 
+def _known_terminal_failure(value):
+    """A group needs actual per-item terminal receipts, not inferred flags."""
+    from .navigation import can_fail_forward
+    if not isinstance(value, dict):
+        return False
+    items = value.get('items')
+    if isinstance(items, list):
+        failed = [row for row in items if isinstance(row, dict) and (
+            row.get('status') in ('failed', 'blocked', 'needs_review') or isinstance(row.get('result'), dict)
+            and (row['result'].get('requiresReview') is True or row['result'].get('failed_items', 0)))]
+        count = value.get('failed_items', 0)
+        if type(count) is not int or count < 0 or count > len(failed) or not failed:
+            return False
+        return all(_known_terminal_failure(row) for row in failed)
+    receipt = value.get('result')
+    if isinstance(receipt, dict) and isinstance(receipt.get('items'), list):
+        return _known_terminal_failure(receipt)
+    return can_fail_forward(receipt if isinstance(receipt, dict) else value)
+
+
 def _stop_reason(value, *, prior=False):
     """Normalize updater-specific stop flags across the entire batch."""
     pending = [value]
     while pending:
         item = pending.pop()
         if isinstance(item, dict):
+            from .navigation import shared_update_refusal
+            terminal_failure = _known_terminal_failure(item)
+            shared = dict(item)
+            if terminal_failure:
+                # Aggregated review flags do not override proven package-local
+                # receipts. Explicit shared scope/codes remain authoritative.
+                shared.pop('requiresReview', None)
+            if shared_update_refusal(shared):
+                return 'Shared update safety checks require review before another installer.'
             if item.get('restartNeeded') is True or item.get('reboot_required') is True:
                 return 'A restart is required. Remaining installers were deferred.'
             if (item.get('may_continue') is True or item.get('running') is True or item.get('outcomeKnown') is False
                     or item.get('status') == 'uncertain' or item.get('uncertain') is True):
                 return 'An operation may still be running or its outcome is uncertain. Verify its state before another installer.'
-            if not prior and item.get('requiresReview') is True:
+            if not prior and item.get('requiresReview') is True and not terminal_failure:
                 return 'An update safety check requires review before another installer.'
             if item.get('cancelled') is True:
                 return 'Cancellation requested; remaining actions were deferred.'
-            if not prior and (item.get('status') == 'failed' or item.get('failed_items', 0)):
+            if not prior and (item.get('status') == 'failed' or item.get('failed_items', 0)) and not terminal_failure:
                 return 'An operation failed; remaining installers were deferred for review.'
             pending.extend(item.values())
         elif isinstance(item, list):
@@ -258,7 +319,7 @@ def _prior_installer_barrier(backend, report):
             if _native(backend) and channel == 'software_updates' and (
                     failed or value.get('failed_items', 0)
                     or any(isinstance(item, dict) and item.get('status') == 'failed'
-                           for item in (value['items'] if isinstance(value.get('items'), list) else []))):
+                           for item in (value['items'] if isinstance(value.get('items'), list) else []))) and not _known_terminal_failure(value):
                 return 'The previous native package operation failed and its installer termination is unverified. Review the native package manager before retrying.'
             reason = _stop_reason(value, prior=True)
             if reason:
@@ -369,6 +430,8 @@ class PostRunFixes:
         if not workflow.lock.acquire(blocking=False):
             raise RuntimeError('An optimization or follow-up run is already active.')
         lease = None
+        navigation_started = False
+        navigation = getattr(workflow, 'navigation', None)
         try:
             active = getattr(workflow, 'last_report', None)
             if not isinstance(active, dict) or active.get('id') != requested['id']:
@@ -385,6 +448,10 @@ class PostRunFixes:
             directory = Path(self.backend.data_dir) / 'post-run-fixes'
             _ordinary_data_path(directory)
             identifier = uuid.uuid4().hex
+            from .navigation import NavigationHub
+            if isinstance(navigation, NavigationHub):
+                navigation.begin(identifier, cancel_event=cancel_event)
+                navigation_started = True
             path = directory / (identifier + '.json')
             result = {'schema': 1, 'id': identifier, 'parent_run_id': source['id'], 'started_at': time.time(),
                       'settings': approved, 'status': 'running', 'stages': [], 'cancelled': False,
@@ -512,8 +579,12 @@ class PostRunFixes:
             return result
         finally:
             try:
-                if lease is not None:
-                    lease.release()
+                try:
+                    if navigation_started:
+                        navigation.end()
+                finally:
+                    if lease is not None:
+                        lease.release()
             finally:
                 workflow.active = False
                 workflow.lock.release()

@@ -59,6 +59,8 @@ def launch_warning(settings):
     """Describe actual saved requests; native/applicability checks still apply."""
     scope_fingerprint(settings)
     settings = copy.deepcopy(settings)
+    from .software_app_rules import app_rules_summary, apply_update_rules
+    rule_scope = app_rules_summary(settings)
     actions, checks = [], []
     categories = list(settings.get('cleanup_category_ids') or [])
     if settings.get('cleanup_enabled') is True:
@@ -107,14 +109,26 @@ def launch_warning(settings):
         else:
             checks.append('Startup review only; no startup entries are selected for automatic disabling.')
     if settings.get('software_updates_enabled') is True:
-        if (settings.get('software_update_policy') in ('selected', 'all_supported')
+        effective = apply_update_rules(settings)
+        if (effective.get('software_update_policy') in ('selected', 'all_supported')
                 and settings.get('software_update_agreements_accepted') is True):
-            scope = ('all supported current package-manager offers; saved exclusions: ' + _listed(settings.get('software_update_exclude_ids') or [])
-                     if settings.get('software_update_policy') == 'all_supported' and settings.get('software_update_all_approved') is True
-                     else 'saved exact package IDs: ' + _listed(settings.get('software_update_ids') or []))
+            scope = ('all supported current package-manager offers; saved exclusions: ' + _listed(effective.get('software_update_exclude_ids') or [])
+                     if effective.get('software_update_policy') == 'all_supported' and settings.get('software_update_all_approved') is True
+                     else 'saved exact package IDs: ' + _listed(effective.get('software_update_ids') or []))
             actions.append('Install available eligible software updates for ' + scope + '. Installer/restart checks still apply.')
-        else:
+        elif not rule_scope['automatic_actions']:
             checks.append('Software update discovery only; automatic installation is not approved.')
+        for key, text in (
+            ('always_update', 'Always update only available eligible newer versions for exact app rules: '),
+            ('always_ignore', 'Always ignore updates for exact app rules: '),
+            ('keep_installed', 'Install or reinstall these exact apps if missing: '),
+            ('keep_uninstalled', 'Uninstall these exact apps if installed; app-local data can be permanently lost: ')):
+            if rule_scope[key]:
+                actions.append(text + ', '.join(rule_scope[key]) + '.')
+        if rule_scope['automatic_actions']:
+            actions.append('Saved per-app rules apply on each maintenance run. Reinstalling an app does not restore app-local data removed by uninstalling it. '
+                           'Per-app actions require saved package agreements, fresh identity/source checks and protected-app/installer checks. Saved update exclusions and pins still win over Always update. '
+                           'Install/uninstall rules currently run only on Windows with WinGet; other platforms report unsupported actions.')
     if settings.get('driver_updates_enabled') is True:
         if (settings.get('driver_policy') in ('install_approved', 'install_matching')
                 and settings.get('driver_changes_approved') is True and settings.get('driver_update_agreements_accepted') is True):
@@ -150,7 +164,7 @@ def launch_warning(settings):
               if any(settings.get(key) is True for key in ('cleanup_enabled', 'browser_cache_enabled', 'browser_history_enabled',
                   'browser_cookies_enabled', 'browser_download_history_enabled', 'consumer_debloat_enabled',
                   'm365_debloat_enabled', 'outlook_debloat_enabled', 'edge_debloat_enabled',
-                  'privacy_disable_recall_snapshots_enabled')) or categories
+                  'privacy_disable_recall_snapshots_enabled')) or categories or rule_scope['enabled'] and rule_scope['keep_uninstalled']
               else 'Auto Clean runs the saved checks and approved actions below. Native eligibility and saved scopes still apply.')
     lines = [header, '', *('• ' + action for action in actions)]
     if checks:

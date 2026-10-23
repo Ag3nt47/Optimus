@@ -575,11 +575,11 @@ class InitialSetupWizard(QWizard):
 
     def _build_software(self):
         body = self._page('software', '9. Software Updater',
-            'Load current WinGet application updates and select exact packages, or authorize all supported installed WinGet applications with explicit exclusions. Review only never installs. All-supported approval also covers future matching installed applications.')
+            'Choose global update scope and exact per-app rules. Global review only checks updates; explicit per-app rules can authorize updates, installation or removal. All-supported approval also covers future matching installed applications.')
         self._check(body, 'software_updates_enabled', 'Include the Software Updater stage')
         self._check(body, 'parallel_app_updates_enabled', 'Update apps and Windows drivers in background while independent steps continue')
         self._check(body, 'auto_continue_fixes_enabled', 'Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)')
-        body.addWidget(_label('Saving automatic continuation approves supported Defender/firewall fixes and already-approved updates after a completed scan, without another per-run prompt. Process choices, application removal and restarts remain manual. App and Windows driver updates share one background installer lane while independent steps continue.'))
+        body.addWidget(_label('Saving automatic continuation approves supported Defender/firewall fixes and already-approved updates after a completed scan, without another per-run prompt. Process choices, removals outside saved app rules and restarts remain manual. App and Windows driver updates share one background installer lane while independent steps continue.'))
         self._check(body, 'legacy_patch_review_enabled', 'Review known legacy/unofficial support provider paths (information only; no unverified replacement installation)')
         self._check(body, 'windows_security_updates_enabled', 'Check available Windows Security and Critical updates')
         self._check(body, 'windows_security_updates_install_approved', 'Approve automatic installation of eligible Windows Security/Critical updates, including later matching offers')
@@ -590,7 +590,7 @@ class InitialSetupWizard(QWizard):
         self._check(body, 'windows_cpu_compatibility_enabled', 'Prepare unsupported-CPU Windows media upgrades (MoSetup; administrator access)')
         body.addWidget(_label('This prepares only the supported media-Setup workaround; Installation Assistant may still block the upgrade. Bootability, security, personal-data and free-space checks remain in effect. Saved Windows security/driver scopes are unchanged. The OS upgrade itself is not part of automatic cleanup.'))
         self.software_policy = QComboBox()
-        self.software_policy.addItem('Scan and report only', 'review')
+        self.software_policy.addItem('Global: scan and report; saved per-app rules still apply', 'review')
         self.software_policy.addItem('Install only my selected/listed exact package IDs', 'selected')
         self.software_policy.addItem('All supported installed WinGet applications (including future matching applications)', 'all_supported')
         self.software_policy.setCurrentIndex(max(0, self.software_policy.findData(self.initial.get('software_update_policy', 'review'))))
@@ -616,6 +616,10 @@ class InitialSetupWizard(QWizard):
         self.software_exclusions.setPlainText('\n'.join(self.initial.get('software_update_exclude_ids', [])))
         self.software_exclusions.setFixedHeight(75)
         body.addWidget(self.software_exclusions)
+        from .widgets.app_rules_editor import AppRulesEditor
+        body.addWidget(_label('Per-app choices: follow the global policy, always update, ignore, or maintain a chosen installed state.'))
+        self.software_app_rules = AppRulesEditor(self.initial)
+        body.addWidget(self.software_app_rules)
         self.software_all_consent = self._check(body, 'software_update_all_approved',
             'Approve all supported installed WinGet applications, including future matching applications, except my exclusions')
         self.software_all_consent.setStyleSheet('color:#ffd29c;')
@@ -627,6 +631,7 @@ class InitialSetupWizard(QWizard):
         self.software_targets.itemChanged.connect(lambda: self.software_agreements.setChecked(False))
         self.software_ids.textChanged.connect(lambda: self.software_agreements.setChecked(False))
         self.software_exclusions.textChanged.connect(self._software_scope_changed)
+        self.software_app_rules.changed.connect(self._software_scope_changed)
         self._software_controls()
         body.addStretch()
 
@@ -634,12 +639,15 @@ class InitialSetupWizard(QWizard):
         enabled = self.controls['software_updates_enabled'].isChecked()
         selected = enabled and self.software_policy.currentData() == 'selected'
         all_supported = enabled and self.software_policy.currentData() == 'all_supported'
+        app_actions = enabled and self.software_app_rules.has_automatic_actions()
         self.software_ids.setEnabled(selected)
         self.software_targets.setEnabled(selected)
         self.software_exclusions.setEnabled(all_supported)
         self.software_all_consent.setEnabled(all_supported)
-        self.software_agreements.setEnabled(selected or all_supported)
-        self.software_agreements.setText('Allow silent installation of supported WinGet applications and accept their package/source agreements' if all_supported else 'Allow silent installation of my selected/listed packages and accept their package/source agreements')
+        self.software_agreements.setEnabled(selected or all_supported or app_actions)
+        self.software_agreements.setText('Approve saved per-app update/install/uninstall actions and accept their package/source agreements' if app_actions
+            else 'Allow silent installation of supported WinGet applications and accept their package/source agreements' if all_supported
+            else 'Allow silent installation of my selected/listed packages and accept their package/source agreements')
         if hasattr(self, 'hardware_targets'):
             self._sync_selection_actions()
 
@@ -651,6 +659,7 @@ class InitialSetupWizard(QWizard):
     def _software_scope_changed(self):
         self.software_all_consent.setChecked(False)
         self.software_agreements.setChecked(False)
+        self._software_controls()
 
     def load_software_candidates(self):
         self._start_probe(self.backend.updates_scan, (), {}, self._software_candidates_ready, self.software_status)
@@ -673,6 +682,7 @@ class InitialSetupWizard(QWizard):
             return
         from .automated_software import fresh_candidates
         accepted = fresh_candidates(result)
+        self.software_app_rules.set_candidates(list(accepted.values()))
         selectable = {identity.casefold() for identity in accepted}
         for identifier, record in accepted.items():
             item = QListWidgetItem(str(record.get('name') or identifier)+' | '+identifier+' | '+str(record.get('version','?'))+' -> '+str(record.get('available','?')))
@@ -1149,15 +1159,20 @@ class InitialSetupWizard(QWizard):
             result['duplicate_roots'] = self._roots()
             result['software_update_ids'] = self._package_ids()
             result['software_update_exclude_ids'] = self._exact_ids(self.software_exclusions.toPlainText())
+            result = self.software_app_rules.apply_to(result)
+            from .software_app_rules import app_rules_summary
+            rule_scope = app_rules_summary(result)
             if section in (None,'duplicates') and result['duplicates_enabled'] and not result['duplicate_roots']:
                 raise ValueError('Add at least one local folder for Duplicate Finder, or turn its scan off.')
             selected = result['software_updates_enabled'] and result['software_update_policy'] == 'selected'
-            if section in (None,'software') and selected and not result['software_update_ids']:
+            if section in (None,'software') and selected and not result['software_update_ids'] and not rule_scope['always_update']:
                 raise ValueError('List at least one exact WinGet package ID, or choose scan/report only.')
             if section in (None,'software') and result['software_updates_enabled'] and result['software_update_policy']=='all_supported' and (not result['software_update_all_approved'] or not result['software_update_agreements_accepted']):
                 raise ValueError('All-supported updates require explicit approval of future matching applications and package/source agreements.')
             if section in (None,'software') and selected and not result['software_update_agreements_accepted']:
                 raise ValueError('Selected-package installation requires your explicit package/source agreement authorization. Choose review-only to avoid accepting agreements.')
+            if section in (None,'software') and rule_scope['automatic_actions'] and not result['software_update_agreements_accepted']:
+                raise ValueError('Automatic per-app updates, installation or removal require your explicit package/source agreement authorization.')
             if section in (None,'software') and result.get('windows_security_updates_enabled') and result.get('windows_security_updates_install_approved') and not result.get('windows_security_update_agreements_accepted'):
                 raise ValueError('Automatic Windows security updates require explicit Microsoft update agreement acceptance, or leave installation approval off.')
         else:
@@ -1165,6 +1180,7 @@ class InitialSetupWizard(QWizard):
             result['software_update_ids'] = [entry.strip() for entry in re.split(r'[\r\n,]+',self.software_ids.toPlainText()) if entry.strip()]
             result['software_update_ids'] += [item['id'] for item in self._checked(self.software_targets) if item['id'] not in result['software_update_ids']]
             result['software_update_exclude_ids'] = [entry.strip() for entry in re.split(r'[\r\n,]+',self.software_exclusions.toPlainText()) if entry.strip()]
+        result = self.software_app_rules.apply_to(result)
         result.update({'duplicate_policy':self.duplicate_policy.currentData(),
                        'cloud_policy':self.cloud_policy.currentData(),
                        'startup_policy':self.startup_policy.currentData(),
@@ -1201,8 +1217,10 @@ class InitialSetupWizard(QWizard):
         if not result['driver_changes_approved']:
             result['driver_update_agreements_accepted'] = False
 
-        # Review-only never grants agreement acceptance.
-        if result['software_update_policy'] not in ('selected','all_supported') or not result['software_updates_enabled']:
+        # Global review can still contain separately approved exact per-app actions.
+        from .software_app_rules import app_rules_summary
+        rule_scope = app_rules_summary(result)
+        if not result['software_updates_enabled'] or result['software_update_policy'] not in ('selected','all_supported') and not rule_scope['automatic_actions']:
             result['software_update_agreements_accepted'] = False
         if result['software_update_policy'] != 'all_supported' or not result['software_updates_enabled']:
             result['software_update_all_approved'] = False
@@ -1279,6 +1297,13 @@ class InitialSetupWizard(QWizard):
         if settings.get('software_updates_enabled') and settings['software_update_policy']=='all_supported':
             actions.append('Update all supported installed WinGet applications, including future matching applications. Exclusions: '+(', '.join(settings['software_update_exclude_ids']) or 'none'))
             actions.append('All-supported scope: '+('approved' if settings['software_update_all_approved'] else 'approval required')+'; package/source agreements: '+('accepted' if settings['software_update_agreements_accepted'] else 'not accepted'))
+        from .software_app_rules import app_rules_summary
+        rule_scope = app_rules_summary(settings)
+        if rule_scope['enabled']:
+            for key, label in (('always_update', 'Always update available newer versions'), ('always_ignore', 'Always ignore updates'),
+                               ('keep_installed', 'Install/reinstall if missing'), ('keep_uninstalled', 'Uninstall if installed; app data can be lost')):
+                if rule_scope[key]:
+                    actions.append(label + ': ' + ', '.join(rule_scope[key]))
         policy_labels = {'review':'Review only', 'keep_oldest':'Keep oldest modified copy',
             'keep_newest':'Keep newest modified copy', 'disable_selected':'Disable selected sign-in entries',
             'install_approved':'Install exact approved update revisions',
@@ -1315,7 +1340,7 @@ class InitialSetupWizard(QWizard):
                 reviews.append(text)
         if cloud_scope_text and settings['cloud_policy'] == 'review':
             reviews.append(cloud_scope_text)
-        if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'review':
+        if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'review' and not rule_scope['automatic_actions']:
             reviews.append('Software update scan/report; no agreements accepted or installation')
         if settings.get('spyware_scan_enabled'):
             reviews.append('Microsoft Defender quick scan; Windows policy controls detections/remediation')

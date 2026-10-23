@@ -14,6 +14,7 @@ from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
 from .approval_policy import APPROVAL_DEFAULTS, validate_approvals
 from .smart_configuration import SMART_DEFAULTS, validate_smart_configuration
 from .unattended_configuration import UNATTENDED_DEFAULTS, validate_unattended_configuration
+from .software_app_rules import APP_RULE_DEFAULTS, validate_app_rules
 
 CONSUMER_PACKAGE_NAMES = (
     'Microsoft.BingNews', 'Microsoft.BingWeather', 'Microsoft.Getstarted',
@@ -70,6 +71,7 @@ DEFAULTS = {
 DEFAULTS.update(copy.deepcopy(APPROVAL_DEFAULTS))
 DEFAULTS.update(copy.deepcopy(SMART_DEFAULTS))
 DEFAULTS.update(copy.deepcopy(UNATTENDED_DEFAULTS))
+DEFAULTS.update(copy.deepcopy(APP_RULE_DEFAULTS))
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _CATEGORY_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
 FINAL_VERIFICATION_STAGE = 'Verify optimization outcomes'
@@ -190,6 +192,7 @@ class Preferences:
             raise ValueError('Choose manual, startup, daily, weekly, or monthly maintenance.')
         result.update(validate_smart_configuration(result))
         result.update(validate_unattended_configuration(result))
+        result['software_app_rules'] = validate_app_rules(result['software_app_rules'])
         if result['software_update_policy'] not in ('review', 'selected', 'all_supported'):
             raise ValueError('Software updates require review, selected IDs, or all-supported policy.')
         packages = result['consumer_debloat_package_names']
@@ -231,9 +234,15 @@ class Preferences:
         if len({root.casefold() for root in normalized}) != len(normalized):
             raise ValueError('Duplicate-review folders must be unique.')
         result['duplicate_roots'] = normalized
+        active_rules = result['software_updates_enabled'] and any(
+            row['update_policy'] == 'always_update' or row['presence'] != 'keep_current'
+            for row in result['software_app_rules'])
+        if active_rules and (result['setup_version'] != CURRENT_SETUP_VERSION or not result['software_update_agreements_accepted']):
+            raise ValueError('Complete setup and accept package agreements before automatic per-app update/install/uninstall actions.')
         if result['software_updates_enabled'] and result['software_update_policy'] != 'review' and not result['software_update_agreements_accepted']:
             raise ValueError('Unattended software updates require explicit agreement acceptance.')
-        if result['software_updates_enabled'] and result['software_update_policy'] == 'selected' and not result['software_update_ids']:
+        if (result['software_updates_enabled'] and result['software_update_policy'] == 'selected'
+                and not result['software_update_ids'] and not any(row['update_policy'] == 'always_update' for row in result['software_app_rules'])):
             raise ValueError('Choose at least one exact software ID for unattended updates.')
         if result['software_updates_enabled'] and result['software_update_policy'] == 'all_supported' and not result['software_update_all_approved']:
             raise ValueError('Updating all supported installed applications requires separate explicit scope approval.')
@@ -257,11 +266,14 @@ def _fresh_software_candidates(scan):
 class Workflow:
     def __init__(self, backend):
         self.backend = backend
+        from .navigation import NavigationHub
+        self.navigation = NavigationHub()
         self.lock = threading.Lock()
         self.active = False
         self.last_report = None
 
     def run(self, settings, progress_callback, cancel_event=None, *, browser_prompt=None):
+        global_cancel_event = cancel_event
         configuration = Preferences.validate(settings)
         if not self.lock.acquire(blocking=False):
             raise RuntimeError('An optimization run is already active.')
@@ -277,6 +289,9 @@ class Workflow:
             lease = RunLease(self.backend.data_dir).acquire()
             unresolved_apps = pending_updates_barrier(self.backend)
             run_id = uuid.uuid4().hex
+            self.navigation.begin(run_id, cancel_event=global_cancel_event)
+            maintenance_navigation = self.navigation.cursor('maintenance', 'Maintenance')
+            cancel_event = maintenance_navigation.cancellation(global_cancel_event)
             log_path = self.backend.data_dir / 'runs' / (run_id + '.json')
             report = {'id': run_id, 'started_at': time.time(), 'settings': configuration, 'stages': [], 'cancelled': False,
                       'status': 'running', 'note': 'Percent completion measures completed stages and selected items, not elapsed time. Daily/weekly automation runs only while Optimus is open. Review stages do not make changes. Apply stages require the current setup and saved scope approvals; targets are revalidated on each run.'}
@@ -569,16 +584,16 @@ class Workflow:
             if parallel_specs:
                 from .automated_software import run_software
                 def background_software(worker, item_callback, prepared_callback, before_install):
-                    return run_software(worker, configuration, cancel_event=parallel_job.cancel_event,
+                    return run_software(worker, configuration, cancel_event=getattr(worker, '_optimus_lane_cancel_event', global_cancel_event),
                         item_callback=item_callback, prepared_callback=prepared_callback, before_install=before_install)
                 def background_drivers(worker, item_callback, prepared_callback, before_install):
                     from .automated_system import run_drivers
-                    return run_drivers(worker, configuration, cancel_event=parallel_job.cancel_event,
+                    return run_drivers(worker, configuration, cancel_event=getattr(worker, '_optimus_lane_cancel_event', global_cancel_event),
                         item_callback=item_callback, prepared_callback=prepared_callback, before_install=before_install)
                 operations = [(spec[0], background_drivers if spec[0] in DRIVER_TITLES else background_software)
                               for spec in parallel_specs]
                 parallel_job = ParallelInstallerQueue(self.backend, run_id, operations, progress_callback,
-                                                     cancel_event=cancel_event, prior_barrier=unresolved_apps)
+                                                     cancel_event=global_cancel_event, prior_barrier=unresolved_apps)
                 report['stages'].extend(parallel_job.start())
                 atomic_json(log_path, report)
 
@@ -587,9 +602,15 @@ class Workflow:
                     join_updates(title)
                 if parallel_job is not None and title in BEFORE_UPDATES and not checkpoint_open:
                     cleanup_barrier = cleanup_barrier or parallel_job.wait_prepared()
-                if cancelled():
+                if global_cancel_event is not None and global_cancel_event.is_set():
                     report['cancelled'] = True
                     break
+                navigation_item = title not in (WINDOWS_SOFTWARE, WINDOWS_DRIVERS, WINDOWS_DRIVER_REVIEW, 'Check or install Windows security updates')
+                mutation_item = title.startswith(('Apply ', 'Prepare approved ', 'Disable ', 'Recycle ', 'Clean ', 'Optimize ', 'Remove ', 'Uninstall ', 'Enable '))
+                navigation_available = True
+                if navigation_item:
+                    navigation_available = maintenance_navigation.begin_item('stage:' + str(completed) + ':' + title, title,
+                        kind='mutation' if mutation_item else 'scan')
                 process_lines = ['Optimus workflow worker']
                 process = getattr(self.backend.bridge, '_process', None)
                 if process is not None and process.poll() is None:
@@ -600,7 +621,14 @@ class Workflow:
                 started = time.time()
                 serial_job = None
                 try:
-                    if cleanup_barrier and title in BEFORE_UPDATES:
+                    if not navigation_available:
+                        result = {'skipped': True, 'navigation_blocked': True, 'requiresReview': True, 'failed_items': 0,
+                                  'note': 'The preceding maintenance item has an unresolved outcome; this stage was not started.'}
+                    elif navigation_item and maintenance_navigation.local_requested():
+                        result = {'skipped': True, 'cancelled': True, 'navigation_cancelled': True, 'navigation_not_started': True,
+                                  'failed_items': 0, 'installer_started': False, 'outcomeKnown': True,
+                                  'note': 'You skipped this exact maintenance stage before it started.'}
+                    elif cleanup_barrier and title in BEFORE_UPDATES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': cleanup_barrier,
                                   'note': 'No cleanup ran while update discovery still owned temporary files.'}
@@ -643,15 +671,23 @@ class Workflow:
                             serial_job._run()
                         result = serial_job.result
                     else:
+                        if navigation_item:
+                            maintenance_navigation.phase('applying' if mutation_item else 'scanning', mutation_started=mutation_item)
                         result = operation()
-                    interrupted = cancelled() or (isinstance(result, dict) and result.get('cancelled') is True)
-                    status = 'cancelled' if interrupted else 'failed' if isinstance(result, dict) and result.get('failed_items', 0) else 'completed'
+                    local_navigation_cancel = navigation_item and maintenance_navigation.local_requested()
+                    if local_navigation_cancel and isinstance(result, dict) and result.get('cancelled') is True:
+                        result = dict(result, navigation_cancelled=True,
+                                      navigation_cancelled_items=max(1, result.get('navigation_cancelled_items', 0)))
+                    interrupted = (global_cancel_event is not None and global_cancel_event.is_set()
+                                   or isinstance(result, dict) and result.get('cancelled') is True)
+                    navigation_cancelled = isinstance(result, dict) and (result.get('navigation_cancelled') is True or bool(result.get('navigation_cancelled_items')))
+                    status = 'cancelled' if interrupted or navigation_cancelled else 'skipped' if isinstance(result, dict) and result.get('navigation_blocked') else 'failed' if isinstance(result, dict) and result.get('failed_items', 0) else 'completed'
                     stage = {'title': title, 'status': status, 'started_at': started, 'finished_at': time.time(), 'result': result}
                     if serial_job is not None:
                         stage['worker_log_path'] = str(serial_job.path)
                     if status == 'failed':
                         stage['error'] = 'One or more selected operations or scan checks failed; review the saved item results.'
-                    if interrupted:
+                    if interrupted and not local_navigation_cancel:
                         report['cancelled'] = True
                 except Exception as error:
                     stage = {'title': title, 'status': 'failed', 'started_at': started, 'finished_at': time.time(), 'error': str(error)}
@@ -672,6 +708,12 @@ class Workflow:
                     report['stages'].append(stage)
                 completed += 1
                 atomic_json(log_path, report)
+                if navigation_item:
+                    maintenance_navigation.finish(stage['status'],
+                        message=stage.get('error') or (stage.get('result') or {}).get('note') if isinstance(stage.get('result'), dict) else stage.get('error'),
+                        mutation_started=False if isinstance(stage.get('result'), dict) and stage['result'].get('navigation_not_started') is True else mutation_item,
+                        outcome_known=not (mutation_item and stage.get('error') and 'result' not in stage
+                            or isinstance(stage.get('result'), dict) and stage['result'].get('outcomeKnown') is False))
                 if parallel_job is not None and title == parallel_launch_after:
                     checkpoint_open = True
                     prior_barrier = unresolved_apps or cleanup_barrier
@@ -697,8 +739,9 @@ class Workflow:
             join_updates()
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(item['status'] == 'failed' for item in report['stages'])
+            report['cancelled_stages'] = sum(item['status'] == 'cancelled' for item in report['stages'])
             report['log_path'] = str(log_path)
-            report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] else 'completed'
+            report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] or report['cancelled_stages'] else 'completed'
             atomic_json(log_path, report)
             if attempt_started:
                 record_attempt(self.backend.data_dir, configuration, status='cancelled' if report['cancelled'] else 'failed' if report['failed_stages'] else 'completed', run_id=run_id,
@@ -733,6 +776,7 @@ class Workflow:
                 if lease is not None:
                     lease.release()
             finally:
+                self.navigation.end((report or {}).get('status', 'failed'))
                 self.active = False
                 self.lock.release()
 

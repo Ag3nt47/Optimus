@@ -70,7 +70,11 @@ def test_native_wizard_saved_software_selection_is_not_silently_replaced(app, ba
     try:
         assert wizard.collect()['software_update_ids'] == ['apt:fixture']
         wizard._software_ready({'updates': [{'id': 'apt:new', 'name': 'Fixture', 'installedVersion': '1', 'availableVersion': '2'}]})
-        assert wizard.collect()['software_update_ids'] == []
+        # An empty current offer for a previously selected app does not revoke
+        # its future update choice or silently enroll a newly discovered app.
+        assert wizard.collect()['software_update_ids'] == ['apt:fixture']
+        from optimus.native_ui import checked_data
+        assert checked_data(wizard.software) == []
         assert not wizard.controls['software_update_agreements_accepted'].isChecked()
     finally:
         wizard.reject()

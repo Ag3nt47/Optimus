@@ -176,6 +176,11 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'additional-workers.actual-poll', 'additional-workers.count-honesty',
             'additional-workers.reflow-1', 'additional-workers.reflow-3',
             'additional-workers.board-poll', 'additional-workers.no-operation',
+            'worker-controls.no-live-sampler', 'worker-controls.three-controls',
+            'worker-controls.stale-revision', 'worker-controls.history-only',
+            'worker-controls.history-forward', 'worker-controls.pending-local', 'worker-controls.stale-session',
+            'metrics.measured-values', 'metrics.system-network', 'metrics.fixture-only',
+            'app-rules.exact-choices', 'app-rules.master-off-draft', 'app-rules.presence-warning',
             'revert.explicit-selection', 'revert.supported-only', 'revert.no-constructor-actions'):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed'
     assert by_id['confirmation.negative-default']['status'] == 'passed'
@@ -183,6 +188,9 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
     assert {item['name'] for item in report['screenshots']} >= {
         f'{width}x{height}-{state}' for width, height in bot.VIEWPORTS
         for state in ('concurrent-workers', 'updates-waiting', 'driver-updates-waiting', 'deferred-update-details')}
+    assert {item['name'] for item in report['screenshots']} >= {
+        f'{width}x{height}-{state}' for width, height in bot.VIEWPORTS
+        for state in ('worker-cpu-network', 'worker-history', 'worker-skip-pending', 'app-policy-choices')}
     assert {item['area'] for item in report['manual_review']} >= {'GPU', 'CPU and RAM', 'Updates and security'}
     assert all(item['status'] == 'not_exercised' for item in report['skipped_checks'])
     assert {item['source'] for item in report['documentation_comparison']} == {'docs/FEATURES.md', 'docs/PLATFORMS.md'}
@@ -227,6 +235,47 @@ def test_additional_worker_review_detects_a_grid_that_refuses_narrow_reflow(revi
         assert by_id['grid-defect.additional-workers.no-operation']['status'] == 'passed'
     finally:
         reviewer.dispose(window)
+
+
+def test_metrics_review_detects_invented_worker_cpu_without_running_sampler(reviewer, monkeypatch):
+    from optimus.ui import WorkflowWorkerCard
+    from optimus.live_metrics import LiveMetrics
+    original = WorkflowWorkerCard.set_live_metrics
+    def broken(card, metrics, computer=None):
+        original(card, metrics, computer)
+        if card.heading.text() == 'App updates':
+            card.activity_ring.cpu_percent = 100.
+    monkeypatch.setattr(WorkflowWorkerCard, 'set_live_metrics', broken)
+    forbidden = Mock(side_effect=AssertionError('The fixture bot must never start live host metrics.'))
+    monkeypatch.setattr(LiveMetrics, 'start', forbidden)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_worker_controls_and_metrics(window, backend, bot.VIEWPORTS[0], 'cpu-defect')
+        findings = {row['id']: row for row in reviewer.report['checks']}
+        assert findings['cpu-defect.metrics.measured-values']['status'] == 'failed'
+        assert findings['cpu-defect.metrics.fixture-only']['status'] == 'passed'
+        forbidden.assert_not_called()
+    finally:
+        reviewer.dispose(window)
+
+
+def test_app_rules_review_detects_missing_data_loss_disclosure(reviewer, monkeypatch):
+    from optimus.widgets import app_rules_editor
+    from PySide6.QtWidgets import QLabel
+    original = app_rules_editor.AppRulesEditor
+    class Incomplete(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            for label in self.findChildren(QLabel):
+                if 'app-local data' in label.text():
+                    label.setText('Saved rules apply on each maintenance run with saved agreements.')
+    monkeypatch.setattr(app_rules_editor, 'AppRulesEditor', Incomplete)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    reviewer.review_app_rules(backend, bot.VIEWPORTS[0], 'policy-defect')
+    findings = {row['id']: row for row in reviewer.report['checks']}
+    assert findings['policy-defect.app-rules.presence-warning']['status'] == 'failed'
+    assert findings['policy-defect.app-rules.master-off-draft']['status'] == 'passed'
 
 
 @pytest.mark.parametrize(('defect', 'expected_failure'), [

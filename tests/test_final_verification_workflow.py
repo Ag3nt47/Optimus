@@ -111,8 +111,10 @@ def test_cancellation_during_final_check_cannot_emit_100_percent(tmp_path):
     service = MockBackend(tmp_path)
     event = threading.Event()
     def verify(report, **kwargs):
-        assert kwargs['cancel_event'] is event
+        assert kwargs['cancel_event'].external is event
+        assert kwargs['cancel_event'].is_set() is False
         event.set()
+        assert kwargs['cancel_event'].is_set() is True
         return dict(verification('unverified'), cancelled=True)
     service.verify_optimization = Mock(side_effect=verify)
     events = []

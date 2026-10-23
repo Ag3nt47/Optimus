@@ -987,21 +987,93 @@ class DetailedSettingsWindow(QMainWindow):
         self._button(bar, 'Windows Update', lambda: self._run('system_tool', 'windows-update'))
         self._button(bar, 'Microsoft Store updates', lambda: self._run('system_tool', 'store-updates'))
         bar.addStretch()
-        self.updates_summary = self._note(layout, 'No scan loaded. Automatic selected/all-supported policies and exact exclusions are configured in Settings > Run setup questions again.')
+        self.updates_summary = self._note(layout, 'No scan loaded. Save per-app choices here, or review the global update scope in setup.')
+        from PySide6.QtWidgets import QTabWidget
+        self.app_update_tabs = QTabWidget()
+        rules_page, offers_page = QWidget(), QWidget()
+        rules_layout, offers_layout = QVBoxLayout(rules_page), QVBoxLayout(offers_page)
+        self._build_app_rules_controls(rules_layout)
+        self.app_update_tabs.addTab(rules_page, 'Per-app choices')
+        self.app_update_tabs.addTab(offers_page, 'Available updates')
+        layout.addWidget(self.app_update_tabs, 1)
         self.updates_candidates_table = DataTable([('Application','name'),('Package ID','id|package_id'),('Installed','version'),('Available','available'),('Source','source')])
         self.updates_candidates_table.itemSelectionChanged.connect(self._update_selected)
-        layout.addWidget(self.updates_candidates_table,1)
+        offers_layout.addWidget(self.updates_candidates_table,1)
         self.updates_output = QPlainTextEdit()
         self.updates_output.setReadOnly(True)
         self.updates_output.setMaximumHeight(160)
         self.updates_output.setPlaceholderText('WinGet source output and any unsupported or incomplete results appear here.')
-        layout.addWidget(self.updates_output)
-        bar = self._toolbar(layout)
+        offers_layout.addWidget(self.updates_output)
+        bar = self._toolbar(offers_layout)
         self.update_id = QLineEdit()
         self.update_id.setPlaceholderText('Selected or advanced exact package ID, for example Vendor.Application')
         bar.addWidget(self.update_id,1)
         self._button(bar,'Update this package',self.update_package)
-        self._note(layout,'This direct action updates one confirmed package. Automatic all-supported scope needs separate saved approval and agreement acceptance; exact exclusions and all WinGet pins are respected. Unknown or ambiguous update identities are not automatically included. Store apps use the Microsoft Store route; unsupported applications need their own updater.')
+        self._note(offers_layout,'This direct action updates one confirmed package. Automatic all-supported scope needs separate saved approval and agreement acceptance; exact exclusions and all WinGet pins are respected. Unknown or ambiguous update identities are not automatically included. Store apps use the Microsoft Store route; unsupported applications need their own updater.')
+
+    def _build_app_rules_controls(self, layout, *, native=False):
+        from .widgets.app_rules_editor import AppRulesEditor
+        reader = getattr(self.backend, 'preferences', None)
+        settings = reader() if callable(reader) else {}
+        settings = settings if isinstance(settings, dict) else {}
+        import copy
+        self._app_rules_baseline = copy.deepcopy(settings)
+        self.app_rules_enabled = QCheckBox('Include saved app rules and Software Updater in maintenance')
+        self.app_rules_enabled.setChecked(settings.get('software_updates_enabled', False))
+        layout.addWidget(self.app_rules_enabled)
+        self.app_rules_global = QComboBox()
+        for title, value in (('Global: review updates; saved per-app rules still apply', 'review'), ('Global: update existing selected IDs', 'selected'),
+                             ('Global: update all supported apps except exclusions', 'all_supported')):
+            self.app_rules_global.addItem(title, value)
+        self.app_rules_global.setCurrentIndex(max(0, self.app_rules_global.findData(settings.get('software_update_policy', 'review'))))
+        layout.addWidget(self.app_rules_global)
+        self.app_rules_editor = AppRulesEditor(settings, native=native)
+        layout.addWidget(self.app_rules_editor, 1)
+        self.app_rules_all_approved = QCheckBox('Approve the global all-supported app update scope, including future matching apps')
+        self.app_rules_all_approved.setChecked(settings.get('software_update_all_approved', False))
+        layout.addWidget(self.app_rules_all_approved)
+        self.app_rules_agreements = QCheckBox('Approve my saved automatic app actions and accept their package/source agreements')
+        self.app_rules_agreements.setChecked(settings.get('software_update_agreements_accepted', False))
+        layout.addWidget(self.app_rules_agreements)
+        self.app_rules_save = QPushButton('Save app choices')
+        self.app_rules_save.clicked.connect(self._save_app_rules)
+        layout.addWidget(self.app_rules_save)
+        def policy_changed():
+            self.app_rules_agreements.setChecked(False)
+            self.app_rules_all_approved.setChecked(False)
+        self.app_rules_global.currentIndexChanged.connect(policy_changed)
+        self.app_rules_editor.changed.connect(lambda: self.app_rules_agreements.setChecked(False))
+
+    def _save_app_rules(self):
+        if self.smoke_test or self.busy:
+            self.status.setText('Save is unavailable during an operation or an interface smoke test.')
+            return
+        try:
+            current = self.backend.preferences()
+            keys = ('software_updates_enabled', 'software_update_policy', 'software_update_ids',
+                'software_update_exclude_ids', 'software_update_all_approved',
+                'software_update_agreements_accepted', 'software_app_rules')
+            for key in keys:
+                default = [] if key.endswith(('_ids', '_rules')) else None
+                if current.get(key, default) != self._app_rules_baseline.get(key, default):
+                    raise ValueError('Saved app choices changed outside this form. Reopen Settings before replacing them.')
+            value = self.app_rules_editor.apply_to(current)
+            value.update(software_updates_enabled=self.app_rules_enabled.isChecked(),
+                software_update_policy=self.app_rules_global.currentData(),
+                software_update_all_approved=self.app_rules_all_approved.isChecked(),
+                software_update_agreements_accepted=self.app_rules_agreements.isChecked())
+            validator = getattr(getattr(self.backend, 'preference_store', None), 'validate', None)
+            if callable(validator):
+                value = validator(value)
+        except (ValueError, TypeError) as error:
+            self._error(str(error)); return
+        def saved(result):
+            import copy
+            settings = result if isinstance(result, dict) else value
+            self._app_rules_baseline = copy.deepcopy(settings)
+            self.app_rules_editor.reset(settings)
+            self.status.setText('App choices saved. Exact identities, available versions, protections and installer checks still apply.')
+        self._run('save_preferences', value, done=saved)
 
     def _updates_ready(self, result):
         self.updates_output.setPlainText(display(field(result,'output','text','Text',default=result)))
@@ -1011,6 +1083,7 @@ class DetailedSettingsWindow(QMainWindow):
         evidence = app_scan_evidence(result)
         values=[dict(record,id=identity) for identity,record in fresh_candidates(result).items()]
         self.updates_candidates_table.populate(values)
+        self.app_rules_editor.set_candidates(values)
         self.updates_summary.setText(evidence['summary'] + ' ' + evidence['coverage_limit']
             + (' Choose a row to fill its exact ID.' if values else '')
             + ' Exclusions/notes: ' + display(field(result,'excluded',default=[])))
@@ -1831,6 +1904,8 @@ class WorkflowSummaryLabel(QLabel):
 
 class WorkflowWorkerCard(QFrame):
     """A persistent worker status, with observed item counts and no invented ETA."""
+    navigationRequested = Signal(str, object)
+
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self.setObjectName('WorkflowWorkerCard')
@@ -1839,9 +1914,25 @@ class WorkflowWorkerCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(9, 7, 9, 7)
         layout.setSpacing(3)
+        from .widgets.live_activity import WorkerActivityRing
+        header = QHBoxLayout()
+        heading_layout = QVBoxLayout()
+        heading_layout.setSpacing(2)
         self.heading = QLabel(title)
+        self.heading.setWordWrap(True)
+        self.heading.setMinimumWidth(0)
         self.heading.setStyleSheet('font-weight:700;color:#78c8ff;')
-        layout.addWidget(self.heading)
+        heading_layout.addWidget(self.heading)
+        self.completion = QLabel('Progress: —')
+        self.completion.setTextFormat(Qt.PlainText)
+        heading_layout.addWidget(self.completion)
+        self.activity_ring = WorkerActivityRing(self)
+        header.addLayout(heading_layout, 1)
+        header.addWidget(self.activity_ring, 0, Qt.AlignRight)
+        layout.addLayout(header)
+        self._raw_status = 'not_started'
+        self._last_progress = None
+        self._progress_activity = QElapsedTimer()
         self.status = QLabel('Not started')
         self.status.setTextFormat(Qt.PlainText)
         self.status.setWordWrap(True)
@@ -1859,6 +1950,102 @@ class WorkflowWorkerCard(QFrame):
         self._elapsed_clock = QElapsedTimer()
         self._elapsed_active = False
         layout.addWidget(self.elapsed)
+        self.activity_state = QLabel('Activity: unverified')
+        self.activity_state.setTextFormat(Qt.PlainText)
+        self.activity_state.setWordWrap(True)
+        layout.addWidget(self.activity_state)
+        self._navigation_state = {}
+        self._navigation_revision = None
+        self.navigation_buttons = {}
+        self._navigation_presses = {}
+        navigation = QHBoxLayout()
+        navigation.setSpacing(5)
+        for action, text, name in (('back', '←', 'Previous item'),
+                                   ('next', '→', 'Skip to next item'),
+                                   ('cancel', '×', 'Cancel current item')):
+            button = QPushButton(text)
+            button.setObjectName('WorkerNavigation_' + action)
+            button.setAutoDefault(False)
+            button.setDefault(False)
+            button.setMinimumHeight(28)
+            button.setMinimumWidth(30)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.setStyleSheet('padding:3px 5px;font-size:18px;font-weight:700;min-width:24px;')
+            button.setAccessibleName(title + ': ' + name)
+            button.setProperty('_optimus_navigation_action', action)
+            button.installEventFilter(self)
+            button.pressed.connect(lambda action=action: self._capture_navigation_press(action))
+            button.released.connect(lambda action=action: self._clear_navigation_press_later(action))
+            button.clicked.connect(lambda checked=False, action=action: self._emit_navigation_press(action))
+            self.navigation_buttons[action] = button
+            navigation.addWidget(button, 1)
+        layout.addLayout(navigation)
+        self.navigation_note = WorkflowSummaryLabel()
+        layout.addWidget(self.navigation_note)
+        self.set_navigation({}, enabled=False)
+
+    def _capture_navigation_press(self, action):
+        import copy
+        self._navigation_presses[action] = copy.deepcopy(self._navigation_state)
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.MouseButtonRelease, QEvent.KeyRelease, QEvent.Hide, QEvent.FocusOut):
+            action = watched.property('_optimus_navigation_action')
+            if action in ('back', 'next', 'cancel'):
+                self._clear_navigation_press_later(action)
+        return super().eventFilter(watched, event)
+
+    def _clear_navigation_press_later(self, action):
+        state = self._navigation_presses.get(action)
+        # Qt emits clicked immediately after released. Clear an aborted click
+        # on the next event turn, without clearing a later new press.
+        QTimer.singleShot(0, lambda: self._navigation_presses.pop(action, None)
+            if self._navigation_presses.get(action) is state else None)
+
+    def _emit_navigation_press(self, action):
+        state = self._navigation_presses.pop(action, None)
+        if isinstance(state, dict):
+            self.navigationRequested.emit(action, state)
+
+    def set_navigation(self, state, *, enabled=True):
+        state = state if isinstance(state, dict) else {}
+        revision = (state.get('session_id'), state.get('revision'))
+        if revision != self._navigation_revision:
+            self.navigation_note.clear()
+            self._navigation_revision = revision
+        self._navigation_state = dict(state)
+        valid = (enabled is True and isinstance(state.get('session_id'), str)
+                 and bool(state['session_id']) and type(state.get('revision')) is int
+                 and state['revision'] >= 0 and not state.get('pending'))
+        captions = {'back': 'Return to the previous eligible item after current work stops safely.',
+                    'next': 'Skip this item and continue after its current operation returns.',
+                    'cancel': 'Cancel this item at a safe boundary.'}
+        for action, button in self.navigation_buttons.items():
+            allowed = valid and state.get('can_' + action) is True
+            button.setEnabled(allowed)
+            reason = state.get(action + '_reason')
+            if not isinstance(reason, str) or not reason.strip():
+                reason = captions[action] if allowed else 'No live eligible item. Completed changes remain in results; supported undo is in Revert.'
+            button.setToolTip(reason[:1500])
+            button.setAccessibleDescription(reason[:1500])
+        self.navigation_buttons['next'].setAccessibleName(self.heading.text() + ': '
+            + ('Next saved result' if state.get('next_mode') == 'history' else 'Skip to next item'))
+        message = state.get('message')
+        if state.get('viewing_history') is True and isinstance(state.get('view_item'), dict):
+            item = state['view_item']
+            message = 'Previous result: ' + str(item.get('label') or item.get('key') or 'Saved item')[:500]
+            message += ' — ' + str(item.get('status') or 'Outcome recorded')[:80]
+            if item.get('message'):
+                message += '\n' + str(item['message'])[:800]
+        if isinstance(message, str) and message.strip():
+            self.set_navigation_message(message)
+        else:
+            self.navigation_note.setVisible(bool(self.navigation_note.text()))
+
+    def set_navigation_message(self, message):
+        message = str(message)[:1500]
+        self.navigation_note.setText(message)
+        self.navigation_note.setVisible(bool(message))
 
     def _fit_status(self):
         # A wrapping label inside a shared horizontal row needs an explicit
@@ -1887,6 +2074,21 @@ class WorkflowWorkerCard(QFrame):
     def update_state(self, state, *, maintenance=False):
         state = state if isinstance(state, dict) else {}
         raw_status = str(state.get('status', 'not_started'))
+        self._raw_status = raw_status
+        percentage = state.get('percentage') if maintenance else None
+        current, total = state.get('current'), state.get('total')
+        if not maintenance and type(current) is int and type(total) is int and 0 <= current <= total and total > 0:
+            percentage = current / total * 100
+        if (isinstance(percentage, (int, float)) and not isinstance(percentage, bool)
+                and math.isfinite(percentage) and 0 <= percentage <= 100):
+            if percentage != self._last_progress:
+                self._progress_activity.start()
+            self._last_progress = percentage
+            self.completion.setText(f'Progress: {percentage:.0f}%')
+        elif raw_status == 'completed':
+            self.completion.setText('Progress: 100%')
+        else:
+            self.completion.setText('Progress: —')
         installation_blocked = state.get('installation_blocked') is True
         scan_complete = state.get('scan_complete') is True
         offers = state.get('offers_count')
@@ -1968,6 +2170,37 @@ class WorkflowWorkerCard(QFrame):
                                              'waiting_for_maintenance', 'waiting_for_installer', 'waiting_for_preparation')
         self._elapsed_clock.start()
         self.refresh_elapsed()
+
+    def set_live_metrics(self, metrics, computer=None):
+        metrics = metrics if isinstance(metrics, dict) else {}
+        computer = computer if isinstance(computer, dict) else {}
+        cpu = metrics.get('cpu_percent')
+        terminal = self._raw_status in ('completed', 'completed_with_errors', 'failed', 'needs_review',
+            'cancelled', 'stopped', 'not_started', 'not_selected', 'not_run', 'deferred')
+        if self._raw_status in ('failed', 'needs_review', 'completed_with_errors'):
+            health, label = 'error', 'Needs attention'
+        elif self._raw_status in ('not_started', 'not_selected', 'not_run'):
+            health, label = 'unverified', 'Not running'
+        elif self._raw_status == 'completed':
+            health, label = 'complete', 'Finished'
+        elif self._raw_status in ('cancelled', 'stopped', 'deferred') or self._navigation_state.get('pending'):
+            health, label = 'waiting', 'Stopping / deferred' if terminal else 'Stopping safely'
+        elif self._raw_status.startswith('waiting') or self._raw_status == 'pending':
+            health, label = 'waiting', 'Waiting for a prerequisite'
+        elif computer.get('pressure') is True or computer.get('pressure') == 'high':
+            health, label = 'pressure', 'System under resource pressure'
+        elif (isinstance(cpu, (int, float)) and not isinstance(cpu, bool) and math.isfinite(cpu) and 0 <= cpu <= 100):
+            observed = cpu > 0.01 or self._progress_activity.isValid() and self._progress_activity.elapsed() < 8000
+            health, label = ('working', 'Activity observed') if observed else ('waiting', 'Waiting / external work')
+        else:
+            health, label = 'unverified', 'Activity not yet measurable'
+        self.activity_ring.set_activity(cpu, health, active=not terminal)
+        self.activity_state.setText(label)
+        self.activity_state.setStyleSheet('color:' + self.activity_ring.COLORS[health] + ';')
+        detail = str(metrics.get('reason') or metrics.get('scope') or
+            'Worker-thread CPU uses total computer capacity. Windows Update and vendor installers can work in other processes.')
+        self.activity_ring.setToolTip(label + '. ' + detail[:1500])
+        self.activity_ring.setAccessibleDescription(label + '. ' + detail[:1500])
 
     def refresh_elapsed(self):
         if self._elapsed_base is not None:
@@ -2051,6 +2284,13 @@ class OptimizationProgressWindow(QDialog):
         header_layout.addWidget(self.description, 4, 0)
         header_layout.addWidget(self.loading_animation, 0, 1, 5, 1, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(header)
+        from .widgets.live_activity import LiveSystemStatus
+        self.live_system_status = LiveSystemStatus(self)
+        layout.addWidget(self.live_system_status)
+        self._live_metrics_service = None
+        if getattr(owner, 'smoke_test', True) is False:
+            from .live_metrics import LiveMetrics
+            self._live_metrics_service = LiveMetrics(getattr(owner, 'backend', None))
         from .widgets.worker_grid import WorkerGrid
         self.worker_grid = WorkerGrid(WorkflowWorkerCard, self)
         self.worker_cards = self.worker_grid.cards
@@ -2110,6 +2350,9 @@ class OptimizationProgressWindow(QDialog):
         self._worker_elapsed_timer = QTimer(self)
         self._worker_elapsed_timer.setInterval(1000)
         self._worker_elapsed_timer.timeout.connect(self._refresh_worker_elapsed)
+        from .widgets.worker_navigation import WorkerNavigationController
+        self.worker_navigation = WorkerNavigationController(getattr(owner, 'backend', None), self.worker_cards, self)
+        self.worker_navigation.refresh(enabled=True)
         self.loading_animation.start()
 
     def _refresh_worker_elapsed(self):
@@ -2118,15 +2361,38 @@ class OptimizationProgressWindow(QDialog):
             self.worker_grid.update_jobs(status())
         for card in self.worker_cards.values():
             card.refresh_elapsed()
+        self.worker_navigation.refresh(enabled=not self.completed and not self.cancel.is_set())
+        self._update_live_metrics()
+
+    def _update_live_metrics(self):
+        service = self._live_metrics_service
+        payload = service.status() if service is not None else {}
+        self.live_system_status.update_metrics(payload)
+        workers = payload.get('workers', {}) if isinstance(payload, dict) else {}
+        computer = payload.get('computer', {}) if isinstance(payload, dict) else {}
+        for identity, card in self.worker_cards.items():
+            card.set_live_metrics(workers.get(identity), computer)
+
+    def _sync_live_metrics(self, active):
+        service = getattr(self, '_live_metrics_service', None)
+        if service is not None:
+            if active and not self.completed:
+                service.start()
+            else:
+                service.stop(wait=False)
+        for card in getattr(self, 'worker_cards', {}).values():
+            card.activity_ring._sync()
 
     def showEvent(self, event):
         super().showEvent(event)
         if not self.completed:
+            self._sync_live_metrics(True)
             self._refresh_worker_elapsed()
             self._worker_elapsed_timer.start()
 
     def hideEvent(self, event):
         self._worker_elapsed_timer.stop()
+        self._sync_live_metrics(False)
         super().hideEvent(event)
 
     def changeEvent(self, event):
@@ -2134,8 +2400,10 @@ class OptimizationProgressWindow(QDialog):
         if hasattr(self, '_worker_elapsed_timer'):
             if self.isMinimized() or not self.isVisible() or self.completed:
                 self._worker_elapsed_timer.stop()
+                self._sync_live_metrics(False)
             else:
                 self._worker_elapsed_timer.start()
+                self._sync_live_metrics(True)
 
     def configure_workers(self, settings):
         self._worker_selection = dict(settings) if isinstance(settings, dict) else {}
@@ -2293,6 +2561,7 @@ class OptimizationProgressWindow(QDialog):
         log = field(state, 'log', default='')
         if log:
             self.log.appendPlainText(display(log))
+        self.worker_navigation.refresh(enabled=not self.completed and not self.cancel.is_set())
 
     def _update_cancellation_message(self):
         kind = 'application' if self._waiting_update_kind == 'software_updates' else 'background'
@@ -2300,6 +2569,8 @@ class OptimizationProgressWindow(QDialog):
 
     def finish(self, result, error=None):
         self.completed = True
+        self._sync_live_metrics(False)
+        self.worker_navigation.refresh(enabled=False)
         self._worker_elapsed_timer.stop()
         self.loading_animation.stop()
         self._waiting_for_updates = False
@@ -2380,6 +2651,7 @@ class OptimizationProgressWindow(QDialog):
                     'description': 'The run stopped before a final updater status was reported. Review the saved outcome before retrying.'})
         self.cancel_button.setText('Close results')
         self.cancel_button.setEnabled(True)
+        self._update_live_metrics()
 
     def clear_auto_continue(self):
         self.auto_continue_button.setEnabled(False)
@@ -2422,6 +2694,7 @@ class OptimizationProgressWindow(QDialog):
         self._foreground_update_clocks.clear()
         if self.isVisible():
             self._worker_elapsed_timer.start()
+            self._sync_live_metrics(True)
         self.configure_workers(self._worker_selection)
         self.worker_cards['maintenance'].update_state({'status': 'pending',
             'description': 'Preparing the approved follow-up checks and fixes.', 'percentage': 0}, maintenance=True)
@@ -2471,6 +2744,7 @@ class OptimizationProgressWindow(QDialog):
                 self.close()
         else:
             self.cancel.set()
+            self.worker_navigation.refresh(enabled=False)
             self.cancel_button.setEnabled(False)
             self.description.setText(self._update_cancellation_message()
                 if self._waiting_for_updates else

@@ -94,6 +94,16 @@ class Backend(ExtendedMaintenanceBackend):
         return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event,
                                  browser_prompt=browser_prompt)
 
+    def workflow_navigation_status(self):
+        navigation = getattr(self.workflow, 'navigation', None)
+        return navigation.snapshot() if navigation is not None else {'active': False, 'session_id': None, 'jobs': []}
+
+    def request_workflow_navigation(self, session_id, job_id, revision, action):
+        navigation = getattr(self.workflow, 'navigation', None)
+        if navigation is None:
+            return {'accepted': False, 'message': 'This workflow does not expose active worker navigation.'}
+        return navigation.request(session_id, job_id, revision, action)
+
     def available_fixes(self, report, settings):
         from .post_run_fixes import available_fixes
         return available_fixes(self, report, settings)
@@ -367,6 +377,9 @@ class Backend(ExtendedMaintenanceBackend):
     def updates_scan(self):
         return self.maintenance.updates_scan()
 
+    def updates_scan_cancellable(self, cancel_event=None):
+        return self.maintenance.updates_scan(cancel_event=cancel_event)
+
     def update_app(self, package_id):
         return self.maintenance.updates_apply(package_id, confirmed=True)
 
@@ -406,6 +419,17 @@ class Backend(ExtendedMaintenanceBackend):
                         'note': 'A Windows restart is pending or its state could not be verified. Compatibility mode did not start an installer.', **before_install}
             options['compatibility_mode'] = True
         return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True, **options)
+
+    def app_presence_inspect(self, package_id, source='winget'):
+        """Read-only exact catalog and installed identity; grants no apply authority."""
+        from .app_presence import WindowsAppPresence
+        return WindowsAppPresence(self).inspect(package_id, source)
+
+    def app_presence_capabilities(self):
+        from .app_presence import SUPPORTED_INSTALLER_TYPES
+        return {'source': 'winget', 'supported': True,
+                'installer_types': list(SUPPORTED_INSTALLER_TYPES),
+                'note': 'Exact verifiable catalog releases only; quiet install/uninstall runs inside the software worker. Unsupported or ambiguous metadata needs review. This does not block other applications from reinstalling software.'}
 
     def update_disk_readiness(self):
         """Windows installers need system-drive space even when Optimus is on D:."""
@@ -462,6 +486,11 @@ class Backend(ExtendedMaintenanceBackend):
     def driver_backup_automatic(self):
         import uuid
         return self.backup_drivers(self.data_dir / 'driver-backups' / uuid.uuid4().hex)
+
+    def driver_backup_for_updates(self, offers, cancel_event=None, item_callback=None):
+        """Export and verify only current OEM packages replaced by exact offers."""
+        from .driver_update_backup import DriverUpdateBackup
+        return DriverUpdateBackup(self).backup(offers, cancel_event=cancel_event, item_callback=item_callback)
 
     def driver_update_apply_unattended(self, record, accept_eula=False):
         if accept_eula is not True:

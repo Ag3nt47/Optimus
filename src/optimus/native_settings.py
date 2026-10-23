@@ -73,6 +73,8 @@ class NativePreferences(Preferences):
             raise ValueError('Settings must be an object.')
         raw = copy.deepcopy(DEFAULTS)
         raw.update(copy.deepcopy(value))
+        from .software_app_rules import validate_app_rules
+        app_rules = validate_app_rules(raw.get('software_app_rules', []), native=True)
         roots = raw['duplicate_roots']
         if type(roots) is not list or len(roots) > 20:
             raise ValueError('Choose at most 20 native duplicate folders.')
@@ -102,10 +104,11 @@ class NativePreferences(Preferences):
         common.update(duplicate_roots=[], duplicates_enabled=False,
                       startup_approved_entries=[], startup_review_enabled=False,
                       startup_policy='review', driver_policy='review', cloud_policy='review',
-                      software_update_ids=[], software_update_exclude_ids=[],
+                      software_update_ids=[], software_update_exclude_ids=[], software_app_rules=[],
                       software_updates_enabled=False)
         result = Preferences.validate(common)
         result.update(packages)
+        result['software_app_rules'] = app_rules
         result.update(duplicate_roots=roots, startup_approved_entries=entries)
         for key in ('duplicates_enabled', 'startup_review_enabled', 'software_updates_enabled'):
             if type(raw[key]) is not bool:
@@ -121,10 +124,15 @@ class NativePreferences(Preferences):
         if result['startup_review_enabled'] and result['startup_policy'] != 'review':
             if not current or not result['startup_changes_approved'] or not entries:
                 raise ValueError('Approve exact native startup files before automatic disabling.')
+        active_rules = result['software_updates_enabled'] and any(
+            row['update_policy'] == 'always_update' or row['presence'] != 'keep_current' for row in app_rules)
+        if active_rules and (not current or not result['software_update_agreements_accepted']):
+            raise ValueError('Complete setup and accept package agreements before automatic per-app actions.')
         if result['software_updates_enabled'] and result['software_update_policy'] != 'review':
             if not current or not result['software_update_agreements_accepted']:
                 raise ValueError('Complete setup and accept native package-manager agreements before automatic updates.')
-            if result['software_update_policy'] == 'selected' and not packages['software_update_ids']:
+            if (result['software_update_policy'] == 'selected' and not packages['software_update_ids']
+                    and not any(row['update_policy'] == 'always_update' for row in app_rules)):
                 raise ValueError('Choose exact native package IDs before automatic updates.')
             if result['software_update_policy'] == 'all_supported' and not result['software_update_all_approved']:
                 raise ValueError('Approve the all-supported native update scope explicitly.')

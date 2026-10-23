@@ -134,6 +134,7 @@ def test_combined_browser_scopes_forward_the_ui_callback_cancel_and_progress_onc
         assert all(settings[key] for key in BROWSER_FLAGS)
         assert settings['browser_cleanup_browsers'] == ['chrome']
         assert settings['browser_keep_domains'] == ['example.com']
+        assert kwargs['cancel_event'].is_set() is False
         kwargs['item_callback']({'current': 0, 'total': 1, 'description': 'Fixture browser scope'})
         return {'fixture_browser_cleanup': True, 'failed_items': 0}
     operation = Mock(side_effect=dispatch)
@@ -143,7 +144,8 @@ def test_combined_browser_scopes_forward_the_ui_callback_cancel_and_progress_onc
             progress.append, cancelled, browser_prompt=prompt)
     operation.assert_called_once()
     assert observed['browser_prompt'] is prompt
-    assert observed['cancel_event'] is cancelled
+    assert observed['cancel_event'].external is cancelled
+    assert cancelled.is_set() is False
     assert callable(observed['clean'])
     assert callable(observed['item_callback'])
     assert any(event['description'] == 'Fixture browser scope' for event in progress)

@@ -14,6 +14,7 @@ import time
 import uuid
 
 from .filesystem import _ordinary_data_path
+from .navigation import local_skip, shared_update_refusal, can_fail_forward
 
 WINDOWS_SOFTWARE = 'Review or update configured software'
 NATIVE_SOFTWARE = 'Review or install approved native package updates'
@@ -237,23 +238,28 @@ def installer_barrier(result):
         if isinstance(value, dict):
             if value.get('blocked_by_prior_installer') is True:
                 return str(value.get('stop_reason') or 'A previous installer remains unresolved; later conflicting operations were deferred.')[:4000]
-            if value.get('cancelled') is True:
+            if shared_update_refusal(value):
+                return shared_update_refusal(value)
+            if isinstance(value.get('result'), dict) and shared_update_refusal(value['result']):
+                return shared_update_refusal(value['result'])
+            if value.get('cancelled') is True and not local_skip(value):
                 return 'Updating was cancelled; later conflicting operations were deferred.'
             if (value.get('restartNeeded') is True or value.get('reboot_required') is True
                     or value.get('exitCode') in (3010, 1641)):
                 return 'An update requires a restart; later conflicting operations were deferred.'
             known_preflight = _known_preflight(value)
             known_batch = isinstance(value.get('items'), list) and _known_outcome(value)
+            known_terminal = can_fail_forward(value) or isinstance(value.get('result'), dict) and can_fail_forward(value['result'])
             if (value.get('running') is True or value.get('outcomeKnown') is False
                     or value.get('uncertain') is True and not known_preflight):
                 return 'An installer may still be running or its outcome is uncertain; later conflicting operations were deferred.'
-            if not known_preflight and not known_batch and (value.get('failed_items') or value.get('status') in ('failed', 'uncertain')
+            if not known_preflight and not known_batch and not known_terminal and (value.get('failed_items') or value.get('status') in ('failed', 'uncertain')
                                         or value.get('stop_reason')):
                 return str(value.get('stop_reason') or 'An update failed or remains uncertain; review installer state before another mutation.')[:4000]
             if 'items' in value and not isinstance(value['items'], list):
                 return 'The update item outcomes are malformed; later conflicting operations were deferred.'
             # Discovery status is independent of actual installer receipts.
-            pending.extend(item for key, item in value.items() if key not in ('driver_scan', 'app_scan'))
+            pending.extend(item for key, item in value.items() if key not in ('driver_scan', 'app_scan', 'backup'))
         elif isinstance(value, list):
             if any(not isinstance(row, dict) for row in value) and value is result.get('items'):
                 return 'An update item has an unknown outcome; later conflicting operations were deferred.'
@@ -279,7 +285,7 @@ def _uncertain(result, *, native=False):
                         or native and value.get('status') == 'failed' and not value.get('skipped')):
                     return True
             # A source-search timeout does not make a known idle installer live.
-            pending.extend(item for key, item in value.items() if key not in ('driver_scan', 'app_scan'))
+            pending.extend(item for key, item in value.items() if key not in ('driver_scan', 'app_scan', 'backup'))
         elif isinstance(value, list):
             pending.extend(value)
     return False
@@ -298,16 +304,22 @@ def pending_updates_barrier(backend):
 
 def _journal_result(result):
     saved = {key: result[key] for key in ('failed_items', 'cancelled', 'restartNeeded', 'uncertain', 'policy', 'review_only',
-             'stop_reason', 'reason', 'installer_started', 'outcomeKnown', 'blocked_by_prior_installer',
-             'installation_blocked', 'installation_block_reason') if key in result}
+             'stop_reason', 'reason', 'installer_started', 'outcomeKnown', 'running', 'blocked_by_prior_installer',
+             'installation_blocked', 'installation_block_reason', 'navigation_cancelled', 'navigation_cancelled_items',
+             'shared_barrier', 'failure_scope') if key in result}
+    if isinstance(result.get('error'), str):
+        saved['error'] = result['error'][:4000]
     saved['items'] = [{'id': str(row.get('id') or row.get('binding', {}).get('id', ''))[:280],
                       'status': row.get('status'), 'uncertain': row.get('uncertain', False),
+                      'presence': str(row.get('presence', ''))[:40], 'source': str(row.get('source', ''))[:40],
                       'error': str(row.get('error', ''))[:2000],
-                      'result': {key: (str(row['result'][key])[:2000] if key in ('note', 'failureKind') else row['result'][key])
+                      'reason': str(row.get('reason', ''))[:2000],
+                      'result': {key: (str(row['result'][key])[:2000] if key in ('note', 'failureKind', 'error') else row['result'][key])
                                  for key in ('exitCode', 'running', 'outcomeKnown',
                                  'restartNeeded', 'requiresReview', 'installer_started',
                                  'resultCode', 'hresult', 'aggregateResultCode', 'aggregateHresult',
-                                 'note', 'failureKind') if key in row['result']}
+                                 'navigation_cancelled', 'navigation_skipped', 'verified', 'shared_barrier',
+                                 'failure_scope', 'note', 'failureKind', 'error') if key in row['result']}
                       if isinstance(row.get('result'), dict) else {}}
                      for row in result.get('items', []) if isinstance(row, dict)][:1000]
     if _restart_needed(result):
@@ -322,6 +334,9 @@ def _journal_result(result):
         saved['held_ids'] = [value[:280] for value in result['held_ids'][:1000] if isinstance(value, str)]
     if isinstance(result.get('automatic_update_holds'), list):
         saved['automatic_update_holds'] = _bounded_update_holds(result)
+    if isinstance(result.get('app_presence'), dict):
+        presence = result['app_presence']
+        saved['app_presence'] = _journal_result({key: value for key, value in presence.items() if key != 'app_presence'})
     return saved
 
 
@@ -386,7 +401,7 @@ def _driver_completion_counts(result, evidence):
                                           ('aggregateResultCode', 2), ('aggregateHresult', 0))))
         if success:
             counts['installed'] += 1
-        elif status == 'skipped':
+        elif status == 'skipped' or status == 'cancelled' and local_skip(outcome):
             counts['skipped'] += 1
         elif status == 'deferred':
             counts['deferred'] += 1
@@ -418,6 +433,10 @@ def _driver_completion_notes(result):
         note = next((value for value in (row.get('error'), row.get('reason'), outcome.get('note'),
                                         outcome.get('reason'), outcome.get('error'))
                      if isinstance(value, str) and value.strip()), '')
+        if not note and type(outcome.get('hresult')) is int:
+            note = 'Driver result ' + str(outcome.get('resultCode')) + ', HRESULT 0x' + format(outcome['hresult'] & 0xffffffff, '08X')
+            if type(outcome.get('aggregateHresult')) is int:
+                note += '; aggregate HRESULT 0x' + format(outcome['aggregateHresult'] & 0xffffffff, '08X')
         if note and note[:500] not in notes:
             notes.append(note[:500])
         if len(notes) == 2:
@@ -442,6 +461,26 @@ def update_completion_state(result):
             for name in ('installed', 'failed', 'unverified', 'skipped', 'deferred', 'not_processed')) + '.'
         details = ' '.join(_driver_completion_notes(result))
         description = ' '.join(value for value in (reason, counts_text, details, summary) if value)
+    presence_counts = _presence_completion_counts(result)
+    if presence_counts is not None:
+        description = ('Application rules: ' + '; '.join(str(presence_counts[name]) + ' ' + name.replace('_', ' ')
+            for name in ('installed', 'removed', 'already_satisfied', 'skipped', 'needs_review', 'unverified'))
+            + '. Update installers completed: ' + str(presence_counts['updates_completed']) + '. ' + description)
+    if key != 'driver_scan':
+        notes = []
+        presence = result.get('app_presence')
+        groups = [result.get('items'), presence.get('items') if isinstance(presence, dict) else None]
+        for rows in groups:
+            for row in rows[:1000] if isinstance(rows, list) else []:
+                if not isinstance(row, dict) or row.get('status') not in ('failed', 'needs_review', 'skipped', 'cancelled'):
+                    continue
+                outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+                note = row.get('error') or outcome.get('note') or outcome.get('error')
+                if isinstance(note, str) and note.strip() and note not in description:
+                    notes.append(str(row.get('id') or 'Application') + ': ' + ' '.join(note.split())[:600])
+                if len(notes) >= 2: break
+            if len(notes) >= 2: break
+        if notes: description += ' Review: ' + '; '.join(notes)
     errors = evidence.get('errors')
     if isinstance(errors, list):
         notes = [str(row.get('error') or '')[:500] for row in errors[:3] if isinstance(row, dict)]
@@ -471,6 +510,9 @@ def update_completion_state(result):
             label = 'Availability not confirmed'
     if driver_counts is not None and result.get('installation_blocked') is not True and result.get('blocked_by_prior_installer') is not True:
         label = str(driver_counts['installed']) + ' installed / ' + str(offers) + ' found'
+    if presence_counts is not None:
+        label = (str(presence_counts['installed']) + ' installed / ' + str(presence_counts['removed'])
+                 + ' removed / ' + str(presence_counts['updates_completed']) + ' updates completed')
     items = result.get('items')
     state = {'description': description[:2000], 'current': len(items) if isinstance(items, list) else 0,
              'id': None,
@@ -480,6 +522,8 @@ def update_completion_state(result):
         state['total'] = 0
     if driver_counts is not None:
         state.update(driver_counts=driver_counts, total=0)
+    if presence_counts is not None:
+        state['presence_counts'] = presence_counts
     if evidence:
         state.update(scan_complete=complete, scan_status=str(evidence.get('status') or 'unknown'))
         if type(offers) is int and offers >= 0:
@@ -496,8 +540,45 @@ def update_completion_state(result):
     return state
 
 
+def _presence_completion_counts(result):
+    presence = result.get('app_presence')
+    rows = presence.get('items') if isinstance(presence, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return None
+    counts = dict(installed=0, removed=0, already_satisfied=0, skipped=0,
+                  needs_review=0, unverified=0, updates_completed=0)
+    for row in rows[:100]:
+        if not isinstance(row, dict):
+            counts['unverified'] += 1
+            continue
+        value = row.get('result') if isinstance(row.get('result'), dict) else {}
+        known = value.get('outcomeKnown') is True and value.get('running') is False
+        if row.get('status') == 'completed':
+            if known and value.get('installer_started') is True and value.get('verified') is True and row.get('presence') in ('keep_installed', 'keep_uninstalled'):
+                counts['installed' if row['presence'] == 'keep_installed' else 'removed'] += 1
+            else:
+                counts['unverified'] += 1
+        elif row.get('status') == 'already_satisfied' and known and value.get('installer_started') is False:
+            counts['already_satisfied'] += 1
+        elif row.get('status') in ('skipped', 'cancelled') and known and value.get('installer_started') is False:
+            counts['skipped'] += 1
+        else:
+            counts['needs_review' if known else 'unverified'] += 1
+    for row in result.get('items', [])[:1000] if isinstance(result.get('items'), list) else []:
+        if not isinstance(row, dict):
+            continue
+        value = row.get('result') if isinstance(row.get('result'), dict) else {}
+        if (row.get('status') == 'completed' and value.get('outcomeKnown') is True
+                and value.get('running') is False and value.get('installer_started') is True
+                and type(value.get('exitCode')) is int and value['exitCode'] in (0, 3010, 1641)):
+            counts['updates_completed'] += 1
+    return counts
+
+
 def update_completion_status(result):
     if result.get('cancelled'):
+        return 'cancelled'
+    if result.get('navigation_cancelled') is True or result.get('navigation_cancelled_items'):
         return 'cancelled'
     evidence = next((result[key] for key in ('driver_scan', 'app_scan') if isinstance(result.get(key), dict)), {})
     driver_counts = (_driver_completion_counts(result, evidence)
@@ -536,6 +617,8 @@ class ParallelAppUpdates:
         self.backend, self.title, self.operation = backend, title, operation
         self.job_id = ('driver_updates' if title in DRIVER_TITLES else
                        'windows_updates' if title == 'Check or install Windows security updates' else 'software_updates')
+        from .navigation import cursor_for
+        self.navigation = cursor_for(backend, self.job_id, title)
         self.mux = mux.for_job(self.job_id) if hasattr(mux, 'for_job') else mux
         self.isolate_bridge = isolate_bridge
         self.directory = Path(backend.data_dir) / 'parallel-updates'
@@ -612,6 +695,8 @@ class ParallelAppUpdates:
                       'started_at': self.record['started_at'], 'background': True,
                       'worker_log_path': str(self.path)}
         self._write()  # Prepared evidence is durable before the thread can mutate.
+        if self.navigation is not None:
+            self.navigation.receipt_callback = self.item_receipt
         # Only coordinated operations expose a mandatory before-install gate.
         # They may search under an old installer barrier; unphased/serial calls
         # retain their original refusal before executing an arbitrary operation.
@@ -644,17 +729,32 @@ class ParallelAppUpdates:
         self.record.update(status='deferred', result=self.result, finished_at=time.time())
         self._write()
         self.mux.background('cancelled' if cancelled else 'deferred', update_completion_state(self.result))
+        if self.navigation is not None:
+            self.navigation.end('cancelled' if cancelled else 'deferred')
 
     def item_progress(self, state):
         state = state if isinstance(state, dict) else {'description': str(state)}
         if 'id' not in state and isinstance(state.get('binding'), dict):
             state = dict(state, id=state['binding'].get('id'))
-        if self.title in DRIVER_TITLES and type(state.get('current')) is int:
+        backing_up = self.title in DRIVER_TITLES and state.get('phase') == 'backup'
+        if self.title in DRIVER_TITLES and not backing_up and type(state.get('current')) is int:
             state = dict(state, current=max(0, state['current'] - 1))
-        self.record['current_item'] = {key: state[key] for key in ('id', 'description', 'current', 'total', 'item') if key in state}
-        self.record['installer_prepared'] = True
+        self.record['current_item'] = {key: state[key] for key in ('id', 'description', 'current', 'total', 'item', 'phase') if key in state}
+        if not backing_up:
+            self.record['installer_prepared'] = True
         self._write()  # Existing sequential helpers emit this before each installer.
-        self.mux.background('installing' if self.concurrent_preparation else 'running', state)
+        self.mux.background('preparing' if backing_up else 'installing' if self.concurrent_preparation else 'running', state)
+
+    def item_receipt(self, row):
+        """Persist the actual terminal item before navigation advances its lane."""
+        compact = _journal_result({'items': [row]})['items']
+        if len(compact) != 1:
+            raise ValueError('The terminal updater item receipt is invalid.')
+        history = self.record.setdefault('terminal_items', [])
+        if len(history) >= 1000:
+            raise RuntimeError('The bounded updater receipt limit was reached; review before continuing.')
+        history.append(compact[0])
+        self._write()
 
     def _run(self):
         from .runtime_priority import lower_worker_priority
@@ -669,6 +769,7 @@ class ParallelAppUpdates:
             self.mux.background(phase, {'description': 'Checking approved driver updates.'
                                 if self.title in DRIVER_TITLES else 'Checking approved application updates.'})
             worker = isolated_backend(self.backend, isolate_bridge=self.isolate_bridge)
+            worker._optimus_lane_cancel_event = self.cancel_event
             self.result = self.operation(worker, self.item_progress)
             if not isinstance(self.result, dict):
                 raise ValueError('The ' + worker_kind + ' updater returned an unknown result.')
@@ -686,6 +787,8 @@ class ParallelAppUpdates:
                 evidence = getattr(error, key, None)
                 if isinstance(evidence, dict):
                     self.result[key] = _bounded_scan_evidence(evidence)
+            if isinstance(getattr(error, 'app_presence', None), dict):
+                self.result['app_presence'] = _journal_result(error.app_presence)
         finally:
             if worker is not None and getattr(worker, 'bridge', None) is not getattr(self.backend, 'bridge', None):
                 # Never close the shared backend (its sampler/controller belongs
@@ -722,6 +825,11 @@ class ParallelAppUpdates:
                                stop_reason='The application outcome journal could not be saved; verify installer state before continuing.',
                                journal_error=str(error)[:2000])
         self.mux.background(update_completion_status(self.result), update_completion_state(self.result))
+        if self.navigation is not None:
+            if self.navigation.current is not None:
+                self.navigation.finish(update_completion_status(self.result),
+                    outcome_known=not _uncertain(self.result, native=native))
+            self.navigation.end(update_completion_status(self.result))
 
     def join(self, *, next_stage=None):
         if self.joined:
@@ -736,7 +844,7 @@ class ParallelAppUpdates:
             self.thread.join()  # Never release the workflow lease before this returns.
         result = self.result or {'items': [], 'failed_items': 1, 'uncertain': True,
                                  'stop_reason': 'The application worker did not establish an outcome.'}
-        status = 'cancelled' if result.get('cancelled') else 'failed' if result.get('failed_items') else 'completed'
+        status = 'cancelled' if result.get('cancelled') or result.get('navigation_cancelled') or result.get('navigation_cancelled_items') else 'failed' if result.get('failed_items') else 'completed'
         self.stage.update(status=status,
                           started_at=self.record.get('execution_started_at', self.record['started_at']),
                           finished_at=self.record.get('finished_at', time.time()), result=result)
@@ -853,12 +961,19 @@ class ParallelInstallerQueue:
         phase = None
         with self.condition:
             while True:
-                if self.cancel_event.is_set():
+                if job.cancel_event.is_set():
                     job.gate_refusal = 'Cancelled before installation; no installer was launched.'
                     return False
+                if job.navigation is not None and job.navigation.local_requested():
+                    return False  # This exact local item does not close another lane's gate.
                 if self.barrier:
                     job.gate_refusal = self.barrier
                     return False
+                if self.active_job is job:
+                    # Presence rules and later updates share one job-owned
+                    # installer slot. Reentry must retain that ownership after
+                    # fresh cancellation/barrier checks, rather than deadlock.
+                    return True
                 if not self.maintenance_ready:
                     current = 'waiting_for_maintenance'
                     description = 'Discovery finished; waiting for initial resource checks and selected temporary-file cleanup.'

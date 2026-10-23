@@ -21,6 +21,8 @@ PORTABLE_SUITES = (
     'test_launch_review.py', 'test_smart_setup_integration.py', 'test_consumer_privacy_controls.py',
     'test_unattended_configuration.py',
     'test_change_history.py', 'test_revert_dialog.py',
+    'test_live_metrics.py', 'test_app_presence.py', 'test_driver_update_backup.py',
+    'test_software_app_rules.py',
 )
 
 

@@ -92,7 +92,8 @@ def test_explicit_settings_save_stamps_normalized_complete_scope_only(windows, p
     args, kwargs = captured[0]
     assert args[0] == 'save_preferences'
     payload = args[1]
-    assert len(payload) == len(DEFAULTS) == 90
+    assert len(payload) == len(DEFAULTS) == 91
+    assert payload['software_app_rules'] == []
     assert matches_unattended(payload) and matches_unattended(Preferences.validate(payload))
     assert payload['unattended_browser_policy'] == policy
     assert payload['launch_at_sign_in'] is True and payload['automation_mode'] == 'startup'

@@ -284,13 +284,48 @@ class Maintenance:
             rows = [row for row in rows if row["id"].casefold() not in duplicates]
         return rows, True, skipped
 
-    def updates_scan(self) -> dict[str, Any]:
+    def _read_only_update_search(self, cancel_event):
+        """Cancel only our exact WinGet listing child; never an installer.
+
+        A request remains pending until the child has exited. Native update
+        apply commands continue using the non-interruptible installer runner.
+        """
+        arguments = [self._winget(), 'upgrade', '--source', 'winget', '--disable-interactivity']
+        if cancel_event.is_set():
+            return subprocess.CompletedProcess(arguments, 130, '', 'Read-only update search cancelled.')
+        child = subprocess.Popen(arguments, shell=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        deadline = time.monotonic() + 120
+        requested = False
+        stop_deadline = None
+        while True:
+            try:
+                output, errors = child.communicate(timeout=0.1)
+                return subprocess.CompletedProcess(arguments, 130 if requested else child.returncode,
+                    output, errors or ('Read-only update search cancelled.' if requested else ''))
+            except subprocess.TimeoutExpired:
+                if cancel_event.is_set() or time.monotonic() >= deadline:
+                    if not requested:
+                        requested = True
+                        stop_deadline = time.monotonic() + 2
+                        try: child.terminate()
+                        except OSError: pass  # Retain the child and wait for proven exit.
+                    elif stop_deadline is not None and time.monotonic() >= stop_deadline:
+                        try: child.kill()
+                        except OSError: pass  # Failed termination never establishes quiescence.
+                        stop_deadline = None
+                    # communicate() must prove this direct read-only child is
+                    # quiescent before the caller clears its pending request.
+
+    def updates_scan(self, *, cancel_event=None) -> dict[str, Any]:
         """Read the winget source only; never accept agreements during a scan."""
         self._last_update_ids = set()
         self._last_update_packages = {}
         self._last_update_scan = 0.0
         started = time.time()
-        result = self._run([self._winget(), "upgrade", "--source", "winget", "--disable-interactivity"])
+        result = (self._read_only_update_search(cancel_event) if cancel_event is not None else
+                  self._run([self._winget(), "upgrade", "--source", "winget", "--disable-interactivity"]))
         output = _ANSI.sub("", result.stdout or "").replace("\r", "")
         stderr = _ANSI.sub("", result.stderr or "")
         rows, structured, skipped = self._parse_update_table(output, source_context="winget")
