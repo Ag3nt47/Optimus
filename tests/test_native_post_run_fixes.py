@@ -421,7 +421,9 @@ def test_initial_uncertain_or_restart_state_blocks_installers_but_allows_support
     result = service.apply_available_fixes(source, settings)
     service.apply_security_recommendation.assert_called_once()
     service.updates_scan.assert_not_called()
-    assert result['counts']['completed'] == 1 and result['counts']['deferred'] == 1
+    assert result['counts']['completed'] == 1 and result['counts']['deferred'] == 0
+    assert any(item['id'] == 'software_updates' and item['reason'] for item in result['manual_items'])
+    assert not any(stage.get('action_id') == 'software_updates' for stage in result['stages'])
 
 
 @pytest.mark.parametrize('fresh_restart', [True, None])
@@ -654,8 +656,8 @@ def test_prior_native_timeout_failure_is_not_retried_without_verified_terminatio
     result = service.apply_available_fixes(source, settings)
     service.updates_scan.assert_not_called()
     service.update_app_unattended.assert_not_called()
-    assert result['counts']['deferred'] == 1
-    assert any(item['id'] == 'installer_state' and 'termination is unverified' in item['reason']
+    assert result['counts']['deferred'] == 0
+    assert any(item['id'] == 'software_updates' and 'termination is unverified' in item['reason']
                for item in result['manual_items'])
     assert result['final_verification']['status'] == 'needs_review'
 
@@ -671,8 +673,10 @@ def test_prior_escaped_updater_exception_without_result_cannot_authorize_retry(t
     result = service.apply_available_fixes(source, settings)
     service.updates_scan.assert_not_called()
     service.update_app_unattended.assert_not_called()
-    assert result['counts']['deferred'] == 1
-    assert 'without a verified operation result' in result['stop_reason']
+    assert result['counts']['deferred'] == 0
+    assert any(item['id'] == 'software_updates' and 'without a verified operation result' in item['reason']
+               for item in result['manual_items'])
+    assert not result['reviewed_plan']['actions']
 
 
 def test_prior_structured_known_terminated_windows_failure_can_recheck_fresh_offer(tmp_path):

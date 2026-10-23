@@ -40,6 +40,20 @@ An exact-version hold skips that app release and retains its reason while other 
 
 This disposable fixture shows one held app and two unverified source offers. The driver is the active worker; the overall workflow is still at 44%.
 
+## Safe continuation in one run
+
+While app and driver catalogs are searching, maintenance can perform already-approved independent inventory, resource and privacy checks. Shared temporary-file cleanup waits until discovery releases its staging files; installers still wait until that cleanup finishes. Cancellation keeps the worker and maintenance lease until its active operation returns.
+
+Known package-specific failures keep their reason and advance to the next eligible app or driver. Driver offers that disappear, change identity or cannot support unattended interaction are skipped before installation. A failed driver download permits continuation only with complete, terminal native result codes; unknown or shared errors keep their barrier. No blind retry, unsupported driver forcing or automatic restart is added.
+
+A prior unresolved installer blocks conflicting cleanup and installations while independent checks continue. Follow-up previews show those channels as manual review, with the actual reason, rather than advertising an automatic attempt that must defer. A later barrier records that this follow-up did not start an installer or perform a fresh update search. No extra app launch is needed to advance past a known package-local refusal.
+
+## Security recommendation selection
+
+![One labeled selection control per security finding](optimus-security-review.png)
+
+This disposable fixture shows the **Review** checkbox selected. Each row has one labeled control; selecting it only enables **Review selected recommendations**. A separate **Yes — apply / No — skip** question determines whether each recommendation runs. Nothing is selected or approved by default.
+
 ## Driver installation
 
 Automatic driver backup targets the installed OEM driver packages matched to the actual approved offers. It avoids exporting unrelated packages from the entire driver store before every batch. Each selected package must have verified backup files before its update is eligible to install. Unsupported mappings, inbox packages without an exportable backup, export failures and changes in identity are reported per offer. Other backed-up eligible offers can continue. Windows Update quiet-install, hardware/provider/date, agreement, permission and restart checks still apply.

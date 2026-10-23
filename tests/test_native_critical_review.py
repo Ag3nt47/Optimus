@@ -449,3 +449,29 @@ def test_ci_runs_the_bot_before_publishing_and_retains_failure_artifacts():
     assert review < build
     assert '--github-summary' in source[review:build]
     assert 'if: always()' in source and 'path: test-artifacts/' in source
+
+
+@pytest.mark.parametrize('defect', [None, 'blank-label', 'duplicate-indicator'])
+def test_security_selection_review_detects_unmarked_and_duplicate_controls(reviewer, app, monkeypatch, defect):
+    if defect:
+        original = bot.SecurityReviewDialog.__init__
+        def broken(dialog, *args, **kwargs):
+            original(dialog, *args, **kwargs)
+            if defect == 'blank-label':
+                dialog.selection_control(0).setText('')
+            else:
+                dialog.table.item(0, 0).setCheckState(Qt.Unchecked)
+        monkeypatch.setattr(bot.SecurityReviewDialog, '__init__', broken)
+    owner = QWidget()
+    try:
+        reviewer.review_security_selection(owner, bot.VIEWPORTS[0], 'regression')
+        findings = {row['id']: row for row in reviewer.report['checks']}
+        target = findings['regression.security-selection.one-labeled-control']
+        assert target['status'] == ('failed' if defect else 'passed')
+        assert findings['regression.security-selection.review-only']['status'] == 'passed'
+        assert (reviewer.output / 'regression-security-selection-unchecked.png').is_file()
+        assert (reviewer.output / 'regression-security-selection-checked.png').is_file()
+    finally:
+        owner.close()
+        owner.deleteLater()
+        app.processEvents()

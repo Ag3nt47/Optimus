@@ -474,24 +474,65 @@ function New-SCMDriverQuietRefusal {
         resultCode=4;aggregateResultCode=4;hresult=$HResult;aggregateHresult=$HResult
         restartNeeded=$RestartNeeded;unattended=$true
         installer_started=$InstallerStarted;outcomeKnown=$true;running=$false
-        requiresReview=$true;failureKind='quiet_mode_unavailable'
+        requiresReview=$true;failure_scope='package';failureKind='quiet_mode_unavailable'
         note='Windows Update could not complete the approved driver in quiet mode. Review this update in Windows Update. No interactive fallback or forced installation was started.'
+    }
+}
+function Get-SCMDriverPreflightHResult {
+    param([Parameter(Mandatory=$true)]$Exception)
+    # PowerShell can wrap a COM property failure. Keep an authorization/busy/
+    # service HRESULT from any native inner exception instead of masking it
+    # with the generic MethodInvocationException HRESULT.
+    $failure=$Exception;$code=[int]$Exception.HResult
+    for($depth=0;$null -ne $failure -and $depth -lt 8;$depth++){
+        $code=[int]$failure.HResult
+        if($code -in @([int]0x80240016,[int]0x80240018,[int]0x80240019,[int]0x8024001B,
+            [int]0x8024001E,[int]0x8024001F,[int]0x80240020,[int]0x80070005,[int]0x80070070,[int]0x8A150102,1618)){
+            return $code
+        }
+        $failure=$failure.InnerException
+    }
+    return $code
+}
+function New-SCMDriverPreflightRefusal {
+    param([Parameter(Mandatory=$true)]$Record,
+        [Parameter(Mandatory=$true)][ValidateSet('package_unavailable','version_changed','unsupported_installer','download_failed')][string]$FailureKind,
+        [Parameter(Mandatory=$true)][string]$Note,[int]$HResult=0,[int]$AggregateHResult=0,
+        [ValidateSet(2,3,4,5)][int]$ResultCode=4,[ValidateSet(2,3,4,5)][int]$AggregateResultCode=4,
+        [bool]$RestartNeeded=$false)
+    # Only callers before Install() may use this no-launch receipt. Preserve
+    # native download HRESULTs so shared authorization/service/busy failures
+    # override package scope in the Python installer gate.
+    [pscustomobject]@{
+        id=$Record.id;revision=$Record.revision;title=$Record.title
+        resultCode=$ResultCode;aggregateResultCode=$AggregateResultCode
+        hresult=$HResult;aggregateHresult=$AggregateHResult;restartNeeded=$RestartNeeded
+        unattended=$true;installer_started=$false;outcomeKnown=$true;running=$false
+        requiresReview=$true;failure_scope='package';failureKind=$FailureKind
+        note=$Note.Substring(0,[Math]::Min(2000,$Note.Length))
     }
 }
 function Invoke-SCMDriverUpdateApply {
     param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false)
     if(-not(Test-SCMAdministrator)){throw 'Administrator access is required; no automatic elevation was requested.'}
+    if($Unattended -and -not $AcceptEula){throw 'Saved driver license agreement approval is required for unattended installation.'}
     $parsed=[guid]::Empty
     if(-not [guid]::TryParse([string]$Record.id,[ref]$parsed) -or $Record.revision -isnot [int] -or $Record.revision -lt 0){throw 'Invalid exact Windows Update driver identity or revision.'}
     $session=New-SCMWuaSession
     $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
     if([int]$result.ResultCode -ne 2){throw 'Windows Update did not return a complete successful applicability scan.'}
     $selected=@($result.Updates | Where-Object {$_.Identity.UpdateID -ieq $parsed.ToString() -and $_.Identity.RevisionNumber -eq $Record.revision})
-    if($selected.Count -ne 1){throw 'The exact approved update is changed, ambiguous, installed or no longer applicable.'}
+    if($selected.Count -ne 1){
+        if($Unattended){return New-SCMDriverPreflightRefusal -Record $Record -FailureKind package_unavailable -Note 'The exact approved update is changed, ambiguous, installed or no longer applicable. No installer was started; other approved packages may be checked.'}
+        throw 'The exact approved update is changed, ambiguous, installed or no longer applicable.'
+    }
     $update=$selected[0]
     $fresh=ConvertTo-SCMDriverUpdateDescriptor -Update $update
     foreach($field in @('title','hardwareId','provider','driverClass','manufacturer','model','driverDate')){
-        if($Record.PSObject.Properties.Name -contains $field -and [string]$Record.$field -cne [string]$fresh.$field){throw 'The approved driver title, device or publisher metadata changed. Review the update again.'}
+        if($Record.PSObject.Properties.Name -contains $field -and [string]$Record.$field -cne [string]$fresh.$field){
+            if($Unattended){return New-SCMDriverPreflightRefusal -Record $Record -FailureKind version_changed -Note 'The approved driver title, device or publisher metadata changed. No installer was started; review this exact update again.'}
+            throw 'The approved driver title, device or publisher metadata changed. Review the update again.'
+        }
     }
     if ($Unattended -and [string]$Record.approvalMode -eq 'matching') { Assert-SCMDriverNotOlderThanInstalled -Record $Record -Fresh $fresh }
     $collection=New-SCMWuaCollection
@@ -500,8 +541,10 @@ function Invoke-SCMDriverUpdateApply {
     $installer.Updates=$collection
     $installer.IsForced=$false
     if($Unattended){
-        if(-not $AcceptEula){throw 'Saved driver license agreement approval is required for unattended installation.'}
-        if($fresh.canRequestUserInput -isnot [bool] -or $fresh.rebootBehavior -isnot [int] -or $fresh.rebootBehavior -notin @(0,2)){throw 'Unknown interaction metadata or mandatory-restart updates are excluded from unattended installation.'}
+        if($fresh.rebootBehavior -isnot [int] -or $fresh.rebootBehavior -notin @(0,2)){throw 'Unknown reboot metadata or mandatory-restart updates are excluded from unattended installation.'}
+        if($fresh.canRequestUserInput -isnot [bool]){
+            return New-SCMDriverPreflightRefusal -Record $Record -FailureKind unsupported_installer -Note 'This exact driver has unverified interaction capability. No installer or interactive fallback was started; review this package in Windows Update.'
+        }
         # CanRequestUserInput=True can still support ForceQuiet. This documented
         # WUA mode suppresses interaction; it does not force an incompatible
         # package or bypass Windows security. Missing quiet support fails closed.
@@ -510,7 +553,7 @@ function Invoke-SCMDriverUpdateApply {
             $installer.AllowSourcePrompts=$false
             Assert-SCMDriverQuietMode -Installer $installer
         } catch {
-            return New-SCMDriverQuietRefusal -Record $fresh -HResult ([int]$_.Exception.HResult)
+            return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception)
         }
         if($installer.RebootRequiredBeforeInstallation -or (Test-SCMWuaRebootPending)){throw 'A pending Windows restart must be completed before automated driver installation.'}
     }
@@ -525,16 +568,31 @@ function Invoke-SCMDriverUpdateApply {
     $downloader.IsForced=$false
     if($Unattended){
         try { Assert-SCMDriverQuietMode -Installer $installer }
-        catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult ([int]$_.Exception.HResult) }
+        catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception) }
     }
     $download=$downloader.Download()
     $downloadItem=$download.GetUpdateResult(0)
-    if([int]$download.ResultCode -ne 2 -or [int]$downloadItem.ResultCode -ne 2 -or [int]$downloadItem.HResult -ne 0){throw 'Windows Update did not completely download the selected driver.'}
+    # https://learn.microsoft.com/windows/win32/wua_sdk/idownloadresult-properties
+    # https://learn.microsoft.com/windows/win32/api/wuapi/nn-wuapi-iupdatedownloadresult
+    # Synchronous download completion needs both native terminal result codes
+    # and typed HRESULTs. Missing/in-progress results and COM throws stay closed.
+    if($null -eq $download -or $null -eq $downloadItem -or
+       $download.ResultCode -isnot [int] -or $download.ResultCode -notin @(2,3,4,5) -or
+       $downloadItem.ResultCode -isnot [int] -or $downloadItem.ResultCode -notin @(2,3,4,5) -or
+       $download.HResult -isnot [int] -or $downloadItem.HResult -isnot [int]){
+        throw 'Windows Update returned an incomplete or nonterminal driver download result. No driver installation was started; verify Windows Update before continuing.'
+    }
+    if($download.ResultCode -ne 2 -or $downloadItem.ResultCode -ne 2 -or $downloadItem.HResult -ne 0 -or $download.HResult -ne 0){
+        if($Unattended){
+            return New-SCMDriverPreflightRefusal -Record $fresh -FailureKind download_failed -ResultCode $downloadItem.ResultCode -AggregateResultCode $download.ResultCode -HResult $downloadItem.HResult -AggregateHResult $download.HResult -RestartNeeded (Test-SCMWuaRebootPending) -Note 'Windows Update returned a terminal failure downloading this driver. No driver installer was started. The exact download result is retained; no retry or forced installation was requested.'
+        }
+        throw 'Windows Update did not completely download the selected driver.'
+    }
     if($Unattended -and ($installer.RebootRequiredBeforeInstallation -or (Test-SCMWuaRebootPending))){throw 'A restart became pending before installation. The downloaded update was not installed.'}
     if($installer.IsBusy){throw 'Another Windows update installation started. The selected driver was not installed.'}
     if($Unattended){
         try { Assert-SCMDriverQuietMode -Installer $installer }
-        catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult ([int]$_.Exception.HResult) }
+        catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception) }
     }
     try {
         $installed=$installer.Install()

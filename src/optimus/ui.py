@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, 
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter, QScrollArea,
     QSizePolicy, QStackedWidget, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget,
@@ -2913,6 +2913,7 @@ class SecurityReviewDialog(QDialog):
         self._results = []
         self._review_data = dict(report) if isinstance(report, dict) else {}
         self._recommendations = {}
+        self._selection_controls = {}
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         layout = QVBoxLayout(self)
@@ -2925,10 +2926,11 @@ class SecurityReviewDialog(QDialog):
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(['Select', 'Recommendation', 'Why', 'Result'])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 58)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.setColumnWidth(0, 112)
         self.table.setColumnWidth(1, 230)
-        self.table.setColumnWidth(2, 400)
         for recommendation in report.get('recommendations', []) if isinstance(report, dict) else []:
             if not isinstance(recommendation, dict):
                 continue
@@ -2940,14 +2942,29 @@ class SecurityReviewDialog(QDialog):
             self.table.insertRow(row)
             selection = QTableWidgetItem()
             selection.setData(Qt.UserRole, identifier)
-            selection.setFlags(selection.flags() | Qt.ItemIsUserCheckable)
-            selection.setCheckState(Qt.Unchecked)
+            # A labeled widget avoids the native empty-cell focus rectangle
+            # looking like a second unlabeled checkbox on Windows.
+            selection.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 0, selection)
+            choice = QCheckBox('Review', self.table)
+            choice.setMinimumWidth(choice.fontMetrics().horizontalAdvance('Review') + 28)
+            self.table.setColumnWidth(0, max(self.table.columnWidth(0), choice.minimumWidth() + 16))
+            choice.setAccessibleName('Review recommendation: ' + str(recommendation.get('title', identifier)))
+            choice.setToolTip('Select for review. A separate Yes or No prompt is required before applying this recommendation.')
+            choice.toggled.connect(self._selection_changed)
+            self._selection_controls[identifier] = choice
+            cell = QWidget(self.table)
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(8, 2, 8, 2)
+            cell_layout.addWidget(choice)
+            cell_layout.addStretch()
+            cell.setFocusProxy(choice)
+            self.table.setCellWidget(row, 0, cell)
+            self.table.setRowHeight(row, max(34, choice.sizeHint().height() + 6))
             for column, value in ((1, recommendation.get('title', identifier)), (2, recommendation.get('reason', 'Review this finding.')), (3, 'Not approved')):
                 item = QTableWidgetItem(str(value))
                 item.setToolTip(str(value))
                 self.table.setItem(row, column, item)
-        self.table.itemChanged.connect(self._selection_changed)
         layout.addWidget(self.table, 1)
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
@@ -2968,8 +2985,11 @@ class SecurityReviewDialog(QDialog):
         bar.addWidget(self.close_button)
         layout.addLayout(bar)
 
+    def selection_control(self, row):
+        return self._selection_controls[self.table.item(row, 0).data(Qt.UserRole)]
+
     def _selection_changed(self, *_):
-        chosen = any(self.table.item(row, 0).checkState() == Qt.Checked for row in range(self.table.rowCount()))
+        chosen = any(self.selection_control(row).isChecked() for row in range(self.table.rowCount()))
         self.apply_button.setEnabled(chosen and self._worker is None and callable(getattr(self.backend, 'apply_security_recommendation', None)))
 
     def _render_details(self):
@@ -3002,14 +3022,15 @@ class SecurityReviewDialog(QDialog):
         self._queue = []
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
-            if item.checkState() != Qt.Checked:
+            choice = self.selection_control(row)
+            if not choice.isChecked():
                 continue
             identifier = item.data(Qt.UserRole)
             recommendation = self._recommendations[identifier]
             self._set_result(identifier, 'Approved for this attempt' if self._ask_recommendation(recommendation) else 'Declined; unchanged')
             if self.table.item(row, 3).text() == 'Approved for this attempt':
                 self._queue.append(identifier)
-            item.setCheckState(Qt.Unchecked)
+            choice.setChecked(False)
         if not self._queue:
             self.status.setText('No recommendation was approved. You can close this review and continue to process suggestions.')
             return

@@ -170,6 +170,7 @@ def _authorized(settings, channel):
 
 def _preview(backend, report, settings):
     actions, manual = [], []
+    prior_barrier = _prior_installer_barrier(backend, report)
     identifiers = _recommendation_ids(report.get('security_review'))
     for identity, title in SECURITY_FIXES.items():
         if identity in identifiers and not _native(backend):
@@ -187,6 +188,8 @@ def _preview(backend, report, settings):
             continue
         if _native(backend) and channel != 'software_updates':
             manual.append({'id': channel, 'title': title, 'reason': 'This Windows update channel is unavailable on this platform; use the native OS or vendor updater.'})
+        elif prior_barrier:
+            manual.append({'id': channel, 'title': title, 'reason': prior_barrier})
         elif _authorized(settings, channel):
             actions.append({'id': channel, 'title': title, 'kind': channel})
         else:
@@ -325,6 +328,20 @@ def _prior_installer_barrier(backend, report):
             if reason:
                 return 'The completed run has an unresolved installer or restart state. Review its saved outcome before another installer.'
     return ''
+
+
+def _blocked_installer(channel, reason, *, prior=False):
+    """Record only this follow-up's verified no-launch refusal, never an old scan."""
+    reason = str(reason)[:4000]
+    outcome = {'status': 'blocked', 'skipped': True, 'review_only': True, 'requiresReview': True,
+        'reason': reason, 'stop_reason': reason, 'installation_block_reason': reason,
+        'installation_blocked': True, 'blocked_by_prior_installer': prior is True,
+        'installer_started': False, 'outcomeKnown': True, 'running': False, 'items': []}
+    scan_key = {'software_updates': 'app_scan', 'driver_updates': 'driver_scan'}.get(channel)
+    if scan_key:
+        outcome[scan_key] = {'schema': 1, 'complete': False, 'status': 'not_started',
+            'offers_count': None, 'summary': 'This follow-up search was not started because installation is blocked. ' + reason}
+    return outcome
 
 
 def _action_status(value):
@@ -477,14 +494,19 @@ class PostRunFixes:
             progress = progress_callback or (lambda event: None)
             actions = original_plan['actions']
             halted = False
-            installer_barrier = _prior_installer_barrier(self.backend, source)
+            initial_installer_barrier = _prior_installer_barrier(self.backend, source)
+            installer_barrier = initial_installer_barrier
             installer_state_checked = False
             for index, action in enumerate(actions):
                 stage = {'title': action['title'], 'action_id': action['id'], 'kind': action['kind'],
                          'started_at': time.time(), 'status': 'prepared', 'action_status': 'prepared'}
                 result['stages'].append(stage)
                 if stopped() or halted:
-                    stage.update(status='skipped', action_status='deferred', result={'skipped': True, 'reason': result.get('stop_reason', 'Cancellation requested.')})
+                    reason = result.get('stop_reason', 'Cancellation requested.')
+                    outcome = (_blocked_installer(action['id'], reason)
+                               if halted and not stopped() and action['id'] in CHANNELS else
+                               {'skipped': True, 'reason': reason})
+                    stage.update(status='skipped', action_status='deferred', result=outcome)
                     result['counts']['deferred'] += 1
                     result['cancelled'] = result['cancelled'] or stopped()
                     journal()
@@ -511,7 +533,8 @@ class PostRunFixes:
                                     installer_barrier = 'A fresh Windows restart state is pending or unverifiable. Remaining installers were deferred.'
                         if action['id'] in CHANNELS and installer_barrier:
                             stage.update(status='skipped', action_status='deferred',
-                                         result={'skipped': True, 'reason': installer_barrier})
+                                         result=_blocked_installer(action['id'], installer_barrier,
+                                             prior=bool(initial_installer_barrier)))
                             result['counts']['deferred'] += 1
                             result['stop_reason'] = installer_barrier
                             if not any(item['id'] == 'installer_state' for item in result['manual_items']):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import re
 import threading
+import time
 import uuid
 
 _JOB = re.compile(r'[a-z][a-z0-9_.-]{0,63}\Z')
@@ -27,6 +28,32 @@ class ItemCancellation:
 
     def is_set(self):
         return self.cursor.stop_requested() or self.external is not None and self.external.is_set()
+
+    def wait(self, timeout=None):
+        """Wait for any cancellation source without blocking worker controls.
+
+        The item event wakes local requests immediately. Global and external
+        events are separate owners, so check them at most 50 ms apart without
+        spawning a thread or holding the navigation lock while sleeping.
+        """
+        if self.is_set():
+            return True
+        if timeout is not None:
+            if timeout > threading.TIMEOUT_MAX:
+                raise OverflowError('The cancellation wait timeout is too large.')
+            if not timeout > 0:
+                return False
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self.is_set():
+                return True
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return self.is_set()
+            with self.cursor.hub.lock:
+                item_stop = self.cursor._item_stop
+            if item_stop.wait(0.05 if remaining is None else min(0.05, remaining)):
+                return True
 
 
 class NavigationHub:

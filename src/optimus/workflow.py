@@ -283,7 +283,7 @@ class Workflow:
         try:
             from .parallel_updates import (ProgressMux, ParallelAppUpdates, ParallelInstallerQueue, WINDOWS_SOFTWARE, WINDOWS_DRIVERS,
                                            WINDOWS_DRIVER_REVIEW, DRIVER_TITLES,
-                                           independent_stage, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
+                                           independent_stage, ready_maintenance_stages, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_installer_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
@@ -597,7 +597,7 @@ class Workflow:
                 report['stages'].extend(parallel_job.start())
                 atomic_json(log_path, report)
 
-            for title, description, operation in stages:
+            for title, description, operation in ready_maintenance_stages(stages, parallel_job):
                 if parallel_job is not None and checkpoint_open and not independent_stage(title):
                     join_updates(title)
                 if parallel_job is not None and title in BEFORE_UPDATES and not checkpoint_open:

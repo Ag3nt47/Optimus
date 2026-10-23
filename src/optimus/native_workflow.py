@@ -292,7 +292,7 @@ class NativeWorkflow:
         report, lease, path, attempted, parallel_job = None, None, None, False, None
         try:
             from .parallel_updates import (ProgressMux, ParallelAppUpdates, ParallelInstallerQueue, NATIVE_SOFTWARE,
-                                           independent_stage, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
+                                           independent_stage, ready_maintenance_stages, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
@@ -401,7 +401,7 @@ class NativeWorkflow:
                 report['stages'].extend(parallel_job.start())
                 atomic_json(path, report)
 
-            for title, operation in stages:
+            for title, operation in ready_maintenance_stages(stages, parallel_job):
                 if parallel_job is not None and checkpoint_open and not independent_stage(title):
                     join_updates(title)
                 if parallel_job is not None and title in BEFORE_UPDATES and not checkpoint_open:

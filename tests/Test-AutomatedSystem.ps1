@@ -22,7 +22,7 @@ function Reset-Fixture {
  $script:SearchResult=[pscustomobject]@{ResultCode=[int]2;Updates=@($script:Update)}
  $script:Searcher=[pscustomobject]@{Online=$false};$script:Searcher|Add-Member ScriptMethod Search {param($query) if($query -cne "IsInstalled=0 and Type='Driver' and IsHidden=0"){throw 'Unexpected search'};return $script:SearchResult}
  $script:DownloadItem=[pscustomobject]@{ResultCode=[int]2;HResult=0}
- $script:DownloadResult=[pscustomobject]@{ResultCode=[int]2};$script:DownloadResult|Add-Member ScriptMethod GetUpdateResult {param($index) if($index -ne 0){throw 'Wrong index'};return $script:DownloadItem}
+ $script:DownloadResult=[pscustomobject]@{ResultCode=[int]2;HResult=[int]0};$script:DownloadResult|Add-Member ScriptMethod GetUpdateResult {param($index) if($index -ne 0){throw 'Wrong index'};return $script:DownloadItem}
  $script:Downloader=[pscustomobject]@{Updates=$null;IsForced=$true};$script:Downloader|Add-Member ScriptMethod Download {
   Assert-Test ($script:Installer.ForceQuiet -and -not $script:Installer.AllowSourcePrompts -and -not $this.IsForced) 'quiet/no-source-prompt/no-force before download'
   $script:Downloads++;return $script:DownloadResult
@@ -46,7 +46,15 @@ function Record-Fixture {
 function Assert-Blocked {
  param($Record,[string]$Reason,[bool]$Accept=$true)
  $blocked=$false
- try{Invoke-SCMDriverUpdateApply -Record $Record -Unattended $true -AcceptEula $Accept|Out-Null}catch{$blocked=$true}
+ try{
+  $refusal=Invoke-SCMDriverUpdateApply -Record $Record -Unattended $true -AcceptEula $Accept
+  $blocked=($null -ne $refusal -and $refusal.requiresReview -eq $true -and $refusal.failure_scope -eq 'package' -and
+    $refusal.failureKind -in @('package_unavailable','version_changed','unsupported_installer','download_failed') -and
+    $refusal.installer_started -eq $false -and $refusal.outcomeKnown -eq $true -and $refusal.running -eq $false -and
+    $refusal.resultCode -is [int] -and $refusal.resultCode -in @(2,3,4,5) -and
+    $refusal.aggregateResultCode -is [int] -and $refusal.aggregateResultCode -in @(2,3,4,5) -and
+    $refusal.hresult -is [int] -and $refusal.aggregateHresult -is [int])
+ }catch{$blocked=$true}
  Assert-Test ($blocked -and $script:Installs -eq 0) $Reason
 }
 Reset-Fixture

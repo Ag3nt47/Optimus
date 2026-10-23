@@ -1098,6 +1098,12 @@ class ParallelInstallerQueue:
 
     def wait_prepared(self):
         """Drain discovery before touching its shared TEMP/cache staging area."""
+        if self.prior_barrier:
+            # Cleanup is already forbidden by this durable installer barrier.
+            # Return it now so independent maintenance need not await another
+            # read-only search. The closed gate and final join still protect
+            # installer staging files and retain ownership until workers drain.
+            return self.prior_barrier
         if any(not job.prepared.is_set() for job in self.jobs):
             self.mux.wait_for_preparation()
         while any(not job.prepared.wait(timeout=0.2) for job in self.jobs):
@@ -1141,6 +1147,23 @@ class ParallelInstallerQueue:
                     job.thread.join()
             self.joined = True
         return [job.join() for job in self.jobs]
+
+
+def ready_maintenance_stages(stages, queue):
+    """Use catalog wait time for already-approved independent stages.
+
+    Reconsider readiness between foreground stages. Cleanup retains its native
+    discovery checkpoint; installers still wait until cleanup has returned.
+    """
+    pending = list(stages)
+    if pending:
+        yield pending.pop(0)  # Preserve the initial before-inventory boundary.
+    while pending:
+        index = 0
+        if (queue is not None and not queue.prior_barrier and pending[0][0] in BEFORE_UPDATES
+                and any(not job.prepared.is_set() for job in queue.jobs)):
+            index = next((i for i, stage in enumerate(pending) if independent_stage(stage[0])), 0)
+        yield pending.pop(index)
 
 
 def parallel_installer_stages(stages, titles):

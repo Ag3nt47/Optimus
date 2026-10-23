@@ -260,10 +260,10 @@ def test_security_review_starts_unselected_and_does_nothing_without_yes(qapp):
     dialog = SecurityReviewDialog(backend, security_report())
     try:
         assert not dialog.apply_button.isEnabled()
-        assert all(dialog.table.item(row, 0).checkState() == Qt.Unchecked for row in range(dialog.table.rowCount()))
+        assert all(not dialog.selection_control(row).isChecked() for row in range(dialog.table.rowCount()))
         dialog.apply_selected()
         backend.apply_security_recommendation.assert_not_called()
-        dialog.table.item(0, 0).setCheckState(Qt.Checked)
+        dialog.selection_control(0).setChecked(True)
         dialog._ask_recommendation = Mock(return_value=False)
         dialog.apply_selected()
         backend.apply_security_recommendation.assert_not_called()
@@ -297,14 +297,14 @@ def test_security_questions_per_item_on_gui_apply_only_yes_on_worker(qapp):
     asked = []
     try:
         for row in range(2):
-            dialog.table.item(row, 0).setCheckState(Qt.Checked)
+            dialog.selection_control(row).setChecked(True)
         dialog._ask_recommendation = lambda recommendation: asked.append((recommendation['id'], threading.get_ident())) or recommendation['id'] == 'fixture-two'
         dialog.apply_selected()
         finish_security(dialog, qapp)
         assert asked == [('fixture-one', threading.get_ident()), ('fixture-two', threading.get_ident())]
         assert len(calls) == 1 and calls[0][0] == 'fixture-two' and calls[0][1] != threading.get_ident()
         assert dialog.table.item(1, 3).text() == 'completed'
-        assert all(dialog.table.item(row, 0).checkState() == Qt.Unchecked for row in range(2))
+        assert all(not dialog.selection_control(row).isChecked() for row in range(2))
     finally:
         dialog.shutdown()
         dispose(dialog, qapp)
@@ -314,7 +314,7 @@ def test_security_permission_failure_is_visible(qapp):
     backend = SimpleNamespace(apply_security_recommendation=Mock(side_effect=PermissionError('Fixture permission denied')))
     dialog = SecurityReviewDialog(backend, security_report())
     try:
-        dialog.table.item(0, 0).setCheckState(Qt.Checked)
+        dialog.selection_control(0).setChecked(True)
         dialog._ask_recommendation = Mock(return_value=True)
         dialog.apply_selected()
         finish_security(dialog, qapp)
@@ -338,7 +338,7 @@ def test_cancelling_security_batch_stops_later_approved_items(qapp):
     dialog = SecurityReviewDialog(SimpleNamespace(apply_security_recommendation=apply), security_report())
     try:
         for row in range(2):
-            dialog.table.item(row, 0).setCheckState(Qt.Checked)
+            dialog.selection_control(row).setChecked(True)
         dialog._ask_recommendation = Mock(return_value=True)
         dialog.apply_selected()
         assert entered.wait(1)

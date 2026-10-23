@@ -30,7 +30,7 @@ def test_real_security_confirmation_only_explicit_yes_applies(qapp, answer):
         {'id': 'fixture-only', 'title': 'Disposable fixture recommendation',
          'reason': 'No system settings are changed.'}]}, owner)
     dialog.show()
-    dialog.table.item(0, 0).setCheckState(Qt.Checked)
+    dialog.selection_control(0).setChecked(True)
 
     def respond():
         question = qapp.activeModalWidget()
@@ -103,5 +103,47 @@ def test_labels_have_rendered_glyphs_before_and_during_hover(qapp, theme):
     finally:
         question.done(QMessageBox.No)
         question.deleteLater()
+        owner.deleteLater()
+        qapp.processEvents()
+
+
+@pytest.mark.parametrize('theme', ['cyber', 'crt', 'slate'])
+def test_security_selection_is_one_labeled_control_and_never_implies_consent(qapp, theme):
+    from PySide6.QtWidgets import QCheckBox
+    calls = []
+    owner = QWidget()
+    owner.setStyleSheet(build_qss(theme))
+    dialog = SecurityReviewDialog(SimpleNamespace(apply_security_recommendation=lambda *a, **k: calls.append(a)),
+        {'recommendations': [{'id': 'fixture-only', 'title': 'Review the fixture update source',
+                              'reason': 'Disposable finding; no host operation is allowed.'}]}, owner)
+    try:
+        dialog.show()
+        qapp.processEvents()
+        item = dialog.table.item(0, 0)
+        cell = dialog.table.cellWidget(0, 0)
+        choice = dialog.selection_control(0)
+        assert cell.findChildren(QCheckBox) == [choice]
+        assert item.data(Qt.CheckStateRole) is None
+        assert not item.flags() & Qt.ItemIsUserCheckable
+        assert choice.text() == 'Review' and not choice.isChecked()
+        assert 'Review the fixture update source' in choice.accessibleName()
+        assert 'separate Yes or No' in choice.toolTip()
+        assert not dialog.apply_button.isEnabled()
+        QTest.mouseMove(choice, choice.rect().center())
+        QTest.mouseClick(choice, Qt.LeftButton)
+        qapp.processEvents()
+        assert choice.isChecked() and dialog.apply_button.isEnabled()
+        assert calls == [] and dialog.table.item(0, 3).text() == 'Not approved'
+        choice.setFocus(Qt.TabFocusReason)
+        QTest.keyClick(choice, Qt.Key_Space)
+        assert not choice.isChecked() and not dialog.apply_button.isEnabled()
+        assert calls == []
+        assert choice.width() >= choice.fontMetrics().horizontalAdvance('Review') + 22
+        assert cell.geometry().height() >= choice.sizeHint().height()
+    finally:
+        dialog.shutdown()
+        dialog.close()
+        dialog.deleteLater()
+        owner.close()
         owner.deleteLater()
         qapp.processEvents()

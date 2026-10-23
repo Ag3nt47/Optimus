@@ -419,12 +419,19 @@ def test_all_cleanup_finishes_before_updater_and_independent_work_overlaps(tmp_p
         service.calls.append('browser_cleanup')
         return {'items': [], 'failed_items': 0}
     service.cleanup_categories, service.cleanup_scan, service.cleanup_apply = categories, scan, apply
+    def independent_review():
+        # This inventory can now be scheduled before cleanup during discovery.
+        service.calls.append('independent')
+        service.independent.set()
+        return []
+    service.installed_apps = independent_review
     with patch('optimus.browser_cleanup.run_browser_cleanup', side_effect=browser):
         workflow, thread, result, errors = start_workflow(service, settings(
             applications_review_enabled=True, cleanup_enabled=True,
             cleanup_category_ids=['fixture-temp'], browser_cache_enabled=True), native=native)
         try:
             assert service.independent.wait(15)
+            assert service.started.wait(15)
             assert 'cleanup_apply' in service.calls and 'browser_cleanup' in service.calls
             assert service.calls.index('browser_cleanup') < service.calls.index('update:Fixture.One')
             assert thread.is_alive() and 'verify' not in service.calls
@@ -584,6 +591,7 @@ def test_driver_prepares_during_app_install_and_foreground_keeps_working(tmp_pat
     try:
         assert service.independent.wait(15)
         assert driver_waiting.wait(15)
+        assert service.started.wait(15)
         assert not driver_started.is_set()
         jobs = {job['id']: job for job in events[-1]['jobs']}
         assert jobs['software_updates']['status'] == 'installing'

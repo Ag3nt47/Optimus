@@ -25,14 +25,14 @@ if str(ROOT / 'src') not in sys.path:
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QAbstractButton, QMessageBox, QScrollArea,
-    QDialog, QPlainTextEdit, QPushButton, QTabWidget, QWizard)
+    QCheckBox, QDialog, QPlainTextEdit, QPushButton, QTabWidget, QWizard)
 
 from optimus.automation import CURRENT_SETUP_VERSION
 from optimus.filesystem import _ordinary_data_path
 from optimus.native_settings import full_native_settings
 from optimus.native_ui import NativeOptimusWindow, NativeSetupWizard
 from optimus.onboarding import InitialSetupWizard
-from optimus.ui import OptimizationProgressWindow, OptimusWindow
+from optimus.ui import OptimizationProgressWindow, OptimusWindow, SecurityReviewDialog
 from optimus.launch_review import ask_launch_review
 from optimus.widgets.recovery_panel import RecoveryPanel
 from optimus.widgets.questions import make_yes_no_dialog
@@ -785,6 +785,40 @@ class CriticalReview:
             window.smoke_test = original
             dialog.close()
 
+    def review_security_selection(self, window, dimensions, prefix):
+        """Render the native table selection that previously looked like two empty boxes."""
+        apply = Mock(side_effect=AssertionError('Selection must never apply security changes.'))
+        dialog = SecurityReviewDialog(SimpleNamespace(apply_security_recommendation=apply),
+            {'recommendations': [{'id': 'fixture-vendor-review',
+                'title': 'Review vendor-only and legacy patch sources',
+                'reason': 'Disposable fixture: review official provider sources before taking action.'}]}, window)
+        try:
+            self.viewport(dialog, dimensions, prefix + '.security-selection')
+            choice = dialog.selection_control(0)
+            item = dialog.table.item(0, 0)
+            controls = dialog.table.cellWidget(0, 0).findChildren(QCheckBox)
+            self.check(prefix + '.security-selection.one-labeled-control', controls == [choice]
+                and choice.text() == 'Review' and item.data(Qt.CheckStateRole) is None
+                and not item.flags() & Qt.ItemIsUserCheckable,
+                'Each row must have exactly one labeled review checkbox and no native empty table checkbox.')
+            self.check(prefix + '.security-selection.fits', choice.width() >= choice.fontMetrics().horizontalAdvance('Review') + 22,
+                'The checkbox and Review label must fit without clipping at the requested viewport.')
+            self.check(prefix + '.security-selection.no-default-consent', not choice.isChecked()
+                and not dialog.apply_button.isEnabled() and not apply.called,
+                'Security review must start unselected, without approval or backend calls.')
+            self.screenshot(dialog, prefix + '-security-selection-unchecked')
+            choice.setChecked(True)
+            drain(self.app)
+            self.check(prefix + '.security-selection.review-only', dialog.apply_button.isEnabled()
+                and dialog.table.item(0, 3).text() == 'Not approved' and not apply.called,
+                'Selecting a finding only enables review; the separate Yes or No prompt still controls application.')
+            self.screenshot(dialog, prefix + '-security-selection-checked')
+        finally:
+            dialog.shutdown()
+            dialog.close()
+            dialog.deleteLater()
+            drain(self.app)
+
     def review_held_app_wait(self, window, dimensions, prefix):
         """A finished skipped app must not appear to own an active driver wait."""
         from optimus.parallel_updates import ProgressMux, update_completion_state, installer_barrier
@@ -1121,6 +1155,7 @@ class CriticalReview:
                 self.review_worker_controls_and_metrics(window, backend, dimensions, prefix)
                 self.review_app_rules(backend, dimensions, prefix)
                 self.review_revert(window, backend, dimensions, prefix)
+                self.review_security_selection(window, dimensions, prefix)
                 self.review_held_app_wait(window, dimensions, prefix)
                 self.review_update_wait(window, dimensions, prefix)
                 self.review_workflow(window, backend, dimensions, prefix)
