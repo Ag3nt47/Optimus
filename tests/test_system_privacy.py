@@ -225,7 +225,7 @@ def test_home_does_not_claim_unsupported_policy_controls_work(fixture):
     tool, runner = fixture
     runner.context['edition'] = 'Core'
     result = tool.apply_privacy(settings())
-    unsupported = {item['id'] for item in result['items'] if item['status'] == 'unsupported'}
+    unsupported = {item['id'] for item in result['items'] if item['status'] == 'not_applicable'}
     assert unsupported == {'tailored_experiences', 'optional_diagnostics', 'app_diagnostics'}
     assert runner.values['advertising_id'] == dword(0)
 
@@ -234,7 +234,7 @@ def test_absent_version_dependent_preferences_are_not_invented(fixture):
     tool, runner = fixture
     runner.values = {}
     result = tool.apply_privacy(settings(privacy_diagnostics_enabled=False, privacy_disable_tailored_experiences=False))
-    assert all(item['status'] == 'unsupported' for item in result['items'])
+    assert all(item['status'] == 'not_applicable' for item in result['items'])
     assert mutation_calls(runner) == []
 
 

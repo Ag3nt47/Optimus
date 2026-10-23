@@ -770,6 +770,83 @@ class CriticalReview:
             progress.deleteLater()
             drain(self.app)
 
+    def review_maintenance_progress(self, window, backend, dimensions, prefix):
+        """Completed policy/file decisions are distinct from opaque discovery."""
+        progress = OptimizationProgressWindow(window, threading.Event())
+        try:
+            self.viewport(progress, dimensions, prefix + '.maintenance-progress')
+            description = ('Privacy controls (3/9 checked). Three policies are not applicable on this fixture edition; '
+                'no unsupported policy was applied. Required Windows diagnostics and application privacy choices remain separate.')
+            progress.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 29,
+                'stage_status': 'running', 'description': description,
+                'item_progress': {'key': 'privacy:controls', 'label': 'Privacy controls (3/9 checked)',
+                                  'phase': 'verify', 'percent': 100 / 3},
+                'jobs': [{'id': 'driver_updates', 'status': 'scanning',
+                          'description': 'Querying Windows Update and present devices; native search has not reported a percentage.'}]})
+            maintenance, driver = (progress.worker_cards[key] for key in ('maintenance', 'driver_updates'))
+            self.check(prefix + '.maintenance-progress.privacy-checks',
+                maintenance.activity_ring.value_text() == '33%'
+                and maintenance.activity_ring.phase_caption == 'Verify'
+                and maintenance.completion.text() == 'Overall: 29%'
+                and '3/9 checked' in maintenance.activity_ring.accessibleDescription()
+                and maintenance.details.text() == description,
+                'Privacy progress must report durably checked selected-policy decisions; unavailable controls are not presented as applied, and the whole workflow retains its own percentage.')
+            drain(self.app)
+            labels = (progress.description, maintenance.details)
+            self.check(prefix + '.maintenance-progress.description-fit',
+                all(label.text() == description and label.toolTip() == description
+                    and label.accessibleDescription() == description
+                    and len(label.visible_text.splitlines()) <= 2
+                    and label.height() >= label.fontMetrics().lineSpacing() * 2
+                    and all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
+                        for line in label.visible_text.splitlines()) for label in labels),
+                'Long current-operation descriptions must fit two visible lines while retaining the complete tooltip and accessible text, in the header and maintenance card.')
+            self.check(prefix + '.maintenance-progress.driver-scan-unknown',
+                driver.activity_ring.value_text() == '—' and driver.activity_ring.active
+                and driver.activity_ring.phase_caption == 'Scan'
+                and driver.completion.text() == 'Overall: —',
+                'An opaque driver search must name Scan and stay indeterminate; elapsed time and an empty offer count are not a percentage.')
+            progress.content_scroll.verticalScrollBar().setValue(0)
+            drain(self.app)
+            self.screenshot(progress, prefix + '-maintenance-privacy-progress')
+            progress.update_progress({'stage': 'Clean temporary files', 'percentage': 30,
+                'stage_status': 'running',
+                'description': 'Discovering eligible files; the total is not known yet.',
+                'item_progress': {'key': 'cleanup:fixture-plan', 'label': 'Cleanup preview',
+                                  'phase': 'scan', 'percent': None},
+                'jobs': [{'id': 'driver_updates', 'status': 'scanning',
+                    'description': 'Present-device inventory is still being read.',
+                    'item_progress': {'key': 'driver-query:fixture', 'label': 'Present-device inventory',
+                                      'phase': 'device_query', 'percent': None}}]})
+            self.check(prefix + '.maintenance-progress.cleanup-phase-reset',
+                maintenance.activity_ring.value_text() == '—'
+                and maintenance.activity_ring.phase_caption == 'Scan'
+                and maintenance.activity_ring.active
+                and maintenance.completion.text() == 'Overall: 30%'
+                and driver.activity_ring.value_text() == '—',
+                'Starting cleanup discovery must clear the previous privacy fraction; unknown scan totals must remain unknown until the selected preview actually completes.')
+            drain(self.app)
+            self.screenshot(progress, prefix + '-maintenance-cleanup-discovery')
+            progress.update_progress({'stage': 'Clean temporary files', 'percentage': 30,
+                'stage_status': 'running', 'description': '3/8 preview-approved files checked; 2 removed, 1 preserved.',
+                'item_progress': {'key': 'cleanup:fixture-plan', 'label': 'Cleanup file checks',
+                                  'phase': 'cleanup', 'percent': 37.5}})
+            self.check(prefix + '.maintenance-progress.cleanup-file-fraction',
+                maintenance.activity_ring.value_text() == '37%'
+                and maintenance.activity_ring.phase_caption == 'Clean'
+                and maintenance.completion.text() == 'Overall: 30%'
+                and 'preserved' in progress.description.text(),
+                'Cleanup may count checked approved files, including preserved ones, without claiming that every checked file was removed.')
+            self.check(prefix + '.maintenance-progress.fixture-only', progress._live_metrics_service is None
+                and not backend.optimize.called and not backend.apply_available_fixes.called,
+                'These transitions use in-memory event fixtures, never a host cleanup, Windows query or metrics sampler.')
+        finally:
+            progress.completed = True
+            progress._worker_elapsed_timer.stop()
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
     def review_app_rules(self, backend, dimensions, prefix):
         from optimus.widgets.app_rules_editor import AppRulesEditor, UPDATE_CHOICES, PRESENCE_CHOICES
         from optimus.widgets.theme import build_qss
@@ -1273,6 +1350,7 @@ class CriticalReview:
                 self.review_optional_tools(window, backend, dimensions, prefix)
                 self.review_additional_workers(window, backend, dimensions, prefix)
                 self.review_worker_controls_and_metrics(window, backend, dimensions, prefix)
+                self.review_maintenance_progress(window, backend, dimensions, prefix)
                 self.review_app_rules(backend, dimensions, prefix)
                 self.review_revert(window, backend, dimensions, prefix)
                 self.review_security_selection(window, dimensions, prefix)

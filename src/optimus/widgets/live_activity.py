@@ -35,7 +35,10 @@ class WorkerActivityRing(QWidget):
         self.phase_caption = {'download': 'Download', 'install': 'Install', 'backup': 'Backup',
             'verify': 'Verify', 'scan': 'Scan', 'cleanup': 'Clean', 'optimize': 'Optimize',
             'prepare': 'Prepare', 'downloading': 'Download', 'installing': 'Install',
-            'backing_up': 'Backup', 'verifying': 'Verify', 'scanning': 'Scan'}.get(phase, 'Current item')
+            'backing_up': 'Backup', 'verifying': 'Verify', 'scanning': 'Scan',
+            'working': 'Working', 'waiting': 'Waiting', 'driver_offers': 'Offers',
+            'device_query': 'Devices', 'driver_records': 'Drivers', 'device_records': 'Devices',
+            'system_query': 'System', 'installed_driver_query': 'Drivers'}.get(phase, 'Current item')
         detail = str(description or 'The current operation has not reported a percentage.')[:2000]
         self.setToolTip(detail)
         self.setAccessibleDescription('Current item: ' + self.value_text() + '. ' + detail)

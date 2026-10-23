@@ -2100,6 +2100,8 @@ class WorkflowWorkerCard(QFrame):
         else:
             self.completion.setText('Overall: —')
         installation_blocked = state.get('installation_blocked') is True
+        if installation_blocked:
+            self.completion.setText('Overall: blocked')
         scan_complete = state.get('scan_complete') is True
         offers = state.get('offers_count')
         scan_label = state.get('scan_label')
@@ -2222,8 +2224,12 @@ class WorkflowWorkerCard(QFrame):
                     'Current operation: ' + str(int(percent)) + '% reported.') if percent is not None else
                    'This operation has not reported a percentage; the ring is indeterminate while running.')
         detail += ' Queue and workflow totals are shown separately in the bars.'
+        observed_phase = (item.get('phase', '') if item is not None else
+            'scan' if self._raw_status == 'scanning' else
+            'waiting' if self._raw_status.startswith('waiting') or self._raw_status == 'pending' else
+            'working' if not terminal else '')
         self.activity_ring.set_progress(percent, health, active=not terminal, description=detail,
-            phase=item.get('phase', '') if item is not None else '', estimated=estimated)
+            phase=observed_phase, estimated=estimated)
         self.activity_state.setText(label)
         self.activity_state.setStyleSheet('color:' + self.activity_ring.COLORS[health] + ';')
         # CPU observations can explain activity or pressure, but cannot replace
@@ -2309,8 +2315,7 @@ class OptimizationProgressWindow(QDialog):
         self.stage.setMinimumWidth(0)
         self.stage.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         header_layout.addWidget(self.stage, 3, 0)
-        self.description = QLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
-        self.description.setWordWrap(True)
+        self.description = WorkflowSummaryLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
         header_layout.addWidget(self.description, 4, 0)
         header_layout.addWidget(self.loading_animation, 0, 1, 5, 1, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(header)
@@ -2495,10 +2500,11 @@ class OptimizationProgressWindow(QDialog):
         self.processes.setPlainText(display(field(state, 'processes', default=[])))
         maintenance_phase = state.get('maintenance_status')
         if not isinstance(maintenance_phase, str) or not maintenance_phase.strip():
-            maintenance_phase = 'waiting' if waiting_for_updates else 'running'
+            maintenance_phase = ('waiting' if waiting_for_updates else
+                'failed' if state.get('stage_status') == 'failed' else 'running')
         maintenance_details = display(state.get('maintenance_wait_reason'))
         if not maintenance_details:
-            maintenance_details = (description if maintenance_phase.startswith('waiting_for_') else
+            maintenance_details = (description if maintenance_phase.startswith('waiting_for_') or state.get('item_progress') is not None else
                 'Ready for: ' + display(state['next_stage']) if waiting_for_updates and state.get('next_stage') else stage)
         self.worker_cards['maintenance'].update_state({'status': maintenance_phase,
             'description': maintenance_details,

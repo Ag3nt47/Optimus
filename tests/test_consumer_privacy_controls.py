@@ -68,7 +68,7 @@ def test_separate_silent_install_approval_works_on_home_only_for_existing_user_p
     items = {row['id']: row for row in result['items']}
     assert set(items) == {SILENT, 'consumer_features'}
     assert items[SILENT]['status'] == 'applied'
-    assert items['consumer_features']['status'] == 'unsupported'
+    assert items['consumer_features']['status'] == 'not_applicable'
     assert result['changed_count'] == 1
     assert [payload['control'] for _, payload, _ in mutation_calls(runner)] == [SILENT]
     assert 'do not block every installer' in result['note']
@@ -79,7 +79,7 @@ def test_missing_silent_preference_is_not_created_on_home(fixture):
     runner.context['edition'] = 'Core'
     runner.values = {}
     result = tool.apply_privacy(only(privacy_block_silent_consumer_apps_enabled=True))
-    assert all(row['status'] == 'unsupported' for row in result['items'])
+    assert all(row['status'] == 'not_applicable' for row in result['items'])
     assert not mutation_calls(runner)
 
 
@@ -89,7 +89,7 @@ def test_enterprise_content_policies_are_never_written_on_unsupported_editions(f
     runner.context['edition'] = edition
     result = tool.apply_privacy(only(privacy_disable_cloud_promotions_enabled=True))
     assert {row['id'] for row in result['items']} == {'cloud_optimized_content', 'consumer_account_content'}
-    assert all(row['status'] == 'unsupported' for row in result['items'])
+    assert all(row['status'] == ('unsupported' if edition == 'unknown' else 'not_applicable') for row in result['items'])
     assert not mutation_calls(runner)
 
 
@@ -132,7 +132,7 @@ def test_recall_exact_cumulative_revision_must_be_verified(fixture, ubr):
     tool, runner = fixture
     runner.context['ubr'] = ubr
     result = tool.apply_privacy(only(privacy_disable_recall_snapshots_enabled=True))
-    assert result['items'][0]['status'] == 'unsupported'
+    assert result['items'][0]['status'] == ('not_applicable' if ubr == 3914 and type(ubr) is int else 'unsupported')
     assert not mutation_calls(runner)
 
 
@@ -165,7 +165,7 @@ def test_documented_build_floors_are_enforced(fixture, key, build):
     tool, runner = fixture
     runner.context.update(build=build, edition='Enterprise', ubr=9999)
     result = tool.apply_privacy(only(**{_CONTROLS[key]['master']: True}))
-    assert next(row for row in result['items'] if row['id'] == key)['status'] == 'unsupported'
+    assert next(row for row in result['items'] if row['id'] == key)['status'] == 'not_applicable'
     assert not any(payload['control'] == key for _, payload, _ in mutation_calls(runner))
 
 

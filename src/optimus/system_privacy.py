@@ -91,6 +91,46 @@ _CONTROLS['recall_snapshots'] = dict(hive='LocalMachine', path=r'SOFTWARE\Polici
     minimum_build=26100, minimum_revision=3915,
     source='https://learn.microsoft.com/windows/client-management/mdm/policy-csp-windowsai#disableaidataanalysis',
     note='Windows blocks Recall snapshot saving and deletes previously saved snapshots when this policy is enabled. Restoring the original policy cannot restore deleted snapshots; a registry readback does not verify snapshot deletion.')
+# An unknown edition/build remains unverified; only recognizable Windows client
+# metadata can establish that a documented feature is simply not applicable.
+_KNOWN_CLIENT_EDITIONS = set(_CONSUMER_POLICY_EDITIONS) | {
+    'Core', 'CoreN', 'CoreSingleLanguage', 'CoreCountrySpecific',
+    'Professional', 'ProfessionalN', 'ProfessionalEducation', 'ProfessionalEducationN',
+    'ProfessionalWorkstation', 'ProfessionalWorkstationN',
+}
+_CONTROL_LABELS = {
+    'advertising_id': 'Advertising ID', 'tailored_experiences': 'Tailored experiences',
+    'optional_diagnostics': 'Optional diagnostic data', 'app_diagnostics': 'App diagnostic access',
+    'consumer_features': 'Consumer-content policy', 'cloud_optimized_content': 'Cloud promotions',
+    'consumer_account_content': 'Consumer account content', 'cross_device_clipboard': 'Cross-device clipboard',
+    'recall_snapshots': 'Recall snapshots',
+}
+
+
+def _unavailable_status(context):
+    return ('not_applicable' if context.get('platform') == 'Windows'
+            and type(context.get('build')) is int and context['build'] >= 10240
+            and context.get('edition') in _KNOWN_CLIENT_EDITIONS else 'unsupported')
+
+
+def _privacy_progress(callback, checked, total, *, policy=None, status=None, unknown=False, description=None):
+    # The fraction measures durably checked policy decisions, never native
+    # registry-call timing or the number of controls successfully applied.
+    if not callable(callback):
+        return
+    label = f'Privacy controls ({checked}/{total} checked)'
+    policy_label = _CONTROL_LABELS.get(policy, 'Windows suggestions: ' + str(policy or '').removeprefix('suggestions_'))
+    detail = description or (f'{policy_label}: ' + (str(status).replace('_', ' ') if status else 'checking'))
+    event = {'item_progress': {'key': 'privacy:controls', 'label': label, 'phase': 'verify',
+                              'percent': None if unknown else checked * 100 / total},
+             'description': label + '. ' + detail, 'current': checked, 'total': total,
+             'policy_id': policy, 'policy_status': status, 'progress_only': True}
+    try:
+        callback(event)
+    except Exception:
+        pass  # Display failures must not abandon a prepared registry operation.
+
+
 _ID = re.compile(r'^[a-f0-9]{32}$')
 MITRE_MITIGATIONS = {
     'M1049': {'id': 'M1049', 'name': 'Antivirus/Antimalware', 'url': 'https://attack.mitre.org/mitigations/M1049/'},
@@ -431,7 +471,7 @@ class SystemPrivacy:
         report['complete'] = not report['errors']
         return report
 
-    def apply_privacy(self, settings, cancel_event=None):
+    def apply_privacy(self, settings, cancel_event=None, *, progress_callback=None):
         keys = {control['master'] for control in _CONTROLS.values()} | {control['flag'] for control in _CONTROLS.values()}
         if not isinstance(settings, dict) or any(key in settings and type(settings[key]) is not bool for key in keys):
             raise ValueError('Privacy choices must be explicit booleans.')
@@ -439,12 +479,15 @@ class SystemPrivacy:
                     if (settings.get(control['master'], False) and settings.get(control['flag'], True))
                     or settings.get(control.get('alternate_master'), False)]
         report = {'id': uuid.uuid4().hex, 'version': 1, 'kind': 'privacy', 'status': 'running', 'created_at': time.time(),
-                  'items': [], 'errors': [], 'failed_items': 0, 'changed_count': 0, 'cancelled': False, 'sources': SOURCES,
+                  'items': [], 'errors': [], 'failed_items': 0, 'changed_count': 0, 'not_applicable_count': 0,
+                  'checked_count': 0, 'selected_count': len(selected), 'cancelled': False, 'sources': SOURCES,
                   'note': 'These Windows privacy controls reduce selected advertising/diagnostic uses. Required Windows diagnostic data, security protection and third-party app/account privacy choices remain separate. Existing content-delivery preferences are version dependent. Consumer/cloud policies require a documented Enterprise, Education or IoT Enterprise edition; clipboard/Recall policies require Pro or a supported higher edition. Device policies need administrator access. Registry readback verifies the preference only; these controls do not block every installer, reinstallation, tracker or data transfer. Windows Update, Store/browser updates and Defender remain available. If explicitly selected, the Recall policy makes Windows delete previous snapshots; restoring the policy cannot recover those snapshots.'}
         if not selected or _cancelled(cancel_event):
             report.update(status='cancelled' if _cancelled(cancel_event) else 'completed', cancelled=_cancelled(cancel_event))
             return report
         with self.lock:
+            _privacy_progress(progress_callback, 0, len(selected), unknown=True,
+                description='Reading Windows privacy eligibility; the native query has not reported a percentage.')
             context = self._call('context', cancel_event=cancel_event)
             self._journal(report)
             for key in selected:
@@ -452,6 +495,10 @@ class SystemPrivacy:
                     report['cancelled'] = True
                     break
                 control = _CONTROLS[key]
+                _privacy_progress(progress_callback, report['checked_count'], len(selected), policy=key)
+                if _cancelled(cancel_event):
+                    report['cancelled'] = True
+                    break
                 item = {'id': key, 'scope': control['scope'], 'status': 'prepared', 'desired': control['desired']}
                 if control.get('source'):
                     item['source'] = control['source']
@@ -460,14 +507,14 @@ class SystemPrivacy:
                 report['items'].append(item)
                 try:
                     if context.get('platform') != 'Windows' or type(context.get('build')) is not int or context['build'] < control['minimum_build']:
-                        item.update(status='unsupported', reason='This Windows version does not expose the selected supported control.')
+                        item.update(status=_unavailable_status(context), reason='This Windows version does not expose the selected supported control. No policy value was written.')
                     elif control.get('minimum_revision') and context['build'] == control['minimum_build'] and (
                             type(context.get('ubr')) is not int or context['ubr'] < control['minimum_revision']):
-                        item.update(status='unsupported', reason='This policy requires Windows 11 build 26100.3915 or later. The installed cumulative-update revision is older or unknown; no policy was written.')
+                        item.update(status=(_unavailable_status(context) if type(context.get('ubr')) is int and context['ubr'] >= 0 else 'unsupported'), reason='This policy requires Windows 11 build 26100.3915 or later. The installed cumulative-update revision is older or unknown; no policy was written.')
                     elif control.get('editions') and context.get('edition') not in control['editions']:
-                        item.update(status='unsupported', reason='Microsoft documents this consumer-content policy for Enterprise, Education and IoT Enterprise only. Home and Pro are not supported; no policy value was written.')
+                        item.update(status=_unavailable_status(context), reason='Microsoft documents this consumer-content policy for Enterprise, Education and IoT Enterprise only. Home and Pro are not supported; no policy value was written.')
                     elif control.get('policy') and not str(context.get('edition', '')).startswith(('Professional', 'Enterprise', 'Education', 'IoTEnterprise')):
-                        item.update(status='unsupported', reason='This policy is not documented for the installed Windows edition; use Windows privacy Settings.')
+                        item.update(status=_unavailable_status(context), reason='This policy is not documented for the installed Windows edition; use Windows privacy Settings.')
                     elif control['scope'] == 'device' and context.get('is_admin') is not True:
                         item.update(status='requires_admin', reason='This is a device-wide Windows policy and needs an administrator session. No elevation was requested.')
                     else:
@@ -477,7 +524,7 @@ class SystemPrivacy:
                             raise ValueError('The existing preference value is not a recognized setting.')
                         item['before'] = before
                         if control.get('existing_only') and not before['exists']:
-                            item.update(status='unsupported', reason='This version-dependent user preference is absent. No undocumented value was invented; review Windows Recommendations and offers.')
+                            item.update(status=_unavailable_status(context), reason='This version-dependent user preference is absent. No undocumented value was invented; review Windows Recommendations and offers.')
                         elif key == 'optional_diagnostics' and before.get('value') == 0:
                             item.update(status='already_configured', changed=False, reason='An existing more restrictive diagnostic-data policy was preserved; Optimus never increases collection from Off/Security to Required.')
                         elif before.get('value') == control['desired']:
@@ -488,10 +535,17 @@ class SystemPrivacy:
                                 report['cancelled'] = True
                                 item['status'] = 'cancelled'
                                 break
-                            outcome = self._call('registry_write', {'control': key, 'expected': before, 'value': control['desired'], 'remove': False}, cancel_event=cancel_event)
-                            if outcome.get('cancelled'):
-                                report['cancelled'] = True
-                                item.update(status='uncertain', reason='The request stopped waiting; the journal retains the original value for guarded restore.')
+                            try:
+                                outcome = self._call('registry_write', {'control': key, 'expected': before, 'value': control['desired'], 'remove': False}, cancel_event=cancel_event)
+                            except Exception as error:
+                                item.update(status='uncertain', error_type=type(error).__name__,
+                                    reason='The registry write returned no verified native outcome; the original value remains in private history. No further privacy writes were started.')
+                                report['failed_items'] += 1
+                                break
+                            if outcome.get('cancelled') or outcome.get('may_continue') is True:
+                                report['cancelled'] = outcome.get('cancelled') is True or _cancelled(cancel_event)
+                                item.update(status='uncertain', reason='The registry request stopped waiting and may continue; the journal retains the original value for guarded restore. No further privacy writes were started.')
+                                report['failed_items'] += 1
                                 break
                             if outcome.get('ok') is not True or _snapshot(outcome.get('current')) != {'exists': True, 'type': 'DWord', 'value': control['desired']}:
                                 raise RuntimeError('Windows did not verify the selected privacy value.')
@@ -501,10 +555,23 @@ class SystemPrivacy:
                     item.update(status='failed', error_type=type(error).__name__, reason='Windows refused, changed or could not verify this privacy control. The original value remains in private history when available.')
                 if item['status'] in ('failed', 'requires_admin', 'unsupported', 'uncertain'):
                     report['failed_items'] += 1
+                if item['status'] == 'not_applicable':
+                    report['not_applicable_count'] += 1
+                report['checked_count'] += 1
                 self._journal(report)
+                if report['checked_count'] < len(selected):
+                    _privacy_progress(progress_callback, report['checked_count'], len(selected), policy=key, status=item['status'])
+            report['cancelled'] = report['cancelled'] or _cancelled(cancel_event)
             report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_items'] else 'completed'
             report['finished_at'] = time.time()
             report['log_path'] = str(self._journal(report))
+            complete = (not report['cancelled'] and report['checked_count'] == len(selected)
+                        and not any(item['status'] == 'uncertain' for item in report['items']))
+            _privacy_progress(progress_callback, report['checked_count'], len(selected), unknown=not complete,
+                description=(f"Policy checks finished: {report['changed_count']} applied, "
+                    f"{report['not_applicable_count']} not applicable, {report['failed_items']} need review. "
+                    'Checks completed does not mean every setting was changed.' if complete else
+                    'Privacy checking stopped before every selected policy outcome was verified; review the saved results.'))
             return report
 
     def restore_privacy(self, change_id, cancel_event=None):

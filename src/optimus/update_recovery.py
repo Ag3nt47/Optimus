@@ -40,6 +40,84 @@ _MAX_JOURNAL = 256 * 1024
 _MAX_SUPPORT = 4 * 1024 * 1024
 
 
+def finished_package_attempt(record):
+    """Recognize only a receipt closing this journal's latest exact intent.
+
+    This is a read-only crash-gap check, not an inference from age, process
+    absence, a batch status or a successful search. Legacy journals without a
+    token remain unresolved. A subsequent package boundary replaces the token
+    before its native call and therefore invalidates every earlier closure.
+    """
+    if not isinstance(record, dict) or type(record.get('schema')) is not int or record['schema'] != 1:
+        return False
+    attempt = record.get('package_attempt')
+    history = record.get('terminal_items')
+    if (not isinstance(attempt, dict) or attempt.get('kind') != 'terminal-package-attempt-v1'
+            or not _identity(attempt.get('id')) or attempt.get('state') != 'finished'
+            or not isinstance(attempt.get('item_id'), str) or not attempt['item_id']
+            or len(attempt['item_id']) > 280 or not isinstance(history, list)
+            or not 1 <= len(history) <= 1000 or type(attempt.get('terminal_index')) is not int
+            or attempt['terminal_index'] != len(history) - 1
+            or not isinstance(attempt.get('terminal_sha256'), str)
+            or not _SHA.fullmatch(attempt['terminal_sha256'])):
+        return False
+    for key in ('prepared_at', 'finished_at'):
+        value = attempt.get(key)
+        if type(value) not in (int, float) or not 0 < value <= 32503680000 or not math.isfinite(value):
+            return False
+    if attempt['finished_at'] < attempt['prepared_at']:
+        return False
+    row = history[-1]
+    if (not isinstance(row, dict) or row.get('id') != attempt['item_id']
+            or row.get('status') not in ('completed', 'applied', 'failed', 'skipped', 'needs_review')):
+        return False
+    try:
+        digest = _digest(json.dumps(row, sort_keys=True, ensure_ascii=True, allow_nan=False,
+                                    separators=(',', ':')).encode('utf-8'))
+    except (TypeError, ValueError, RecursionError):
+        return False
+    if digest != attempt['terminal_sha256']:
+        return False
+    # Every earlier receipt must also be explicit. An unrelated terminal item
+    # cannot wash out a previously recorded unknown installer.
+    for item in history:
+        if not isinstance(item, dict):
+            return False
+        result = item.get('result')
+        if (not isinstance(result, dict) or result.get('outcomeKnown') is not True
+                or result.get('running') is not False or type(result.get('installer_started')) is not bool):
+            return False
+        code = result.get('exitCode')
+        if (type(code) is int and (code & 0xffffffff) in
+                (3010, 1641, 1618, 0x8A150109, 0x8A15010A, 0x8A15010B, 0x8A150102)):
+            return False
+        stack = [item]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, dict):
+                for key in ('restartNeeded', 'reboot_required', 'rebootRequired'):
+                    if key not in value or value[key] is False:
+                        continue
+                    # Maintenance's captured WinGet result uses None for its
+                    # explicitly checked no-restart case. Preserve that real
+                    # shape only with a strict terminal non-restart exit.
+                    code = result.get('exitCode')
+                    winget_clear = (key == 'restartNeeded' and value[key] is None
+                        and record.get('title') == _TITLE and type(code) is int
+                        and (code & 0xffffffff) not in (3010, 1641, 1618, 0x8A150109, 0x8A15010A, 0x8A15010B, 0x8A150102))
+                    if not winget_clear:
+                        return False
+                if (value.get('running') is True or value.get('outcomeKnown') is False
+                        or value.get('uncertain') is True or value.get('restartNeeded') is True
+                        or value.get('reboot_required') is True or value.get('rebootRequired') is True
+                        or value.get('exitCode') in (3010, 1641)):
+                    return False
+                stack.extend(part for part in value.values() if isinstance(part, (dict, list)))
+            elif isinstance(value, list):
+                stack.extend(value)
+    return True
+
+
 class _ReviewRequired(ValueError):
     def __init__(self, context):
         super().__init__('Historical launch arguments were not recorded; an exact operator review is required.')

@@ -388,12 +388,21 @@ class Workflow:
                                 'note': 'Review only; no driver was downloaded or installed by this workflow. Windows Update must report a successful completed scan; partial/failed/unknown scan results require review.'}
                     stages.append(('Review available driver updates', 'Checking Windows Update metadata; driver installation requires separate review.', driver_review))
 
+            def progress_operation(operation, *args, title, **kwargs):
+                from .item_progress import accepts_progress_callback
+                if accepts_progress_callback(operation):
+                    kwargs['progress_callback'] = item_progress(title)
+                return operation(*args, **kwargs)
+
             age = max(30, configuration['cleanup_age_days']) if configuration['intensity'] == 'Low' else configuration['cleanup_age_days']
             def clean(category_ids):
-                plan = self.backend.cleanup_scan(category_ids, age)
+                title = ('Clean temporary files' if category_ids == ['user-temp'] else
+                         'Clean selected browser data' if any(':' in value for value in category_ids) else
+                         'Clean selected additional categories')
+                plan = progress_operation(self.backend.cleanup_scan, category_ids, age, title=title)
                 if cancelled():
                     return {'cancelled': True, 'reason': 'Cancelled after preview; no files were deleted.'}
-                outcome = self.backend.cleanup_apply(plan) if plan.get('files') else {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0}
+                outcome = progress_operation(self.backend.cleanup_apply, plan, title=title) if plan.get('files') else {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0}
                 errors = plan.get('errors', [])
                 preview_partial = plan.get('complete') is not True or bool(errors)
                 refusals = max(outcome.get('skipped_count', 0), len(outcome.get('errors', [])))
@@ -477,7 +486,8 @@ class Workflow:
                     'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled')):
                 stages.append(('Apply saved privacy controls',
                                'Disabling selected Windows advertising and optional diagnostic sharing settings, with recovery records; managed or administrator-only settings may need review.',
-                               lambda: self.backend.apply_system_privacy(configuration, cancel_event=cancel_event)))
+                               lambda: progress_operation(self.backend.apply_system_privacy, configuration,
+                                   cancel_event=cancel_event, title='Apply saved privacy controls')))
             if configuration['windows_security_updates_enabled']:
                 def security_updates():
                     result = self.backend.windows_security_updates(configuration, cancel_event=cancel_event,

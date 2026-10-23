@@ -214,8 +214,8 @@ class Backend(ExtendedMaintenanceBackend):
             self._system_privacy_service = SystemPrivacy(self.data_dir)
         return self._system_privacy_service
 
-    def apply_system_privacy(self, settings, cancel_event=None):
-        return self._privacy_service().apply_privacy(settings, cancel_event=cancel_event)
+    def apply_system_privacy(self, settings, cancel_event=None, *, progress_callback=None):
+        return self._privacy_service().apply_privacy(settings, cancel_event=cancel_event, progress_callback=progress_callback)
 
     def restore_system_privacy(self, change_id, cancel_event=None):
         return self._privacy_service().restore_privacy(change_id, cancel_event=cancel_event)
@@ -328,13 +328,13 @@ class Backend(ExtendedMaintenanceBackend):
     def cleanup_categories(self):
         return self.cleaner.categories()
 
-    def cleanup_scan(self, category_ids=None, min_age_days=7):
+    def cleanup_scan(self, category_ids=None, min_age_days=7, *, progress_callback=None):
         if category_ids is None:
             category_ids = ['user-temp']
-        return self.cleaner.scan(list(category_ids), int(min_age_days))
+        return self.cleaner.scan(list(category_ids), int(min_age_days), progress_callback=progress_callback)
 
-    def cleanup_apply(self, plan):
-        return self.cleaner.apply(plan)
+    def cleanup_apply(self, plan, *, progress_callback=None):
+        return self.cleaner.apply(plan, progress_callback=progress_callback)
 
     def storage_scan(self, root):
         return self.bridge.request('storage_scan', root=str(root), timeout=120)
@@ -451,9 +451,22 @@ class Backend(ExtendedMaintenanceBackend):
     def drivers_list(self):
         return self._list(self.bridge.request('drivers_list'))
 
-    def _driver_updates_scan_raw(self):
+    @staticmethod
+    def _driver_discovery_progress(progress_callback, phase, percent=None):
+        if progress_callback is not None and not callable(progress_callback):
+            raise ValueError('An optional driver discovery callback must be callable.')
+        if progress_callback is not None:
+            try:
+                progress_callback({'phase': phase, 'percent': percent})
+            except Exception:
+                pass  # A display observer cannot abandon or replay discovery.
+
+    def _driver_updates_scan_raw(self, *, progress_callback=None):
+        self._driver_discovery_progress(progress_callback, 'scan')
+        options = ({'progress_callback': progress_callback, 'reportProgress': True}
+                   if progress_callback is not None else {})
         try:
-            scan = self.bridge.request('driver_updates_scan', timeout=300)
+            scan = self.bridge.request('driver_updates_scan', timeout=300, **options)
         except Exception as error:
             return {'updates': [], 'resultCode': 4, 'source': 'Windows Update', 'error': str(error)}
         if not isinstance(scan, dict):
@@ -461,9 +474,16 @@ class Backend(ExtendedMaintenanceBackend):
                     'error': 'Windows Update returned no usable scan report.'}
         return scan
 
-    def driver_updates_scan(self):
-        scan = dict(self._driver_updates_scan_raw())
-        scan['coverage'] = self.driver_coverage(scan)
+    def driver_updates_scan(self, *, progress_callback=None):
+        self._driver_discovery_progress(progress_callback, 'scan')
+        options = {'progress_callback': progress_callback} if progress_callback is not None else {}
+        scan = dict(self._driver_updates_scan_raw(**options))
+        scan['coverage'] = self.driver_coverage(scan, **options)
+        from .driver_coverage import driver_scan_evidence
+        evidence = driver_scan_evidence(scan)
+        complete = (evidence['complete'] and scan['coverage'].get('inventoryComplete') is True
+                    and not scan['coverage'].get('inventoryErrors'))
+        self._driver_discovery_progress(progress_callback, 'verify', 100 if complete else None)
         return scan
 
     def driver_devices(self):
@@ -472,16 +492,21 @@ class Backend(ExtendedMaintenanceBackend):
                                      'source': 'Not scanned (device inventory only)'})
 
 
-    def driver_coverage(self, scan=None):
+    def driver_coverage(self, scan=None, *, progress_callback=None):
         """Present devices, device problems and exact WUA matches; no changes."""
         from .driver_coverage import build_driver_coverage
+        self._driver_discovery_progress(progress_callback, 'device_query')
+        options = ({'progress_callback': progress_callback, 'reportProgress': True}
+                   if progress_callback is not None else {})
         if scan is None:
-            scan = self._driver_updates_scan_raw()
+            scan = self._driver_updates_scan_raw(**({'progress_callback': progress_callback}
+                                                   if progress_callback is not None else {}))
         try:
-            inventory = self.bridge.request('driver_device_inventory', timeout=120)
+            inventory = self.bridge.request('driver_device_inventory', timeout=120, **options)
         except Exception as error:
             inventory = {'complete': False, 'devices': [],
                          'errors': [{'source': 'Device inventory', 'error': str(error)}]}
+        self._driver_discovery_progress(progress_callback, 'verify')
         return build_driver_coverage(inventory, scan)
 
 

@@ -238,8 +238,20 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     scan_started_utc=datetime.now(timezone.utc).isoformat()
     scan_clock=time.monotonic()
     discovery=WorkItem(navigation,'driver:discovery','Search Windows Update for applicable driver updates',external=cancel_event)
+    discovery_state={'operation':'driver','discovery_progress':True,'phase':'scan',
+        'description':'Search Windows Update and inspect present devices'}
+    if callable(item_callback):
+        try:
+            item_callback(dict(discovery_state,item_progress=normalize_item_progress({
+                'key':'driver:discovery','label':'Driver discovery','phase':'scan','percent':None})))
+        except Exception:
+            pass  # Read-only progress observation does not alter scan outcomes.
+    discovery_reporter=BoundItemProgress(item_callback,'driver:discovery','Driver discovery',discovery_state)
     try:
-        scan=backend.driver_updates_scan()
+        options={}
+        if callable(item_callback) and accepts_progress_callback(backend.driver_updates_scan):
+            options['progress_callback']=discovery_reporter
+        scan=backend.driver_updates_scan(**options)
     except Exception as error:
         discovery.finish('failed',message=str(error))
         # Preserve the existing preparation/exception contract. Owners can save
@@ -252,6 +264,8 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
         try:error.driver_scan=failed
         except (AttributeError,TypeError):pass
         raise
+    finally:
+        discovery_reporter.close()
     skipped_discovery=discovery.requested()
     discovery.finish('cancelled' if skipped_discovery else 'completed',mutation_started=False)
     scan_completed_utc=datetime.now(timezone.utc).isoformat()

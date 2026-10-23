@@ -6,6 +6,7 @@ Discovery overlaps foreground maintenance; no installer is killed on cancel.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -862,11 +863,17 @@ class ParallelAppUpdates:
                 value = json.loads(path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 return 'An application update journal is unreadable; verify installer state first.'
-            if (not isinstance(value, dict) or value.get('schema') != 1 or value.get('owner') != self.owner
+            if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1 or value.get('owner') != self.owner
                     or value.get('id') != path.stem):
                 return 'Application update history ownership is unknown; verify installer state first.'
             if (value.get('status') in ('prepared', 'running', 'uncertain')
                     and value.get('installer_prepared', True) is not False):
+                    from .update_recovery import finished_package_attempt
+                    outcome = value.get('result')
+                    if (value.get('status') == 'running' and finished_package_attempt(value)
+                            and (outcome is None or isinstance(outcome, dict)
+                                 and not _uncertain(outcome) and installer_barrier(outcome) is None)):
+                        continue  # Exact native receipt, never a time/PID heuristic.
                     return ('A previous update installer has an unresolved outcome; no automatic retry was started. '
                         'Review installer state and the saved record before continuing: ' + str(path))
             if value.get('status') == 'needs_review' and isinstance(value.get('result'), dict) and value['result'].get('restartNeeded'):
@@ -938,6 +945,11 @@ class ParallelAppUpdates:
                 return  # A late tick cannot revive an older package or create intent.
             state = dict(state, item_progress=progress)
         backing_up = self.title in DRIVER_TITLES and state.get('phase') == 'backup'
+        discovering = (self.title in DRIVER_TITLES and state.get('operation') == 'driver'
+                       and state.get('discovery_progress') is True
+                       and state.get('phase') in ('scan', 'driver_offers', 'device_query', 'installed_driver_query',
+                           'driver_records', 'device_records', 'system_query', 'verify')
+                       and progress is not None and progress['key'] == 'driver:discovery')
         rechecking = (self.title == WINDOWS_SOFTWARE
                       and state.get('phase') in ('source_refresh', 'metadata_recheck'))
         if self.title in DRIVER_TITLES and not backing_up and type(state.get('current')) is int:
@@ -945,12 +957,20 @@ class ParallelAppUpdates:
         if state.get('progress_only') is not True:
             self.record['current_item'] = {key: state[key] for key in ('id', 'description', 'current', 'total', 'item', 'phase') if key in state}
             self.record['current_item']['item_progress'] = progress
-            if not backing_up and not rechecking:
+            if not backing_up and not rechecking and not discovering:
                 self.record['installer_prepared'] = True
+                identity = state.get('id')
+                if isinstance(identity, str) and 0 < len(identity) <= 280:
+                    self.record['package_attempt'] = {
+                        'kind': 'terminal-package-attempt-v1', 'id': uuid.uuid4().hex,
+                        'item_id': identity, 'state': 'prepared', 'prepared_at': time.time()}
+                else:
+                    # An unbound intent must never inherit a prior closure.
+                    self.record.pop('package_attempt', None)
             self._write()  # Only the original item boundary persists intent, never progress ticks.
         if rechecking:
             state = dict(state, current=0, total=0, scan_label='Rechecking publisher metadata')
-        self.mux.background('scanning' if rechecking else 'preparing' if backing_up else
+        self.mux.background('scanning' if rechecking or discovering else 'preparing' if backing_up else
                             'installing' if self.concurrent_preparation else 'running', state)
 
     def item_receipt(self, row):
@@ -962,6 +982,16 @@ class ParallelAppUpdates:
         if len(history) >= 1000:
             raise RuntimeError('The bounded updater receipt limit was reached; review before continuing.')
         history.append(compact[0])
+        attempt = self.record.get('package_attempt')
+        if isinstance(attempt, dict) and compact[0]['id'] == attempt.get('item_id'):
+            attempt = dict(attempt, state='finished', terminal_index=len(history)-1,
+                terminal_sha256=hashlib.sha256(json.dumps(compact[0], sort_keys=True,
+                    ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode('utf-8')).hexdigest(),
+                finished_at=time.time())
+            proposed = dict(self.record, package_attempt=attempt)
+            from .update_recovery import finished_package_attempt
+            if finished_package_attempt(proposed):
+                self.record['package_attempt'] = attempt
         self._write()
 
     def _run(self):

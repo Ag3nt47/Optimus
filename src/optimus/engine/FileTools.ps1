@@ -309,50 +309,84 @@ function Get-SCMDriverInventory {
 }
 
 # Windows Update Agent operations. Loading defines functions; no scan/install runs.
+function Publish-SCMDriverDiscoveryProgress {
+    param([scriptblock]$ProgressCallback,
+        [Parameter(Mandatory=$true)][ValidatePattern('^[a-z][a-z0-9_-]{0,47}$')][string]$Phase,
+        $Percent=$null)
+    if($null -eq $ProgressCallback){return}
+    $value=$null
+    if(($Percent -is [int] -or $Percent -is [long] -or $Percent -is [double]) -and
+        $Percent -ge 0 -and $Percent -le 100 -and -not [double]::IsNaN([double]$Percent) -and
+        -not [double]::IsInfinity([double]$Percent)){$value=[double]$Percent}
+    try{$null=& $ProgressCallback ([pscustomobject]@{phase=$Phase;percent=$value})}catch{}
+}
+function Publish-SCMDriverCollectionProgress {
+    param([scriptblock]$ProgressCallback,[string]$Phase,[int]$Completed,[int]$Total,[ref]$Previous)
+    if($null -eq $ProgressCallback -or $Total -le 0){return}
+    $percent=[int][math]::Floor(100.0*$Completed/$Total)
+    # Final 100 is published only after the whole native phase validates.
+    if($percent -ge 100 -or $percent -le $Previous.Value){return}
+    $Previous.Value=$percent
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase $Phase -Percent $percent
+}
 function Get-SCMDeviceCoverageInventory {
+    param([scriptblock]$ProgressCallback)
     # Read-only. Never invokes a device rescan, enable/disable or installer.
     $errors=New-Object 'Collections.Generic.List[object]'
     $devices=@();$drivers=@();$pnpComplete=$false;$driversComplete=$false
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase device_query
     try{$devices=@(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop);$pnpComplete=$true}
     catch{$errors.Add([pscustomobject]@{source='Win32_PnPEntity';error=$_.Exception.Message})}
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase installed_driver_query
     try{$drivers=@(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop);$driversComplete=$true}
     catch{$errors.Add([pscustomobject]@{source='Win32_PnPSignedDriver';error=$_.Exception.Message})}
-    $byDevice=@{}
+    $byDevice=@{};$driverDone=0;$driverPercent=-1
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase driver_records -Percent $(if($driversComplete){0}else{$null})
     foreach($driver in $drivers){
         $key=[string]$driver.DeviceID
-        if(-not $key){continue}
-        if(-not $byDevice.ContainsKey($key)){$byDevice[$key]=New-Object 'Collections.Generic.List[object]'}
-        $date=Get-SCMWuaProperty $driver 'DriverDate' ''
-        if($date){try{$date=([datetime]$date).ToUniversalTime().ToString('o')}catch{$date=[string]$date}}
-        $byDevice[$key].Add([pscustomobject]@{
-            version=[string]$driver.DriverVersion;date=[string]$date;inf=[string]$driver.InfName
-            signed=(Get-SCMWuaProperty $driver 'IsSigned')
-            provider=[string]$driver.DriverProviderName;manufacturer=[string]$driver.Manufacturer
-            deviceClass=[string]$driver.DeviceClass
-        })
+        if($key){
+            if(-not $byDevice.ContainsKey($key)){$byDevice[$key]=New-Object 'Collections.Generic.List[object]'}
+            $date=Get-SCMWuaProperty $driver 'DriverDate' ''
+            if($date){try{$date=([datetime]$date).ToUniversalTime().ToString('o')}catch{$date=[string]$date}}
+            $byDevice[$key].Add([pscustomobject]@{
+                version=[string]$driver.DriverVersion;date=[string]$date;inf=[string]$driver.InfName
+                signed=(Get-SCMWuaProperty $driver 'IsSigned')
+                provider=[string]$driver.DriverProviderName;manufacturer=[string]$driver.Manufacturer
+                deviceClass=[string]$driver.DeviceClass
+            })
+        }
+        $driverDone++
+        Publish-SCMDriverCollectionProgress -ProgressCallback $ProgressCallback -Phase driver_records -Completed $driverDone -Total $drivers.Count -Previous ([ref]$driverPercent)
     }
-    $excluded=0
+    if($driversComplete){Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase driver_records -Percent 100}
+    $excluded=0;$deviceDone=0;$devicePercent=-1
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase device_records -Percent $(if($pnpComplete){0}else{$null})
     $rows=@(foreach($device in $devices){
         $present=Get-SCMWuaProperty $device 'Present'
-        if($null -ne $present -and $present -eq $false){$excluded++;continue}
-        $identity=[string]$device.PNPDeviceID
-        if(-not $identity){$identity=[string]$device.DeviceID}
-        $installed=@()
-        if($identity -and $byDevice.ContainsKey($identity)){$installed=@($byDevice[$identity].ToArray())}
-        $class=[string](Get-SCMWuaProperty $device 'PNPClass' '')
-        if(-not $class -and $installed.Count){$class=[string]$installed[0].deviceClass}
-        if(-not $class){$class=[string](Get-SCMWuaProperty $device 'ClassGuid' '')}
-        [pscustomobject]@{
-            deviceId=$identity;displayName=[string]$device.Name;deviceClass=$class
-            manufacturer=[string]$device.Manufacturer;present=$present
-            problemCode=(Get-SCMWuaProperty $device 'ConfigManagerErrorCode')
-            deviceStatus=[string]$device.Status;service=[string]$device.Service
-            hardwareIds=@($device.HardwareID | Where-Object {$_})
-            compatibleIds=@($device.CompatibleID | Where-Object {$_})
-            installedDrivers=@($installed)
+        if($null -ne $present -and $present -eq $false){$excluded++}else{
+            $identity=[string]$device.PNPDeviceID
+            if(-not $identity){$identity=[string]$device.DeviceID}
+            $installed=@()
+            if($identity -and $byDevice.ContainsKey($identity)){$installed=@($byDevice[$identity].ToArray())}
+            $class=[string](Get-SCMWuaProperty $device 'PNPClass' '')
+            if(-not $class -and $installed.Count){$class=[string]$installed[0].deviceClass}
+            if(-not $class){$class=[string](Get-SCMWuaProperty $device 'ClassGuid' '')}
+            [pscustomobject]@{
+                deviceId=$identity;displayName=[string]$device.Name;deviceClass=$class
+                manufacturer=[string]$device.Manufacturer;present=$present
+                problemCode=(Get-SCMWuaProperty $device 'ConfigManagerErrorCode')
+                deviceStatus=[string]$device.Status;service=[string]$device.Service
+                hardwareIds=@($device.HardwareID | Where-Object {$_})
+                compatibleIds=@($device.CompatibleID | Where-Object {$_})
+                installedDrivers=@($installed)
+            }
         }
+        $deviceDone++
+        Publish-SCMDriverCollectionProgress -ProgressCallback $ProgressCallback -Phase device_records -Completed $deviceDone -Total $devices.Count -Previous ([ref]$devicePercent)
     })
+    if($pnpComplete){Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase device_records -Percent 100}
     $system=[pscustomobject]@{manufacturer='';model='';baseboardManufacturer='';baseboardModel=''}
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase system_query
     try{
         $computer=@(Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop)
         if($computer.Count){$system.manufacturer=[string]$computer[0].Manufacturer;$system.model=[string]$computer[0].Model}
@@ -361,13 +395,14 @@ function Get-SCMDeviceCoverageInventory {
         $board=@(Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction Stop)
         if($board.Count){$system.baseboardManufacturer=[string]$board[0].Manufacturer;$system.baseboardModel=[string]$board[0].Product}
     }catch{$errors.Add([pscustomobject]@{source='Win32_BaseBoard';error=$_.Exception.Message})}
+    $complete=($pnpComplete -and $driversComplete)
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase verify -Percent $(if($complete -and $errors.Count -eq 0){100}else{$null})
     [pscustomobject]@{
-        capturedUtc=[datetime]::UtcNow.ToString('o');complete=($pnpComplete -and $driversComplete)
+        capturedUtc=[datetime]::UtcNow.ToString('o');complete=$complete
         pnpComplete=$pnpComplete;driversComplete=$driversComplete;devices=@($rows)
         excludedNotPresent=$excluded;system=$system;errors=@($errors.ToArray())
     }
 }
-
 
 function Get-SCMWuaProperty {
     param($Object,[string]$Name,$Default=$null)
@@ -400,11 +435,16 @@ function Test-SCMWuaRebootPending {
     return [bool]$system.RebootRequired
 }
 function Get-SCMDriverUpdateScan {
+    param([scriptblock]$ProgressCallback)
     # Read-only search. Online explicitly requests the configured update service;
     # it never overrides organization policy or downloads/installs an update.
     $started=[datetime]::UtcNow.ToString('o');$clock=[Diagnostics.Stopwatch]::StartNew()
     $criteria="IsInstalled=0 and Type='Driver' and IsHidden=0"
     $updates=@();$errors=@();$warnings=@();$code=4;$online=$false;$server=$null;$service=''
+    # ISearchJob exposes completion, not a numeric search-progress interface.
+    # Keep the online WUA query unknown; never estimate it from elapsed time.
+    # https://learn.microsoft.com/windows/win32/api/wuapi/nn-wuapi-isearchjob
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase scan
     try {
         $session=New-SCMWuaSession
         $searcher=$session.CreateUpdateSearcher()
@@ -415,7 +455,13 @@ function Get-SCMDriverUpdateScan {
         $result=$searcher.Search($criteria)
         if($null -eq $result -or $null -eq $result.Updates){throw 'Windows Update returned no usable driver offer collection.'}
         $code=[int]$result.ResultCode
-        $updates=@(foreach($update in $result.Updates){ConvertTo-SCMDriverUpdateDescriptor -Update $update})
+        $offers=@($result.Updates);$offerDone=0;$offerPercent=-1
+        Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase driver_offers -Percent 0
+        $updates=@(foreach($update in $offers){
+            ConvertTo-SCMDriverUpdateDescriptor -Update $update
+            $offerDone++
+            Publish-SCMDriverCollectionProgress -ProgressCallback $ProgressCallback -Phase driver_offers -Completed $offerDone -Total $offers.Count -Previous ([ref]$offerPercent)
+        })
         $warnings=@(foreach($warning in @((Get-SCMWuaProperty $result 'Warnings' @()) | Select-Object -First 20)){
             [pscustomobject]@{source='Windows Update';message=[string](Get-SCMWuaProperty $warning 'Message' 'Update search reported a warning.');hresult=(Get-SCMWuaProperty $warning 'HResult')}
         })
@@ -423,6 +469,7 @@ function Get-SCMDriverUpdateScan {
         $errors=@([pscustomobject]@{source='Windows Update';error=$_.Exception.Message})
     }
     $clock.Stop()
+    Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase driver_offers -Percent $(if($code -eq 2 -and $errors.Count -eq 0 -and $warnings.Count -eq 0){100}else{$null})
     [pscustomobject]@{
         updates=@($updates);source='Windows Update';resultCode=$code;includesOptional=$true
         started_utc=$started;completed_utc=[datetime]::UtcNow.ToString('o');duration_seconds=$clock.Elapsed.TotalSeconds

@@ -107,8 +107,16 @@ function Invoke-OptimusRequest {
         'power_plans' { @(Get-SCMPowerPlans) }
         'set_power_plan' { Set-SCMPowerPlan -Guid ([string]$arg.guid);@(Get-SCMPowerPlans) }
         'registry_audit' { Get-OptimusRegistryIssues }
-        'driver_updates_scan' { Get-SCMDriverUpdateScan }
-        'driver_device_inventory' { Get-SCMDeviceCoverageInventory }
+        'driver_updates_scan' {
+            if($arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
+                Get-SCMDriverUpdateScan -ProgressCallback (New-OptimusProgressCallback -RequestId ([string]$Request.id))
+            }else{Get-SCMDriverUpdateScan}
+        }
+        'driver_device_inventory' {
+            if($arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
+                Get-SCMDeviceCoverageInventory -ProgressCallback (New-OptimusProgressCallback -RequestId ([string]$Request.id))
+            }else{Get-SCMDeviceCoverageInventory}
+        }
         'driver_update_apply' {
             $record=if($arg.record){$arg.record}else{[pscustomobject]@{id=[string]$arg.id;revision=[int]$arg.revision}}
             $progressCallback=$null

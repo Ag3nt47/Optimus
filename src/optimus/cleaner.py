@@ -33,6 +33,30 @@ class Category:
     requires_admin: bool = False
     suffixes: tuple[str, ...] = ()
 
+def _cleanup_progress(callback, identity):
+    if callback is not None and not callable(callback):
+        raise ValueError('An optional progress callback must be callable.')
+    previous_phase, previous_time = None, None
+
+    def emit(phase, percent, description, *, force=False):
+        nonlocal previous_phase, previous_time
+        if callback is None:
+            return
+        now = time.monotonic()
+        if (not force and phase == previous_phase and previous_time is not None
+                and now - previous_time < 0.1):
+            return
+        previous_phase, previous_time = phase, now
+        try:
+            callback({'item_progress': {'key': 'cleanup:' + identity,
+                'label': 'Cleanup preview' if phase == 'scan' else 'Cleanup file checks',
+                'phase': phase, 'percent': percent},
+                'description': str(description)[:1500], 'progress_only': True})
+        except Exception:
+            pass  # A display callback cannot replay or abandon file operations.
+    return emit
+
+
 class Cleaner:
     def __init__(self, data_dir: Path, categories: list[Category] | None = None):
         self.data_dir = Path(data_dir)
@@ -262,7 +286,7 @@ class Cleaner:
                 continue
         return sorted(result)
 
-    def scan(self, category_ids: list[str], min_age_days: int = 7, max_files: int = 20000, max_seconds: int = 35) -> dict:
+    def scan(self, category_ids: list[str], min_age_days: int = 7, max_files: int = 20000, max_seconds: int = 35, *, progress_callback=None) -> dict:
         if type(min_age_days) is not int or not 0 <= min_age_days <= 3650:
             raise ValueError('Minimum age must be between 0 and 3650 whole days.')
         choices = {item.id: item for item in self._definitions()}
@@ -273,6 +297,8 @@ class Cleaner:
         deadline = time.monotonic() + max(1, min(int(max_seconds), 120))
         plan = {'id': uuid.uuid4().hex, 'created_at': now, 'min_age_days': int(min_age_days), 'categories': [], 'files': [],
                 'total_bytes': 0, 'total_mb': 0.0, 'complete': True, 'skipped': [], 'errors': []}
+        emit = _cleanup_progress(progress_callback, plan['id'])
+        emit('scan', None, 'Discovering eligible files; the total is not known yet.', force=True)
         seen = set()
         examined = 0
         native_open, native_open_complete = self._open_files_snapshot() if os.name != 'nt' else (set(), True)
@@ -331,6 +357,8 @@ class Cleaner:
                                     stack.append(path)
                                     continue
                                 examined += 1
+                                if examined % 64 == 0:
+                                    emit('scan', None, f'Scanning {category.name}: {examined} files checked; {len(plan["files"])} eligible so far.')
                                 info = path.lstat()  # DirEntry.stat leaves inode/link/device zero on Windows.
                                 if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
                                     continue
@@ -373,6 +401,9 @@ class Cleaner:
         with self._lock:
             # Isolate cached approval records from callers mutating a displayed preview.
             self._plans[plan['id']] = json.loads(json.dumps(plan))
+        emit('scan', 100 if plan['complete'] is True else None,
+             f'Preview finished: {examined} files checked; {len(plan["files"])} eligible.'
+             + (' Some locations could not be fully checked.' if not plan['complete'] else ''), force=True)
         return plan
 
     def discard_plan(self, identity: str) -> bool:
@@ -487,13 +518,16 @@ class Cleaner:
             if recovery_error is not None:
                 raise recovery_error
 
-    def apply(self, displayed_plan: dict) -> dict:
+    def apply(self, displayed_plan: dict, *, progress_callback=None) -> dict:
+        if progress_callback is not None and not callable(progress_callback):
+            raise ValueError('An optional progress callback must be callable.')
         with self._lock:
             plan = self._plans.pop(str(displayed_plan.get('id', '')), None)
         if plan is None:
             raise ValueError('Preview expired. Scan again in this app session.')
         if time.time() - plan['created_at'] > 900:
             raise ValueError('Preview is older than 15 minutes. Scan again.')
+        emit = _cleanup_progress(progress_callback, plan['id'])
         choices = {item.id: item for item in self._definitions()}
         result = {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0, 'errors': [], 'files': []}
         native = os.name != 'nt'
@@ -509,7 +543,9 @@ class Cleaner:
         log_path = log_root / f'{plan["id"]}.json'
         # A complete preview journal must exist before any deletion.
         log_path.write_text(json.dumps({'state': 'prepared', 'plan': plan}, indent=2), encoding='utf-8')
-        for record in plan['files']:
+        total = len(plan['files'])
+        emit('cleanup', 0, f'Checking {total} preview-approved files before removal.', force=True)
+        for processed, record in enumerate(plan['files'], 1):
             try:
                 category = choices.get(record['category_id'])
                 if category is None or os.path.normcase(os.path.abspath(category.path)) != os.path.normcase(record['root']):
@@ -538,8 +574,11 @@ class Cleaner:
             except (OSError, ValueError) as error:
                 result['skipped_count'] += 1
                 result['errors'].append(f'{record["path"]}: {error}')
+            emit('cleanup', min(99, processed * 100 / total),
+                 f'{processed}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved.')
         result['log_path'] = str(log_path)
         log_path.write_text(json.dumps({'state': 'completed', 'plan_id': plan['id'], 'result': result}, indent=2), encoding='utf-8')
+        emit('cleanup', 100, f'{total}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved. Results saved.', force=True)
         return result
 
 

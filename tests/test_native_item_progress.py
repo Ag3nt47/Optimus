@@ -12,7 +12,7 @@ import pytest
 
 from optimus import item_progress as items
 from optimus import winget_progress as winget
-from optimus.parallel_updates import ProgressMux, ParallelAppUpdates, WINDOWS_SOFTWARE
+from optimus.parallel_updates import ProgressMux, ParallelAppUpdates, WINDOWS_SOFTWARE, WINDOWS_DRIVERS
 
 
 def progress(key='app:A', phase='download', percent=25, **fields):
@@ -24,6 +24,37 @@ def progress(key='app:A', phase='download', percent=25, **fields):
 def test_invalid_percent_stays_unknown_without_cpu_or_queue_fallback(value):
     result = items.normalize_item_progress(dict(progress(percent=value), current=1,total=2,cpu_percent=80))
     assert result == progress(percent=None)
+
+
+@pytest.mark.parametrize('prepared', [False, True])
+def test_driver_discovery_never_creates_or_clears_installer_intent(tmp_path, monkeypatch, prepared):
+    from optimus import speed_enhancements
+    monkeypatch.setattr(speed_enhancements, '_current_owner', lambda: 'fixture')
+    events = []
+    job = ParallelAppUpdates(SimpleNamespace(data_dir=tmp_path), 'a'*32,
+                             WINDOWS_DRIVERS, lambda *_: None, ProgressMux(events.append))
+    job._write = Mock()
+    job.record.update(status='running', installer_prepared=prepared)
+    boundary = {'operation': 'driver', 'discovery_progress': True, 'phase': 'scan',
+        'description': 'Inspect exact driver offers',
+        'item_progress': progress('driver:discovery', 'scan', None)}
+    job.item_progress(boundary)
+    before = copy.deepcopy(job.record)
+    for phase in ('scan', 'driver_offers', 'device_query', 'installed_driver_query', 'driver_records',
+                  'device_records', 'system_query', 'verify'):
+        job.item_progress(dict(boundary, phase=phase, progress_only=True,
+            item_progress=progress('driver:discovery', phase, 25)))
+    assert job.record == before and job._write.call_count == 1
+    assert job.record['installer_prepared'] is prepared
+    assert events[-1]['jobs'][0]['status'] == 'scanning'
+    count = len(events)
+    job.item_progress(dict(boundary, progress_only=True,
+        item_progress=progress('driver:other', 'scan', 50)))
+    assert len(events) == count
+    job.item_progress({'id': 'exact-offer', 'phase': 'install',
+        'item_progress': progress('driver:exact-offer', 'install', None)})
+    assert job.record['installer_prepared'] is True
+    assert job._write.call_count == 2
 
 
 @pytest.mark.parametrize('changes', [dict(key=''),dict(key=[]),dict(key='x'*513),dict(phase=''),
@@ -203,7 +234,8 @@ def test_driver_native_phases_are_bound_to_the_exact_update_and_revision():
         return {'resultCode':2,'hresult':0,'restartNeeded':False,'installer_started':True,'outcomeKnown':True,'running':False}
     value.driver_update_apply_unattended=install
     result=run_drivers(value,driver_config(),item_callback=events.append)
-    actual=[e['item_progress'] for e in events if isinstance(e.get('item_progress'),dict)]
+    actual=[e['item_progress'] for e in events if isinstance(e.get('item_progress'),dict)
+            and e['item_progress']['key'].startswith('driver:update:')]
     assert actual[0]['percent'] is None and actual[1]['percent']==30
     assert actual[-1]['phase']=='installing' and actual[-1]['percent'] is None
     assert all(e['key'].endswith('000000000001:1') for e in actual)

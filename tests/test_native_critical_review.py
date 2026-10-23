@@ -186,9 +186,13 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'item-progress.cpu-isolation', 'item-progress.next-package-reset',
             'item-progress.unknown', 'item-progress.queue-isolation',
             'metrics.system-network', 'metrics.fixture-only',
+            'maintenance-progress.privacy-checks', 'maintenance-progress.description-fit',
+            'maintenance-progress.driver-scan-unknown',
+            'maintenance-progress.cleanup-phase-reset', 'maintenance-progress.cleanup-file-fraction',
+            'maintenance-progress.fixture-only',
             'app-rules.exact-choices', 'app-rules.master-off-draft', 'app-rules.presence-warning',
             'revert.explicit-selection', 'revert.supported-only', 'revert.no-constructor-actions'):
-            assert by_id[prefix + '.' + suffix]['status'] == 'passed'
+            assert by_id[prefix + '.' + suffix]['status'] == 'passed', prefix + '.' + suffix
     assert by_id['confirmation.negative-default']['status'] == 'passed'
     assert report['screenshots'] and all((reviewer.output / item['file']).is_file() for item in report['screenshots'])
     assert {item['name'] for item in report['screenshots']} >= {
@@ -197,7 +201,8 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
     assert {item['name'] for item in report['screenshots']} >= {
         f'{width}x{height}-{state}' for width, height in bot.VIEWPORTS
         for state in ('worker-item-progress', 'worker-item-progress-reset', 'worker-item-progress-unknown',
-                      'worker-history', 'worker-skip-pending', 'app-policy-choices')}
+                      'worker-history', 'worker-skip-pending', 'app-policy-choices',
+                      'maintenance-privacy-progress', 'maintenance-cleanup-discovery')}
     assert {item['area'] for item in report['manual_review']} >= {'GPU', 'CPU and RAM', 'Updates and security'}
     assert all(item['status'] == 'not_exercised' for item in report['skipped_checks'])
     assert {item['source'] for item in report['documentation_comparison']} == {'docs/FEATURES.md', 'docs/PLATFORMS.md'}
@@ -532,5 +537,59 @@ def test_update_prompt_review_detects_omitted_saved_removals(reviewer, monkeypat
         findings = {row['id']: row for row in reviewer.report['checks']}
         assert findings['update-warning-defect.startup-update.actual-warning']['status'] == 'failed'
         assert findings['update-warning-defect.startup-update.no-implicit-actions']['status'] == 'passed'
+    finally:
+        reviewer.dispose(window)
+
+
+@pytest.mark.parametrize('defect,check', [('privacy', 'privacy-checks'),
+    ('driver-scan', 'driver-scan-unknown'), ('cleanup-stale', 'cleanup-phase-reset')])
+def test_maintenance_progress_review_detects_missing_or_fabricated_progress(reviewer, monkeypatch, defect, check):
+    from optimus.ui import WorkflowWorkerCard
+    original = WorkflowWorkerCard.update_state
+    def broken(card, state, **options):
+        previous = card.activity_ring.value_percent
+        original(card, state, **options)
+        item = state.get('item_progress') or {}
+        replacement = None
+        if defect == 'privacy' and item.get('key') == 'privacy:controls':
+            replacement = None
+        elif defect == 'driver-scan' and card.heading.text() == 'Driver updates' and state.get('status') == 'scanning':
+            replacement = 0.
+        elif defect == 'cleanup-stale' and item.get('key') == 'cleanup:fixture-plan' and item.get('phase') == 'scan':
+            replacement = previous
+        else:
+            return
+        card.activity_ring.value_percent = replacement
+        if card._item_progress is not None:
+            card._item_progress = dict(card._item_progress, percent=replacement)
+    monkeypatch.setattr(WorkflowWorkerCard, 'update_state', broken)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_maintenance_progress(window, backend, bot.VIEWPORTS[0], 'maintenance-defect')
+        checks = {row['id']: row for row in reviewer.report['checks']}
+        assert checks['maintenance-defect.maintenance-progress.' + check]['status'] == 'failed'
+        assert checks['maintenance-defect.maintenance-progress.fixture-only']['status'] == 'passed'
+        backend.optimize.assert_not_called()
+        backend.apply_available_fixes.assert_not_called()
+    finally:
+        reviewer.dispose(window)
+
+
+def test_maintenance_review_detects_a_long_description_that_is_not_fitted(reviewer, monkeypatch):
+    from optimus.ui import WorkflowSummaryLabel
+    original = WorkflowSummaryLabel._fit_summary
+    def broken(label):
+        original(label)
+        if label.text().startswith('Privacy controls (3/9 checked).'):
+            label.visible_text = label.text()
+    monkeypatch.setattr(WorkflowSummaryLabel, '_fit_summary', broken)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_maintenance_progress(window, backend, bot.VIEWPORTS[0], 'long-defect')
+        checks = {row['id']: row for row in reviewer.report['checks']}
+        assert checks['long-defect.maintenance-progress.description-fit']['status'] == 'failed'
+        assert checks['long-defect.maintenance-progress.fixture-only']['status'] == 'passed'
     finally:
         reviewer.dispose(window)

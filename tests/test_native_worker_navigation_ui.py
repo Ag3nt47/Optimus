@@ -351,3 +351,73 @@ def test_three_buttons_remain_visible_within_a_narrow_worker_card(app, width):
             assert bounds.contains(button.geometry())
     finally:
         card.close()
+
+
+def test_live_privacy_counts_and_driver_discovery_reach_item_rings(progress):
+    window, _ = progress
+    window.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 40,
+        'item_progress': {'key': 'privacy:controls', 'label': 'Privacy controls: 4/8 checked',
+                          'phase': 'verify', 'percent': 50},
+        'jobs': [{'id': 'driver_updates', 'status': 'scanning', 'current': 0, 'total': 0,
+                  'item_progress': {'key': 'driver:discovery', 'label': 'Device inventory',
+                                    'phase': 'device_records', 'percent': 62}}]})
+    maintenance = window.worker_cards['maintenance']
+    driver = window.worker_cards['driver_updates']
+    assert maintenance.completion.text() == 'Overall: 40%'
+    assert maintenance.activity_ring.value_text() == '50%'
+    assert maintenance.activity_ring.phase_caption == 'Verify'
+    assert driver.activity_ring.value_text() == '62%'
+    assert driver.activity_ring.phase_caption == 'Devices'
+    assert driver.completion.text() != 'Overall: 62%'
+    window.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 40,
+        'jobs': [{'id': 'driver_updates', 'status': 'scanning', 'current': 0, 'total': 0}]})
+    assert driver.activity_ring.value_percent is None
+    assert driver.activity_ring.phase_caption == 'Scan'
+
+
+def test_blocked_search_counts_are_not_shown_as_install_completion(progress):
+    window, _ = progress
+    window.update_progress({'stage': 'Measured operation', 'percentage': 40,
+        'jobs': [{'id': 'software_updates', 'status': 'needs_review',
+                  'current': 1, 'total': 3, 'installation_blocked': True,
+                  'blocked_by_prior_installer': True, 'scan_complete': False,
+                  'description': 'Previous installer needs review.'}]})
+    card = window.worker_cards['software_updates']
+    assert card.completion.text() == 'Overall: blocked'
+    assert card.activity_ring.value_percent is None
+    assert not card.activity_ring.timer.isActive()
+
+
+def test_failed_maintenance_item_shows_error_then_next_item_runs(progress):
+    window, _ = progress
+    window.update_progress({'stage': 'Fixture refused step', 'stage_status': 'failed',
+                            'percentage': 40, 'description': 'Known fixture failure.'})
+    card = window.worker_cards['maintenance']
+    assert card.activity_ring.health == 'error'
+    assert card.activity_ring.value_percent is None
+    window.update_progress({'stage': 'Next safe fixture step', 'stage_status': 'running',
+        'percentage': 41, 'item_progress': {'key': 'next:fixture', 'label': 'Next checks',
+                                           'phase': 'verify', 'percent': 25}})
+    assert card.activity_ring.value_text() == '25%'
+    assert card.status.text() == 'Running'
+    assert not window.cancel.is_set()
+
+
+def test_long_current_step_description_fits_and_keeps_full_accessible_text(progress):
+    window, backend = progress
+    text = 'Privacy control checks completed; unsupported settings stay visible. ' * 8
+    window.update_progress({'stage': 'Apply saved privacy controls', 'percentage': 40,
+        'description': text, 'item_progress': {'key': 'privacy:controls', 'label': 'Privacy controls',
+                                              'phase': 'verify', 'percent': 33}})
+    for width in (850, 520):
+        window.resize(width, 650)
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        label = window.description
+        assert label.text() == text
+        assert label.toolTip() == text
+        assert len(label.visible_text.splitlines()) <= 2
+        assert label.height() >= label.fontMetrics().lineSpacing() * 2
+        assert all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
+                   for line in label.visible_text.splitlines())
+        assert window.worker_cards['maintenance'].details.text() == text
