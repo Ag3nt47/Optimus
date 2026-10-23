@@ -170,6 +170,16 @@ class ProgressMux:
             if isinstance(state.get('app_counts'), dict):
                 self.jobs[job_id]['app_counts'] = {key: value for key, value in state['app_counts'].items()
                     if key in ('updated', 'skipped', 'failed', 'unverified', 'held', 'source_unverified') and type(value) is int and 0 <= value <= 1000000}
+            if type(state.get('automatic_recheck_count')) is int and 0 <= state['automatic_recheck_count'] <= 100:
+                self.jobs[job_id]['automatic_recheck_count'] = state['automatic_recheck_count']
+            if isinstance(state.get('driver_counts'), dict):
+                self.jobs[job_id]['driver_counts'] = {key: value for key, value in state['driver_counts'].items()
+                    if key in ('installed', 'skipped', 'failed', 'unverified', 'deferred', 'not_processed')
+                    and type(value) is int and 0 <= value <= 1000000}
+            if isinstance(state.get('prerequisite_findings'), list):
+                self.jobs[job_id]['prerequisite_findings'] = [
+                    {key: value for key, value in row.items() if key in ('stage', 'status', 'reason', 'known_no_launch')}
+                    for row in state['prerequisite_findings'][:100] if isinstance(row, dict)]
             # Serialize emission too, so an older background event cannot
             # replace a newer foreground stage in the queued UI callbacks.
             try:
@@ -323,26 +333,92 @@ def pending_updates_barrier(backend):
     return probe._pending()
 
 
+def _bounded_item_binding(row):
+    binding = row.get('binding')
+    if not isinstance(binding, dict):
+        return {}
+    return {key: binding[key][:limit] for key, limit in (('id', 280), ('stage', 80))
+            if isinstance(binding.get(key), str) and binding[key]}
+
+
+def _driver_prerequisite(row):
+    binding = row.get('binding') if isinstance(row.get('binding'), dict) else {}
+    return bool(binding.get('stage')) and not binding.get('id') and not row.get('id')
+
+
+def _driver_prerequisite_findings(result):
+    items = result.get('items') if isinstance(result.get('items'), list) else []
+    findings = []
+    for row in items[:1000]:
+        if not isinstance(row, dict) or not _driver_prerequisite(row):
+            continue
+        outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+        findings.append({'stage': str(row['binding']['stage'])[:80],
+            'status': str(row.get('status') or 'unknown')[:40],
+            'known_no_launch': row.get('uncertain') is not True and _known_preflight(row),
+            'reason': str(row.get('error') or row.get('reason') or outcome.get('note') or '')[:1000]})
+    return findings
+
+
+def _bounded_automatic_recheck(value):
+    if not isinstance(value, dict):
+        return {}
+    text_fields = {'id': 280, 'available_version': 160, 'held_available_version': 160, 'status': 80, 'note': 1000,
+        'recheck_status': 80, 'recheck_schedule': 80, 'metadata_sha256': 64,
+        'installer_sha256': 64, 'url_sha256': 64, 'error': 1000}
+    saved = {key: value[key][:limit] for key, limit in text_fields.items()
+             if isinstance(value.get(key), str)}
+    for key in ('automatic_recheck', 'authorization_granted', 'source_verified',
+                'source_refreshed', 'installer_started', 'outcomeKnown', 'running',
+                'artifact_verified', 'metadata_changed'):
+        if type(value.get(key)) is bool:
+            saved[key] = value[key]
+    for key in ('checked_at', 'last_attempt_at', 'next_check_at', 'source_refreshed_at'):
+        if type(value.get(key)) in (int, float) and 0 <= value[key] <= 32503680000:
+            saved[key] = value[key]
+    return saved
+
+
 def _journal_result(result):
     saved = {key: result[key] for key in ('failed_items', 'cancelled', 'restartNeeded', 'uncertain', 'policy', 'review_only',
              'stop_reason', 'reason', 'installer_started', 'outcomeKnown', 'running', 'blocked_by_prior_installer',
              'installation_blocked', 'installation_block_reason', 'navigation_cancelled', 'navigation_cancelled_items',
-             'shared_barrier', 'failure_scope') if key in result}
+             'shared_barrier', 'failure_scope', 'backup_unavailable') if key in result}
     if isinstance(result.get('error'), str):
         saved['error'] = result['error'][:4000]
-    saved['items'] = [{'id': str(row.get('id') or row.get('binding', {}).get('id', ''))[:280],
+    saved['items'] = [{'id': str(row.get('id') or _bounded_item_binding(row).get('id', ''))[:280],
+                      'binding': _bounded_item_binding(row),
+                      **{key: row[key] for key in ('installer_started', 'outcomeKnown', 'running')
+                         if type(row.get(key)) is bool},
                       'status': row.get('status'), 'uncertain': row.get('uncertain', False),
                       'presence': str(row.get('presence', ''))[:40], 'source': str(row.get('source', ''))[:40],
                       'error': str(row.get('error', ''))[:2000],
                       'reason': str(row.get('reason', ''))[:2000],
-                      'result': {key: (str(row['result'][key])[:2000] if key in ('note', 'failureKind', 'error') else row['result'][key])
+                      'result': {key: (str(row['result'][key])[:2000] if key in ('note', 'failureKind', 'error', 'status') else row['result'][key])
                                  for key in ('exitCode', 'running', 'outcomeKnown',
                                  'restartNeeded', 'requiresReview', 'installer_started',
                                  'resultCode', 'hresult', 'aggregateResultCode', 'aggregateHresult',
                                  'navigation_cancelled', 'navigation_skipped', 'verified', 'shared_barrier',
-                                 'failure_scope', 'note', 'failureKind', 'error') if key in row['result']}
+                                 'failure_scope', 'note', 'failureKind', 'error', 'status', 'skipped',
+                                 'cancelled', 'uncertain', 'reboot_required') if key in row['result']}
                       if isinstance(row.get('result'), dict) else {}}
                      for row in result.get('items', []) if isinstance(row, dict)][:1000]
+    rows = [row for row in result.get('items', []) if isinstance(row, dict)][:1000]
+    for row, compact in zip(rows, saved['items']):
+        outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+        if isinstance(outcome.get('automatic_recheck'), dict):
+            compact['result']['automatic_recheck'] = _bounded_automatic_recheck(outcome['automatic_recheck'])
+    rechecks = result.get('automatic_update_rechecks')
+    if isinstance(rechecks, dict):
+        saved['automatic_update_rechecks'] = {key: rechecks[key]
+            for key in ('refresh_attempted', 'source_refreshed', 'needs_fresh_scan',
+                        'source_verified_after_refresh', 'authorization_granted')
+            if type(rechecks.get(key)) is bool}
+        saved['automatic_update_rechecks']['items'] = [
+            _bounded_automatic_recheck(row) for row in rechecks.get('items', [])[:5]
+            if isinstance(row, dict)] if isinstance(rechecks.get('items'), list) else []
+        if isinstance(rechecks.get('error'), str):
+            saved['automatic_update_rechecks']['error'] = rechecks['error'][:1000]
     if _restart_needed(result):
         saved['restartNeeded'] = True
     for key in ('driver_scan', 'app_scan'):
@@ -405,14 +481,18 @@ def _driver_completion_counts(result, evidence):
         return None
     counts = dict(installed=0, failed=0, unverified=0, skipped=0, deferred=0, not_processed=0)
     items = result.get('items') if isinstance(result.get('items'), list) else []
-    prerequisite_checks = 0
+    known_prerequisite_failures = 0
     for row in items[:1000]:
         if not isinstance(row, dict):
             counts['unverified'] += 1
             continue
         status = row.get('status')
-        binding = row.get('binding') if isinstance(row.get('binding'), dict) else {}
-        prerequisite_checks += int(bool(binding.get('stage')) and not binding.get('id'))
+        if (_driver_prerequisite(row) and row.get('uncertain') is not True
+                and _known_preflight(row)):
+            # A failed backup/scan check is not a third offered driver. Keep
+            # its finding separate; unknown native outcomes remain below.
+            known_prerequisite_failures += int(status in ('failed', 'needs_review', 'blocked'))
+            continue
         outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
         success = (status == 'applied' and row.get('uncertain') is not True
             and outcome.get('installer_started') is True and outcome.get('outcomeKnown') is True
@@ -437,9 +517,10 @@ def _driver_completion_counts(result, evidence):
     if type(result.get('failed_items')) is int and result['failed_items'] > 0:
         # A count without item receipts cannot be promoted to a known failure
         # or successful installation; preserve it as an unverified outcome.
-        unexplained = result['failed_items'] - counts['failed'] - counts['unverified']
+        unexplained = (result['failed_items'] - counts['failed'] - counts['unverified']
+                       - known_prerequisite_failures)
         counts['unverified'] += max(0, unexplained)
-    counts['not_processed'] = max(0, offers - sum(counts.values()) + prerequisite_checks)
+    counts['not_processed'] = max(0, offers - sum(counts.values()))
     return counts
 
 
@@ -481,8 +562,11 @@ def update_completion_state(result):
         reason = reason or installer_barrier(result) or ''
         counts_text = 'Driver results: ' + '; '.join(str(driver_counts[name]) + ' ' + name.replace('_', ' ')
             for name in ('installed', 'failed', 'unverified', 'skipped', 'deferred', 'not_processed')) + '.'
+        prerequisites = _driver_prerequisite_findings(result)
+        prerequisite_text = ('Prerequisite findings: ' + str(len(prerequisites)) + '; separate from driver results.'
+                             if prerequisites else '')
         details = ' '.join(_driver_completion_notes(result))
-        description = ' '.join(value for value in (reason, counts_text, details, summary) if value)
+        description = ' '.join(value for value in (reason, counts_text, prerequisite_text, details, summary) if value)
     presence_counts = _presence_completion_counts(result)
     if presence_counts is not None:
         description = ('Application rules: ' + '; '.join(str(presence_counts[name]) + ' ' + name.replace('_', ' ')
@@ -509,13 +593,26 @@ def update_completion_state(result):
         notes = [note for note in notes if note and note not in description]
         if notes:
             description += ' Details: ' + '; '.join(notes)
+    automatic_rechecks = {}
+    from .update_holds import is_known_update_hold
+    for row in result.get('items', [])[:1000] if isinstance(result.get('items'), list) else []:
+        outcome = row.get('result') if isinstance(row, dict) and isinstance(row.get('result'), dict) else {}
+        audit = _bounded_automatic_recheck(outcome.get('automatic_recheck'))
+        if (is_known_update_hold(outcome) and audit.get('status') == 'awaiting_publisher'
+                and audit.get('automatic_recheck') is True and audit.get('authorization_granted') is False
+                and audit.get('artifact_verified') is False and isinstance(audit.get('id'), str)):
+            automatic_rechecks[(audit['id'].casefold(), audit.get('held_available_version') or audit.get('available_version'))] = audit
     holds = _bounded_update_holds(result)
     if holds:
         count = result.get('held_count')
         count = count if type(count) is int and count >= len(holds) else len(holds)
         notes = [str(row.get('id') or 'Application') + ': ' + str(row.get('reason') or 'Saved automatic-update hold.')[:500]
                  for row in holds[:2]]
-        description = (str(count) + ' app update' + ('' if count == 1 else 's') + ' held for review. '
+        automatic_count = sum((row.get('id', '').casefold(), row.get('available_version'))
+                              in automatic_rechecks for row in holds)
+        waiting = (' held; automatic publisher rechecks enabled on later approved runs. '
+                   if automatic_count == count else ' held for review. ')
+        description = (str(count) + ' app update' + ('' if count == 1 else 's') + waiting
                        + '; '.join(notes) + ' ' + description)
     if app_presentation is not None:
         counts = app_presentation['app_counts']
@@ -546,6 +643,8 @@ def update_completion_state(result):
     state = {'description': description[:2000], 'current': len(items) if isinstance(items, list) else 0,
              'id': None,
              'scan_label': label}
+    if automatic_rechecks:
+        state['automatic_recheck_count'] = len(automatic_rechecks)
     # Existing per-installer totals remain distinct from the number discovered.
     if not isinstance(items, list) or not items:
         state['total'] = 0
@@ -554,7 +653,8 @@ def update_completion_state(result):
         deferred = result.get('deferred_ids')
         state['total'] = len(items) + (len(deferred) if isinstance(deferred, list) else 0)
     if driver_counts is not None:
-        state.update(driver_counts=driver_counts, total=0)
+        state.update(driver_counts=driver_counts,
+                     prerequisite_findings=_driver_prerequisite_findings(result), total=0)
     if presence_counts is not None:
         state['presence_counts'] = presence_counts
     if evidence:
@@ -826,13 +926,18 @@ class ParallelAppUpdates:
         if 'id' not in state and isinstance(state.get('binding'), dict):
             state = dict(state, id=state['binding'].get('id'))
         backing_up = self.title in DRIVER_TITLES and state.get('phase') == 'backup'
+        rechecking = (self.title == WINDOWS_SOFTWARE
+                      and state.get('phase') in ('source_refresh', 'metadata_recheck'))
         if self.title in DRIVER_TITLES and not backing_up and type(state.get('current')) is int:
             state = dict(state, current=max(0, state['current'] - 1))
         self.record['current_item'] = {key: state[key] for key in ('id', 'description', 'current', 'total', 'item', 'phase') if key in state}
-        if not backing_up:
+        if not backing_up and not rechecking:
             self.record['installer_prepared'] = True
-        self._write()  # Existing sequential helpers emit this before each installer.
-        self.mux.background('preparing' if backing_up else 'installing' if self.concurrent_preparation else 'running', state)
+        self._write()  # Read-only rechecks never create or clear installer intent.
+        if rechecking:
+            state = dict(state, current=0, total=0, scan_label='Rechecking publisher metadata')
+        self.mux.background('scanning' if rechecking else 'preparing' if backing_up else
+                            'installing' if self.concurrent_preparation else 'running', state)
 
     def item_receipt(self, row):
         """Persist the actual terminal item before navigation advances its lane."""
@@ -939,7 +1044,9 @@ class ParallelAppUpdates:
                           finished_at=self.record.get('finished_at', time.time()), result=result)
         self.joined = True
         if status == 'failed':
-            self.stage['error'] = 'One or more application update checks failed; review the saved item results.'
+            self.stage['error'] = ('One or more driver update checks or prerequisites need review; see the saved item results.'
+                                   if self.title in DRIVER_TITLES else
+                                   'One or more application update checks failed; review the saved item results.')
         self.mux.background(update_completion_status(result), update_completion_state(result))
         return self.stage
 

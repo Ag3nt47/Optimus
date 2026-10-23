@@ -808,6 +808,9 @@ class NativeSettingsWindow(DetailedSettingsWindow):
 
 class NativeOptimusWindow(OptimusWindow):
     def open_initial_setup(self, checked=False, *, first_run=False):
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update prompt before setup. Maintenance is paused.')
+            return False
         if self.busy or self._setup_wizard is not None or self._settings_window is not None and self._settings_window.busy:
             return False
         wizard = NativeSetupWizard(self.backend, self, preferences=self._settings(), first_run=first_run)
@@ -836,6 +839,9 @@ class NativeOptimusWindow(OptimusWindow):
         return accepted
 
     def open_settings(self, checked=False, page=None):
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update prompt before opening Settings. Maintenance is paused.')
+            return
         if self.busy or self._setup_wizard is not None:
             self.status.setText('Finish the current operation or setup questions first.')
             return

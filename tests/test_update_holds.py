@@ -10,7 +10,7 @@ import pytest
 from optimus.automated_software import run_software
 from optimus.maintenance import Maintenance
 from optimus.parallel_updates import installer_barrier, _uncertain, WINDOWS_SOFTWARE, WINDOWS_DRIVERS
-from optimus.update_holds import UpdateHoldError, load_update_holds, held_update_result
+from optimus.update_holds import UpdateHoldError, load_update_holds, held_update_result, matching_update_hold
 from optimus.workflow import Workflow
 from test_updates import table, scan
 from test_automated_software import package, configuration, backend
@@ -57,6 +57,35 @@ def test_exact_case_insensitive_offer_is_held_before_network_pin_or_installer(tm
     assert result['installer_started'] is False and result['outcomeKnown'] is True and result['running'] is False
     assert REASON in result['note'] and result['to_version'] == '2.0'
     service._run.assert_not_called()
+
+
+@pytest.mark.parametrize('available', ['v2.0', 'V2.0.0', '2.0.0.0', '2.0+repacked', 'v2.0.0+build2'])
+def test_same_release_format_changes_remain_held_without_native_calls_or_hold_writes(tmp_path, available):
+    path = hold_file(tmp_path)
+    original = path.read_bytes()
+    service = updater(tmp_path, available=available)
+    service._run.reset_mock()
+    result = service.updates_apply('Vendor.One', confirmed=True, unattended=True)
+    assert result['failureKind'] == 'automatic_update_hold' and result['to_version'] == available
+    assert result['installer_started'] is False and result['outcomeKnown'] is True
+    service._run.assert_not_called()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize('held,available', [
+    ('2.0', '2.0.1'), ('2.0', '3.0'), ('2.0', '2.0-rc1'),
+    ('2.0-rc1', '2.0-rc2'), ('2.0-rc1', '2.0'),
+    ('6000.5.4f1', '6000.6.7f1'), ('6000.5.4f1', '6000.5.4f2'),
+    ('6000.5.4f1', '7000.0.0f1'), ('1.0-vendor', '1.0-vendor2'),
+])
+def test_new_or_opaque_release_is_never_invented_as_equivalent_hold(held, available):
+    assert matching_update_hold(package(available=available), [
+        {'id': 'Vendor.One', 'available_version': held, 'reason': REASON}]) is None
+
+
+def test_identical_opaque_version_hold_still_matches_exactly():
+    assert matching_update_hold(package(available='1.0-vendor'), [
+        {'id': 'Vendor.One', 'available_version': '1.0-vendor', 'reason': REASON}])
 
 
 @pytest.mark.parametrize('manual,available', [(False, '3.0'), (True, '2.0')])

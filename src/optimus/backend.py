@@ -380,6 +380,9 @@ class Backend(ExtendedMaintenanceBackend):
     def updates_scan_cancellable(self, cancel_event=None):
         return self.maintenance.updates_scan(cancel_event=cancel_event)
 
+    def recheck_held_updates(self, packages, *, cancel_event=None, item_callback=None):
+        return self.maintenance.recheck_held_updates(packages, cancel_event=cancel_event, item_callback=item_callback)
+
     def update_app(self, package_id):
         return self.maintenance.updates_apply(package_id, confirmed=True)
 

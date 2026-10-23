@@ -34,6 +34,7 @@ from optimus.native_ui import NativeOptimusWindow, NativeSetupWizard
 from optimus.onboarding import InitialSetupWizard
 from optimus.ui import OptimizationProgressWindow, OptimusWindow, SecurityReviewDialog
 from optimus.launch_review import ask_launch_review
+from optimus.self_update_ui import make_startup_update_dialog, SelfUpdateProgressWindow
 from optimus.widgets.recovery_panel import RecoveryPanel
 from optimus.widgets.questions import make_yes_no_dialog
 from optimus.navigation import NavigationHub
@@ -53,7 +54,7 @@ MANUAL_GAPS = [
     {'area': 'Live CPU and network metrics', 'review': 'Displayed fixture values prove rendering only. Worker CPU covers identified Optimus threads and excludes external installers. Passive adapter traffic, reported link speed and cached OS connectivity do not measure Internet capacity or prove maximum computer performance.'},
     {'area': 'GPU', 'review': 'Check actual GPU utilization, VRAM, temperatures and graphics drivers separately. GPU/shader cache cleanup is not GPU tuning; no overclock or unsupported voltage change is tested.'},
     {'area': 'One-click scope', 'review': 'Confirm that saved approvals match the intended computer. Browser close-or-skip, restarts, vendor installers, process removal and native permissions may still require a decision; maximum automation is not universal unattended support.'},
-    {'area': 'Updates and security', 'review': 'Validate real signed catalogs, hardware, reboot state and effective security controls on representative machines. No driver, firmware, Windows upgrade, compatibility workaround or security change is applied by this bot.'},
+    {'area': 'Updates and security', 'review': 'Validate real signed catalogs, hardware, reboot state and effective security controls on representative machines. No driver, firmware, Windows upgrade, compatibility workaround or security change is applied by this bot. Validate a future GitHub release update and actual restart/UAC handoff on a disposable managed installation; prompt/progress fixtures do not prove a live self-update.'},
     {'area': 'Files, browsers and cloud', 'review': 'Exercise disposable real profiles, filesystem locks, Trash/Recycle Bin recovery and an explicitly connected test cloud account. No real user file or connected account is touched here.'},
     {'area': 'Accessibility and desktop behavior', 'review': 'Review screenshots, screen readers, high contrast, keyboard order, localization, text scaling, real multi-monitor desktops and animation quality. Offscreen reachability does not prove native desktop usability.'},
     {'area': 'Sandbox and privileged prompts', 'review': 'Review actual source editing/restart handoff, UAC/polkit/macOS authorization, unsaved work and packaging signatures separately. The bot never approves an OS dialog.'},
@@ -1133,6 +1134,67 @@ class CriticalReview:
             window.pool.waitForDone(5000)
             drain(self.app)
 
+    def review_startup_update(self, window, backend, dimensions, prefix):
+        """Offline prompt/progress views; no checker, download or Backend runs."""
+        saved = backend.preferences()
+        saved.update(setup_version=CURRENT_SETUP_VERSION, cleanup_enabled=True,
+            m365_debloat_enabled=True, consumer_debloat_enabled=True,
+            consumer_debloat_package_names=['Microsoft.Copilot'], browser_cookies_enabled=True,
+            browser_cleanup_browsers=['chrome'], browser_keep_domains=['example.com'])
+        original = backend.preferences()
+        dialog = make_startup_update_dialog(window, {'version': '999999.999999.999999'}, saved)
+        try:
+            self.viewport(dialog, dimensions, prefix + '.startup-update')
+            controls = dialog.update_buttons
+            self.buttons(dialog, dimensions, prefix + '.startup-update', list(controls.values()))
+            self.check(prefix + '.startup-update.explicit-choices',
+                controls['yes'].text().startswith('Yes') and controls['no'].text().startswith('No')
+                and controls['adjust'].isDefault() and not controls['yes'].autoDefault()
+                and dialog.update_choice is None,
+                'A startup update must offer labeled Yes/No/Adjust, default to Adjust and approve nothing on display.')
+            shown = dialog.saved_actions.toPlainText()
+            self.check(prefix + '.startup-update.actual-warning', dialog.saved_actions.isReadOnly()
+                and 'Microsoft 365 hub/companion' in shown and 'Microsoft.Copilot' in shown
+                and 'sign you out' in shown and 'example.com' in shown
+                and dialog.saved_actions.height() > 80,
+                'Update-then-clean approval must contain the real scrollable saved removal/browser warning.')
+            self.screenshot(dialog, prefix + '-startup-update-prompt')
+            controls['no'].click()
+            self.check(prefix + '.startup-update.no-implicit-actions', dialog.update_choice == 'no_update'
+                and backend.preferences() == original and not backend.optimize.called
+                and not backend.analysis_start.called,
+                'Choosing No in the update prompt must not save settings, start maintenance or collect data.')
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            drain(self.app)
+        cancel = threading.Event()
+        progress = SelfUpdateProgressWindow(window, cancel)
+        try:
+            progress.update_phase({'phase': 'Download release', 'description':
+                'Fixture bytes only. Auto Clean has not started; no network or host change is performed.',
+                'bytes_received': 25, 'bytes_total': 100})
+            self.viewport(progress, dimensions, prefix + '.startup-update-progress')
+            self.buttons(progress, dimensions, prefix + '.startup-update-progress', [progress.cancel_button])
+            self.check(prefix + '.startup-update.download-honesty', progress.progress.value() == 25
+                and '25%' in progress.spinner._label.text()
+                and progress.worker_grid.isHidden() and progress.live_system_status.isHidden()
+                and 'UPDATING OPTIMUS' in progress.title.text() and not progress.auto_continue_button.isVisible()
+                and 'Auto Clean has not started' in progress.description.text(),
+                'Self-update progress must report its own bytes without inventing maintenance workers or completion.')
+            self.screenshot(progress, prefix + '-startup-update-progress')
+            progress.cancel_button.click()
+            self.check(prefix + '.startup-update.cooperative-cancel', cancel.is_set()
+                and not progress.completed and not backend.optimize.called,
+                'Update cancellation must signal the owned job and must not approve cleanup or fabricate completion.')
+        finally:
+            progress.completed = True
+            progress.spinner.stop()
+            progress.loading_animation.stop()
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
     def run(self):
         for dimensions in VIEWPORTS:
             prefix = f'{dimensions[0]}x{dimensions[1]}'
@@ -1148,6 +1210,7 @@ class CriticalReview:
                 self.buttons(window, dimensions, prefix + '.main', window.main_buttons)
                 self.screenshot(window, prefix + '-main')
                 self.review_launch(window, backend, dimensions, prefix)
+                self.review_startup_update(window, backend, dimensions, prefix)
                 self.review_setup(backend, dimensions, prefix)
                 self.review_speed(window, backend, dimensions, prefix)
                 self.review_optional_tools(window, backend, dimensions, prefix)

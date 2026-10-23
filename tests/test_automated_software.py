@@ -135,7 +135,7 @@ def test_review_scan_never_starts_installer_even_with_old_consents():
 
 @pytest.mark.parametrize('bad', [
     {'source': 'msstore'}, {'version': 'Unknown'}, {'available': 'Unknown'},
-    {'version': '< 1.0'}, {'available': '2.0...'}, {'available': '2.0\u2026'},
+    {'version': '> 1.0'}, {'available': '2.0...'}, {'available': '2.0\u2026'},
     {'version': '1.0', 'available': '1.0'}, {'version': 'V1.0', 'available': 'v1.0'},
     {'id': 'Vendor.App...'}, {'id': '--all'}, {'package_id': 'Other.App'}, {'pinned': True},
 ])

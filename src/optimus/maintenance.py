@@ -18,7 +18,7 @@ import tempfile
 import time
 import uuid
 from typing import Any
-from .automated_software import is_newer_version
+from .automated_software import is_newer_version, valid_update_version
 
 
 _ACTIONS = (
@@ -255,7 +255,6 @@ class Maintenance:
         rows: list[dict[str, str]] = []
         skipped: list[str] = []
         counts: dict[str, int] = {}
-        version_pattern = re.compile(r"[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}")
         for line in lines[index + 2:]:
             if not line.strip():
                 continue
@@ -278,11 +277,10 @@ class Maintenance:
                 continue
             key = package_id.casefold()
             counts[key] = counts.get(key, 0) + 1
-            if (not version_pattern.fullmatch(version) or not version_pattern.fullmatch(available)
-                    or version.endswith(".") or available.endswith(".") or ".." in version or ".." in available):
+            if not valid_update_version(version, installed=True) or not valid_update_version(available):
                 skipped.append("A package with unknown, truncated or unsupported versions was excluded.")
                 continue
-            if not is_newer_version(version, available):
+            if not is_newer_version(version, available, package_id=package_id, source=source):
                 skipped.append("A package without a provably newer comparable version was excluded.")
                 continue
             rows.append({"name": name, "id": package_id, "package_id": package_id,
@@ -367,6 +365,11 @@ class Maintenance:
                 "no_applicable_upgrades": no_applicable_upgrades,
                 "note": "Only recognized complete winget-source rows are selectable. Localized or changed output remains text; an empty parsed list does not establish that no updates exist."}
 
+    def recheck_held_updates(self, packages, *, cancel_event=None, item_callback=None):
+        """Refresh/audit exact held metadata, preserving every hold and native gate."""
+        from .update_hold_rechecks import HeldUpdateRechecks
+        return HeldUpdateRechecks(self).run(packages, cancel_event=cancel_event, item_callback=item_callback)
+
     @staticmethod
     def _parse_pins(output: str) -> tuple[list[dict[str, str]], bool]:
         """Recognize English pin output; missing or partial output is never no pins.
@@ -439,7 +442,7 @@ class Maintenance:
             raise UpdatePreflightError("The software source cache is not current; no installer was started.", failure_scope='app_batch', failureKind='cache_unavailable')
         if package_id not in self._last_update_ids or not isinstance(current, dict) or current.get('source') != 'winget':
             raise UpdatePreflightError("The exact selected package is no longer unambiguous in the current winget scan; no installer was started.", failure_scope='package', failureKind='package_unavailable')
-        if not is_newer_version(current.get('version'), current.get('available')):
+        if not is_newer_version(current.get('version'), current.get('available'), package_id=package_id, source=current.get('source')):
             raise UpdatePreflightError("The selected package no longer has a provably newer version; no installer was started.", failure_scope='package', failureKind='version_changed')
         # Retain the exact previously selected version pair, even when a prior
         # installer took over fifteen minutes. Fresh revalidation below must

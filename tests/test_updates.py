@@ -38,7 +38,7 @@ def test_scan_exposes_matching_aliases_and_pins_source(updater):
     assert result['text'] == result['output']
 
 
-@pytest.mark.parametrize('installed,available', [('Unknown','2.0'),('1.0','Unknown'),('1.0','1.0'),('1.0','Latest'),('1.0','2.0...'),('< 1.0','2.0')])
+@pytest.mark.parametrize('installed,available', [('Unknown','2.0'),('1.0','Unknown'),('1.0','1.0'),('1.0','Latest'),('1.0','2.0...'),('<= 1.0','2.0')])
 def test_unknown_equal_and_truncated_versions_are_not_candidates(updater,installed,available):
     result = scan(updater,table(('Fixture','Vendor.App',installed,available,'winget')))
     assert result['packages'] == []
@@ -348,7 +348,7 @@ def scoped_table(*rows):
 
 def test_native_source_scoped_four_column_win_get_layout_remains_selectable(updater):
     text = scoped_table(('Fixture Application', 'Vendor.App', '1.0', '2.0'),
-                        ('Unknown Fixture', 'Vendor.Other', '< 3.0', '4.0'),
+                        ('Unknown Fixture', 'Vendor.Other', '> 3.0', '4.0'),
                         ('Truncated Fixture', 'Vendor.Trunc...', '1.0', '2.0'))
     result = scan(updater, text)
     assert result['structured'] and result['exitCode'] == 0

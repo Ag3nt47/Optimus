@@ -3143,6 +3143,10 @@ class OptimusWindow(QMainWindow):
         self._launch_review_dialog = None
         self._session_approved_callback = None
         self._session_invalidated_callback = None
+        self._startup_update_pending = False
+        self._self_update_controller = None
+        self._self_update_dialog = None
+        self._self_update_notice = ''
         self.busy = False
         self._quitting = False
         self._close_when_idle = False
@@ -3247,6 +3251,8 @@ class OptimusWindow(QMainWindow):
 
     def session_approved(self, settings=None):
         """Pure approval check, also usable by background busy predicates."""
+        if self._startup_update_pending:
+            return False
         if not self._launch_consent.required:
             return True
         try:
@@ -3279,7 +3285,8 @@ class OptimusWindow(QMainWindow):
 
     def review_launch(self):
         """Approve this process's exact saved scope or open Settings paused."""
-        if self.smoke_test or self._quitting or self._close_when_idle or self.busy or self._launch_review_active:
+        if (self.smoke_test or self._quitting or self._close_when_idle or self.busy
+                or self._launch_review_active or self._startup_update_pending):
             return False
         if self._settings_window is not None and self._settings_window.busy:
             self.status.setText('Wait for the active settings operation before reviewing Auto Clean.')
@@ -3332,6 +3339,9 @@ class OptimusWindow(QMainWindow):
         return True
 
     def open_initial_setup(self, checked=False, *, first_run=False):
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update check before setup. Maintenance is paused.')
+            return False
         if self.busy or (self._settings_window is not None and self._settings_window.busy):
             self.status.setText('Wait for the current operation before opening setup questions.')
             return False
@@ -3412,6 +3422,9 @@ class OptimusWindow(QMainWindow):
         return accepted
 
     def open_settings(self, checked=False, page=None):
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update prompt before opening Settings. Maintenance is paused.')
+            return
         if self._setup_wizard is not None:
             self.status.setText('Finish or cancel the setup questions first.')
             return
@@ -3795,6 +3808,9 @@ class OptimusWindow(QMainWindow):
         self.setStyleSheet(self._qss())
 
     def open_revert(self, checked=False):
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update prompt before opening Revert.')
+            return
         if (self.busy or self._quitting or self._close_when_idle or self._setup_wizard is not None
                 or self._post_review_active or self._settings_window is not None and self._settings_window.busy):
             self.status.setText('Wait for the active operation or questions before reviewing Revert.')
@@ -3810,6 +3826,9 @@ class OptimusWindow(QMainWindow):
             QTimer.singleShot(0, self._revert_dialog.refresh)
 
     def open_sandbox(self, checked=False):
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update prompt before opening Sandbox.')
+            return
         if self._setup_wizard is not None:
             self.status.setText('Finish or cancel the setup questions before opening Sandbox.')
             return
@@ -3829,6 +3848,9 @@ class OptimusWindow(QMainWindow):
                 QMessageBox.warning(self, 'Optimus Sandbox', str(exc))
 
     def start_optimization(self, checked=False):
+        if self._startup_update_pending:
+            self.status.setText('Optimus checks and updates itself before Auto Clean. Maintenance is paused.')
+            return
         if self._close_when_idle:
             self.status.setText('Optimus is stopping safely. Wait for active operations to finish.')
             return
@@ -3885,6 +3907,8 @@ class OptimusWindow(QMainWindow):
             if progress is self._progress_window else None)
         progress.autoContinueRequested.connect(lambda: self._start_auto_continue(progress))
         self._progress_window.show()
+        if self._self_update_notice:
+            self._progress_window.log.appendPlainText(self._self_update_notice)
         self._worker = WorkflowWorker(self.backend, settings, self._cancel, prompt_parent=self._progress_window)
         self._worker.signals.progress.connect(self._progress_window.update_progress)
         self._worker.signals.result.connect(self._workflow_result)
@@ -4147,6 +4171,9 @@ class OptimusWindow(QMainWindow):
         self.activate_existing_window()
 
     def restart_as_administrator(self):
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update prompt before requesting an administrator restart.')
+            return False
         if self.smoke_test:
             self.status.setText('Administrator restart is disabled during a UI smoke test.')
             return False
@@ -4216,6 +4243,9 @@ class OptimusWindow(QMainWindow):
                 event.ignore()
 
     def quit_application(self):
+        if self._startup_update_pending and self._self_update_controller is not None:
+            self._self_update_controller.request_safe_stop()
+            return False
         if self.busy:
             self.request_safe_stop()
             return False
@@ -4259,6 +4289,8 @@ class OptimusWindow(QMainWindow):
         """
         if self.smoke_test or self._quitting:
             return False
+        if self._startup_update_pending and self._self_update_controller is not None:
+            return self._self_update_controller.request_safe_stop()
         if self._setup_wizard is not None or self._post_review_active:
             self.status.setText('Finish the active setup, recommendation or settings operation before safely exiting.')
             return False
@@ -4320,6 +4352,8 @@ class OptimusWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        if self._self_update_controller is not None:
+            self._self_update_controller.shutdown()
         self.invalidate_session_review('Optimus is closing; automatic maintenance is stopped.')
         if self._revert_dialog is not None:
             self._revert_dialog.shutdown()

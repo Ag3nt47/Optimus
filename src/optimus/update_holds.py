@@ -93,18 +93,27 @@ def load_update_holds(data_dir, *, owner=None):
 
 def matching_update_hold(package, holds):
     identity, available = package.get('id'), package.get('available')
+    # Import at call time: the software runner imports this hold reader. A v
+    # prefix, trailing zero or build label cannot turn the same bad release
+    # into a new automatic authorization; opaque versions remain exact-only.
+    from .automated_software import same_release_version
     return next((row for row in holds if isinstance(identity, str)
                  and row['id'].casefold() == identity.casefold()
-                 and row['available_version'] == available), None)
+                 and (row['available_version'] == available
+                      or same_release_version(row['available_version'], available))), None)
 
 
-def held_update_result(package, hold):
-    return {'id': package['id'], 'package_id': package['id'], 'source': 'winget',
+def held_update_result(package, hold, *, recheck=None):
+    result = {'id': package['id'], 'package_id': package['id'], 'source': 'winget',
             'status': 'skipped', 'skipped': True, 'exitCode': None, 'unattended': True,
             'failureKind': 'automatic_update_hold', 'requiresReview': True,
             'installer_started': False, 'outcomeKnown': True, 'running': False,
             'from_version': package['version'], 'to_version': package['available'],
             'note': 'Automatic update held: ' + hold['reason']}
+    if isinstance(recheck, dict):
+        result['automatic_recheck'] = dict(recheck)
+        result['note'] += ' Publisher replacement awaited; automatic checks continue.'
+    return result
 
 
 def is_known_update_hold(outcome):

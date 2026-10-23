@@ -13,6 +13,18 @@ from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, l
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _VERSION = re.compile(r'[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}')
 _ORDERED_VERSION = re.compile(r'[vV]?([0-9]+(?:[._][0-9]+)*)(?:[-_.]?(dev|alpha|a|beta|b|rc|pre|preview)(?:[-_.]?([0-9]+))?)?(?:\+[0-9A-Za-z.\-]+)?', re.I)
+_NUMERIC_RELEASE = re.compile(r'[0-9]+(?:\.[0-9]+){1,7}')
+_UPPER_VERSION = re.compile(r'< ?([0-9]+(?:\.[0-9]+){1,7})')
+_UNITY_PACKAGE = re.compile(r'unity\.unity\.([1-9][0-9]{3})', re.I)
+_UNITY_RELEASE = re.compile(r'([1-9][0-9]{3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})f([1-9][0-9]?)')
+
+
+def valid_update_version(value, *, installed=False):
+    """Recognize bounded scan text, without assigning arbitrary labels an order."""
+    return (isinstance(value, str) and len(value) <= 128
+            and not value.endswith('.') and '..' not in value
+            and (_VERSION.fullmatch(value) is not None
+                 or installed and _UPPER_VERSION.fullmatch(value) is not None))
 
 
 def _ordered_version(value):
@@ -30,13 +42,40 @@ def _ordered_version(value):
     return core, stage, int(match[3] or 0)
 
 
-def is_newer_version(installed, available):
+def same_release_version(left, right):
+    """Recognized release equivalence; opaque vendor labels are never guessed."""
+    before, after = _ordered_version(left), _ordered_version(right)
+    return before is not None and after is not None and before == after
+
+
+def is_newer_version(installed, available, *, package_id=None, source=None):
     """Require provable forward ordering, rather than different version strings.
 
     Numeric release components, optional v, common prerelease labels and build
     metadata are understood. Vendor-specific incomparable labels stay review-only.
     Build metadata and trailing zero components do not establish a newer release.
+    Exact WinGet identities additionally support stable Unity Editor releases and
+    numeric installed upper bounds. Neither is generalized to opaque versions.
     """
+    if source == 'winget' and isinstance(package_id, str) and _PACKAGE_ID.fullmatch(package_id):
+        # Unity's documented MAJOR.MINOR.RRzNN ordering, restricted to normal
+        # public (f) builds within the exact package's major release family.
+        # https://docs.unity.com/en-us/engine/6000.0/manual/programming-environment/script-compilation/assembly-definition-files/includes
+        unity = _UNITY_PACKAGE.fullmatch(package_id)
+        if unity:
+            before = _UNITY_RELEASE.fullmatch(installed) if isinstance(installed, str) else None
+            after = _UNITY_RELEASE.fullmatch(available) if isinstance(available, str) else None
+            return bool(before and after and before[1] == after[1] == unity[1]
+                        and tuple(map(int, after.groups())) > tuple(map(int, before.groups())))
+        # WinGet's ARP mapping can report a strict installed upper bound, '< '.
+        # Require an exact final numeric offer strictly ABOVE that bound (even
+        # equality remains review-only). Never strip >, <=, unknown or labels.
+        # https://github.com/microsoft/winget-cli/blob/master/src/AppInstallerRepositoryCore/CompositeSource.cpp
+        upper = _UPPER_VERSION.fullmatch(installed) if isinstance(installed, str) and len(installed) <= 128 else None
+        if upper:
+            if not isinstance(available, str) or len(available) > 128 or not _NUMERIC_RELEASE.fullmatch(available):
+                return False
+            return is_newer_version(upper[1], available)
     before, after = _ordered_version(installed), _ordered_version(available)
     if before is None or after is None:
         return False
@@ -80,10 +119,9 @@ def fresh_candidates(scan: Any) -> dict[str, dict[str, Any]]:
         if item.get('package_id', identity) != identity or item.get('source') != 'winget':
             continue
         version, available = item.get('version'), item.get('available')
-        if any(not isinstance(part, str) or not _VERSION.fullmatch(part)
-               or part.endswith('.') or '..' in part for part in (version, available)):
+        if not valid_update_version(version, installed=True) or not valid_update_version(available):
             continue
-        if not is_newer_version(version, available) or item.get('pinned') is True:
+        if not is_newer_version(version, available, package_id=identity, source='winget') or item.get('pinned') is True:
             continue
         candidates[identity] = dict(item)
     return {identity: item for identity, item in candidates.items() if identity.casefold() not in repeated}
@@ -222,14 +260,60 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     # Maintenance re-reads the file immediately before every actual launch.
     data_dir = getattr(backend, 'data_dir', None)
     holds = load_update_holds(data_dir) if data_dir is not None else []
+    rechecks = {}
+    catalog_blocked = ''
+    recheck = getattr(backend, 'recheck_held_updates', None)
+    if callable(recheck) and not cancelled():
+        held_packages = [candidates[identity] for identity in selected
+                         if matching_update_hold(candidates[identity], holds)]
+        try:
+            rechecks = recheck(held_packages, cancel_event=cancel_event, item_callback=item_callback)
+            if not isinstance(rechecks, dict):
+                raise ValueError('Unrecognized catalog recheck evidence.')
+        except Exception:
+            # A crashed refresh can leave shared source state uncertain. These
+            # read-only checks never authorize an installer or remove a hold.
+            rechecks = {'needs_fresh_scan': True, 'source_verified_after_refresh': False,
+                        'error': 'Automatic publisher metadata checks did not establish catalog readiness.'}
+        if rechecks.get('needs_fresh_scan') is True:
+            if rechecks.get('source_verified_after_refresh') is not True:
+                catalog_blocked = 'The application source needs a fresh identity/trust verification after its metadata refresh; no application installer was started.'
+            elif not cancelled():
+                try:
+                    refreshed = cancellable_scan(cancel_event) if callable(cancellable_scan) else backend.updates_scan()
+                    if (not isinstance(refreshed, dict) or refreshed.get('structured') is not True
+                            or type(refreshed.get('exitCode')) is not int or refreshed['exitCode'] != 0
+                            or refreshed.get('source', 'winget') != 'winget'
+                            or not isinstance(refreshed.get('updates', refreshed.get('packages')), list)
+                            or len(refreshed.get('updates', refreshed.get('packages'))) > 1000):
+                        raise ValueError('The fresh catalog scan is not trusted.')
+                    # Preparation still applies the saved selected/all scope.
+                    # A new valid offer can supersede an old exact-version hold;
+                    # the hold itself is never removed, widened or bypassed.
+                    scan = refreshed
+                    candidates = fresh_candidates(scan)
+                    canonical_ids = {identity.casefold(): identity for identity in candidates}
+                    selected = ([identity for identity in candidates if identity.casefold() not in exclusions]
+                                if policy == 'all_supported' else [canonical_ids[identity.casefold()]
+                                for identity in configuration['software_update_ids']
+                                if identity.casefold() in canonical_ids and identity.casefold() not in exclusions])
+                    approved_ids = list(selected)
+                    holds = load_update_holds(data_dir) if data_dir is not None else []
+                    scan_context.update(scan=scan, selected=list(selected))
+                    partial_scan = bool(scan.get('excluded'))
+                except Exception:
+                    catalog_blocked = 'The fresh application source scan failed after metadata refresh; no application installer was started.'
+    recheck_items = rechecks.get('items') if isinstance(rechecks.get('items'), list) else []
     allowed = []
     for identity in selected:
         current = candidates[identity]
         hold = matching_update_hold(current, holds)
         if hold:
+            evidence = next((row for row in recheck_items if isinstance(row, dict)
+                             and row.get('id') == identity and row.get('available_version') == current['available']), None)
             preflight_items.append({'id': identity, 'name': current.get('name', identity),
                 'from_version': current['version'], 'to_version': current['available'], 'status': 'skipped',
-                'result': held_update_result(current, hold)})
+                'result': held_update_result(current, hold, recheck=evidence)})
         else:
             allowed.append(identity)
     selected = allowed
@@ -239,7 +323,8 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                  'reason': item['result']['note']}
                 for item in items if is_known_update_hold(item.get('result'))]
         return {'held_ids': [row['id'] for row in rows], 'held_count': len(rows),
-                'automatic_update_holds': rows}
+                'automatic_update_holds': rows,
+                **({'automatic_update_rechecks': rechecks} if rechecks else {})}
     def defer(reason, *, failed=0, refreshed_scan=None, error=None):
         return with_app_scan({'review_only': False, 'scan': scan if refreshed_scan is None else refreshed_scan,
                 'policy': policy, 'items': preflight_items,
@@ -247,6 +332,9 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 'deferred_ids': list(selected), 'cancelled': cancelled(), 'stop_reason': reason,
                 'installer_started': False, 'outcomeKnown': True, **hold_details(preflight_items)},
                 started=started, selected=approved_ids, error=error)
+    if catalog_blocked:
+        return dict(defer(catalog_blocked), installation_blocked=True,
+                    installation_block_reason=catalog_blocked, running=False)
     if selected and not cancelled() and before_install is not None:
         checkpoint = WorkItem(navigation, 'software:checkpoint', 'Wait for the application installer checkpoint', external=cancel_event, kind='check')
         permitted = before_install({'operation': 'software', 'scan_complete': not untrusted,

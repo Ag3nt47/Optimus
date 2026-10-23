@@ -31,6 +31,10 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
+Version **0.11.6** checks GitHub for a newer stable Optimus release before normal startup maintenance. On supported Windows installations, **Yes — update then Auto Clean** downloads and verifies the release first, preserves saved choices, and performs a guarded restart before that unchanged approved cleanup. No or an unavailable check continues normal launch review. See [startup updates](docs/SELF_UPDATE.md) for verification, consent and platform limits.
+
+Version **0.11.6** also adds automatic recovery for verified Windows inbox driver backups, stable Unity editor versions and WinGet's numeric installed-version upper bounds. Held publisher offers receive bounded automatic source/metadata rechecks on later approved runs; a bad or mismatched installer is never retried on metadata alone. Driver offer counts stay separate from backup prerequisite findings, including saved reports. Saved approvals, exclusions, signatures and unknown-installer guards remain in effect.
+
 Version **0.11.5** gives every security finding one labeled **Review** checkbox that adapts to theme/font changes; selecting it never replaces the separate Yes/No approval. Independent maintenance uses slow catalog-search time and continues while a prior installer blocks cleanup, slowdown analysis supports cooperative cancellation, and follow-up previews explain blocked update channels instead of offering attempts that cannot run. Known package-specific refusals are skipped while eligible work continues; unresolved installers, shared update failures and required restarts remain visible.
 
 Version **0.11.2** skips held or unavailable individual app offers and continues the remaining eligible app queue. Finished app workers distinguish skipped items from a blocked installer, retain incomplete-search warnings, and show which active app or driver worker maintenance is waiting for. Exact-version holds, source/pin checks and unknown-installer barriers remain in effect.

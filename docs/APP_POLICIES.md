@@ -56,7 +56,9 @@ This disposable fixture shows the **Review** checkbox selected. Each row has one
 
 ## Driver installation
 
-Automatic driver backup targets the installed OEM driver packages matched to the actual approved offers. It avoids exporting unrelated packages from the entire driver store before every batch. Each selected package must have verified backup files before its update is eligible to install. Unsupported mappings, inbox packages without an exportable backup, export failures and changes in identity are reported per offer. Other backed-up eligible offers can continue. Windows Update quiet-install, hardware/provider/date, agreement, permission and restart checks still apply.
+Automatic backup targets only the installed packages matched to approved offers. OEM packages use PnPUtil export. Signed Microsoft inbox packages can use a complete private DriverStore and signed-catalog snapshot, with native forward/reverse INF binding, source/destination hashes and a final device-identity recheck. Protected Windows files and permissions are never modified by backup. An inbox snapshot is recovery evidence: Windows Device Manager may offer rollback, but automatic reinstall or successful rollback is not guaranteed. It is kept separate from the OEM restore catalog.
+
+Only an exact offer with verified backup evidence can reach Windows Update installation. Unsupported identities, trust or copy failures remain per-offer skips; other eligible offers continue. A backup prerequisite is reported separately from failed driver installations. Quiet-install, hardware/provider/date, agreements, permissions, space and restart checks still apply.
 
 ## Activity indicators
 
@@ -71,3 +73,15 @@ The live status area reports computer CPU use, available clock information, RAM 
 ![Saved app rule editor](optimus-app-rules.png)
 
 The app above is a disposable review fixture. Real rules take effect only after Save and the required scope/agreements are approved.
+
+## Automatic update recovery
+
+Stable Unity editor releases use the documented final-release `f` version order only within the exact `Unity.Unity.<major>` package track. A numeric installed-version upper bound such as `< 3.21.0.65535` is accepted only when an exact numeric offer is strictly greater than that bound. Unknown, prerelease, mixed-track and ambiguous versions stay excluded. Fresh exact-pair validation, exclusions, pins and saved scope still apply.
+
+Selected held offers receive at most one bounded metadata pass per approved run, with a six-hour cooldown and five-offer limit. Optimus verifies and refreshes only the existing official WinGet source, then checks exact offer metadata. It does not reset/add sources, clear holds, accept new licences or run an installer based on metadata alone. A publisher correction is awaited automatically on later approved runs; this is not a separate background timer. A failed or uncertain source check is recorded durably and prevents affected app installs until trust and a fresh approved-pair scan succeed. Independent maintenance and driver work continue.
+
+## Fresh startup and previous failures
+
+Every new application session starts with fresh progress and worker state. Each approved maintenance run performs fresh update discovery; a known completed package failure does not permanently disable later eligible attempts. The prior result remains in history and the current run still validates saved scope, current offers and readiness.
+
+Startup does not delete installer journals, exact bad-artifact holds or recovery records. A still-running or unresolved installer, pending restart, untrusted source or mismatched artifact needs its own verified resolution. Forgetting that evidence could launch duplicate installers or repeat the same bad package. Held offers keep their bounded automatic metadata rechecks while unrelated eligible work continues.

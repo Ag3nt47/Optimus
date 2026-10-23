@@ -119,7 +119,8 @@ def test_backup_failure_is_a_failed_prerequisite_not_a_processed_driver():
         'installer_started': False, 'outcomeKnown': True,
         'error': 'A successful third-party driver backup is required before installation.'}])
     state = update_completion_state(outcome)
-    assert state['driver_counts']['failed'] == 1
+    assert state['driver_counts']['failed'] == 0
+    assert len(state['prerequisite_findings']) == 1
     assert state['driver_counts']['not_processed'] == 5
     assert 'successful third-party driver backup' in state['description']
     assert update_completion_status(outcome) == 'needs_review'

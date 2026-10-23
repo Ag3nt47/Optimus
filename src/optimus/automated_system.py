@@ -365,6 +365,7 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
         def binding_key(row):
             if not isinstance(row,dict) or not isinstance(row.get('id'),str) or type(row.get('revision')) is not int:return None
             return row['id'].casefold(),row['revision']
+        selected_keys=[binding_key(value) for value in eligible]
         backed=[binding_key(row) for row in backup['backed_updates']]
         blocked={binding_key(row):row for row in backup['blocked_updates'] if binding_key(row) is not None}
         allowed=[]
@@ -377,6 +378,22 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
                 items.append({'binding':value,'status':'skipped','reason':reason,
                     'result':{'installer_started':False,'outcomeKnown':True,'running':False,'skipped':True,'note':reason}})
         eligible=allowed
+        # A complete exact per-offer refusal is a known no-install outcome.
+        # Do not invent an additional failed driver when every real offer was
+        # deliberately skipped because its recovery package was unavailable.
+        # Malformed, failed, contradictory and incomplete backup receipts still
+        # take the failure path below; none can authorize an installer.
+        blocked_keys=[binding_key(row) for row in backup['blocked_updates']]
+        if (not eligible and not backup['backed_updates'] and backup.get('status')=='blocked'
+                and type(backup.get('exit_code')) is int and backup['exit_code']==1
+                and isinstance(backup.get('destination'),str) and backup['destination']
+                and not backup.get('cancelled') and not backup.get('error')
+                and None not in blocked_keys and len(blocked_keys)==len(set(blocked_keys))
+                and set(blocked_keys)==set(selected_keys)
+                and all(isinstance(row.get('reason'),str) and row['reason'] for row in backup['blocked_updates'])):
+            return finish(items,backup=backup,cancelled=_cancel(cancel_event),review_only=False,
+                installer_started=False,outcomeKnown=True,running=False,backup_unavailable=True,
+                note='Every applicable approved offer was skipped because its complete recovery backup could not be verified. No driver installer started; the per-offer reasons remain available.')
     if ((not isinstance(backup,dict) or type(backup.get('exit_code')) is not int or backup['exit_code']!=0)
             or not isinstance(backup,dict) or not isinstance(backup.get('destination'),str) or not backup['destination']):
         return finish(items+[{'status':'failed','binding':{'stage':'driver-backup'},'result':{

@@ -203,6 +203,10 @@ def test_source_restart_stays_hidden_and_does_no_automatic_work_until_lease_hand
         resume.assert_not_called()
         window.session_approved.return_value = True
         window._quitting = window._close_when_idle = False
+        assert window._startup_update_pending is True
+        window._session_approved_callback()
+        resume.assert_not_called()
+        window._startup_update_pending = False  # The new startup update gate has completed.
         window._session_approved_callback()
         resume.assert_called_once_with(backend)
         controller.assert_called_once()

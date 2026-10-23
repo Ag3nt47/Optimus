@@ -168,6 +168,9 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'updates-waiting.driver-handoff', 'updates-concurrent.discovery',
             'updates-concurrent.maintenance-gate', 'updates-concurrent.installer-gate',
             'updates-deferred.compact-reason', 'updates-deferred.layout', 'updates-deferred.honest-state',
+            'startup-update.explicit-choices', 'startup-update.actual-warning',
+            'startup-update.no-implicit-actions', 'startup-update.download-honesty',
+            'startup-update.cooperative-cancel',
             'launch-review.negative-default', 'launch-review.actual-warning',
             'launch-review.scroll-access', 'launch-review.no-implicit-actions',
             'optional.no-constructor-actions', 'optional.smart-stopped-honesty',
@@ -475,3 +478,19 @@ def test_security_selection_review_detects_unmarked_and_duplicate_controls(revie
         owner.close()
         owner.deleteLater()
         app.processEvents()
+
+
+def test_update_prompt_review_detects_omitted_saved_removals(reviewer, monkeypatch):
+    original = bot.make_startup_update_dialog
+    def incomplete(parent, offer, settings):
+        return original(parent, offer, dict(settings, m365_debloat_enabled=False))
+    monkeypatch.setattr(bot, 'make_startup_update_dialog', incomplete)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_startup_update(window, backend, bot.VIEWPORTS[0], 'update-warning-defect')
+        findings = {row['id']: row for row in reviewer.report['checks']}
+        assert findings['update-warning-defect.startup-update.actual-warning']['status'] == 'failed'
+        assert findings['update-warning-defect.startup-update.no-implicit-actions']['status'] == 'passed'
+    finally:
+        reviewer.dispose(window)

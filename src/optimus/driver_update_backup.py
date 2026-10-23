@@ -1,7 +1,8 @@
 """Targeted recovery evidence for exact offered Windows driver replacements.
 
-Only an installed OEM INF matched through a present device's exact hardware or
-compatible ID is exported. Inbox drivers have no invented export fallback.
+Only exact installed packages matched through present-device hardware or
+compatible IDs are backed up. OEM packages use PnPUtil export; signed Microsoft
+inbox packages require a separately verified native DriverStore snapshot.
 PnPUtil /export-driver accepts one published OEM INF on Windows 10 1607+:
 https://learn.microsoft.com/windows-hardware/drivers/devtest/pnputil-command-syntax#export-driver
 No driver install/remove/device/reboot command is issued here.
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -26,7 +28,19 @@ from .filesystem import _ordinary_data_path, resolve_data_root
 from .speed_enhancements import _current_owner, _private_json
 
 _OEM = re.compile(r'oem[0-9]+\.inf\Z', re.I)
+_INF = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,199}\.inf\Z', re.I)
 _SHA = re.compile(r'[a-f0-9]{64}\Z')
+
+
+def _known_inbox_driver(driver):
+    if (driver['signed'] is not True or driver['provider'].casefold() != 'microsoft'
+            or not driver['deviceClass'] or not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,3}', driver['version'])):
+        return False
+    try:
+        datetime.fromisoformat(driver['date'].replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    return True
 
 
 def _cancelled(event):
@@ -61,13 +75,17 @@ def _mapping(inventory, offers):
             result[key] = {'reason': 'A matching present device has no complete installed-driver package identity.'}
             continue
         infs = sorted({driver['inf'].casefold() for device in matches for driver in device['drivers']})
-        if not infs or any(not _OEM.fullmatch(inf) for inf in infs):
-            result[key] = {'reason': 'A matched installed package is an inbox or unsupported non-OEM INF; no export backup is claimed.'}
+        if not infs or any(not _INF.fullmatch(inf) for inf in infs):
+            result[key] = {'reason': 'A matched installed package has an unsupported INF name; no backup is claimed.'}
             continue
         if any(not all(driver[name] for name in ('version', 'date', 'provider', 'inf')) for device in matches for driver in device['drivers']):
-            result[key] = {'reason': 'Installed OEM driver identity is incomplete; targeted backup cannot be verified.'}
+            result[key] = {'reason': 'Installed driver identity is incomplete; targeted backup cannot be verified.'}
             continue
-        result[key] = {'packages': infs, 'devices': sorted(
+        if any(not _OEM.fullmatch(driver['inf']) and not _known_inbox_driver(driver)
+               for device in matches for driver in device['drivers']):
+            result[key] = {'reason': 'A non-OEM inbox package requires a known signed Microsoft installed-driver identity; no backup is claimed.'}
+            continue
+        result[key] = {'packages': infs, 'package_kinds': {inf: 'oem' if _OEM.fullmatch(inf) else 'inbox' for inf in infs}, 'devices': sorted(
             ({'id': device['device_id'], 'fingerprint': device['fingerprint']} for device in matches), key=lambda row: row['id'].casefold())}
     return result
 
@@ -79,6 +97,20 @@ class WindowsTargetedExport:
 
     def inventory(self):
         return self.backend.driver_devices()
+
+    def snapshot_inbox(self, inf, destination, **kwargs):
+        from .inbox_driver_backup import InboxDriverSnapshot
+        if not hasattr(self, '_inbox'):
+            reserve = getattr(self.backend, 'driver_backup_reserve_bytes', None)
+            self._inbox = (InboxDriverSnapshot(reserve_bytes=reserve(destination))
+                           if callable(reserve) else InboxDriverSnapshot())
+        return self._inbox.snapshot(inf, destination, **kwargs)
+
+    def verify_inbox(self, snapshot, **kwargs):
+        from .inbox_driver_backup import InboxDriverSnapshot
+        if not hasattr(self, '_inbox'):
+            self._inbox = InboxDriverSnapshot()
+        return self._inbox.verify(snapshot, **kwargs)
 
     def installed_inf_hash(self, inf):
         if not _OEM.fullmatch(inf):
@@ -226,31 +258,48 @@ class DriverUpdateBackup:
             receipt['status'] = 'exporting'
             self._save(path, receipt)
             needed = sorted({inf for item in mapping.values() for inf in item.get('packages', [])})
+            kinds = {inf: kind for item in mapping.values() for inf, kind in item.get('package_kinds', {}).items()}
             packages = {}
             for index, inf in enumerate(needed):
-                package = {'inf': inf, 'verified': False}
+                kind = kinds[inf]
+                package = {'inf': inf, 'verified': False, 'kind': 'oem-pnputil-export' if kind == 'oem' else 'inbox-driver-store-snapshot'}
                 try:
                     if _cancelled(cancel_event) or time.monotonic() >= deadline:
                         raise RuntimeError('Targeted driver backup was cancelled or exceeded its total time budget.')
                     if item_callback:
                         item_callback({'description': f'Backing up current driver package {index + 1}/{len(needed)}: {inf}',
                             'current': index, 'total': len(needed), 'phase': 'backup'})
-                    digest = self._adapter().installed_inf_hash(inf)
-                    if not isinstance(digest, str) or not _SHA.fullmatch(digest):
-                        raise ValueError('The installed OEM INF hash is unavailable.')
                     destination = folder / inf
                     destination.mkdir(mode=0o700)
-                    outcome = self._adapter().export(inf, destination, cancel_event=cancel_event,
-                        timeout=min(self.package_timeout, max(0.1, deadline - time.monotonic())), progress_callback=item_callback)
-                    package['export_result'] = copy.deepcopy(outcome)
-                    if (not isinstance(outcome, dict) or type(outcome.get('exit_code')) is not int
-                            or outcome['exit_code'] != 0 or outcome.get('cancelled') or outcome.get('timed_out')):
-                        raise ValueError('The targeted OEM export did not complete successfully: ' + str(outcome.get('reason') or outcome.get('exit_code')) if isinstance(outcome, dict) else 'The targeted export returned no native outcome.')
-                    files = self._files(destination, cancel_event, deadline, item_callback)
-                    inf_matches = [item['path'] for item in files if item['path'].casefold().endswith('.inf') and item['sha256'] == digest]
-                    if len(inf_matches) != 1 or self._adapter().installed_inf_hash(inf) != digest:
-                        raise ValueError('The exported INF does not map uniquely to the unchanged installed OEM INF hash.')
-                    package.update(verified=True, installed_inf_sha256=digest, exported_inf=inf_matches[0], files=files)
+                    if kind == 'inbox':
+                        snapshot = getattr(self._adapter(), 'snapshot_inbox', None)
+                        if not callable(snapshot):
+                            raise ValueError('A trusted native inbox package snapshot is unavailable; no OEM export fallback is claimed.')
+                        value = snapshot(inf, destination, cancel_event=cancel_event,
+                            deadline=min(deadline, time.monotonic() + self.package_timeout), progress_callback=item_callback)
+                        if (not isinstance(value, dict) or value.get('kind') != 'inbox-driver-store-snapshot'
+                                or value.get('verified') is not True or value.get('inf') != inf
+                                or value.get('destination') != str(destination) or value.get('oem_export') is not False
+                                or value.get('automatic_restore_supported') is not False):
+                            raise ValueError('The native inbox snapshot returned an invalid recovery receipt.')
+                        package.update(verified=True, snapshot=copy.deepcopy(value),
+                            files=self._files(destination, cancel_event, deadline, item_callback),
+                            automatic_restore_supported=False, oem_export=False)
+                    else:
+                        digest = self._adapter().installed_inf_hash(inf)
+                        if not isinstance(digest, str) or not _SHA.fullmatch(digest):
+                            raise ValueError('The installed OEM INF hash is unavailable.')
+                        outcome = self._adapter().export(inf, destination, cancel_event=cancel_event,
+                            timeout=min(self.package_timeout, max(0.1, deadline - time.monotonic())), progress_callback=item_callback)
+                        package['export_result'] = copy.deepcopy(outcome)
+                        if (not isinstance(outcome, dict) or type(outcome.get('exit_code')) is not int
+                                or outcome['exit_code'] != 0 or outcome.get('cancelled') or outcome.get('timed_out')):
+                            raise ValueError('The targeted OEM export did not complete successfully: ' + str(outcome.get('reason') or outcome.get('exit_code')) if isinstance(outcome, dict) else 'The targeted export returned no native outcome.')
+                        files = self._files(destination, cancel_event, deadline, item_callback)
+                        inf_matches = [item['path'] for item in files if item['path'].casefold().endswith('.inf') and item['sha256'] == digest]
+                        if len(inf_matches) != 1 or self._adapter().installed_inf_hash(inf) != digest:
+                            raise ValueError('The exported INF does not map uniquely to the unchanged installed OEM INF hash.')
+                        package.update(verified=True, installed_inf_sha256=digest, exported_inf=inf_matches[0], files=files)
                 except Exception as error:
                     package['reason'] = str(error)[:2000]
                 packages[inf] = package
@@ -259,7 +308,6 @@ class DriverUpdateBackup:
             # Recheck only relevant device mappings, not unrelated hardware changes.
             stop_reason = ('Driver backup was cancelled.' if _cancelled(cancel_event) else
                 'Targeted driver backup exceeded its total time budget.' if time.monotonic() >= deadline else None)
-            fresh = _mapping(self._adapter().inventory(), rows) if not stop_reason else None
             # Several offers/devices can share one published OEM package. Do
             # the final hash pass once per package in this call, then apply its
             # result to each exact offer. Nothing survives as a cross-run cache.
@@ -272,8 +320,13 @@ class DriverUpdateBackup:
                     try:
                         if _cancelled(cancel_event) or time.monotonic() >= deadline:
                             raise RuntimeError('Driver backup was cancelled or exceeded its total time budget.')
-                        if (self._adapter().installed_inf_hash(inf) != package['installed_inf_sha256']
-                                or self._files(folder / inf, cancel_event, deadline, item_callback) != package['files']):
+                        if package['kind'] == 'inbox-driver-store-snapshot':
+                            verifier = getattr(self._adapter(), 'verify_inbox', None)
+                            if not callable(verifier) or verifier(package['snapshot'], cancel_event=cancel_event, deadline=deadline) is not True:
+                                raise ValueError('The exact native inbox snapshot could not be reverified.')
+                        elif self._adapter().installed_inf_hash(inf) != package['installed_inf_sha256']:
+                            raise ValueError('The installed OEM INF changed after backup.')
+                        if self._files(folder / inf, cancel_event, deadline, item_callback) != package['files']:
                             reason = 'A required current OEM package or exported file changed after verification.'
                     except Exception as error:
                         reason = 'A required current OEM package or exported file could not be reverified: ' + str(error)[:2000]
@@ -281,6 +334,15 @@ class DriverUpdateBackup:
                 if reason:
                     package['final_reason'] = reason
                 final_packages[inf] = reason
+            # Package and catalog hashing can take time. Re-read the relevant
+            # present-device identities after that work, so a device that
+            # switched driver during final verification cannot be authorized
+            # against an earlier installed-driver fingerprint.
+            stop_reason = ('Driver backup was cancelled.' if _cancelled(cancel_event) else
+                'Targeted driver backup exceeded its total time budget.' if time.monotonic() >= deadline else None)
+            fresh = _mapping(self._adapter().inventory(), rows) if not stop_reason else None
+            stop_reason = ('Driver backup was cancelled.' if _cancelled(cancel_event) else
+                'Targeted driver backup exceeded its total time budget.' if time.monotonic() >= deadline else None)
             for row in rows:
                 key = row['id'], row['revision']
                 original = mapping[key]

@@ -1,6 +1,6 @@
 # Native platforms and downloads
 
-Optimus 0.11.5 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.11.6 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
@@ -25,6 +25,7 @@ Native startup registration uses the application's current location. Move the ap
 | Function family | Windows | macOS / Linux |
 | --- | --- | --- |
 | Main controls including Revert, launch consent, setup choices, responsive worker cards, stage progress and cancellation | Native Qt | Native Qt |
+| GitHub startup release check | Stable release check, explicit update consent, verified side-by-side install and guarded restart on supported writable managed installations | Stable native-asset check and manual download; no automatic bundle replacement or privileged install |
 | Worker Back/Next/Cancel and per-app update rules | Session/item-bound cooperative controls and exact WinGet update choices | Same worker controls and supported native-manager update choices |
 | Keep installed / Keep uninstalled app policies | Opt-in, exact WinGet identities and supported quiet installer types with fresh verification | Explicitly unavailable for automatic presence changes; normal native update choices remain available |
 | Smart threshold/browser-exit cleaning and calendar-month cadence | Opt-in, while open after launch approval | Opt-in, while open after launch approval; native path/ownership limits apply |

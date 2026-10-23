@@ -165,6 +165,11 @@ def test_normal_gui_starts_saved_runtime_only_after_approval_and_rechecks_each_t
         def event_loop():
             backend.analysis_start.assert_not_called(); backend.activate_smart_maintenance.assert_not_called()
             timer.return_value.start.assert_not_called()
+            assert window._startup_update_pending is True
+            window._session_approved_callback()
+            backend.analysis_start.assert_not_called()
+            backend.activate_smart_maintenance.assert_not_called()
+            window._startup_update_pending = False  # The asynchronous startup update gate has finished.
             window._session_approved_callback()
             backend.analysis_start.assert_called_once_with(9)
             busy_reader = backend.activate_smart_maintenance.call_args.args[0]

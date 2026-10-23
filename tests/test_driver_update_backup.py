@@ -167,6 +167,107 @@ def test_a_failed_oem_export_does_not_block_a_different_verified_offer(tool):
     assert result['blocked_updates'][0]['id'] == offer()['id']
 
 
+def attach_inbox_fixture(adapter, tmp_path):
+    from optimus.inbox_driver_backup import InboxDriverSnapshot, _INBOX_SCORE
+    folder = tmp_path / 'native-windows-fixture' / 'monitor-package'
+    folder.mkdir(parents=True)
+    inf = folder / 'monitor.inf'; inf.write_bytes(b'[Version]\n; signed fixture')
+    catalog = folder / 'monitor.cat'; catalog.write_bytes(b'fixture catalog')
+    description = {'kind': 'inbox-driver-store-snapshot', 'published_inf': str(inf),
+        'store_inf': str(inf), 'package_directory': str(folder), 'catalog': str(catalog),
+        'catalog_trust_verified': True, 'signer_score': _INBOX_SCORE}
+    catalog_adapter = SimpleNamespace(describe=Mock(side_effect=lambda _: copy.deepcopy(description)))
+    engine = InboxDriverSnapshot(catalog_adapter, disk_usage=lambda _: SimpleNamespace(free=16 * 1024 ** 3))
+    adapter.snapshot_inbox = Mock(side_effect=engine.snapshot)
+    adapter.verify_inbox = Mock(side_effect=engine.verify)
+    adapter.devices = [device(inf='monitor.inf')]
+    adapter.devices[0]['installedDrivers'][0]['provider'] = 'Microsoft'
+    return engine, catalog_adapter, description
+
+
+def test_signed_inbox_package_uses_verified_snapshot_and_never_fake_oem_export(tool, tmp_path):
+    service, adapter, backend = tool
+    attach_inbox_fixture(adapter, tmp_path)
+    result = service.backup([offer()])
+    assert result['backed_updates'] == exact([offer()]) and result['status'] == 'completed'
+    assert not any(call[0] in ('export', 'hash') for call in adapter.calls)
+    package = result['packages'][0]
+    assert package['kind'] == 'inbox-driver-store-snapshot' and package['final_verified'] is True
+    assert package['oem_export'] is False and package['automatic_restore_supported'] is False
+    adapter.snapshot_inbox.assert_called_once(); adapter.verify_inbox.assert_called_once()
+    receipt = json.loads(Path(result['receipt']).read_text())
+    assert receipt['packages'][0]['snapshot']['verified'] is True
+    # Targeted snapshots cannot accidentally enter the separate signed OEM
+    # export/revert catalog merely by using a familiar INF/package filename.
+    from optimus.driver_backups import DriverBackups
+    history = DriverBackups(backend, adapter=Mock(), owner='fixture-owner').history()
+    assert history == []
+
+
+@pytest.mark.parametrize('signed,provider', [(False, 'Microsoft'), (None, 'Microsoft'), (True, 'Other')])
+def test_unknown_or_non_microsoft_inbox_identity_never_attempts_snapshot(tool, tmp_path, signed, provider):
+    service, adapter, _ = tool
+    attach_inbox_fixture(adapter, tmp_path)
+    adapter.devices[0]['installedDrivers'][0].update(signed=signed, provider=provider)
+    result = service.backup([offer()])
+    assert not result['backed_updates'] and 'signed Microsoft' in result['blocked_updates'][0]['reason']
+    adapter.snapshot_inbox.assert_not_called()
+
+
+@pytest.mark.parametrize('changes', [{'version':'unknown'}, {'version':'1.*'}, {'date':'unknown'}, {'date':'2026-13-02'}, {'deviceClass':''}])
+def test_inbox_requires_known_installed_version_date_and_class(tool, tmp_path, changes):
+    service, adapter, _ = tool
+    attach_inbox_fixture(adapter, tmp_path)
+    adapter.devices[0]['installedDrivers'][0].update(changes)
+    result = service.backup([offer()])
+    assert not result['backed_updates']
+    adapter.snapshot_inbox.assert_not_called()
+
+
+def test_untrusted_inbox_catalog_does_not_block_an_independently_backed_oem(tool, tmp_path):
+    service, adapter, _ = tool
+    _, _, description = attach_inbox_fixture(adapter, tmp_path)
+    description['catalog_trust_verified'] = False
+    adapter.devices.append(device('two', 'oem23.inf', 'SECOND'))
+    result = service.backup([offer(), offer(2, 'SECOND')])
+    assert result['status'] == 'partial' and result['backed_updates'] == exact([offer(2, 'SECOND')])
+    assert 'incomplete' in result['blocked_updates'][0]['reason']
+
+
+def test_inbox_device_identity_and_copy_are_revalidated_after_backup(tool, tmp_path):
+    service, adapter, _ = tool
+    engine, _, _ = attach_inbox_fixture(adapter, tmp_path)
+    def change_device(*args, **kwargs):
+        result = engine.snapshot(*args, **kwargs)
+        adapter.devices[0]['installedDrivers'][0]['version'] = 'changed'
+        return result
+    adapter.snapshot_inbox.side_effect = change_device
+    result = service.backup([offer()])
+    assert not result['backed_updates'] and 'identity changed' in result['blocked_updates'][0]['reason']
+
+
+def test_failed_final_native_inbox_verification_never_authorizes_driver(tool, tmp_path):
+    service, adapter, _ = tool
+    attach_inbox_fixture(adapter, tmp_path)
+    adapter.verify_inbox.return_value = False
+    adapter.verify_inbox.side_effect = None
+    result = service.backup([offer()])
+    assert not result['backed_updates'] and 'reverified' in result['blocked_updates'][0]['reason']
+
+
+def test_device_change_during_final_inbox_verification_is_not_authorized(tool, tmp_path):
+    service, adapter, _ = tool
+    engine, _, _ = attach_inbox_fixture(adapter, tmp_path)
+    def change_after_verification(*args, **kwargs):
+        result = engine.verify(*args, **kwargs)
+        adapter.devices[0]['installedDrivers'][0]['version'] = '2.0'
+        return result
+    adapter.verify_inbox.side_effect = change_after_verification
+    result = service.backup([offer()])
+    assert not result['backed_updates']
+    assert 'identity changed' in result['blocked_updates'][0]['reason']
+
+
 @pytest.mark.parametrize('kind', ['inf_bytes', 'duplicate_inf', 'changed_installed_inf', 'changed_device', 'hardlink', 'symlink'])
 def test_export_identity_hash_and_ordinary_file_checks_prevent_false_backup(tool, kind, tmp_path):
     service, adapter, _ = tool

@@ -31,6 +31,8 @@ def parser():
     commands.add_argument('--windows-compatibility-restore', type=_run_identity, metavar='CHANGE_ID', help='Restore one recorded Windows compatibility-policy change.')
     commands.add_argument('--update-recovery', choices=('status', 'reconcile'), help='Inspect one updater journal or reconcile a verified legacy preflight error; never starts an installer.')
     commands.add_argument('--safe-stop', action='store_true', help='Ask the running Optimus window to stop new work and exit after active operations save their outcomes; never force-kills installers.')
+    commands.add_argument('--self-update-worker', type=_run_identity, help=argparse.SUPPRESS)
+    commands.add_argument('--self-update-resume', type=_run_identity, help=argparse.SUPPRESS)
     result.add_argument('--update-record', type=_run_identity, metavar='JOURNAL_ID', help='Exact updater journal for --update-recovery.')
     result.add_argument('--recovery-evidence', type=Path, help='Reviewed, hash-bound evidence for an explicit legacy-journal reconciliation.')
     result.add_argument('--output', type=Path, help='Report destination folder.')
@@ -186,6 +188,15 @@ def _safe_stop_command(backend):
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(actual_arguments)
+    if args.self_update_worker:
+        # The exact core transaction is self-contained. Do not initialize a
+        # backend/GUI, request UAC, acquire a GUI lease or start saved actions.
+        from .self_update import worker_main
+        try:
+            outcome = worker_main(args.self_update_worker)
+            return outcome if type(outcome) is int and outcome in (0, 2) else 2
+        except (OSError, ValueError, RuntimeError):
+            return 2
     if (args.update_record or args.recovery_evidence) and not args.update_recovery:
         parser().error('--update-record and --recovery-evidence require --update-recovery.')
     if sys.platform not in ('win32', 'darwin', 'linux'):
@@ -321,6 +332,8 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
     window = OptimusWindow(backend, smoke_test=read_only_gui,
                            **({'defer_activation': True} if staged_restart else {}),
                            **({'require_launch_review': True} if not read_only_gui else {}))
+    if not read_only_gui:
+        window._startup_update_pending = True
     if args.startup_probe:
         window.setEnabled(False)
     if elevation.get('note'):
@@ -375,7 +388,8 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
                 return '; '.join(errors)
 
             def resume_approved_session():
-                if not window.session_approved() or window._quitting or window._close_when_idle:
+                if (not window.session_approved() or window._quitting or window._close_when_idle
+                        or getattr(window, '_startup_update_pending', False) is True):
                     return
                 try:
                     _resume_saved_analysis(backend)
@@ -395,7 +409,14 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
 
             window._session_invalidated_callback = pause_automatic_session
             window._session_approved_callback = resume_approved_session
-            QTimer.singleShot(0, window.review_launch)
+            def begin_startup_review():
+                if window._quitting or window._close_when_idle:
+                    return
+                from .self_update_ui import StartupUpdateController
+                window._self_update_controller = StartupUpdateController(window, backend,
+                    resume_id=getattr(args, 'self_update_resume', None))
+                window._self_update_controller.start()
+            QTimer.singleShot(0, begin_startup_review)
 
     if staged_restart:
         window.tray.hide()
