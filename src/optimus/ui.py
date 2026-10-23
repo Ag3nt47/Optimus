@@ -2953,6 +2953,7 @@ class SecurityReviewDialog(QDialog):
             choice.setToolTip('Select for review. A separate Yes or No prompt is required before applying this recommendation.')
             choice.toggled.connect(self._selection_changed)
             self._selection_controls[identifier] = choice
+            choice.installEventFilter(self)
             cell = QWidget(self.table)
             cell_layout = QHBoxLayout(cell)
             cell_layout.setContentsMargins(8, 2, 8, 2)
@@ -2984,6 +2985,24 @@ class SecurityReviewDialog(QDialog):
         self.close_button.clicked.connect(self.reject)
         bar.addWidget(self.close_button)
         layout.addLayout(bar)
+
+    def _fit_selection_column(self):
+        width = 112
+        for identifier, choice in self._selection_controls.items():
+            # A theme or desktop font can be polished after construction.
+            # Recompute from the current metrics rather than an earlier font.
+            choice.setMinimumWidth(choice.fontMetrics().horizontalAdvance('Review') + 28)
+            width = max(width, choice.minimumWidth() + 16)
+            row = self._row(identifier)
+            if row is not None:
+                self.table.setRowHeight(row, max(34, choice.sizeHint().height() + 6))
+        self.table.setColumnWidth(0, width)
+
+    def eventFilter(self, watched, event):
+        if (event.type() in (QEvent.FontChange, QEvent.StyleChange, QEvent.Polish)
+                and watched in self._selection_controls.values()):
+            self._fit_selection_column()
+        return super().eventFilter(watched, event)
 
     def selection_control(self, row):
         return self._selection_controls[self.table.item(row, 0).data(Qt.UserRole)]
