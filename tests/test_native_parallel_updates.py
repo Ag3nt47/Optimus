@@ -123,7 +123,7 @@ def test_independent_stage_overlaps_but_queued_stages_and_final_readback_wait(tm
     waiting = threading.Event()
     def progress(event):
         events.append(event)
-        if event.get('waiting_for') == 'installer_updates':
+        if event.get('waiting_for') == 'software_updates':
             waiting.set()
     configuration = settings(applications_review_enabled=True, driver_updates_enabled=True,
                              drive_optimization_enabled=not native, windows_security_updates_enabled=not native)
@@ -131,6 +131,8 @@ def test_independent_stage_overlaps_but_queued_stages_and_final_readback_wait(tm
     try:
         assert service.independent.wait(15)
         assert waiting.wait(15)
+        assert any(event.get('maintenance_wait_reason', '').startswith('Waiting for application updates:')
+                   for event in events)
         assert thread.is_alive()
         assert service.calls.count('audit') == 1
         assert 'drivers' in service.calls  # Read-only metadata remains independent.
@@ -443,7 +445,7 @@ def test_startup_duplicate_cloud_and_driver_reviews_continue_before_wait(tmp_pat
     service.apply_system_privacy = Mock(return_value={'failed_items': 1})
     def progress(event):
         events.append(event)
-        if event.get('waiting_for') == 'installer_updates':
+        if event.get('waiting_for') == 'software_updates':
             reviews_done.set()
     workflow, thread, result, errors = start_workflow(service, settings(
         applications_review_enabled=True, startup_review_enabled=True,
@@ -454,6 +456,7 @@ def test_startup_duplicate_cloud_and_driver_reviews_continue_before_wait(tmp_pat
         assert all(call in service.calls for call in ('startup_review', 'duplicate_review', 'cloud_review', 'drivers'))
         wait = events[-1]
         assert wait['stage'] == WAITING_FOR_UPDATES
+        assert wait['maintenance_wait_reason'].startswith('Waiting for application updates:')
         assert 'Apply saved privacy controls' not in wait['stage']
         assert wait['jobs'][0]['current_package'] == 'Fixture.One'
         assert wait['jobs'][0]['total'] == 2 and wait['jobs'][0]['current'] == 0
@@ -477,7 +480,9 @@ def test_waiting_heartbeat_preserves_package_and_refreshes_elapsed_without_logs(
         mux.wait_for_updates('Install approved driver updates')
         mux.heartbeat()
     assert events[-1]['stage'] == WAITING_FOR_UPDATES and events[-1]['percentage'] == 29
-    assert events[-1]['waiting_for'] == 'installer_updates'
+    assert events[-1]['waiting_for'] == 'software_updates'
+    assert events[-1]['maintenance_wait_reason'].startswith('Waiting for application updates:')
+    assert 'Ollama.Ollama' in events[-1]['maintenance_wait_reason']
     assert events[-1]['jobs'][0]['current_package'] == 'Ollama.Ollama'
     assert events[-1]['jobs'][0]['status'] == 'running'  # Foreground wait does not stop the updater.
     assert events[-1]['jobs'][0]['current'] == 1 and events[-1]['jobs'][0]['total'] == 7
@@ -569,7 +574,7 @@ def test_driver_prepares_during_app_install_and_foreground_keeps_working(tmp_pat
         if any(job['id'] == 'software_updates' and job['status'] == 'waiting_for_maintenance'
                for job in event.get('jobs', [])):
             apps_prepared.set()
-        if event.get('waiting_for') == 'installer_updates':
+        if event.get('waiting_for') == 'driver_updates':
             waiting.set()
         if any(job['id'] == 'driver_updates' and job['status'] == 'waiting_for_installer'
                for job in event.get('jobs', [])):
@@ -589,6 +594,8 @@ def test_driver_prepares_during_app_install_and_foreground_keeps_working(tmp_pat
         service.release.set()
         assert maintenance_during_driver.wait(15)
         assert waiting.wait(15)
+        assert any(event.get('maintenance_wait_reason', '').startswith('Waiting for driver updates:')
+                   for event in events)
         jobs = {job['id']: job for job in events[-1]['jobs']}
         assert jobs['software_updates']['status'] == 'completed'
         assert jobs['driver_updates']['status'] == 'installing'
@@ -815,9 +822,20 @@ def test_explicit_shared_app_refusal_still_blocks_driver_channel(tmp_path, outco
     service = Backend(tmp_path)
     service.release.set()
     service.outcome = outcome
+    apps_prepared = threading.Event()
+    original_audit = service.audit
+    def audit():
+        if not service.audit_count:
+            assert apps_prepared.wait(15)
+        return original_audit()
+    def progress(event):
+        if any(job['id'] == 'software_updates' and job['status'] == 'waiting_for_maintenance'
+               for job in event.get('jobs', [])):
+            apps_prepared.set()
+    service.audit = audit
     install = Mock(return_value={'resultCode':2,'hresult':0,'restartNeeded':False})
     enable_fixture_driver(service, install)
-    report = Workflow(service).run(driver_settings(), lambda _:None)
+    report = Workflow(service).run(driver_settings(), progress)
     stages = {row['title']:row for row in report['stages']}
     assert stages[WINDOWS_SOFTWARE]['status'] == 'failed'
     assert stages[WINDOWS_DRIVERS]['result']['installation_blocked'] is True

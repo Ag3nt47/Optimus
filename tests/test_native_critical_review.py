@@ -361,6 +361,30 @@ def test_deferred_review_detects_long_warning_caption_and_counter_overlap(review
         app.processEvents()
 
 
+@pytest.mark.parametrize('defect', [False, True])
+def test_held_app_review_distinguishes_finished_queue_from_active_driver(reviewer, app, monkeypatch, defect):
+    if defect:
+        original = bot.OptimizationProgressWindow.update_progress
+        def broken(progress, state):
+            original(progress, state)
+            progress.worker_cards['software_updates'].status.setText('Needs review')
+        monkeypatch.setattr(bot.OptimizationProgressWindow, 'update_progress', broken)
+    owner = QWidget()
+    try:
+        reviewer.review_held_app_wait(owner, bot.VIEWPORTS[0], 'regression')
+        findings = {row['id']: row for row in reviewer.report['checks']}
+        target = findings['regression.held-app-finished.no-false-block']
+        assert target['status'] == ('failed' if defect else 'passed')
+        if not defect:
+            assert findings['regression.held-app-finished.actual-driver-wait']['status'] == 'passed'
+            assert findings['regression.held-app-finished.coverage-honesty']['status'] == 'passed'
+        assert (reviewer.output / 'regression-held-app-finished-driver-wait.png').is_file()
+    finally:
+        owner.close()
+        owner.deleteLater()
+        app.processEvents()
+
+
 def test_cli_persists_failure_evidence_and_returns_nonzero(tmp_path, monkeypatch, capsys):
     report = {'status': 'failed', 'counts': {'passed': 2, 'failed': 1, 'critical': 1},
         'checks': [{'id': 'fixture.clipped', 'severity': 'critical', 'status': 'failed', 'reason': 'Action clipped.'}],

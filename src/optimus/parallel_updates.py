@@ -114,6 +114,19 @@ class ProgressMux:
             active = next((job['id'] for job in event['jobs'] if job['status'] in ('running', 'installing')), None)
             if active:
                 event['active_job_id'] = active
+            if event.get('waiting_for') in ('installer_updates', 'software_updates', 'driver_updates'):
+                active_jobs = [job for job in event['jobs'] if job['status'] in ACTIVE_JOB_STATES]
+                # A finished app with held offers is not the worker that owns
+                # the wait. Prefer the actual installer, otherwise a sole job.
+                installing = [job for job in active_jobs if job['status'] in ('running', 'installing')]
+                waiting = installing[0] if len(installing) == 1 else active_jobs[0] if len(active_jobs) == 1 else None
+                if waiting is not None and waiting['id'] in ('software_updates', 'driver_updates'):
+                    noun = 'driver updates' if waiting['id'] == 'driver_updates' else 'application updates'
+                    detail = str(waiting.get('description') or waiting.get('current_package') or 'Current operation')[:600]
+                    reason = 'Waiting for ' + noun + ': ' + detail
+                    event.update(waiting_for=waiting['id'], maintenance_status='waiting', maintenance_wait_reason=reason,
+                        description=reason + '. ' + ('Waiting before: ' + str(event['next_stage']) + '. ' if event.get('next_stage') else '')
+                        + 'The current installer must return; cancellation stops further attempts.')
             event['processes'] = list(dict.fromkeys(processes))
         return event
 
@@ -149,6 +162,14 @@ class ProgressMux:
             for key in ('scan_status', 'installation_block_reason', 'wait_reason'):
                 if isinstance(state.get(key), str):
                     self.jobs[job_id][key] = state[key][:4000]
+            for key in ('worker_finished', 'continuation_blocked'):
+                if type(state.get(key)) is bool:
+                    self.jobs[job_id][key] = state[key]
+            if state.get('presentation_status') == 'finished_with_skips':
+                self.jobs[job_id]['presentation_status'] = 'finished_with_skips'
+            if isinstance(state.get('app_counts'), dict):
+                self.jobs[job_id]['app_counts'] = {key: value for key, value in state['app_counts'].items()
+                    if key in ('updated', 'skipped', 'failed', 'unverified', 'held', 'source_unverified') and type(value) is int and 0 <= value <= 1000000}
             # Serialize emission too, so an older background event cannot
             # replace a newer foreground stage in the queued UI callbacks.
             try:
@@ -455,6 +476,7 @@ def update_completion_state(result):
     if reason and summary and summary not in reason:
         description += ' ' + summary
     driver_counts = _driver_completion_counts(result, evidence) if key == 'driver_scan' else None
+    app_presentation = _app_completion_presentation(result, evidence) if key == 'app_scan' else None
     if driver_counts is not None:
         reason = reason or installer_barrier(result) or ''
         counts_text = 'Driver results: ' + '; '.join(str(driver_counts[name]) + ' ' + name.replace('_', ' ')
@@ -495,6 +517,13 @@ def update_completion_state(result):
                  for row in holds[:2]]
         description = (str(count) + ' app update' + ('' if count == 1 else 's') + ' held for review. '
                        + '; '.join(notes) + ' ' + description)
+    if app_presentation is not None:
+        counts = app_presentation['app_counts']
+        description = ('App results: ' + '; '.join(str(counts[name]) + ' ' + name for name in ('updated', 'skipped', 'failed', 'unverified'))
+                       + '. ' + ('Queue finished; held or failed packages do not block other workers. ' if app_presentation.get('presentation_status') else '')
+                       + (str(counts['source_unverified']) + ' additional source offers unverified. '
+                          if counts.get('source_unverified') and evidence.get('complete') is not True else '')
+                       + description)
     label = ''
     offers = evidence.get('offers_count')
     complete = evidence.get('complete') is True
@@ -520,6 +549,10 @@ def update_completion_state(result):
     # Existing per-installer totals remain distinct from the number discovered.
     if not isinstance(items, list) or not items:
         state['total'] = 0
+    if app_presentation is not None:
+        state.update(app_presentation)
+        deferred = result.get('deferred_ids')
+        state['total'] = len(items) + (len(deferred) if isinstance(deferred, list) else 0)
     if driver_counts is not None:
         state.update(driver_counts=driver_counts, total=0)
     if presence_counts is not None:
@@ -537,6 +570,62 @@ def update_completion_state(result):
                      scan_status=str(evidence.get('status') or 'not_started'))
         state['wait_reason'] = (('Search completed; ' if complete else 'Search needs review; ' if evidence else 'Search not started; ')
                                 + 'installation blocked until the previous installer is reviewed. ' + block_reason)[:4000]
+    return state
+
+
+def _app_completion_presentation(result, evidence):
+    """Presentation only: audit status/holds and mutation gates stay unchanged."""
+    from .update_holds import is_known_update_hold
+    rows = result.get('items')
+    if not isinstance(rows, list) or not rows or len(rows) > 1000:
+        return None
+    counts = dict(updated=0, skipped=0, failed=0, unverified=0, held=0)
+    seen = set()
+    for row in rows:
+        value = row.get('result') if isinstance(row, dict) and isinstance(row.get('result'), dict) else {}
+        binding = row.get('binding') if isinstance(row, dict) and isinstance(row.get('binding'), dict) else {}
+        identity = (row.get('id') or binding.get('id')) if isinstance(row, dict) else None
+        if not isinstance(identity, str) or not identity or identity.casefold() in seen or not can_fail_forward(value):
+            counts['unverified'] += 1
+            continue
+        seen.add(identity.casefold())
+        if row.get('status') in ('completed', 'applied') and value.get('installer_started') is True and type(value.get('exitCode')) is int and value['exitCode'] == 0:
+            counts['updated'] += 1
+        elif row.get('status') == 'skipped':
+            counts['skipped'] += 1
+            counts['held'] += int(is_known_update_hold(value))
+        elif row.get('status') in ('failed', 'needs_review', 'blocked'):
+            counts['failed'] += 1
+        else:
+            counts['unverified'] += 1
+    # A queue can finish processing its recognized items while source coverage
+    # remains incomplete. Never promote that into a completed/zero-offer scan.
+    finished = (bool(evidence) and evidence.get('status') not in ('failed', 'not_started')
+        and not counts['unverified'] and installer_barrier(result) is None)
+    presence = _presence_completion_counts(result)
+    if presence is not None and (presence['unverified'] or presence['needs_review']):
+        finished = False
+    reported, recognized = evidence.get('source_reported_offers_count'), evidence.get('recognized_offers_count')
+    if type(reported) is int and type(recognized) is int and 0 <= recognized <= reported <= 1000000:
+        counts['source_unverified'] = reported - recognized
+    pending = [result]
+    while finished and pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if (value.get('cancelled') or value.get('navigation_cancelled') or value.get('navigation_cancelled_items')
+                    or value.get('restartNeeded') or value.get('reboot_required') or value.get('uncertain')
+                    or value.get('running') is True or value.get('outcomeKnown') is False
+                    or value.get('deferred') or value.get('deferred_ids') or value.get('stop_reason')
+                    or value.get('installation_blocked') or value.get('blocked_by_prior_installer')
+                    or value.get('status') in ('deferred', 'cancelled', 'uncertain', 'running', 'installing', 'prepared')):
+                finished = False
+                break
+            pending.extend(item for key, item in value.items() if key not in ('scan', 'app_scan', 'driver_scan', 'backup'))
+        elif isinstance(value, list):
+            pending.extend(value)
+    state = {'app_counts': counts, 'worker_finished': finished, 'continuation_blocked': bool(installer_barrier(result))}
+    if finished and (counts['skipped'] or counts['failed']):
+        state['presentation_status'] = 'finished_with_skips'
     return state
 
 

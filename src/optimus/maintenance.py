@@ -43,6 +43,15 @@ class UpdatePreflightError(ValueError):
     outcomeKnown = True
     running = False
 
+    def __init__(self, message, *, failure_scope='app_batch', failureKind='preflight_failed'):
+        if failure_scope not in ('app_batch', 'package', 'shared'):
+            raise ValueError('Unsupported software preflight failure scope.')
+        if not isinstance(failureKind, str) or re.fullmatch(r'[a-z][a-z0-9_]{0,63}', failureKind) is None:
+            raise ValueError('Unsupported software preflight failure kind.')
+        super().__init__(message)
+        self.failure_scope = failure_scope
+        self.failureKind = failureKind
+
 
 class UpdateOutcomeError(RuntimeError):
     """An installer was launched but its final state cannot be established."""
@@ -417,19 +426,21 @@ class Maintenance:
         return True, '', False
     def updates_apply(self, package_id: str, *, confirmed: bool = False, unattended: bool = False, cancel_event=None, compatibility_mode: bool = False) -> dict[str, Any]:
         if confirmed is not True:
-            raise UpdatePreflightError("Confirm the selected software update before installing it.")
+            raise UpdatePreflightError("Confirm the selected software update before installing it.", failure_scope='shared', failureKind='approvals_changed')
         if type(unattended) is not bool:
-            raise UpdatePreflightError("Choose an explicit unattended mode.")
+            raise UpdatePreflightError("Choose an explicit unattended mode.", failure_scope='shared', failureKind='approvals_changed')
         if type(compatibility_mode) is not bool:
-            raise UpdatePreflightError("Choose an explicit non-security compatibility mode.")
+            raise UpdatePreflightError("Choose an explicit non-security compatibility mode.", failure_scope='shared', failureKind='approvals_changed')
         if not isinstance(package_id, str) or not _PACKAGE_ID.fullmatch(package_id):
-            raise UpdatePreflightError("Select an exact package ID from a fresh update scan.")
+            raise UpdatePreflightError("Select an exact package ID from a fresh update scan.", failure_scope='package', failureKind='package_unavailable')
         current = self._last_update_packages.get(package_id)
         age = time.time() - self._last_update_scan
-        if (package_id not in self._last_update_ids or not current or current.get("source") != "winget"
-                or not is_newer_version(current.get('version'), current.get('available'))
-                or self._last_update_scan <= 0 or age < 0):
-            raise UpdatePreflightError("Select an unambiguous winget package from a fresh update scan.")
+        if self._last_update_scan <= 0 or age < 0:
+            raise UpdatePreflightError("The software source cache is not current; no installer was started.", failure_scope='app_batch', failureKind='cache_unavailable')
+        if package_id not in self._last_update_ids or not isinstance(current, dict) or current.get('source') != 'winget':
+            raise UpdatePreflightError("The exact selected package is no longer unambiguous in the current winget scan; no installer was started.", failure_scope='package', failureKind='package_unavailable')
+        if not is_newer_version(current.get('version'), current.get('available')):
+            raise UpdatePreflightError("The selected package no longer has a provably newer version; no installer was started.", failure_scope='package', failureKind='version_changed')
         # Retain the exact previously selected version pair, even when a prior
         # installer took over fifteen minutes. Fresh revalidation below must
         # still match that pair; an aged cache never authorizes a broader offer.
@@ -460,9 +471,9 @@ class Maintenance:
         try:
             fresh = self.updates_scan()
         except Exception as error:
-            raise UpdatePreflightError("The update revalidation failed before any installer started (" + type(error).__name__ + ").") from error
+            raise UpdatePreflightError("The update revalidation failed before any installer started (" + type(error).__name__ + ").", failure_scope='app_batch', failureKind='source_revalidation') from error
         if not isinstance(fresh, dict) or fresh.get('structured') is not True or type(fresh.get('exitCode')) is not int or fresh['exitCode'] != 0:
-            raise UpdatePreflightError("The update revalidation was incomplete; no installer was started.")
+            raise UpdatePreflightError("The update revalidation was incomplete; no installer was started.", failure_scope='app_batch', failureKind='source_revalidation')
         current = self._last_update_packages.get(package_id)
         if (interrupted := cancelled_result()) is not None:
             return interrupted
@@ -475,7 +486,7 @@ class Maintenance:
         try:
             unpinned, reason, needs_review = self._pin_status(current)
         except Exception as error:
-            raise UpdatePreflightError("The pin safety check failed before any installer started (" + type(error).__name__ + ").") from error
+            raise UpdatePreflightError("The pin safety check failed before any installer started (" + type(error).__name__ + ").", failure_scope='shared', failureKind='pin_inventory_untrusted') from error
         if (interrupted := cancelled_result()) is not None:
             return interrupted
         if not unpinned:
@@ -487,7 +498,7 @@ class Maintenance:
         try:
             executable = self._winget()
         except Exception as error:
-            raise UpdatePreflightError("WinGet became unavailable before any installer started.") from error
+            raise UpdatePreflightError("WinGet became unavailable before any installer started.", failure_scope='app_batch', failureKind='manager_unavailable') from error
         arguments = [executable, "upgrade", "--id", package_id, "--exact", "--source", "winget", "--version", current['available']]
         if compatibility_mode:
             arguments += ["--force"]
@@ -507,7 +518,9 @@ class Maintenance:
         except (FileNotFoundError, PermissionError) as error:
             # These launch errors occur before CreateProcess starts WinGet;
             # a missing/replaced executable is not a detached installer.
-            raise UpdatePreflightError("WinGet could not be started; no installer was launched.") from error
+            raise UpdatePreflightError("WinGet could not be started; no installer was launched.",
+                failure_scope='shared' if isinstance(error, PermissionError) else 'app_batch',
+                failureKind='authorization' if isinstance(error, PermissionError) else 'manager_unavailable') from error
         output = _ANSI.sub("", result.stdout or "")
         stderr = _ANSI.sub("", result.stderr or "")
         native_code = result.returncode & 0xffffffff

@@ -31,6 +31,8 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
+Version **0.11.2** skips held or unavailable individual app offers and continues the remaining eligible app queue. Finished app workers distinguish skipped items from a blocked installer, retain incomplete-search warnings, and show which active app or driver worker maintenance is waiting for. Exact-version holds, source/pin checks and unknown-installer barriers remain in effect.
+
 Version **0.11.1** adds per-worker Back/Next/Cancel controls and persistent per-app update and installation-state rules. [App policies and worker controls](docs/APP_POLICIES.md) explain scope, supported installers, cancellation and recovery. The Software Updater master switch controls these saved rules; no application rule is selected by default. Native macOS/Linux update rules use their supported package managers; automatic install/uninstall presence rules currently require Windows WinGet.
 
 Worker rings show measurable CPU activity separately from completion, alongside computer CPU/RAM/clock and passive network rates. Targeted driver backups avoid exporting the whole driver store. Known item failures advance with saved results; shared safety conditions and uncertain installer outcomes defer further conflicting changes while independent checks continue.

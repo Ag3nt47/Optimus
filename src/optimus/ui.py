@@ -2075,6 +2075,9 @@ class WorkflowWorkerCard(QFrame):
         state = state if isinstance(state, dict) else {}
         raw_status = str(state.get('status', 'not_started'))
         self._raw_status = raw_status
+        self._finished_with_skips = (not maintenance and state.get('presentation_status') == 'finished_with_skips'
+            and state.get('worker_finished') is True and state.get('continuation_blocked') is False
+            and raw_status in ('needs_review', 'completed', 'completed_with_errors'))
         percentage = state.get('percentage') if maintenance else None
         current, total = state.get('current'), state.get('total')
         if not maintenance and type(current) is int and type(total) is int and 0 <= current <= total and total > 0:
@@ -2112,8 +2115,12 @@ class WorkflowWorkerCard(QFrame):
                   'completed': 'Completed', 'completed_with_errors': 'Completed; review findings',
                   'deferred': 'Deferred', 'cancelled': 'Cancelled', 'failed': 'Failed',
                   'needs_review': 'Needs review', 'stopped': 'Stopped'}
-        self.status.setText('Waiting for update lane' if maintenance and raw_status == 'waiting' else
+        self.status.setText({'software_updates': 'Waiting for application updates', 'driver_updates': 'Waiting for driver updates'}
+                            .get(state.get('waiting_for'), 'Waiting for update lane') if maintenance and raw_status == 'waiting' else
                             labels.get(raw_status, raw_status.replace('_', ' ').capitalize()))
+        if self._finished_with_skips:
+            self.status.setText('Finished with skips' + ('; scan incomplete' if state.get('scan_complete') is not True else ''))
+        self.status.setStyleSheet('color:#e8b34b;' if self._finished_with_skips else '')
         if installation_blocked and raw_status in ('deferred', 'needs_review', 'completed', 'completed_with_errors', 'not_run', 'failed'):
             self.status.setText('Search not started; install blocked' if scan_not_started else
                 'Updates found; install blocked' if scan_complete and type(offers) is int and offers > 0 else
@@ -2145,7 +2152,8 @@ class WorkflowWorkerCard(QFrame):
               and 0 <= current <= total):
             self.progress.setRange(0, total)
             self.progress.setValue(current)
-            self.progress.setFormat('%v / %m processed')
+            self.progress.setFormat('%v / %m processed' + (' · ' + scan_label
+                if self._finished_with_skips and not scan_complete and isinstance(scan_label, str) and scan_label else ''))
         else:
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
@@ -2177,7 +2185,9 @@ class WorkflowWorkerCard(QFrame):
         cpu = metrics.get('cpu_percent')
         terminal = self._raw_status in ('completed', 'completed_with_errors', 'failed', 'needs_review',
             'cancelled', 'stopped', 'not_started', 'not_selected', 'not_run', 'deferred')
-        if self._raw_status in ('failed', 'needs_review', 'completed_with_errors'):
+        if getattr(self, '_finished_with_skips', False):
+            health, label = 'waiting', 'Finished with skips; review findings'
+        elif self._raw_status in ('failed', 'needs_review', 'completed_with_errors'):
             health, label = 'error', 'Needs attention'
         elif self._raw_status in ('not_started', 'not_selected', 'not_run'):
             health, label = 'unverified', 'Not running'
@@ -2472,6 +2482,7 @@ class OptimizationProgressWindow(QDialog):
                 'Ready for: ' + display(state['next_stage']) if waiting_for_updates and state.get('next_stage') else stage)
         self.worker_cards['maintenance'].update_state({'status': maintenance_phase,
             'description': maintenance_details,
+            'waiting_for': waiting_kind,
             'percentage': percentage, 'elapsed_seconds': self._maintenance_clock.elapsed() / 1000}, maintenance=True)
         jobs = state.get('jobs')
         job_ids = {job.get('id') for job in jobs if isinstance(job, dict)} if isinstance(jobs, list) else set()
@@ -2491,6 +2502,11 @@ class OptimizationProgressWindow(QDialog):
             descriptions = []
             compact_descriptions = []
             reason_groups = {}
+            def job_status_text(job):
+                if (job.get('presentation_status') == 'finished_with_skips' and job.get('worker_finished') is True
+                        and job.get('continuation_blocked') is False):
+                    return 'finished with skips' + ('; scan incomplete' if job.get('scan_complete') is not True else '')
+                return str(job.get('status', '')).replace('_', ' ')
             blocked_statuses = {'deferred', 'needs_review', 'failed', 'waiting_for_maintenance',
                                 'waiting_for_installer', 'waiting_for_preparation'}
             for job in jobs:
@@ -2525,7 +2541,7 @@ class OptimizationProgressWindow(QDialog):
                     grouped = reason_groups[reason]
                     names = '; '.join(({'software_updates': 'App updates', 'driver_updates': 'Driver updates'}
                         .get(item.get('id'), display(item.get('id')))) + ': '
-                        + str(item.get('status', '')).replace('_', ' ') for item in grouped)
+                        + job_status_text(item) for item in grouped)
                     descriptions.append(names + ' — ' + reason)
                     compact_descriptions.append(names + ' — ' + _compact_worker_reason(reason))
                     if len(reason) > 150 and reason not in self._logged_update_reasons:
@@ -2537,7 +2553,7 @@ class OptimizationProgressWindow(QDialog):
                 if isinstance(package, str) and package.strip() and package not in text:
                     text += ' — current package: ' + package
                 if job.get('status'):
-                    text += ' — ' + display(job['status']).replace('_', ' ')
+                    text += ' — ' + job_status_text(job)
                 if isinstance(job.get('total'), (int, float)) and job['total'] > 0:
                     if waiting_for_updates and job.get('id') in ('software_updates', 'driver_updates'):
                         unit = 'packages' if job['id'] == 'software_updates' else 'driver updates'
@@ -2564,7 +2580,8 @@ class OptimizationProgressWindow(QDialog):
         self.worker_navigation.refresh(enabled=not self.completed and not self.cancel.is_set())
 
     def _update_cancellation_message(self):
-        kind = 'application' if self._waiting_update_kind == 'software_updates' else 'background'
+        kind = ('application' if self._waiting_update_kind == 'software_updates' else
+                'driver' if self._waiting_update_kind == 'driver_updates' else 'background')
         return f'Cancellation requested. The current {kind} update must return before the workflow stops.'
 
     def finish(self, result, error=None):

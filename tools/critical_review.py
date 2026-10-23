@@ -785,6 +785,67 @@ class CriticalReview:
             window.smoke_test = original
             dialog.close()
 
+    def review_held_app_wait(self, window, dimensions, prefix):
+        """A finished skipped app must not appear to own an active driver wait."""
+        from optimus.parallel_updates import ProgressMux, update_completion_state, installer_barrier
+        from optimus.update_holds import held_update_result
+        from optimus.update_scan_evidence import with_app_scan
+        package = {'id': 'Fixture.HeldEditor', 'version': '1.0', 'available': '1.1', 'source': 'winget'}
+        hold = {'id': package['id'], 'available_version': '1.1',
+                'reason': 'The reviewed fixture release had an inconsistent installer version.'}
+        held = held_update_result(package, hold)
+        result = with_app_scan({'scan': {'source': 'winget', 'exitCode': 0, 'structured': True,
+                'updates': [package], 'source_reported_offers_count': 3,
+                'excluded': ['Two fixture offers have unsupported version metadata.']},
+            'items': [{'id': package['id'], 'status': 'skipped', 'result': held}],
+            'failed_items': 2, 'held_count': 1, 'held_ids': [package['id']],
+            'automatic_update_holds': [{'id': package['id'], 'available_version': '1.1', 'reason': held['note']}],
+            'deferred_ids': [], 'stop_reason': '', 'installer_started': False,
+            'outcomeKnown': True, 'running': False})
+        progress = OptimizationProgressWindow(window, threading.Event())
+        try:
+            mux = ProgressMux(progress.update_progress)
+            mux({'stage': 'Independent fixture maintenance', 'percentage': 44})
+            state = update_completion_state(result)
+            mux.background('needs_review', state)
+            mux.background('installing', {'description': 'Install approved Fixture.Network driver',
+                'current': 1, 'total': 3}, job_id='driver_updates')
+            mux.wait_for_updates('Optimize eligible internal drives')
+            self.viewport(progress, dimensions, prefix + '.held-app-finished')
+            cards = progress.worker_cards
+            app_card = cards['software_updates']
+            self.check(prefix + '.held-app-finished.no-false-block',
+                installer_barrier(result) is None and state.get('worker_finished') is True
+                and state.get('continuation_blocked') is False
+                and state.get('presentation_status') == 'finished_with_skips'
+                and 'finished' in app_card.status.text().casefold()
+                and 'skip' in app_card.status.text().casefold()
+                and app_card.activity_ring.health == 'waiting',
+                'A known held app must be shown as a finished skipped queue, not an active blocker or failed installer.')
+            self.check(prefix + '.held-app-finished.coverage-honesty',
+                result['app_scan']['complete'] is False and not result['app_scan']['no_more_offered']
+                and 'incomplete' in app_card.status.text().casefold()
+                and 'incomplete' in app_card.progress.format().casefold()
+                and state.get('app_counts', {}).get('held') == 1
+                and state.get('app_counts', {}).get('source_unverified') == 2,
+                'A finished queue must preserve the incomplete search and two unverified source offers without claiming all apps are current.')
+            self.check(prefix + '.held-app-finished.actual-driver-wait',
+                'DRIVER' in progress.title.text() and 'driver' in cards['maintenance'].status.text().casefold()
+                and 'Fixture.Network' in cards['maintenance'].details.text()
+                and cards['driver_updates'].status.text() == 'Installing'
+                and progress.progress.value() == 44 and not progress.completed,
+                'Maintenance must identify the live driver installer while the skipped app stays finished and total maintenance remains incomplete.',
+                evidence={'title': progress.title.text(), 'maintenance_status': cards['maintenance'].status.text(),
+                    'maintenance_details': cards['maintenance'].details.text(),
+                    'driver_status': cards['driver_updates'].status.text(), 'percentage': progress.progress.value()})
+            self.buttons(progress, dimensions, prefix + '.held-app-finished', [progress.cancel_button])
+            self.screenshot(progress, prefix + '-held-app-finished-driver-wait')
+        finally:
+            progress.completed = True
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
     def review_update_wait(self, window, dimensions, prefix):
         """Replay the stale-stage regression without starting an updater."""
         cancel = threading.Event()
@@ -1060,6 +1121,7 @@ class CriticalReview:
                 self.review_worker_controls_and_metrics(window, backend, dimensions, prefix)
                 self.review_app_rules(backend, dimensions, prefix)
                 self.review_revert(window, backend, dimensions, prefix)
+                self.review_held_app_wait(window, dimensions, prefix)
                 self.review_update_wait(window, dimensions, prefix)
                 self.review_workflow(window, backend, dimensions, prefix)
                 self.check(prefix + '.no-background-analysis', backend.analysis_start.call_count == 0,

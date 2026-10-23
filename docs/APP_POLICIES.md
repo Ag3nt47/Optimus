@@ -34,6 +34,12 @@ A live installer keeps its worker, installer slot and maintenance lease until it
 
 Known terminal failures and unsupported individual items keep their saved results and advance to the next eligible item. Shared conditions such as an untrusted source, insufficient space, missing administrator access or a required restart pause affected installations. If an installer might still be running or its result cannot be verified or saved, further conflicting changes wait for review while independent checks and final verification continue. Fail-forward does not turn a failed item into a successful result.
 
+An exact-version hold skips that app release and retains its reason while other eligible apps continue. **Finished with skips** describes the recognized queue's terminal state. **Scan incomplete** remains visible when some source offers could not be verified; it does not mean every installed app is current. The maintenance card names the active app or driver worker it is waiting for. A finished app with skipped offers does not own the driver installer's wait.
+
+![Finished app queue alongside the active driver worker](optimus-held-apps.png)
+
+This disposable fixture shows one held app and two unverified source offers. The driver is the active worker; the overall workflow is still at 44%.
+
 ## Driver installation
 
 Automatic driver backup targets the installed OEM driver packages matched to the actual approved offers. It avoids exporting unrelated packages from the entire driver store before every batch. Each selected package must have verified backup files before its update is eligible to install. Unsupported mappings, inbox packages without an exportable backup, export failures and changes in identity are reported per offer. Other backed-up eligible offers can continue. Windows Update quiet-install, hardware/provider/date, agreement, permission and restart checks still apply.
