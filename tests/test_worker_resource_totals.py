@@ -237,6 +237,39 @@ def test_terminal_journal_precedes_display_accounting(tmp_path, monkeypatch):
     assert mux.job_resource_snapshot()['installed_items'] == 1
 
 
+@pytest.mark.parametrize('facts', ['unknown', 'installed', 'zero_download'])
+def test_worker_enriches_only_measured_facts_without_mutating_backend_receipts(tmp_path, monkeypatch, facts):
+    monkeypatch.setattr('optimus.speed_enhancements._current_owner', lambda: 'fixture-owner')
+    monkeypatch.setattr('optimus.runtime_priority.lower_worker_priority', lambda: lambda: None)
+    outcome = {'items': [], 'review_only': True}
+    if facts == 'installed':
+        outcome = {'items': [receipt()]}
+    elif facts == 'zero_download':
+        row = receipt(status='failed', exitCode=1, verified=False)
+        row['result']['download_progress'] = progress(done=0)
+        outcome = {'items': [row], 'failed_items': 1}
+    original = copy.deepcopy(outcome)
+    backend = SimpleNamespace(data_dir=tmp_path, system='win32', bridge=SimpleNamespace(_process=None))
+    job = ParallelAppUpdates(backend, 'c' * 32, WINDOWS_SOFTWARE,
+                             lambda *_: outcome, ProgressMux(lambda _: None))
+    job.start(inline=True)
+    job._run()
+    result = job.join()['result']
+    assert outcome == original
+    saved = json.loads(job.path.read_text())['result']
+    if facts == 'unknown':
+        assert result == original and result is outcome
+        assert 'resource_totals' not in saved
+    else:
+        assert result is not outcome
+        assert result['resource_totals'] == saved['resource_totals']
+        if facts == 'installed':
+            assert result['resource_totals']['installed_items'] == 1
+        else:
+            assert result['resource_totals']['downloaded_known'] is True
+            assert result['resource_totals']['downloaded_bytes'] == 0
+
+
 def test_snapshot_validation_rejects_malformed_values():
     snapshot = WorkerResourceTotals().snapshot()
     assert normalize_resource_totals(snapshot) == snapshot

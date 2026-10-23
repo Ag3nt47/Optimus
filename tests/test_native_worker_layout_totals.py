@@ -192,18 +192,70 @@ def test_navigation_note_and_live_font_change_keep_shared_rows_aligned(app):
     owner, progress = make_window(app, 1280, 13)
     try:
         maintenance, software, driver = progress.worker_cards.values()
+        cards = (maintenance, software, driver)
+        initial_columns = progress.worker_grid._columns
+
+        def assert_full_content_rows_fit():
+            grid = progress.worker_grid
+            rows = {}
+            assert progress.content_scroll.horizontalScrollBar().maximum() == 0
+            for index, card in enumerate(cards):
+                position = grid.grid.getItemPosition(grid.grid.indexOf(card))
+                row, column, row_span, column_span = position
+                assert (row, column) == divmod(index, grid._columns)
+                assert (row_span, column_span) == (1, 1)
+                rows.setdefault(row, []).append(card)
+                # Inspect the entire scroll content, including cards below the
+                # viewport after a one-column reflow at larger font sizes.
+                assert grid.rect().contains(card.geometry())
+                assert card.heading.geometry().right() < card.activity_ring.geometry().left()
+                fields = [card.status, card.details, card.progress, card.totals,
+                    card.elapsed, card.activity_state, card.navigation_buttons['next']]
+                if card.navigation_note.isVisible():
+                    fields.append(card.navigation_note)
+                for earlier, later in zip(fields, fields[1:]):
+                    assert earlier.geometry().bottom() < later.geometry().top()
+                for field in fields:
+                    assert card.contentsRect().contains(field.geometry())
+                for label in (card.heading, card.completion, card.status, card.details,
+                        card.totals, card.elapsed, card.activity_state, card.navigation_note):
+                    if label.isVisible():
+                        assert all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
+                            for line in label.visible_text.splitlines())
+                assert card.progress.height() >= card.progress.fontMetrics().height() + 6
+            for row_cards in rows.values():
+                assert len({card.geometry().top() for card in row_cards}) == 1
+                assert max(card.width() for card in row_cards) - min(card.width() for card in row_cards) <= 1
+                assert len({card.height() for card in row_cards}) == 1
+                for field in ('status', 'details', 'progress', 'totals', 'elapsed', 'activity_state'):
+                    assert len({getattr(card, field).geometry().top() for card in row_cards}) == 1
+            for upper, lower in zip(rows.values(), list(rows.values())[1:]):
+                assert max(card.geometry().bottom() for card in upper) < min(card.geometry().top() for card in lower)
+
         maintenance.set_navigation_message('Previous result: a deliberately long fixture explanation retained for review; no completed changes are replayed.')
         for _ in range(3):
             app.processEvents()
-        for field in ('status', 'details', 'progress', 'totals', 'elapsed', 'activity_state'):
-            assert len({getattr(card, field).geometry().top() for card in (maintenance, software, driver)}) == 1
+        assert_full_content_rows_fit()
         owner.setStyleSheet(build_qss() + '\nQFrame#WorkflowWorkerCard QLabel, QFrame#WorkflowWorkerCard QProgressBar {font-size:26px;}')
         progress.resize(850, 850)
         for _ in range(3):
             app.processEvents()
-        assert progress.worker_grid._columns == 2
-        assert maintenance.totals.geometry().top() == software.totals.geometry().top()
-        assert maintenance.progress.height() >= maintenance.progress.fontMetrics().height() + 6
-        assert progress.content_scroll.horizontalScrollBar().maximum() == 0
+        large_font_columns = progress.worker_grid._columns
+        # Platform fonts may need either one or two columns. The contract is
+        # fewer readable columns, with aligned rows and no horizontal overflow.
+        assert 1 <= large_font_columns < initial_columns
+        assert_full_content_rows_fit()
+        large_font_height = progress.worker_grid.minimumHeight()
+        owner.setStyleSheet(build_qss() + '\nQFrame#WorkflowWorkerCard QLabel, QFrame#WorkflowWorkerCard QProgressBar {font-size:13px;}')
+        for _ in range(3):
+            app.processEvents()
+        assert progress.worker_grid._columns > large_font_columns
+        assert progress.worker_grid.minimumHeight() < large_font_height
+        assert_full_content_rows_fit()
+        progress.resize(1280, 850)
+        for _ in range(3):
+            app.processEvents()
+        assert progress.worker_grid._columns == initial_columns
+        assert_full_content_rows_fit()
     finally:
         dispose(owner, progress, app)

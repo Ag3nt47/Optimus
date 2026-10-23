@@ -1121,7 +1121,12 @@ class ParallelAppUpdates:
         try:
             if hasattr(self.mux, 'update_result'):
                 self.mux.update_result(self.result)
-                self.result['resource_totals'] = self.mux.resource_snapshot()
+                totals = self.mux.resource_snapshot()
+                if any(totals.get(key) is True for key in
+                       ('removed_known', 'downloaded_known', 'installed_known')):
+                    # Discovery receipts stay unchanged when there are no
+                    # measured resource facts. Enrich a copy when there are.
+                    self.result = dict(self.result, resource_totals=totals)
             journal_result = _journal_result(self.result)
             self.record.update(status='uncertain' if _uncertain(self.result, native=native) else
                                'needs_review' if update_completion_status(self.result) == 'needs_review' else 'completed',

@@ -42,15 +42,20 @@ class WorkerGrid(QWidget):
             else 245 for card in self.cards.values()), default=245)
         spacing = self.grid.horizontalSpacing()
         columns = max(1, min(3, (self.width() + spacing) // (minimum + spacing)))
-        if columns == self._columns and not force:
-            return
-        self._columns = columns
-        while self.grid.count():
-            self.grid.takeAt(0)
-        for index, card in enumerate(self.cards.values()):
-            self.grid.addWidget(card, index // columns, index % columns)
-        for index in range(3):
-            self.grid.setColumnStretch(index, 1 if index < columns else 0)
+        if columns != self._columns or force:
+            self._columns = columns
+            while self.grid.count():
+                self.grid.takeAt(0)
+            for index, card in enumerate(self.cards.values()):
+                self.grid.addWidget(card, index // columns, index % columns)
+            for index in range(3):
+                self.grid.setColumnStretch(index, 1 if index < columns else 0)
+        # SetNoConstraint keeps the width responsive, but also prevents Qt from
+        # propagating taller card minima to the scroll content. Synchronize
+        # height even when a font or navigation note leaves columns unchanged.
+        minimum_height = self.grid.minimumSize().height()
+        if self.minimumHeight() != minimum_height:
+            self.setMinimumHeight(minimum_height)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
