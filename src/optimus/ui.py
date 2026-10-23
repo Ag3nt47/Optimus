@@ -1540,6 +1540,7 @@ class DetailedSettingsWindow(QMainWindow):
             self._window_reveal.shutdown()
         if getattr(self, 'tray', None) is not None:
             self.tray.hide()
+        self.pool.waitForDone()
 
 
 def create_window(backend, *, smoke_test=False):
@@ -2745,6 +2746,7 @@ class SecurityReviewDialog(QDialog):
     def shutdown(self):
         self._cancel.set()
         self._queue.clear()
+        self.pool.waitForDone()
 
 
 class OptimusWindow(QMainWindow):
@@ -2754,6 +2756,7 @@ class OptimusWindow(QMainWindow):
         self._defer_activation = defer_activation
         self.busy = False
         self._quitting = False
+        self._close_when_idle = False
         self._settings_window = None
         self._sandbox_window = None
         self._setup_wizard = None
@@ -3261,6 +3264,9 @@ class OptimusWindow(QMainWindow):
                 QMessageBox.warning(self, 'Optimus Sandbox', str(exc))
 
     def start_optimization(self, checked=False):
+        if self._close_when_idle:
+            self.status.setText('Optimus is stopping safely. Wait for active operations to finish.')
+            return
         if self.smoke_test:
             self.status.setText('Optimization is disabled during a UI smoke test.')
             return
@@ -3319,6 +3325,11 @@ class OptimusWindow(QMainWindow):
     @Slot(object)
     def _workflow_result(self, result):
         self._progress_window.finish(result)
+        if self._close_when_idle:
+            self._pending_post_review = None
+            self._pending_auto_fixes = None
+            self.status.setText('Current work returned. Closing after its worker finishes saving outcomes.')
+            return
         settings = dict(getattr(self._worker, 'settings', {}))
         self._prepare_post_reviews(result, settings)
         self._pending_auto_fixes = None
@@ -3371,6 +3382,9 @@ class OptimusWindow(QMainWindow):
             bridge.shutdown()
             bridge.deleteLater()
         self._worker = None
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.quit_application)
+            return
         self._enable_result_actions()
 
     def _enable_result_actions(self):
@@ -3402,7 +3416,7 @@ class OptimusWindow(QMainWindow):
             self._start_auto_continue(progress, automatic=True)
 
     def _start_auto_continue(self, progress, *, automatic=False):
-        if (self.smoke_test or self._quitting or self.busy or self._auto_continue_attempted
+        if (self.smoke_test or self._quitting or self._close_when_idle or self.busy or self._auto_continue_attempted
                 or self._pending_auto_fixes is None or progress is not self._progress_window
                 or not progress.isVisible() or not progress.completed
                 or self._security_review_dialog is not None or self._setup_wizard is not None
@@ -3432,6 +3446,11 @@ class OptimusWindow(QMainWindow):
     @Slot(object)
     def _auto_fixes_result(self, result):
         self._progress_window.finish_auto_continue(result)
+        if self._close_when_idle:
+            self._pending_post_review = None
+            self._pending_auto_fixes = None
+            self.status.setText('Current fixes returned. Closing after their worker finishes saving outcomes.')
+            return
         self._prepare_post_reviews(result, dict(getattr(self._worker, 'settings', {})))
         self.status.setText('Available fixes returned results. Review the recorded outcomes and final verification.')
 
@@ -3446,6 +3465,9 @@ class OptimusWindow(QMainWindow):
         self.busy = False
         self.main_buttons[0].setEnabled(True)
         self._worker = None
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.quit_application)
+            return
         self._enable_result_actions()
 
     def _continue_post_optimization_reviews(self):
@@ -3604,7 +3626,7 @@ class OptimusWindow(QMainWindow):
         if self._quitting or self.smoke_test:
             event.accept()
         elif self.busy:
-            self.status.setText('The workflow is still active. Cancel from its progress window and wait for the current stage.')
+            self.request_safe_stop()
             event.ignore()
         else:
             if self.quit_application():
@@ -3613,6 +3635,9 @@ class OptimusWindow(QMainWindow):
                 event.ignore()
 
     def quit_application(self):
+        if self.busy:
+            self.request_safe_stop()
+            return False
         if self._post_review_active:
             self.status.setText('Finish or close the post-optimization recommendations before exiting.')
             return False
@@ -3636,11 +3661,50 @@ class OptimusWindow(QMainWindow):
             finally:
                 sandbox._optimus_close_bypass = previous_bypass
             if not closed:
+                self._close_when_idle = False
                 self.status.setText('Save or discard the Sandbox edits before exiting, or cancel to keep working.')
                 return False
         self._quitting = True
         self.shutdown()
         QApplication.instance().quit()
+        return True
+
+    def request_safe_stop(self):
+        """Stop dispatching work, drain the current operation, then close.
+
+        Keep Qt processing signals while our workflow joins its installer
+        workers and durably saves their receipts. Closing never kills a native
+        installer or clears an unresolved outcome.
+        """
+        if self.smoke_test or self._quitting:
+            return False
+        if (self._setup_wizard is not None or self._post_review_active
+                or self._settings_window is not None and self._settings_window.busy):
+            self.status.setText('Finish the active setup, recommendation or settings operation before safely exiting.')
+            return False
+        self._close_when_idle = True
+        self._cancel.set()
+        self._pending_post_review = None
+        self._pending_auto_fixes = None
+        self._post_review_generation += 1
+        controller = getattr(self, '_automation_controller', None)
+        if controller is not None:
+            controller.stop()
+        timer = getattr(self, '_automation_timer', None)
+        if timer is not None:
+            timer.stop()
+        bridge = getattr(self._worker, '_browser_prompts', None)
+        if bridge is not None:
+            bridge.shutdown()
+        if self.busy:
+            progress = self._progress_window
+            if progress is not None:
+                progress.request_close()
+                progress.description.setText('Stopping safely. No further work will start. Active operations are allowed to finish and save their outcomes before Optimus closes.')
+                progress.show()
+            self.status.setText('Stopping safely. Waiting for the current operations and saved outcomes before exiting.')
+        else:
+            QTimer.singleShot(0, self.quit_application)
         return True
 
     def shutdown(self):
@@ -3656,6 +3720,12 @@ class OptimusWindow(QMainWindow):
         if bridge is not None:
             self._cancel.set()
             bridge.shutdown()
+        # Normal Close reaches this only after the worker finishes. An external
+        # QApplication.quit() can bypass closeEvent, so it must drain our own
+        # workers before app.py closes the backend. Prompt shutdown above makes
+        # this independent of GUI event processing. Native timeouts retain
+        # their durable uncertain receipts; no pending OS process is killed.
+        self.pool.waitForDone()
         self.canvas.timer.stop()
         self._window_reveal.shutdown()
         self.tray.hide()

@@ -30,6 +30,7 @@ def parser():
     commands.add_argument('--windows-compatibility', choices=('status', 'prepare'), help='Inspect or prepare the saved legacy Windows media-Setup CPU policy; no OS upgrade is launched.')
     commands.add_argument('--windows-compatibility-restore', type=_run_identity, metavar='CHANGE_ID', help='Restore one recorded Windows compatibility-policy change.')
     commands.add_argument('--update-recovery', choices=('status', 'reconcile'), help='Inspect one updater journal or reconcile a verified legacy preflight error; never starts an installer.')
+    commands.add_argument('--safe-stop', action='store_true', help='Ask the running Optimus window to stop new work and exit after active operations save their outcomes; never force-kills installers.')
     result.add_argument('--update-record', type=_run_identity, metavar='JOURNAL_ID', help='Exact updater journal for --update-recovery.')
     result.add_argument('--recovery-evidence', type=Path, help='Reviewed, hash-bound evidence for an explicit legacy-journal reconciliation.')
     result.add_argument('--output', type=Path, help='Report destination folder.')
@@ -167,6 +168,21 @@ def _update_recovery_command(backend, args):
         result = dict(result, report=str(report))
     return result
 
+
+def _safe_stop_command(backend):
+    """Contact only this user's existing GUI; never open one or request UAC."""
+    from .gui_instance import GuiInstance
+    instance = GuiInstance(backend.data_dir)
+    try:
+        accepted = instance.stop_existing()
+    finally:
+        instance.close()
+    return {'status': 'stop_requested' if accepted else 'unavailable',
+            'request_accepted': accepted, 'force_terminated_processes': 0,
+            'note': ('Optimus will stop new work and exit after active operations return and their outcomes are saved. '
+                     'This acknowledges the request, not completion; active installers are allowed to finish.'
+                     if accepted else 'No compatible running Optimus window acknowledged the stop request. No process was terminated.')}
+
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(actual_arguments)
@@ -181,9 +197,11 @@ def main(argv=None):
         from .native_backend import NativeBackend as Backend
     backend = Backend()
     if (args.verify_run or args.startup_mode or args.speed_enhancements or args.speed_restore
-            or args.windows_compatibility or args.windows_compatibility_restore or args.update_recovery):
+            or args.windows_compatibility or args.windows_compatibility_restore or args.update_recovery or args.safe_stop):
         try:
-            if args.update_recovery:
+            if args.safe_stop:
+                result = _safe_stop_command(backend)
+            elif args.update_recovery:
                 result = _update_recovery_command(backend, args)
             elif args.verify_run:
                 result = _verify_saved_run(backend, args.verify_run, args.output)
@@ -196,6 +214,8 @@ def main(argv=None):
                     backend.set_startup_launch(args.startup_mode == 'on')
                 result = backend.startup_launch_status()
             print(json.dumps(result))
+            if args.safe_stop and result.get('request_accepted') is not True:
+                return 2
             if args.update_recovery == 'reconcile' and result.get('status') not in ('reconciled', 'already_reconciled'):
                 return 2
             return 0
@@ -315,7 +335,7 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
 
     def start_session():
         if instance is not None:
-            instance.listen(window.activate_existing_window)
+            instance.listen(window.activate_existing_window, safe_stop=window.request_safe_stop)
         window.show()
         if not read_only_gui:
             window.tray.show()

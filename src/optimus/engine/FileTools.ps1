@@ -460,6 +460,24 @@ function Assert-SCMDriverNotOlderThanInstalled {
         }
     }
 }
+function Assert-SCMDriverQuietMode {
+    param([Parameter(Mandatory=$true)]$Installer)
+    if($Installer.ForceQuiet -isnot [bool] -or $Installer.ForceQuiet -ne $true -or
+       $Installer.AllowSourcePrompts -isnot [bool] -or $Installer.AllowSourcePrompts -ne $false){
+        throw 'Windows Update could not establish quiet installation with source prompts disabled.'
+    }
+}
+function New-SCMDriverQuietRefusal {
+    param([Parameter(Mandatory=$true)]$Record,[int]$HResult,[bool]$InstallerStarted=$false,[bool]$RestartNeeded=$false)
+    [pscustomobject]@{
+        id=$Record.id;revision=$Record.revision;title=$Record.title
+        resultCode=4;aggregateResultCode=4;hresult=$HResult;aggregateHresult=$HResult
+        restartNeeded=$RestartNeeded;unattended=$true
+        installer_started=$InstallerStarted;outcomeKnown=$true;running=$false
+        requiresReview=$true;failureKind='quiet_mode_unavailable'
+        note='Windows Update could not complete the approved driver in quiet mode. Review this update in Windows Update. No interactive fallback or forced installation was started.'
+    }
+}
 function Invoke-SCMDriverUpdateApply {
     param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false)
     if(-not(Test-SCMAdministrator)){throw 'Administrator access is required; no automatic elevation was requested.'}
@@ -483,11 +501,17 @@ function Invoke-SCMDriverUpdateApply {
     $installer.IsForced=$false
     if($Unattended){
         if(-not $AcceptEula){throw 'Saved driver license agreement approval is required for unattended installation.'}
-        if($fresh.canRequestUserInput -ne $false -or $null -eq $fresh.rebootBehavior -or [int]$fresh.rebootBehavior -notin @(0,2)){throw 'Interactive, unknown or mandatory-restart updates are excluded from unattended installation.'}
-        # ForceQuiet belongs to IUpdateInstaller2. Missing support must fail closed.
-        $installer.ForceQuiet=$true
-        $installer.AllowSourcePrompts=$false
-        if($installer.ForceQuiet -ne $true -or $installer.AllowSourcePrompts -ne $false){throw 'Windows Update could not establish quiet installation.'}
+        if($fresh.canRequestUserInput -isnot [bool] -or $fresh.rebootBehavior -isnot [int] -or $fresh.rebootBehavior -notin @(0,2)){throw 'Unknown interaction metadata or mandatory-restart updates are excluded from unattended installation.'}
+        # CanRequestUserInput=True can still support ForceQuiet. This documented
+        # WUA mode suppresses interaction; it does not force an incompatible
+        # package or bypass Windows security. Missing quiet support fails closed.
+        try {
+            $installer.ForceQuiet=$true
+            $installer.AllowSourcePrompts=$false
+            Assert-SCMDriverQuietMode -Installer $installer
+        } catch {
+            return New-SCMDriverQuietRefusal -Record $fresh -HResult ([int]$_.Exception.HResult)
+        }
         if($installer.RebootRequiredBeforeInstallation -or (Test-SCMWuaRebootPending)){throw 'A pending Windows restart must be completed before automated driver installation.'}
     }
     if($installer.IsBusy){throw 'Another Windows update installation is already running.'}
@@ -499,19 +523,53 @@ function Invoke-SCMDriverUpdateApply {
     $downloader=$session.CreateUpdateDownloader()
     $downloader.Updates=$collection
     $downloader.IsForced=$false
+    if($Unattended){
+        try { Assert-SCMDriverQuietMode -Installer $installer }
+        catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult ([int]$_.Exception.HResult) }
+    }
     $download=$downloader.Download()
     $downloadItem=$download.GetUpdateResult(0)
     if([int]$download.ResultCode -ne 2 -or [int]$downloadItem.ResultCode -ne 2 -or [int]$downloadItem.HResult -ne 0){throw 'Windows Update did not completely download the selected driver.'}
     if($Unattended -and ($installer.RebootRequiredBeforeInstallation -or (Test-SCMWuaRebootPending))){throw 'A restart became pending before installation. The downloaded update was not installed.'}
     if($installer.IsBusy){throw 'Another Windows update installation started. The selected driver was not installed.'}
-    $installed=$installer.Install()
+    if($Unattended){
+        try { Assert-SCMDriverQuietMode -Installer $installer }
+        catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult ([int]$_.Exception.HResult) }
+    }
+    try {
+        $installed=$installer.Install()
+    } catch {
+        # These exact synchronous handler rejections establish a terminal quiet
+        # failure. All other COM errors/timeouts remain unknown to the caller.
+        $failure=$_.Exception;$quietHResult=$null
+        for($depth=0;$null -ne $failure -and $depth -lt 8;$depth++){
+            if([int]$failure.HResult -in @(-2145116156,-2145116150)){$quietHResult=[int]$failure.HResult;break}
+            $failure=$failure.InnerException
+        }
+        if($Unattended -and $null -ne $quietHResult){
+            return New-SCMDriverQuietRefusal -Record $fresh -HResult $quietHResult -InstallerStarted $true -RestartNeeded (Test-SCMWuaRebootPending)
+        }
+        throw
+    }
     $item=$installed.GetUpdateResult(0)
+    # A synchronous return is terminal only with complete native result fields.
+    # Missing HRESULTs must not become zero through PowerShell conversion, and
+    # NotStarted/InProgress must never become an idle, known-outcome receipt.
+    if($null -eq $installed -or $null -eq $item -or
+       $item.ResultCode -isnot [int] -or $item.ResultCode -notin @(2,3,4,5) -or
+       $installed.ResultCode -isnot [int] -or $installed.ResultCode -notin @(2,3,4,5) -or
+       $item.HResult -isnot [int] -or $installed.HResult -isnot [int] -or
+       $item.RebootRequired -isnot [bool] -or $installed.RebootRequired -isnot [bool]){
+        throw 'Windows Update returned an incomplete or nonterminal driver installation result. Verify installer state before continuing.'
+    }
     [pscustomobject]@{
         id=$fresh.id;revision=$fresh.revision;title=$fresh.title
         resultCode=[int]$item.ResultCode;aggregateResultCode=[int]$installed.ResultCode
         restartNeeded=([bool]$installed.RebootRequired -or [bool]$item.RebootRequired)
         hresult=[int]$item.HResult;aggregateHresult=[int]$installed.HResult
-        unattended=$Unattended;note='Only the selected applicable update was installed. No reboot API or automatic elevation was invoked.'
+        unattended=$Unattended;installer_started=$true;outcomeKnown=$true;running=$false
+        requiresReview=([int]$item.ResultCode -ne 2 -or [int]$item.HResult -ne 0 -or [int]$installed.ResultCode -ne 2 -or [int]$installed.HResult -ne 0)
+        note='Windows Update returned the selected applicable driver installation result. No interactive fallback, forced installation, reboot API or automatic elevation was invoked.'
     }
 }
 

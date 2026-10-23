@@ -202,7 +202,7 @@ def test_source_restart_stays_hidden_and_does_no_automatic_work_until_lease_hand
         window.show.assert_called_once_with()
         resume.assert_called_once_with(backend)
         controller.assert_called_once()
-        lease.listen.assert_called_once_with(window.activate_existing_window)
+        lease.listen.assert_called_once_with(window.activate_existing_window, safe_stop=window.request_safe_stop)
 
 
 @pytest.mark.parametrize('option', ['--smoke-test', '--startup-probe'])

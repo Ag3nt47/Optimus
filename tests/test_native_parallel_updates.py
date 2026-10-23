@@ -549,7 +549,8 @@ def test_driver_prepares_during_app_install_and_foreground_keeps_working(tmp_pat
         service.calls.append('driver_install')
         driver_started.set()
         assert driver_release.wait(15)
-        return {'resultCode': 2, 'hresult': 0, 'restartNeeded': False}
+        return {'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0,
+                'installer_started': True, 'outcomeKnown': True, 'running': False, 'restartNeeded': False}
     enable_fixture_driver(service, install)
     def privacy(*args, **kwargs):
         assert driver_started.wait(15)

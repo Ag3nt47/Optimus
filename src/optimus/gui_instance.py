@@ -91,7 +91,7 @@ class GuiInstance:
             time.sleep(.05)
         return True
 
-    def listen(self, activate):
+    def listen(self, activate, *, safe_stop=None):
         if not self.owned:
             raise RuntimeError('The GUI lease is not owned by this process.')
         server = QLocalServer()
@@ -116,14 +116,16 @@ class GuiInstance:
                     if not connection.canReadLine():
                         return
                     request = bytes(connection.readLine(65))
-                    if request != b'activate\n':
+                    if request not in (b'activate\n', b'safe-stop\n'):
                         connection.abort()
                         return
                     try:
-                        activated = activate() is not False
+                        callback = activate if request == b'activate\n' else safe_stop
+                        activated = callable(callback) and callback() is not False
                     except (RuntimeError, OSError):
                         activated = False
-                    connection.write(b'activated\n' if activated else b'unavailable\n')
+                    reply = b'activated\n' if request == b'activate\n' else b'stopping\n'
+                    connection.write(reply if activated else b'unavailable\n')
                     connection.flush()
                     connection.disconnectFromServer()
                 socket.readyRead.connect(read)
@@ -160,6 +162,25 @@ class GuiInstance:
             socket.abort()
             time.sleep(.05)
         return False
+
+    def stop_existing(self, timeout_ms=3000):
+        """Request an orderly stop; acknowledgement does not mean installers exited.
+
+        Never acquire/remove a GUI lock or fall back to killing a process. An
+        older GUI without this endpoint simply declines the request.
+        """
+        socket = QLocalSocket()
+        try:
+            socket.connectToServer(self.name)
+            if not socket.waitForConnected(timeout_ms):
+                return False
+            socket.write(b'safe-stop\n')
+            socket.flush()
+            if not socket.waitForReadyRead(timeout_ms):
+                return False
+            return bytes(socket.readLine(65)) == b'stopping\n'
+        finally:
+            socket.abort()
 
     def close(self):
         if self.server is not None:

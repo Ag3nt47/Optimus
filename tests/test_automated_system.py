@@ -121,11 +121,37 @@ def test_non_admin_never_launches_elevation_or_installs():
     assert result['skipped'];value.driver_updates_scan.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
 
 
-@pytest.mark.parametrize('changes',[{'revision':2},{'title':'changed'},{'hardwareId':'changed'},{'provider':'changed'},{'canRequestUserInput':True},{'canRequestUserInput':None},{'rebootBehavior':1}])
+@pytest.mark.parametrize('changes',[{'revision':2},{'title':'changed'},{'hardwareId':'changed'},{'provider':'changed'},{'canRequestUserInput':None},{'rebootBehavior':1}])
 def test_changed_or_ineligible_driver_never_installs(changes):
     value=backend();value.driver_updates_scan.return_value={'resultCode':2,'updates':[driver(**changes)]}
     result=system.run_drivers(value,driver_config())
     assert result['skipped_items']==1;value.driver_backup_automatic.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
+
+
+@pytest.mark.parametrize('policy', ['install_approved', 'install_matching'])
+def test_known_input_capable_driver_uses_approved_quiet_backend_after_backup(policy):
+    value=backend();offered=driver(canRequestUserInput=True)
+    value.driver_updates_scan.return_value={'resultCode':2,'updates':[offered]}
+    config=driver_config(driver_policy=policy,
+        driver_approved_updates=[system.driver_descriptor(offered)],
+        driver_approved_devices=[system.driver_device_rule(offered)])
+    calls=[]
+    value.driver_backup_automatic.side_effect=lambda:calls.append('backup') or {'exit_code':0,'destination':'fixture'}
+    value.driver_update_apply_unattended.side_effect=lambda *args,**kwargs:calls.append('quiet-install') or {
+        'resultCode':2,'hresult':0,'installer_started':True,'outcomeKnown':True,'running':False}
+    result=system.run_drivers(value,config)
+    assert calls==['backup','quiet-install'] and result['failed_items']==0
+    assert result['driver_scan']['eligible_count']==1
+    assert value.driver_update_apply_unattended.call_args.kwargs=={'accept_eula':True}
+    assert value.driver_update_apply_unattended.call_args.args[0]['canRequestUserInput'] is True
+
+
+@pytest.mark.parametrize('unknown', [None, 'true', 1])
+def test_unknown_or_malformed_input_metadata_never_reaches_quiet_install(unknown):
+    value=backend();value.driver_updates_scan.return_value={'resultCode':2,'updates':[driver(canRequestUserInput=unknown)]}
+    result=system.run_drivers(value,driver_config())
+    assert result['skipped_items'] or result['failed_items']
+    value.driver_backup_automatic.assert_not_called();value.driver_update_apply_unattended.assert_not_called()
 
 
 def test_future_matching_requires_same_device_provider_class_and_date_floor():
@@ -274,3 +300,31 @@ def test_install_failure_or_uncertainty_defers_remaining_driver_ids(outcome):
     result=system.run_drivers(value,config)
     assert result['failed_items']==1 and value.driver_update_apply_unattended.call_count==1
     assert result['deferred'][0]['id']==second['id']
+
+
+@pytest.mark.parametrize('started', [False, True])
+def test_synchronous_quiet_refusal_keeps_known_receipt_and_defers_remaining_drivers(started):
+    from optimus.parallel_updates import _uncertain
+    value=backend();second=driver(id='00000000-0000-0000-0000-000000000002',title='Second fixture')
+    value.driver_updates_scan.return_value={'resultCode':2,'updates':[driver(canRequestUserInput=True),second]}
+    config=driver_config(driver_approved_updates=[system.driver_descriptor(driver()),system.driver_descriptor(second)])
+    value.driver_update_apply_unattended.return_value={
+        'resultCode':4,'aggregateResultCode':4,'hresult':-2145116156,'aggregateHresult':-2145116156,
+        'installer_started':started,'outcomeKnown':True,'running':False,'restartNeeded':False,
+        'requiresReview':True,'failureKind':'quiet_mode_unavailable'}
+    result=system.run_drivers(value,config)
+    assert result['failed_items']==1 and value.driver_update_apply_unattended.call_count==1
+    assert result['deferred'][0]['id']==second['id']
+    assert result['items'][0]['result']['hresult']==-2145116156
+    assert result['items'][0]['result']['installer_started'] is started
+    assert result['installer_started'] is started and result['outcomeKnown'] is True and result['running'] is False
+    assert not _uncertain(result, native=True)
+
+
+def test_generic_quiet_install_exception_remains_uncertain():
+    from optimus.parallel_updates import _uncertain
+    value=backend();value.driver_update_apply_unattended.side_effect=RuntimeError('Fixture COM disconnected')
+    result=system.run_drivers(value,driver_config())
+    assert result['items'][0]['uncertain'] is True
+    assert result.get('outcomeKnown') is not True
+    assert _uncertain(result, native=True)

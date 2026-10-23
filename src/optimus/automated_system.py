@@ -296,8 +296,13 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
                     selected.append(value)
     eligible=[]
     for value in selected:
-        if counts[(value['id'],value['revision'])]!=1 or value.get('canRequestUserInput') is not False or value.get('rebootBehavior') not in (0,2):
-            items.append({'binding':value,'status':'skipped','reason':'Ambiguous, interactive, unknown, or restart-requiring updates are excluded from unattended installation.'})
+        # CanRequestUserInput describes a handler's capability, not whether a
+        # quiet installation must prompt. The native bridge establishes and
+        # rechecks IUpdateInstaller2.ForceQuiet with source prompts disabled;
+        # an unsupported quiet handler returns a reviewable failure instead of
+        # falling back to interaction. Unknown metadata still fails closed.
+        if counts[(value['id'],value['revision'])]!=1 or type(value.get('canRequestUserInput')) is not bool or value.get('rebootBehavior') not in (0,2):
+            items.append({'binding':value,'status':'skipped','reason':'Ambiguous updates, unknown interaction metadata, and mandatory-restart updates are excluded from unattended installation.'})
         else:eligible.append(value)
     evidence=proof(eligible_count=len(eligible))
     prepared(scan_complete=True,candidate_count=len(eligible),review_only=False)
@@ -343,7 +348,14 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
         except Exception as error:
             items.append({'binding':value,'status':'failed','error':str(error),'uncertain':True})
             break
-    lifecycle={'installer_started':False,'outcomeKnown':True} if processed==0 else {}
+    lifecycle={'installer_started':False,'outcomeKnown':True,'running':False} if processed==0 else {}
+    if processed:
+        outcomes=[row.get('result') for row in items[-processed:]]
+        if all(isinstance(outcome,dict) and outcome.get('outcomeKnown') is True
+               and outcome.get('running') is False and type(outcome.get('installer_started')) is bool
+               for outcome in outcomes):
+            lifecycle={'installer_started':any(outcome['installer_started'] for outcome in outcomes),
+                       'outcomeKnown':True,'running':False}
     return finish(items,cancelled=_cancel(cancel_event),review_only=False,backup=backup,deferred=eligible[processed:],
         **lifecycle,note='Only approved applicable update identities or exact device/provider/class rules were used. No automatic reboot or elevation was requested.')
 

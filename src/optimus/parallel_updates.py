@@ -292,14 +292,17 @@ def pending_updates_barrier(backend):
 
 
 def _journal_result(result):
-    saved = {key: result[key] for key in ('failed_items', 'cancelled', 'restartNeeded', 'uncertain',
-             'stop_reason', 'installer_started', 'outcomeKnown', 'blocked_by_prior_installer',
+    saved = {key: result[key] for key in ('failed_items', 'cancelled', 'restartNeeded', 'uncertain', 'policy', 'review_only',
+             'stop_reason', 'reason', 'installer_started', 'outcomeKnown', 'blocked_by_prior_installer',
              'installation_blocked', 'installation_block_reason') if key in result}
     saved['items'] = [{'id': str(row.get('id') or row.get('binding', {}).get('id', ''))[:280],
                       'status': row.get('status'), 'uncertain': row.get('uncertain', False),
                       'error': str(row.get('error', ''))[:2000],
-                      'result': {key: row['result'][key] for key in ('exitCode', 'running', 'outcomeKnown',
-                                 'restartNeeded', 'requiresReview', 'installer_started') if key in row['result']}
+                      'result': {key: (str(row['result'][key])[:2000] if key in ('note', 'failureKind') else row['result'][key])
+                                 for key in ('exitCode', 'running', 'outcomeKnown',
+                                 'restartNeeded', 'requiresReview', 'installer_started',
+                                 'resultCode', 'hresult', 'aggregateResultCode', 'aggregateHresult',
+                                 'note', 'failureKind') if key in row['result']}
                       if isinstance(row.get('result'), dict) else {}}
                      for row in result.get('items', []) if isinstance(row, dict)][:1000]
     if _restart_needed(result):
@@ -347,16 +350,93 @@ def _bounded_scan_evidence(evidence):
     return saved
 
 
+def _driver_completion_counts(result, evidence):
+    """Count installed drivers only from complete successful native receipts.
+
+    Search counts and a row labelled ``applied`` alone cannot establish that an
+    installation succeeded. Missing/contradictory COM or lifecycle fields stay
+    unverified; a restart remains a separate installer barrier.
+    """
+    offers = evidence.get('offers_count')
+    if (result.get('policy') not in ('install_approved', 'install_matching')
+            or result.get('review_only') is True or evidence.get('complete') is not True
+            or type(offers) is not int or offers < 0):
+        return None
+    counts = dict(installed=0, failed=0, unverified=0, skipped=0, deferred=0, not_processed=0)
+    items = result.get('items') if isinstance(result.get('items'), list) else []
+    prerequisite_checks = 0
+    for row in items[:1000]:
+        if not isinstance(row, dict):
+            counts['unverified'] += 1
+            continue
+        status = row.get('status')
+        binding = row.get('binding') if isinstance(row.get('binding'), dict) else {}
+        prerequisite_checks += int(bool(binding.get('stage')) and not binding.get('id'))
+        outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+        success = (status == 'applied' and row.get('uncertain') is not True
+            and outcome.get('installer_started') is True and outcome.get('outcomeKnown') is True
+            and outcome.get('running') is False and outcome.get('requiresReview') is not True
+            and all(type(outcome.get(key)) is int and outcome[key] == expected
+                    for key, expected in (('resultCode', 2), ('hresult', 0),
+                                          ('aggregateResultCode', 2), ('aggregateHresult', 0))))
+        if success:
+            counts['installed'] += 1
+        elif status == 'skipped':
+            counts['skipped'] += 1
+        elif status == 'deferred':
+            counts['deferred'] += 1
+        elif status == 'failed' and row.get('uncertain') is not True and (
+                _known_preflight(row) or outcome.get('outcomeKnown') is True and outcome.get('running') is False):
+            counts['failed'] += 1
+        else:
+            counts['unverified'] += 1
+    deferred = result.get('deferred')
+    if isinstance(deferred, list):
+        counts['deferred'] += len(deferred)
+    if type(result.get('failed_items')) is int and result['failed_items'] > 0:
+        # A count without item receipts cannot be promoted to a known failure
+        # or successful installation; preserve it as an unverified outcome.
+        unexplained = result['failed_items'] - counts['failed'] - counts['unverified']
+        counts['unverified'] += max(0, unexplained)
+    counts['not_processed'] = max(0, offers - sum(counts.values()) + prerequisite_checks)
+    return counts
+
+
+def _driver_completion_notes(result):
+    """Expose a concrete quiet-mode/backup failure rather than a scan summary."""
+    notes = []
+    items = result.get('items') if isinstance(result.get('items'), list) else []
+    for row in items[:1000]:
+        if not isinstance(row, dict) or row.get('status') == 'applied':
+            continue
+        outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+        note = next((value for value in (row.get('error'), row.get('reason'), outcome.get('note'),
+                                        outcome.get('reason'), outcome.get('error'))
+                     if isinstance(value, str) and value.strip()), '')
+        if note and note[:500] not in notes:
+            notes.append(note[:500])
+        if len(notes) == 2:
+            break
+    return notes
+
+
 def update_completion_state(result):
     """Describe observed availability separately from installer item counts."""
     result = result if isinstance(result, dict) else {}
     key = next((key for key in ('driver_scan', 'app_scan') if isinstance(result.get(key), dict)), None)
     evidence = result[key] if key else {}
-    reason = str(result.get('stop_reason') or '')
+    reason = str(result.get('stop_reason') or result.get('reason') or '')
     summary = str(evidence.get('summary') or '')
     description = reason or summary or 'Update checks completed; item results are ready.'
     if reason and summary and summary not in reason:
         description += ' ' + summary
+    driver_counts = _driver_completion_counts(result, evidence) if key == 'driver_scan' else None
+    if driver_counts is not None:
+        reason = reason or installer_barrier(result) or ''
+        counts_text = 'Driver results: ' + '; '.join(str(driver_counts[name]) + ' ' + name.replace('_', ' ')
+            for name in ('installed', 'failed', 'unverified', 'skipped', 'deferred', 'not_processed')) + '.'
+        details = ' '.join(_driver_completion_notes(result))
+        description = ' '.join(value for value in (reason, counts_text, details, summary) if value)
     errors = evidence.get('errors')
     if isinstance(errors, list):
         notes = [str(row.get('error') or '')[:500] for row in errors[:3] if isinstance(row, dict)]
@@ -384,6 +464,8 @@ def update_completion_state(result):
             label = str(evidence['recognized_offers_count']) + ' recognized; incomplete'
         else:
             label = 'Availability not confirmed'
+    if driver_counts is not None and result.get('installation_blocked') is not True and result.get('blocked_by_prior_installer') is not True:
+        label = str(driver_counts['installed']) + ' installed / ' + str(offers) + ' found'
     items = result.get('items')
     state = {'description': description[:2000], 'current': len(items) if isinstance(items, list) else 0,
              'id': None,
@@ -391,6 +473,8 @@ def update_completion_state(result):
     # Existing per-installer totals remain distinct from the number discovered.
     if not isinstance(items, list) or not items:
         state['total'] = 0
+    if driver_counts is not None:
+        state.update(driver_counts=driver_counts, total=0)
     if evidence:
         state.update(scan_complete=complete, scan_status=str(evidence.get('status') or 'unknown'))
         if type(offers) is int and offers >= 0:
@@ -411,11 +495,17 @@ def update_completion_status(result):
     if result.get('cancelled'):
         return 'cancelled'
     evidence = next((result[key] for key in ('driver_scan', 'app_scan') if isinstance(result.get(key), dict)), {})
+    driver_counts = (_driver_completion_counts(result, evidence)
+                     if isinstance(result.get('driver_scan'), dict) else None)
     if installer_barrier(result) or result.get('failed_items') or evidence.get('status') in ('failed', 'incomplete'):
+        return 'needs_review'
+    if driver_counts is not None and (driver_counts['failed'] or driver_counts['unverified']):
         return 'needs_review'
     if evidence and evidence.get('complete') is not True:
         return 'deferred'
     if evidence and (result.get('skipped') is True or result.get('deferred') or result.get('deferred_ids')):
+        return 'deferred'
+    if driver_counts is not None and any(driver_counts[key] for key in ('skipped', 'deferred', 'not_processed')):
         return 'deferred'
     return 'completed'
 
