@@ -406,7 +406,7 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                          and getattr(error, 'outcomeKnown', None) is True)
             evidence = ({'installer_started': False, 'outcomeKnown': True, 'running': False,
                          'failureKind': getattr(error, 'failureKind', 'preflight_failed'),
-                         'failure_scope': getattr(error, 'failure_scope', 'shared'), 'status': 'blocked'} if preflight else
+                         'failure_scope': getattr(error, 'failure_scope', 'app_batch'), 'status': 'blocked'} if preflight else
                         {'installer_started': getattr(error, 'installer_started', None),
                          'outcomeKnown': False, 'running': getattr(error, 'running', None)})
             results.append({'id': identity, 'status': 'failed', 'error': str(error), 'result': evidence})

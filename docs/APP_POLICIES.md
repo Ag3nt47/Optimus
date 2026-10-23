@@ -1,6 +1,6 @@
 # App policies and worker controls
 
-Optimus 0.11.0 adds persistent exact-app rules and controls for individual worker items. These features use the saved maintenance scope; no application rule is enabled by default.
+Optimus 0.11.1 adds persistent exact-app rules and controls for individual worker items. These features use the saved maintenance scope; no application rule is enabled by default.
 
 ## App choices
 

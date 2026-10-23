@@ -800,6 +800,29 @@ def test_known_before_installer_failure_still_allows_independent_driver_channel(
     app = next(row for row in records if row['title'] == WINDOWS_SOFTWARE)
     assert app['status'] == 'needs_review'
     assert app['result']['installer_started'] is False and app['result']['outcomeKnown'] is True
+    if not failed_scan:
+        assert 'update:Fixture.One' in service.calls and 'update:Fixture.Two' not in service.calls
+        assert app['result']['items'][0]['result']['failure_scope'] == 'app_batch'
+
+
+@pytest.mark.parametrize('outcome', [
+    {'exitCode':None,'installer_started':False,'outcomeKnown':True,'running':False,
+     'skipped':True,'requiresReview':True,'failure_scope':'shared','note':'Fixture explicit system safety refusal'},
+    {'exitCode':-2147024891,'installer_started':True,'outcomeKnown':True,'running':False,
+     'requiresReview':True,'note':'Fixture native access denied (0x80070005)'},
+])
+def test_explicit_shared_app_refusal_still_blocks_driver_channel(tmp_path, outcome):
+    service = Backend(tmp_path)
+    service.release.set()
+    service.outcome = outcome
+    install = Mock(return_value={'resultCode':2,'hresult':0,'restartNeeded':False})
+    enable_fixture_driver(service, install)
+    report = Workflow(service).run(driver_settings(), lambda _:None)
+    stages = {row['title']:row for row in report['stages']}
+    assert stages[WINDOWS_SOFTWARE]['status'] == 'failed'
+    assert stages[WINDOWS_DRIVERS]['result']['installation_blocked'] is True
+    install.assert_not_called()
+    assert 'update:Fixture.Two' not in service.calls
 
 
 @pytest.mark.parametrize('native', [False, True])

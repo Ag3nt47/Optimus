@@ -303,7 +303,7 @@ def local_skip(result):
             and result.get('restartNeeded') is not True and result.get('exitCode') not in (3010, 1641))
 
 
-_PACKAGE_REFUSALS = frozenset(('version_changed', 'pinned', 'update_hold', 'unsupported_installer',
+_PACKAGE_REFUSALS = frozenset(('version_changed', 'pinned', 'update_hold', 'automatic_update_hold', 'unsupported_installer',
     'unsupported_application', 'package_unavailable', 'quiet_mode_unavailable', 'compatibility_block'))
 _SHARED_REFUSALS = frozenset(('pin_inventory_untrusted', 'source_untrusted', 'source_unavailable',
     'admin_required', 'authorization', 'insufficient_disk', 'restart_required', 'approvals_changed', 'security_policy'))
@@ -324,7 +324,7 @@ def shared_update_refusal(value):
         if type(code) is int and (code & 0xffffffff in _SHARED_HRESULTS or key == 'exitCode' and code == 1618):
             shared = True
     if (value.get('requiresReview') is True and value.get('installer_started') is False
-            and value.get('failure_scope') != 'package' and value.get('failureKind') not in _PACKAGE_REFUSALS):
+            and value.get('failure_scope') not in ('package', 'app_batch') and value.get('failureKind') not in _PACKAGE_REFUSALS):
         shared = True
     return _line(value.get('note') or value.get('error') or 'Shared update safety checks require review before another installer.', 1000) if shared else None
 
@@ -338,6 +338,7 @@ def can_fail_forward(value):
         if any(key in value and type(value[key]) is not int for key in ('hresult', 'aggregateHresult')):
             return False
     return (isinstance(value, dict) and value.get('outcomeKnown') is True
+            and value.get('failure_scope') != 'app_batch'
             and value.get('running') is False and type(value.get('installer_started')) is bool
             and value.get('cancelled') is not True and value.get('uncertain') is not True
             and value.get('restartNeeded') is not True and value.get('exitCode') not in (3010, 1641)

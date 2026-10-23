@@ -1,5 +1,6 @@
 """Window controls stay reachable when a desktop or editor is narrowed."""
 from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 from types import SimpleNamespace
 
@@ -8,6 +9,27 @@ from optimus.widgets.flow_layout import FlowLayout
 from optimus.ui import OptimusWindow
 from optimus.workflow import DEFAULTS
 from test_native_worker_cards import app, fonts, progress
+
+
+def settle_scroll_layout(area, child, app):
+    """Wait for the card/grid/body layout requests before asking Qt to scroll.
+
+    A narrow resize reflows several parent layouts. Scrolling before those
+    posted requests settle can target the old child position on native Linux.
+    Keep the real viewport and visibility assertions after this boundary.
+    """
+    previous, stable = None, 0
+    for _ in range(40):
+        QTest.qWait(5)
+        app.processEvents()
+        point = child.mapTo(area.widget(), QPoint())
+        state = (area.widget().size().toTuple(), area.viewport().size().toTuple(),
+                 point.toTuple(), child.size().toTuple(), area.verticalScrollBar().maximum())
+        stable = stable + 1 if state == previous else 0
+        if stable >= 3:
+            return
+        previous = state
+    raise AssertionError('The scroll content did not settle after a compact resize.')
 
 
 def test_sandbox_toolbar_controls_wrap_without_overlap_or_lost_actions(app):
@@ -65,6 +87,7 @@ def test_small_progress_window_keeps_cancel_visible_and_body_scrollable(progress
         'jobs': [{'id': 'software_updates', 'status': 'needs_review', 'current': 1, 'total': 6,
                   'description': 'Update deferred: system-drive space below 2 GiB.', 'elapsed_seconds': 43}]})
     app.processEvents()
+    settle_scroll_layout(progress.content_scroll, progress.log, app)
     assert progress.width() <= 640 and progress.height() <= 400
     assert progress.rect().contains(progress.cancel_button.geometry())
     area = progress.content_scroll
