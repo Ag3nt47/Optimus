@@ -2914,6 +2914,9 @@ class SecurityReviewDialog(QDialog):
         self._review_data = dict(report) if isinstance(report, dict) else {}
         self._recommendations = {}
         self._selection_controls = {}
+        self._selection_fit_timer = QTimer(self)
+        self._selection_fit_timer.setSingleShot(True)
+        self._selection_fit_timer.timeout.connect(self._fit_selection_column)
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         layout = QVBoxLayout(self)
@@ -2960,6 +2963,7 @@ class SecurityReviewDialog(QDialog):
             cell_layout.addWidget(choice)
             cell_layout.addStretch()
             cell.setFocusProxy(choice)
+            cell.setMinimumHeight(choice.sizeHint().height() + 4)
             self.table.setCellWidget(row, 0, cell)
             self.table.setRowHeight(row, max(34, choice.sizeHint().height() + 6))
             for column, value in ((1, recommendation.get('title', identifier)), (2, recommendation.get('reason', 'Review this finding.')), (3, 'Not approved')):
@@ -2995,13 +2999,21 @@ class SecurityReviewDialog(QDialog):
             width = max(width, choice.minimumWidth() + 16)
             row = self._row(identifier)
             if row is not None:
-                self.table.setRowHeight(row, max(34, choice.sizeHint().height() + 6))
+                height = choice.sizeHint().height()
+                cell = self.table.cellWidget(row, 0)
+                if cell is not None:
+                    cell.setMinimumHeight(height + 4)
+                    cell.layout().invalidate()
+                self.table.setRowHeight(row, max(34, height + 6))
         self.table.setColumnWidth(0, width)
 
     def eventFilter(self, watched, event):
         if (event.type() in (QEvent.FontChange, QEvent.StyleChange, QEvent.Polish)
                 and watched in self._selection_controls.values()):
             self._fit_selection_column()
+            # Style polish invalidates size hints after event filters return.
+            # Coalesce a second fit for the next layout turn using final hints.
+            self._selection_fit_timer.start(0)
         return super().eventFilter(watched, event)
 
     def selection_control(self, row):

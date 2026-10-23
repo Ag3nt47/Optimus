@@ -142,10 +142,18 @@ def test_security_selection_is_one_labeled_control_and_never_implies_consent(qap
         assert cell.geometry().height() >= choice.sizeHint().height()
         # Reproduce a late theme/DPI font change, after the cell was created.
         choice.setStyleSheet('font-size:24px;')
-        qapp.processEvents()
+        def rendered_fit():
+            return (choice.font().pixelSize() == 24
+                and choice.width() >= choice.fontMetrics().horizontalAdvance('Review') + 22
+                and cell.geometry().height() >= choice.sizeHint().height() + 4)
+        deadline = time.monotonic() + 1
+        while not rendered_fit() and time.monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(5)
+        assert rendered_fit(), 'The themed row did not finish laying out.'
         assert choice.width() >= choice.fontMetrics().horizontalAdvance('Review') + 22
         assert dialog.table.columnWidth(0) >= choice.minimumWidth() + 16
-        assert cell.geometry().height() >= choice.sizeHint().height()
+        assert cell.geometry().height() >= choice.sizeHint().height() + 4
         assert calls == [] and dialog.table.item(0, 3).text() == 'Not approved'
     finally:
         dialog.shutdown()
