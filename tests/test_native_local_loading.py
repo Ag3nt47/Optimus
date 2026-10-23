@@ -47,10 +47,15 @@ def test_bundled_animation_is_small_local_bounded_and_credited(animation, monkey
     notice = DEFAULT_ASSET.with_name('RACCOON-NOTICE.txt').read_text(encoding='utf-8')
     assert 'Steveo0825' in notice and 'https://tenor.com/view/' in notice
     assert 'separate from Optimus' in notice and 'does not' in notice
+    advanced = []
+    widget._movie.frameChanged.connect(lambda frame: advanced.append(frame) if frame > 0 else None)
     widget.start()
     assert widget._movie.state() == QMovie.Running
-    QTest.qWait(220)
-    assert widget._movie.currentFrameNumber() > 0
+    for unused in range(10):
+        if advanced:
+            break
+        QTest.qWait(100)
+    assert advanced, 'The actual movie timer must advance beyond the initial frame within one second.'
     # Observe a full loop through the actual timer, including its rewind.
     widget._movie.setSpeed(1000)
     QTest.qWait(800)
@@ -153,8 +158,10 @@ def test_large_loading_icon_does_not_push_worker_panels_or_controls_out_of_compa
     assert progress.title.geometry().right() < icon.geometry().left()
     cards = list(progress.worker_cards.values())
     assert max(card.width() for card in cards) - min(card.width() for card in cards) <= 1
-    assert all(card.geometry().top() > header.geometry().bottom() for card in cards)
-    assert all(card.isVisible() and card.geometry().bottom() < progress.cancel_button.geometry().top() for card in cards)
+    header_bottom = header.mapTo(progress, header.rect().bottomLeft()).y()
+    cancel_top = progress.cancel_button.mapTo(progress, progress.cancel_button.rect().topLeft()).y()
+    assert all(card.mapTo(progress, card.rect().topLeft()).y() > header_bottom for card in cards)
+    assert all(card.isVisible() and card.mapTo(progress, card.rect().bottomLeft()).y() < cancel_top for card in cards)
     assert progress.log.height() >= 45 and progress.processes.height() >= 45
     assert progress.cancel_button.geometry().bottom() <= 650 and progress.cancel_button.isEnabled()
 

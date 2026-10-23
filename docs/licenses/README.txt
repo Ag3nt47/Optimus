@@ -23,3 +23,9 @@ Corresponding upstream source and copyright/attribution information:
 
 The standalone application contains no subscription service or bundled
 CCleaner code, assets, licenses or proprietary rule database.
+
+Additional file-utility dependencies:
+- cryptography 50.0.2: https://github.com/pyca/cryptography/tree/50.0.2 (Apache-2.0 OR BSD-3-Clause)
+- OpenSSL: https://openssl-library.org/source/ (Apache-2.0 for bundled 3.x)
+- cffi 2.1.0: https://foss.heptapod.net/pypy/cffi (MIT)
+- pycparser 3.0: https://github.com/eliben/pycparser (BSD-3-Clause)

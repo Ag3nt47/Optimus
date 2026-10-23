@@ -15,26 +15,26 @@ def browser_definitions(platform: str | None = None) -> dict[str, dict]:
     if platform == 'win32':
         names = {'edge': ('msedge.exe',), 'chrome': ('chrome.exe',),
                  'chromium': ('chromium.exe',), 'brave': ('brave.exe',),
-                 'vivaldi': ('vivaldi.exe',), 'firefox': ('firefox.exe',)}
+                 'vivaldi': ('vivaldi.exe',), 'firefox': ('firefox.exe',), 'opera': ('opera.exe',)}
     elif platform == 'darwin':
         names = {'edge': ('Microsoft Edge', 'Microsoft Edge Helper'),
                  'chrome': ('Google Chrome', 'Google Chrome Helper'),
                  'chromium': ('Chromium', 'Chromium Helper'),
                  'brave': ('Brave Browser', 'Brave Browser Helper'),
                  'vivaldi': ('Vivaldi', 'Vivaldi Helper'),
-                 'firefox': ('firefox', 'Firefox', 'plugin-container')}
+                 'firefox': ('firefox', 'Firefox', 'plugin-container'), 'opera': ('Opera', 'Opera Helper')}
     else:
         names = {'edge': ('msedge', 'microsoft-edge', 'microsoft-edge-stable'),
                  'chrome': ('chrome', 'google-chrome', 'google-chrome-stable'),
                  'chromium': ('chromium', 'chromium-browser'),
                  'brave': ('brave', 'brave-browser'), 'vivaldi': ('vivaldi-bin', 'vivaldi'),
-                 'firefox': ('firefox', 'firefox-bin')}
+                 'firefox': ('firefox', 'firefox-bin'), 'opera': ('opera',)}
     labels = {'edge': 'Microsoft Edge', 'chrome': 'Google Chrome',
               'chromium': 'Chromium', 'brave': 'Brave', 'vivaldi': 'Vivaldi',
-              'firefox': 'Mozilla Firefox'}
+              'firefox': 'Mozilla Firefox', 'opera': 'Opera'}
     bundles = {'edge': 'com.microsoft.edgemac', 'chrome': 'com.google.Chrome',
                'chromium': 'org.chromium.Chromium', 'brave': 'com.brave.Browser',
-               'vivaldi': 'com.vivaldi.Vivaldi', 'firefox': 'org.mozilla.firefox'}
+               'vivaldi': 'com.vivaldi.Vivaldi', 'firefox': 'org.mozilla.firefox', 'opera': 'com.operasoftware.Opera'}
     return {key: {'name': labels[key], 'process': values[0], 'process_names': values,
                   'bundle_id': bundles[key]} for key, values in names.items()}
 
@@ -70,12 +70,14 @@ def native_locations(platform: str | None = None, home: Path | None = None) -> l
                  'vivaldi': ('Vivaldi/User Data', 'Vivaldi/User Data')}
         roots = [(key, local / profile, local / cache) for key, (profile, cache) in bases.items()]
         roots.append(('firefox', roaming / 'Mozilla/Firefox/Profiles', local / 'Mozilla/Firefox/Profiles'))
+        roots.append(('opera', roaming / 'Opera Software/Opera Stable', local / 'Opera Software/Opera Stable'))
     elif platform == 'darwin':
         support, caches = home / 'Library/Application Support', home / 'Library/Caches'
         bases = {'edge': 'Microsoft Edge', 'chrome': 'Google/Chrome', 'chromium': 'Chromium',
                  'brave': 'BraveSoftware/Brave-Browser', 'vivaldi': 'Vivaldi'}
         roots = [(key, support / value, caches / value) for key, value in bases.items()]
         roots.append(('firefox', support / 'Firefox/Profiles', caches / 'Firefox/Profiles'))
+        roots.append(('opera', support / 'com.operasoftware.Opera', caches / 'com.operasoftware.Opera'))
     else:
         config = Path(os.environ.get('XDG_CONFIG_HOME', str(home / '.config')))
         cache = Path(os.environ.get('XDG_CACHE_HOME', str(home / '.cache')))
@@ -86,11 +88,12 @@ def native_locations(platform: str | None = None, home: Path | None = None) -> l
                  'brave': 'BraveSoftware/Brave-Browser', 'vivaldi': 'vivaldi'}
         roots = [(key, config / value, cache / value) for key, value in bases.items()]
         roots.append(('firefox', home / '.mozilla/firefox', cache / 'mozilla/firefox'))
+        roots.append(('opera', config / 'opera', cache / 'opera'))
         # Sandboxed Firefox and Chromium retain their own fixed user locations.
         roots.extend((('firefox', home / 'snap/firefox/common/.mozilla/firefox', home / 'snap/firefox/common/.cache/mozilla/firefox'),
                       ('firefox', home / '.var/app/org.mozilla.firefox/.mozilla/firefox', home / '.var/app/org.mozilla.firefox/cache/mozilla/firefox'),
                       ('chromium', home / 'snap/chromium/common/chromium', home / 'snap/chromium/common/.cache/chromium'),
                       ('chromium', home / '.var/app/org.chromium.Chromium/config/chromium', home / '.var/app/org.chromium.Chromium/cache/chromium')))
     return [dict(definitions[key], id=key, profile_root=profile, cache_root=cache,
-                 family='firefox' if key == 'firefox' else 'chromium')
+                 family='firefox' if key == 'firefox' else 'chromium', legacy_direct_profile=key == 'opera')
             for key, profile, cache in roots]

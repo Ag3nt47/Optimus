@@ -105,8 +105,10 @@ def test_safe_starting_values_and_run_now_off(wizard):
     assert 'fixture-browser' not in wizard.category_controls
     assert not any(wizard.controls[key].isChecked() for key in
                    ('browser_history_enabled','browser_cookies_enabled','browser_download_history_enabled'))
-    assert set(wizard.browser_controls) == {'edge','chrome','brave','vivaldi','firefox'}
-    assert all(control.isChecked() for control in wizard.browser_controls.values())
+    assert set(wizard.browser_controls) == {'edge','chrome','brave','vivaldi','firefox','chromium','opera'}
+    assert all(wizard.browser_controls[key].isChecked() for key in ('edge','chrome','brave','vivaldi','firefox'))
+    assert not wizard.browser_controls['opera'].isChecked()
+    assert not wizard.browser_controls['chromium'].isChecked()
 
 
 def test_existing_choices_preserved_without_reenabling_others(qapp, tmp_path):
@@ -324,7 +326,7 @@ def test_saved_setup_updates_sampler_only_after_finish(qapp, backend, monkeypatc
     backend.analysis_start.assert_not_called()
     window.start_optimization.assert_not_called()
     assert window._setup_wizard is None
-    assert len(window.main_buttons) == 3
+    assert len(window.main_buttons) == 4
     window.shutdown()
     window.close()
     window.deleteLater()
@@ -398,7 +400,7 @@ def test_legacy_settings_save_preserves_new_wizard_choices(qapp, backend):
     assert payload['duplicate_roots'] == ['D:\\Fixture']
     assert payload['driver_updates_enabled'] is True
     assert any(button.text() == 'Run setup questions again' for button in detail.findChildren(QPushButton))
-    assert [button.text() for button in main.main_buttons] == ['1 click Optimize and debloat','Settings','Sandbox']
+    assert [button.text() for button in main.main_buttons] == ['1 click Optimize and debloat','Settings','Sandbox','Revert']
     main.shutdown()
     main.close()
     detail.close()

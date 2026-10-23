@@ -4,3 +4,6 @@ pyinstaller==6.21.0
 pytest==9.1.1
 setuptools==83.0.0
 Send2Trash==2.1.0
+cryptography==50.0.2
+cffi==2.1.0
+pycparser==3.0

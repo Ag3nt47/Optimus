@@ -13,6 +13,8 @@ WINDOWS_ONLY = (
     'request_admin_on_startup', 'consumer_debloat_enabled', 'm365_debloat_enabled',
     'outlook_debloat_enabled', 'edge_debloat_enabled', 'privacy_advertising_enabled',
     'privacy_diagnostics_enabled', 'spyware_scan_enabled', 'windows_security_updates_enabled',
+    'privacy_block_silent_consumer_apps_enabled', 'privacy_disable_cloud_promotions_enabled',
+    'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled',
     'windows_security_updates_install_approved', 'windows_security_update_agreements_accepted',
     'driver_updates_enabled', 'legacy_patch_review_enabled', 'cloud_review_enabled',
     'codex_priority_enabled', 'interface_priority_boost_enabled',

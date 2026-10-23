@@ -30,7 +30,7 @@ def window(qapp, tmp_path, monkeypatch):
 def test_opening_settings_does_not_query_or_change_tasks(window):
     window.backend.startup_launch_status.assert_not_called()
     window.backend.set_startup_launch.assert_not_called()
-    assert [button.text() for button in window.main_buttons] == ['1 click Optimize and debloat','Settings','Sandbox']
+    assert [button.text() for button in window.main_buttons] == ['1 click Optimize and debloat','Settings','Sandbox','Revert']
     assert not window._settings_window.workflow_controls['launch_at_sign_in'].isChecked()
     assert not window._settings_window.workflow_controls['request_admin_on_startup'].isChecked()
 

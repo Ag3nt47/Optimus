@@ -1,8 +1,14 @@
 # Optimus user guide
 
-Optimus is a local Windows maintenance application. The main window has three controls: **1 click Optimize and debloat**, **Settings**, and **Sandbox**. Its settings window holds the detailed tools; the main screen stays simple.
+Optimus is a local desktop maintenance application. Its main controls are **1 click Optimize and debloat**, **Settings**, **Sandbox**, and the red **Revert** button. Revert lists recorded changes and offers specific or all-supported undo after review; irreversible changes remain labeled. The settings window holds the detailed tools.
 
 ## Start with your configuration
+
+Every normal launch first asks **Auto Clean** or **Adjust settings** (default). Read the saved removal and file/browser summary. Closing the warning pauses automatic work. New users finish setup, then review the updated summary before cleaning. Opening Settings or changing maintenance scopes pauses automatic work until reviewed again. Read-only commands and smoke tests do not show this dialog or apply maintenance.
+
+**Exception: explicit unattended approval.** Enable **Auto clean with these settings** in setup/Settings and save to approve immediate sign-in/launch maintenance without Optimus questions. This forces startup cadence and sign-in launch. Choose Skip open browsers or Close gracefully; graceful closing can lose unsaved browser form state. Manual-only findings stay in results. New or externally changed scopes invalidate approval; Windows administrator consent and supported quiet-installer requirements remain. Disable this option to return to the launch warning.
+
+See [all removal, cleanup and privacy options](REMOVAL_OPTIONS.md). Smart Cleaning, browser-exit cleanup and Opera start off. Smart controls live in **Settings → Smart cleaning**; **Workers**, **Recovery** and **File utilities** expose the additional tools. Monthly cadence uses local calendar months with end-of-month clamping while open; it is not a closed-app service.
 
 Open **Settings**, select **Settings** in its sidebar, and review **One-click configuration**. New installations select Full Optimization and maintenance on each app startup. Review and save setup before the first run. Full chooses age 0 for all eligible temporary files, browser cache/history/cookies/download-list cleanup, the displayed consumer-package list, update checks, Windows privacy preferences, Defender quick scan and final process/security recommendations. Selecting Full applies its preset once; saved exclusions, scopes and later individual changes remain in effect. Microsoft 365, Outlook and Edge keep their own individual controls.
 
@@ -26,7 +32,7 @@ After a scan/cleanup finishes, **Auto continue — apply available fixes** shows
 
 Automatic security corrections can enable supported Defender real-time protection, enable disabled Windows Firewall profiles, update Defender signatures and request standard remediation of Defender-confirmed threats. Administrator access and Windows security policy still apply. Restart decisions, unsupported/vendor-only patches, missing update approvals, and newly suggested programs remain manual items. A process appearing in a scan does not authorize pausing or uninstalling it. On macOS/Linux, Auto continue uses approved native package updates; native security settings, Apple OS-update approvals and independent driver decisions retain their native review paths.
 
-For launch at Windows sign-in followed by automatic one-click maintenance, enable the sign-in launch and startup administrator-request switches, choose **Each Optimus startup**, and save your choices. Settings can check the effective task and explicitly apply/repair the sign-in choice. Windows requests normal consent once; Yes enables administrator operations for that session. Browsers still receive close-or-skip prompts, and updates retain their separately approved scopes.
+For unattended sign-in maintenance, select **Auto clean with these settings**, save the reviewed scope and choose the open-browser policy. It enables sign-in launch and startup cadence. Keep the administrator-request switch enabled if protected work is required; Windows still requests normal consent. With unattended mode off, launch review and individual browser close-or-skip questions remain. Updates always retain their separately approved scopes and agreements. Settings can check and repair the owned sign-in entry.
 
 The completion window also shows **maintenance observations**: before/after CPU, available memory and disk free space, plus enabled supported startup entries added, removed or changed since the last complete baseline. The first complete inventory establishes that baseline. Unavailable or partial observations remain labelled, and no startup entry is disabled by this comparison. Concurrent applications affect these measurements, so they are distinct from verified deleted bytes and are not proof of a speed gain.
 
@@ -116,13 +122,13 @@ Optimus does not promise a fixed performance gain. Use the measured results to c
 ## First-start setup
 
 1. Open Optimus using its Desktop shortcut. The setup questions appear once, including after upgrading from a version without setup.
-2. Choose manual, every app startup, daily while open or weekly while open. Daily and weekly maintenance requires Optimus to remain running; it does not wake a closed app.
+2. Choose manual, every app startup, daily, weekly or calendar-month maintenance while open. An explicit unattended opt-in instead selects sign-in launch and startup cadence. These modes do not wake a closed app.
 3. Answer the module questions. Previous saved values are shown for existing installations. Use Select all or Clear all for cleanup, debloat and performance choices, and for loaded eligible startup, software and driver lists. Custom Clean has independent browser cache, history, cookie and download-list choices, browser-family selections and cookie domain exceptions. Bing Wallpaper stays protected.
 4. Choose review or automatic changes separately for duplicate files, personal OneDrive, startup registrations and drivers. Authorize each apply mode explicitly and read its scope in the final summary.
 5. Software updates default to reporting. To authorize automatic installation, load and select exact WinGet packages, or separately approve all supported installed WinGet applications and set any exact-ID exclusions. Explicitly allow package/source agreements. Pins are preserved; unknown, ambiguous, unavailable or differently sourced packages are skipped or refused. Driver updates use the exact-update or installed-device/provider/date approvals described below.
 6. Read the final summary. Save choices without starting maintenance, or explicitly select Run selected maintenance now.
 
-Cancelling setup does not save configuration or run maintenance. You can reopen the questions using Run setup questions again in Settings. Existing manual tool panels remain available. The three main buttons are unchanged.
+Cancelling setup does not save configuration or run maintenance. You can reopen the questions using Run setup questions again in Settings. Existing manual tool panels remain available, alongside the main red Revert control for supported undo.
 
 Bulk selection affects only the options or list next to its buttons. Software list selection is available in Selected mode; hardware selection is available in matching-device mode. Disabled, protected and informational entries are excluded. Existing approval limits still apply: 100 startup entries, software package IDs (including the advanced field), or exact driver revisions, and 2048 unique hardware/provider/class rules. The status reports when a limit leaves entries unchecked. Clear all clears the eligible checklist without deleting advanced package IDs or changing a policy. Approval and agreement checkboxes remain separate; changing checked entries clears their previous consent. Save choices is still required to store your selections.
 

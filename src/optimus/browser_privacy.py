@@ -113,12 +113,23 @@ class BrowserPrivacy:
         self._profiles: dict[str, dict[str, Any]] = {}
         self._plans: dict[str, dict[str, Any]] = {}
 
+    def discard_plan(self, identity: str) -> bool:
+        """Release one unused preview; browser files and backups stay untouched."""
+        if not isinstance(identity, str) or not re.fullmatch('[a-f0-9]{32}', identity):
+            raise ValueError('Use one exact browser privacy preview identity.')
+        return self._plans.pop(identity, None) is not None
+
     def _discover(self) -> list[dict[str, Any]]:
         if _PLATFORM != 'win32':
             found = []
             for browser in native_locations(_PLATFORM):
                 root = browser['profile_root']
                 try:
+                    if browser.get('legacy_direct_profile') and any((root / path).is_file() for path in ('History', 'Cookies', 'Network/Cookies')):
+                        found.append({'browser': browser['name'], 'browser_id': browser['id'],
+                            'name': root.name, 'path': str(root.absolute()), 'root': str(root.parent.absolute()),
+                            'family': browser['family'], 'process': browser['process'],
+                            'process_names': list(browser['process_names'])})
                     for profile in root.iterdir():
                         if not profile.is_dir():
                             continue
@@ -140,11 +151,15 @@ class BrowserPrivacy:
                  ("Google Chrome", local / "Google" / "Chrome" / "User Data", "chrome.exe"),
                  ("Chromium", local / "Chromium" / "User Data", "chromium.exe"),
                  ("Brave", local / "BraveSoftware" / "Brave-Browser" / "User Data", "brave.exe"),
-                 ("Vivaldi", local / "Vivaldi" / "User Data", "vivaldi.exe"))
+                 ("Vivaldi", local / "Vivaldi" / "User Data", "vivaldi.exe"),
+                 ("Opera", roaming / "Opera Software" / "Opera Stable", "opera.exe"))
         found = []
         for browser, root, process in roots:
             if not root.is_dir():
                 continue
+            if browser == 'Opera' and any((root / path).is_file() for path in ('History', 'Cookies', 'Network/Cookies')):
+                found.append({'browser': browser, 'browser_id': 'opera', 'name': root.name,
+                    'path': str(root.absolute()), 'root': str(root.parent.absolute()), 'family': 'chromium', 'process': process})
             for profile in root.iterdir():
                 if profile.is_dir() and (profile.name == "Default" or re.fullmatch(r"Profile \d+", profile.name)):
                     found.append({"browser": browser, "name": profile.name, "path": str(profile.absolute()), "root": str(root.absolute()), "family": "chromium", "process": process})

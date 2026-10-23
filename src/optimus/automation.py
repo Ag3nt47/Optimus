@@ -14,7 +14,7 @@ from .filesystem import replace_with_retry
 
 CURRENT_SETUP_VERSION = 2
 SESSION_ID = uuid.uuid4().hex
-MODES = frozenset(('manual', 'startup', 'daily', 'weekly'))
+MODES = frozenset(('manual', 'startup', 'daily', 'weekly', 'monthly'))
 _STATE_LOCK = threading.RLock()
 
 
@@ -75,6 +75,9 @@ def due(settings, last_attempt, now=None, *, validator=None):
         saved = _valid_record(last_attempt)
         if config['automation_mode'] == 'startup':
             return saved['session_id'] != SESSION_ID
+        if config['automation_mode'] == 'monthly':
+            from .calendar_cadence import calendar_month_due
+            return calendar_month_due(saved['attempted_at'], current)
         interval = 86400 if config['automation_mode'] == 'daily' else 7 * 86400
         return current - float(saved['attempted_at']) >= interval
     except (ValueError, TypeError, KeyError):
@@ -166,7 +169,8 @@ def cadence_note(mode):
     return {'manual': 'Maintenance runs only when you start it.',
             'startup': 'Maintenance runs once per Optimus app session while Optimus is open.',
             'daily': 'Maintenance runs when one day has elapsed since the last attempt, only while Optimus is open.',
-            'weekly': 'Maintenance runs when seven days have elapsed since the last attempt, only while Optimus is open.'}[mode]
+            'weekly': 'Maintenance runs when seven days have elapsed since the last attempt, only while Optimus is open.',
+            'monthly': 'Maintenance runs at the same local calendar time next month after the last attempt (clamped to the last day), only while Optimus is open.'}[mode]
 
 class RunLease:
     """A nonblocking OS file lock; process exit releases it without stale PID files."""

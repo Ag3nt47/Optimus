@@ -88,6 +88,25 @@ class Cleaner:
                     ident = f'{browser_id}:{profile.name}:{cache_name}'
                     definitions.append(Category(ident, f'{name} / {profile.name} / {cache_name}', profile / cache_name, 'Cache only. Close this browser first. Passwords, cookies, history and bookmarks are preserved.', processes))
         firefox_base = local / 'Mozilla/Firefox/Profiles'
+        # Opera uses Roaming for profile data and Local for cache. Newer
+        # versions use Default; older profiles keep their databases at the root.
+        # Offer only explicit cache subfolders, never the whole profile.
+        for browser in native_locations('win32'):
+            if browser['id'] != 'opera':
+                continue
+            for base in dict.fromkeys((browser['cache_root'], browser['profile_root'])):
+                profiles = [base]
+                try:
+                    profiles += [path for path in base.iterdir() if path.is_dir() and
+                        (path.name == 'Default' or path.name.startswith('Profile '))]
+                except OSError:
+                    continue
+                root_id = hashlib.sha256(str(base).encode()).hexdigest()[:8]
+                for profile in profiles:
+                    for cache_name in ('Cache', 'Code Cache', 'GPUCache'):
+                        definitions.append(Category(f'opera:{profile.name}:{cache_name}:{root_id}',
+                            f'Opera / {profile.name} / {cache_name}', profile / cache_name,
+                            'Browser cache only; close Opera first. Saved passwords, bookmarks, cookies and history are preserved.', ('opera.exe',)))
         if firefox_base.is_dir():
             try:
                 for profile in firefox_base.iterdir():
@@ -133,6 +152,8 @@ class Cleaner:
             try:
                 profiles = sorted(path for path in base.iterdir() if path.is_dir() and
                     (browser['family'] == 'firefox' or path.name == 'Default' or path.name.startswith('Profile ')))
+                if browser.get('legacy_direct_profile'):
+                    profiles.insert(0, base)
             except OSError:
                 continue
             root_id = hashlib.sha256(str(base).encode()).hexdigest()[:8]
@@ -353,6 +374,13 @@ class Cleaner:
             # Isolate cached approval records from callers mutating a displayed preview.
             self._plans[plan['id']] = json.loads(json.dumps(plan))
         return plan
+
+    def discard_plan(self, identity: str) -> bool:
+        """Release one unused preview without deleting a file or another plan."""
+        if not isinstance(identity, str) or len(identity) != 32 or any(char not in '0123456789abcdef' for char in identity):
+            raise ValueError('Use one exact cleanup preview identity.')
+        with self._lock:
+            return self._plans.pop(identity, None) is not None
 
     @staticmethod
     def _delete_exact(record: dict) -> None:

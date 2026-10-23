@@ -26,15 +26,15 @@ def backend(tmp_path):
         save_preferences=Mock(), close=Mock())
 
 
-def test_native_main_keeps_exact_three_buttons_and_settings_constructs(app, backend):
+def test_native_main_keeps_exact_four_buttons_and_settings_constructs(app, backend):
     window = NativeOptimusWindow(backend, smoke_test=True)
     try:
-        assert [button.text() for button in window.main_buttons] == ['1 click Optimize and debloat', 'Settings', 'Sandbox']
+        assert [button.text() for button in window.main_buttons] == ['1 click Optimize and debloat', 'Settings', 'Sandbox', 'Revert']
         window.start_optimization()
         backend.optimize.assert_not_called()
         window.open_settings()
         settings = window._settings_window
-        assert settings.tabs.count() == 8
+        assert settings.tabs.count() == 12
         assert 'Registry' not in [settings.tabs.tabText(i) for i in range(settings.tabs.count())]
         assert settings.process_harness_panel.actions.count() == 0
         assert settings.privacy_panel._plan is None
@@ -56,7 +56,10 @@ def test_native_wizard_defaults_do_not_accept_update_or_file_change_approvals(ap
         assert not value['duplicate_changes_approved']
         assert wizard.run_after.isChecked()
         assert wizard.pageIds() and len(wizard.pageIds()) == 6
-        assert wizard.browsers.count() == 6
+        assert wizard.browsers.count() == 7
+        opera = wizard.browsers.item(6)
+        assert opera.text().startswith('Opera')
+        assert not opera.checkState().value
     finally:
         wizard.reject()
 

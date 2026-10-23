@@ -16,7 +16,20 @@ Give your computer a clearer, cleaner workspace with Optimus: cleanup, browser p
 
 Optimus combines previewed cleanup, browser privacy tools, resource management, startup controls, debloat actions, disk analysis, duplicate finding and updates in one local application. Its dark blue/orange presentation and reveal animations are adapted from the MIT-licensed [AngeronaSuite](https://github.com/Ag3nt47/AngeronaSuite).
 
+## Cleaning, performance and privacy first
+
+- **Review before Auto Clean.** Normal launches show saved app removals, files and browser records. Choose **Auto Clean** or the default **Adjust settings**. The optional **Auto clean with these settings** choice approves unattended sign-in/launch cleanup for that exact saved scope instead.
+- **Reduce everyday background overhead.** Inspect measured process CPU/RAM/I/O, tune approved startup entries, clean selected junk/browser categories and use supported power and SSD/HDD maintenance.
+- **Opt in to ongoing cleaning.** Smart Cleaning uses a configurable threshold (500 MB initially), browser-exit cleanup uses saved privacy choices, and daily/weekly/monthly cadence runs while the app is open. Opera is off by default.
+- **Keep decisions and outcomes visible.** Scoped app/driver updates, separate worker status cards, cooperative stopping and verified recovery tools retain failures and unknown outcomes.
+
+See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** before choosing debloat. Microsoft 365 consumer apps, Outlook and Edge have separate controls; Bing Wallpaper remains protected. Windows privacy and reinstall controls have explicit build/edition limits. Extra file tools and recovery live in Settings; irreversible overwriting is never part of Auto Clean.
+
+**Unattended mode is off by default.** Enable it in initial setup or Settings to launch at sign-in and clean/update without Optimus questions. Save whether open browsers are skipped (default) or requested to close gracefully. Windows administrator consent and operating-system/vendor requirements remain in effect; interactive/unsupported work is left in results. Manual recommendations remain visible without opening questions. Changed scopes invalidate the saved approval until reviewed and saved again. No automatic reboot or forced browser termination is requested.
+
 ## Download and run
+
+Version **0.10.0** adds the launch warning, default-off Smart Cleaning/browser-exit cleaning, calendar-month scheduling, opt-in Opera support, privacy controls, verified driver/System Restore recovery, authenticated file utilities and a red Revert control. Additional worker cards fit within the existing windows. [Detailed scope and removal options](docs/REMOVAL_OPTIONS.md) document defaults and limitations. The launch review supersedes the unattended startup behavior described in older release notes below.
 
 Version **0.9.9** lets approved Windows Update drivers attempt a verified quiet installation even when their metadata allows user input. Quiet mode and suppressed source prompts must be established before download or installation; unsupported quiet handlers remain for review. It also adds cooperative safe stopping: Close requests cancellation, waits for active work and preserves final receipts before exit. Cancel keeps the results window open. A local safe-stop command requests the same behavior without killing installers.
 
@@ -64,11 +77,14 @@ Software updates require a provably newer offered version; equal, older, equival
 
 **Version 0.4.0** expands the driver updater with coverage for present hardware and future device approvals even when no update is currently offered. Software Updater can install selected applications or all supported WinGet applications with a separate saved approval and exclusions. Junk Clean adds optional diagnostics and graphics-cache categories. Performance measures application CPU, RAM and I/O across multiple samples and explains potential slowdown contributors. Existing duplicate, OneDrive and startup approvals and Bing Wallpaper protection are retained.
 
-## Three controls
+## Main controls
 
 - **1 click Optimize and debloat** runs the modules selected in Settings. A live window shows actual completed-stage percentages, the current operation, process information and a detailed activity log. Cancellation stops at a safe boundary.
 - **Settings** contains Low/Standard/High cleanup presets, individual removal choices, priority/affinity controls, optional background analysis, the full maintenance tools and appearance settings.
 - **Sandbox** opens an editable working copy of the full source. Save, version history, Revert and Original version are available. **Restart Optimus** validates the saved Python source and starts that version; the current app remains open if the new interface does not report ready.
+- **Revert** opens recorded changes and supported recovery choices. Review selected changes or all available undo actions before applying. Permanent deletions and actions without a supported recovery path remain clearly marked.
+
+![Revert history example using disposable test records](docs/optimus-revert.png)
 
 New installations start in Full Optimization. Setup displays the concrete selected consumer packages and browser categories before saving. Bing Wallpaper remains protected. Existing configurations keep their saved individual choices; choosing Full applies its preset once, and later changes are retained. Existing Codex priority watchers are left unchanged. If you previously enabled background analysis in the saved configuration, it resumes at that saved interval when the interface reopens. Scheduled/command-line audits do not start background analysis.
 

@@ -86,7 +86,7 @@ def complete_initial(window, app):
 
 def test_completed_scan_only_previews_exact_batch_until_explicit_click(window, app):
     progress = complete_initial(window, app)
-    assert len(window.main_buttons) == 3
+    assert len(window.main_buttons) == 4
     window.backend.apply_available_fixes.assert_not_called()
     window._offer_post_optimization_reviews.assert_not_called()
     window.backend.optimize.assert_called_once()

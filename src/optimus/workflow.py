@@ -12,6 +12,8 @@ from pathlib import Path
 from .filesystem import replace_with_retry
 from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
 from .approval_policy import APPROVAL_DEFAULTS, validate_approvals
+from .smart_configuration import SMART_DEFAULTS, validate_smart_configuration
+from .unattended_configuration import UNATTENDED_DEFAULTS, validate_unattended_configuration
 
 CONSUMER_PACKAGE_NAMES = (
     'Microsoft.BingNews', 'Microsoft.BingWeather', 'Microsoft.Getstarted',
@@ -52,6 +54,10 @@ DEFAULTS = {
     'cleanup_category_ids': [],
     'post_process_review_enabled': False,
     'privacy_advertising_enabled': False, 'privacy_diagnostics_enabled': False,
+    'privacy_block_silent_consumer_apps_enabled': False,
+    'privacy_disable_cloud_promotions_enabled': False,
+    'privacy_disable_clipboard_sync_enabled': False,
+    'privacy_disable_recall_snapshots_enabled': False,
     'privacy_disable_advertising_id': True, 'privacy_disable_tailored_experiences': True,
     'privacy_disable_optional_diagnostics': True, 'privacy_disable_app_diagnostics': True,
     'privacy_disable_suggestions': True,
@@ -62,6 +68,8 @@ DEFAULTS = {
     'legacy_patch_review_enabled': False,
 }
 DEFAULTS.update(copy.deepcopy(APPROVAL_DEFAULTS))
+DEFAULTS.update(copy.deepcopy(SMART_DEFAULTS))
+DEFAULTS.update(copy.deepcopy(UNATTENDED_DEFAULTS))
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _CATEGORY_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
 FINAL_VERIFICATION_STAGE = 'Verify optimization outcomes'
@@ -178,8 +186,10 @@ class Preferences:
             raise ValueError('Analysis interval must be 2 to 60 seconds.')
         if type(result['setup_version']) is not int or not 0 <= result['setup_version'] <= CURRENT_SETUP_VERSION:
             raise ValueError('Unsupported setup version.')
-        if result['automation_mode'] not in ('manual', 'startup', 'daily', 'weekly'):
-            raise ValueError('Choose manual, startup, daily, or weekly maintenance.')
+        if result['automation_mode'] not in ('manual', 'startup', 'daily', 'weekly', 'monthly'):
+            raise ValueError('Choose manual, startup, daily, weekly, or monthly maintenance.')
+        result.update(validate_smart_configuration(result))
+        result.update(validate_unattended_configuration(result))
         if result['software_update_policy'] not in ('review', 'selected', 'all_supported'):
             raise ValueError('Software updates require review, selected IDs, or all-supported policy.')
         packages = result['consumer_debloat_package_names']
@@ -188,7 +198,7 @@ class Preferences:
                 or len(set(packages)) != len(packages)):
             raise ValueError('Choose unique exact names from the supported consumer-app removal list.')
         browsers = result['browser_cleanup_browsers']
-        if type(browsers) is not list or len(browsers) > 6 or any(not isinstance(item, str) or item not in ('edge', 'chrome', 'chromium', 'brave', 'vivaldi', 'firefox') for item in browsers) or len(set(browsers)) != len(browsers):
+        if type(browsers) is not list or len(browsers) > 7 or any(not isinstance(item, str) or item not in ('edge', 'chrome', 'chromium', 'brave', 'vivaldi', 'firefox', 'opera') for item in browsers) or len(set(browsers)) != len(browsers):
             raise ValueError('Choose unique supported browser identifiers for browser cleanup.')
         if type(result['browser_keep_domains']) is not list:
             raise ValueError('Cookie keep domains must be a list of plain host names.')
@@ -441,7 +451,9 @@ class Workflow:
                 stages.append(('Apply Codex performance profile', 'Applying your selected process priority. Existing external priority watchers remain unchanged.', lambda: self.backend.codex_profile(configuration['codex_priority'])))
             if configuration['background_analysis_enabled']:
                 stages.append(('Enable resource analysis', 'Starting the optional read-only CPU, memory, disk and network sampler.', lambda: self.backend.analysis_start(configuration['analysis_interval'])))
-            if configuration['privacy_advertising_enabled'] or configuration['privacy_diagnostics_enabled']:
+            if any(configuration[key] for key in ('privacy_advertising_enabled', 'privacy_diagnostics_enabled',
+                    'privacy_block_silent_consumer_apps_enabled', 'privacy_disable_cloud_promotions_enabled',
+                    'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled')):
                 stages.append(('Apply saved privacy controls',
                                'Disabling selected Windows advertising and optional diagnostic sharing settings, with recovery records; managed or administrator-only settings may need review.',
                                lambda: self.backend.apply_system_privacy(configuration, cancel_event=cancel_event)))

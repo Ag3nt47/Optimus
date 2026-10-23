@@ -200,6 +200,10 @@ def test_source_restart_stays_hidden_and_does_no_automatic_work_until_lease_hand
         window.show.assert_not_called()
         take_over()
         window.show.assert_called_once_with()
+        resume.assert_not_called()
+        window.session_approved.return_value = True
+        window._quitting = window._close_when_idle = False
+        window._session_approved_callback()
         resume.assert_called_once_with(backend)
         controller.assert_called_once()
         lease.listen.assert_called_once_with(window.activate_existing_window, safe_stop=window.request_safe_stop)

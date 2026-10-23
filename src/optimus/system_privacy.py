@@ -1,9 +1,10 @@
-"""Reversible Windows privacy choices and native Defender security controls.
+"""Guarded Windows privacy choices and native Defender security controls.
 
 Primary references (policy scope/edition restrictions are intentional):
 https://learn.microsoft.com/windows/client-management/mdm/policy-csp-privacy
 https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience
 https://learn.microsoft.com/windows/client-management/mdm/policy-csp-system
+https://learn.microsoft.com/windows/client-management/mdm/policy-csp-windowsai#disableaidataanalysis
 https://support.microsoft.com/windows/privacy/general-privacy-settings-in-windows
 https://support.microsoft.com/windows/privacy/privacy-settings-for-recommendations-offers-in-windows-11
 https://learn.microsoft.com/powershell/module/defender/start-mpscan
@@ -15,6 +16,8 @@ AdvertisingInfo/ContentDeliveryManager preference values are not a published
 stable policy API: only existing recognizable DWORD preferences are changed.
 Missing preferences are reported unsupported. A registry readback verifies the
 written preference, not that every application obeys it or stops all sharing.
+Recall snapshot blocking is separately opt-in: Windows deletes old snapshots,
+and restoring the backed-up policy cannot recover those deleted snapshots.
 No Defender exclusion, threat-action preference, service, hosts entry, network
 blocklist, SmartScreen setting or Windows Update protection is weakened.
 """
@@ -39,6 +42,7 @@ SOURCES = [
     'https://learn.microsoft.com/windows/client-management/mdm/policy-csp-privacy',
     'https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience',
     'https://learn.microsoft.com/windows/client-management/mdm/policy-csp-system',
+    'https://learn.microsoft.com/windows/client-management/mdm/policy-csp-windowsai#disableaidataanalysis',
     'https://support.microsoft.com/windows/privacy/general-privacy-settings-in-windows',
     'https://support.microsoft.com/windows/privacy/privacy-settings-for-recommendations-offers-in-windows-11',
     'https://learn.microsoft.com/powershell/module/defender/start-mpscan',
@@ -56,10 +60,37 @@ _CONTROLS = {
     'app_diagnostics': dict(hive='LocalMachine', path=r'Software\Policies\Microsoft\Windows\AppPrivacy',
         name='LetAppsGetDiagnosticInfo', desired=2, scope='device', policy=True, master='privacy_diagnostics_enabled', flag='privacy_disable_app_diagnostics', minimum_build=15063),
 }
+# These mapped Group Policies explicitly exclude Home and Pro. They reduce
+# Windows consumer provisioning/promotions; they are not an installer firewall.
+_CONSUMER_POLICY_EDITIONS = ('Enterprise', 'EnterpriseN', 'EnterpriseS', 'EnterpriseSN',
+    'EnterpriseEval', 'EnterpriseNEval', 'EnterpriseSEval', 'Education', 'EducationN',
+    'IoTEnterprise', 'IoTEnterpriseS')
+for _key, _name, _master, _build in (
+    ('consumer_features', 'DisableWindowsConsumerFeatures', 'privacy_block_silent_consumer_apps_enabled', 14393),
+    ('cloud_optimized_content', 'DisableCloudOptimizedContent', 'privacy_disable_cloud_promotions_enabled', 22000),
+    ('consumer_account_content', 'DisableConsumerAccountStateContent', 'privacy_disable_cloud_promotions_enabled', 22000)):
+    _CONTROLS[_key] = dict(hive='LocalMachine', path=r'Software\Policies\Microsoft\Windows\CloudContent',
+        name=_name, desired=1, scope='device', policy=True, master=_master, flag=_master,
+        minimum_build=_build, editions=_CONSUMER_POLICY_EDITIONS,
+        source='https://learn.microsoft.com/windows/client-management/mdm/policy-csp-experience#'
+            + {'consumer_features': 'allowwindowsconsumerfeatures', 'cloud_optimized_content': 'disablecloudoptimizedcontent',
+               'consumer_account_content': 'disableconsumeraccountstatecontent'}[_key])
 for _name in ('SilentInstalledAppsEnabled', 'SubscribedContent-338388Enabled', 'SubscribedContent-338389Enabled',
               'SubscribedContent-353694Enabled', 'SubscribedContent-353696Enabled'):
     _CONTROLS['suggestions_' + _name] = dict(hive='CurrentUser', path=r'Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager',
         name=_name, desired=0, existing_only=True, scope='user', master='privacy_advertising_enabled', flag='privacy_disable_suggestions', minimum_build=10240)
+_CONTROLS['suggestions_SilentInstalledAppsEnabled']['alternate_master'] = 'privacy_block_silent_consumer_apps_enabled'
+_CONTROLS['cross_device_clipboard'] = dict(hive='LocalMachine', path=r'Software\Policies\Microsoft\Windows\System',
+    name='AllowCrossDeviceClipboard', desired=0, scope='device', policy=True,
+    master='privacy_disable_clipboard_sync_enabled', flag='privacy_disable_clipboard_sync_enabled', minimum_build=17763,
+    source='https://learn.microsoft.com/windows/client-management/mdm/policy-csp-privacy#allowcrossdeviceclipboard',
+    note='Disables Windows cross-device clipboard synchronization. Local clipboard history is unchanged; this does not erase previously uploaded copies.')
+_CONTROLS['recall_snapshots'] = dict(hive='LocalMachine', path=r'SOFTWARE\Policies\Microsoft\Windows\WindowsAI',
+    name='DisableAIDataAnalysis', desired=1, scope='device', policy=True,
+    master='privacy_disable_recall_snapshots_enabled', flag='privacy_disable_recall_snapshots_enabled',
+    minimum_build=26100, minimum_revision=3915,
+    source='https://learn.microsoft.com/windows/client-management/mdm/policy-csp-windowsai#disableaidataanalysis',
+    note='Windows blocks Recall snapshot saving and deletes previously saved snapshots when this policy is enabled. Restoring the original policy cannot restore deleted snapshots; a registry readback does not verify snapshot deletion.')
 _ID = re.compile(r'^[a-f0-9]{32}$')
 MITRE_MITIGATIONS = {
     'M1049': {'id': 'M1049', 'name': 'Antivirus/Antimalware', 'url': 'https://attack.mitre.org/mitigations/M1049/'},
@@ -77,7 +108,7 @@ $C=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__CONTROLS__'))|
 function Is-Admin {([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)}
 function Context {
  $v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
- [pscustomobject]@{platform='Windows';build=[int]$v.CurrentBuildNumber;edition=[string]$v.EditionID;is_admin=(Is-Admin)}
+ [pscustomobject]@{platform='Windows';build=[int]$v.CurrentBuildNumber;ubr=[int]$v.UBR;edition=[string]$v.EditionID;is_admin=(Is-Admin)}
 }
 function Read-Control($id) {
  $s=$C.$id;if($null -eq $s){throw 'Unknown privacy control.'}
@@ -401,13 +432,15 @@ class SystemPrivacy:
         return report
 
     def apply_privacy(self, settings, cancel_event=None):
-        keys = {'privacy_advertising_enabled', 'privacy_diagnostics_enabled'} | {control['flag'] for control in _CONTROLS.values()}
+        keys = {control['master'] for control in _CONTROLS.values()} | {control['flag'] for control in _CONTROLS.values()}
         if not isinstance(settings, dict) or any(key in settings and type(settings[key]) is not bool for key in keys):
             raise ValueError('Privacy choices must be explicit booleans.')
-        selected = [key for key, control in _CONTROLS.items() if settings.get(control['master'], False) and settings.get(control['flag'], True)]
+        selected = [key for key, control in _CONTROLS.items()
+                    if (settings.get(control['master'], False) and settings.get(control['flag'], True))
+                    or settings.get(control.get('alternate_master'), False)]
         report = {'id': uuid.uuid4().hex, 'version': 1, 'kind': 'privacy', 'status': 'running', 'created_at': time.time(),
                   'items': [], 'errors': [], 'failed_items': 0, 'changed_count': 0, 'cancelled': False, 'sources': SOURCES,
-                  'note': 'These Windows privacy controls reduce selected advertising/diagnostic uses. Required Windows diagnostic data, security protection and third-party app/account privacy choices remain separate. Existing content-delivery preferences are version dependent and do not guarantee that all suggested apps or reinstallations are prevented.'}
+                  'note': 'These Windows privacy controls reduce selected advertising/diagnostic uses. Required Windows diagnostic data, security protection and third-party app/account privacy choices remain separate. Existing content-delivery preferences are version dependent. Consumer/cloud policies require a documented Enterprise, Education or IoT Enterprise edition; clipboard/Recall policies require Pro or a supported higher edition. Device policies need administrator access. Registry readback verifies the preference only; these controls do not block every installer, reinstallation, tracker or data transfer. Windows Update, Store/browser updates and Defender remain available. If explicitly selected, the Recall policy makes Windows delete previous snapshots; restoring the policy cannot recover those snapshots.'}
         if not selected or _cancelled(cancel_event):
             report.update(status='cancelled' if _cancelled(cancel_event) else 'completed', cancelled=_cancelled(cancel_event))
             return report
@@ -420,10 +453,19 @@ class SystemPrivacy:
                     break
                 control = _CONTROLS[key]
                 item = {'id': key, 'scope': control['scope'], 'status': 'prepared', 'desired': control['desired']}
+                if control.get('source'):
+                    item['source'] = control['source']
+                if control.get('note'):
+                    item['note'] = control['note']
                 report['items'].append(item)
                 try:
                     if context.get('platform') != 'Windows' or type(context.get('build')) is not int or context['build'] < control['minimum_build']:
                         item.update(status='unsupported', reason='This Windows version does not expose the selected supported control.')
+                    elif control.get('minimum_revision') and context['build'] == control['minimum_build'] and (
+                            type(context.get('ubr')) is not int or context['ubr'] < control['minimum_revision']):
+                        item.update(status='unsupported', reason='This policy requires Windows 11 build 26100.3915 or later. The installed cumulative-update revision is older or unknown; no policy was written.')
+                    elif control.get('editions') and context.get('edition') not in control['editions']:
+                        item.update(status='unsupported', reason='Microsoft documents this consumer-content policy for Enterprise, Education and IoT Enterprise only. Home and Pro are not supported; no policy value was written.')
                     elif control.get('policy') and not str(context.get('edition', '')).startswith(('Professional', 'Enterprise', 'Education', 'IoTEnterprise')):
                         item.update(status='unsupported', reason='This policy is not documented for the installed Windows edition; use Windows privacy Settings.')
                     elif control['scope'] == 'device' and context.get('is_admin') is not True:
@@ -496,6 +538,8 @@ class SystemPrivacy:
                     break
                 expected = {'exists': True, 'type': 'DWord', 'value': _CONTROLS[key]['desired']}
                 item = {'id': key, 'status': 'skipped'}
+                if _CONTROLS[key].get('note'):
+                    item['note'] = _CONTROLS[key]['note']
                 report['items'].append(item)
                 try:
                     current = _snapshot(self._call('registry_read', {'control': key}, cancel_event=cancel_event))

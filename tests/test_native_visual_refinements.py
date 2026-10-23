@@ -77,11 +77,11 @@ def test_settings_and_speed_actions_fit_small_viewport_and_are_scroll_reachable(
         ensure_reachable(detail.navigation['Settings'], app)
 
 
-def test_main_keeps_three_centered_actions_and_pauses_stars_for_tools(window, app):
+def test_main_keeps_four_centered_actions_and_pauses_stars_for_tools(window, app):
     window.resize(1024, 768)
     window.show()
     app.processEvents()
-    assert len(window.main_buttons) == 3
+    assert len(window.main_buttons) == 4
     for button in window.main_buttons:
         center = button.mapTo(window.canvas, button.rect().center())
         assert abs(center.x() - window.canvas.rect().center().x()) <= 1

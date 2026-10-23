@@ -21,6 +21,7 @@ CADENCES = {
     'startup': 'Each app startup',
     'daily': 'Daily while the app is open',
     'weekly': 'Weekly while the app is open',
+    'monthly': 'Monthly by the local calendar while the app is open',
 }
 REMOVALS = (
     ('consumer_debloat_enabled', 'Remove the curated consumer-app group'),
@@ -262,10 +263,23 @@ class InitialSetupWizard(QWizard):
             self.cadence_group.addButton(button)
             self.cadence_buttons[mode] = button
             body.addWidget(button)
-        body.addWidget(_label('Daily and weekly maintenance require Optimus to stay open. Closing the app stops its timer. Existing Windows scheduled audit tasks are separate and remain read-only.'))
+        body.addWidget(_label('Daily, weekly and monthly maintenance require Optimus to stay open. Monthly uses the same local calendar time next month, clamped to that month\'s last day. Closing the app stops its timer. Existing Windows scheduled audit tasks are separate and remain read-only.'))
         warning = _label('At the saved cadence, the changes you approve here run without another per-run confirmation. Review policies only scan/report. Choose Manual to start runs yourself; return to setup and switch a tool off or to Review to revoke its automatic changes.')
         warning.setStyleSheet('color:#ffd29c;')
         body.addWidget(warning)
+        from .widgets.unattended_setup_choices import UnattendedSetupChoices
+        self.unattended_setup = UnattendedSetupChoices(body, self.initial,
+            add_check=lambda key, text: self._check(body, key, text),
+            add_note=lambda text: body.addWidget(_label(text)))
+        def unattended_controls(enabled):
+            if enabled:
+                self.controls['launch_at_sign_in'].setChecked(True)
+                self.cadence_buttons['startup'].setChecked(True)
+            self.controls['launch_at_sign_in'].setEnabled(not enabled)
+            for button in self.cadence_buttons.values():
+                button.setEnabled(not enabled)
+        self.unattended_setup.enabled.toggled.connect(unattended_controls)
+        unattended_controls(self.unattended_setup.enabled.isChecked())
         body.addStretch()
 
     def _mode_changed(self, *_):
@@ -327,6 +341,15 @@ class InitialSetupWizard(QWizard):
         self._check(body, 'spyware_scan_enabled', 'Run a Microsoft Defender quick scan for malware and spyware')
         self._check(body, 'privacy_advertising_enabled', 'Apply my selected Windows advertising and suggestion privacy preferences')
         self._check(body, 'privacy_diagnostics_enabled', 'Apply my selected optional Windows diagnostic-data preferences')
+        self._check(body, 'privacy_block_silent_consumer_apps_enabled',
+            'Reduce silent Windows consumer-app installs (existing user preference; additional policy on supported Enterprise/Education editions)')
+        self._check(body, 'privacy_disable_cloud_promotions_enabled',
+            'Turn off supported Windows cloud/account promotions (Enterprise/Education policy; unsupported on Home/Pro)')
+        self._check(body, 'privacy_disable_clipboard_sync_enabled',
+            'Turn off Windows cross-device clipboard sync (Pro+; local clipboard history stays available)')
+        self._check(body, 'privacy_disable_recall_snapshots_enabled',
+            'Block Recall screen snapshots and let Windows delete existing snapshots (Pro+, build 26100.3915+; deleted snapshots cannot be restored)')
+        body.addWidget(_label('These optional controls reduce Windows consumer provisioning and promotions. They cannot require approval for every third-party installer or block all tracking/data sharing. Windows Update, Defender and legitimate app/browser updates stay available. Changes have private original-value backups and guarded undo; managed policies can override them.'))
         for key, text in (
             ('privacy_disable_advertising_id', 'Turn off the Windows advertising ID'),
             ('privacy_disable_tailored_experiences', 'Turn off tailored experiences based on diagnostic data'),
@@ -358,13 +381,14 @@ class InitialSetupWizard(QWizard):
         self._check(body, 'browser_download_history_enabled', 'Clear the download list (Chromium browsers only; downloaded files stay)')
         body.addWidget(_label('Apply those categories to all recognized profiles of the browsers checked below:'))
         selected_browsers = self.initial.get('browser_cleanup_browsers', ['edge', 'chrome', 'brave', 'vivaldi', 'firefox'])
-        browser_row = QHBoxLayout()
-        for key, name in (('edge', 'Microsoft Edge'), ('chrome', 'Google Chrome'), ('brave', 'Brave'), ('vivaldi', 'Vivaldi'), ('firefox', 'Firefox')):
+        for index, (key, name) in enumerate((('edge', 'Microsoft Edge'), ('chrome', 'Google Chrome'), ('brave', 'Brave'), ('vivaldi', 'Vivaldi'), ('firefox', 'Firefox'), ('chromium', 'Chromium'), ('opera', 'Opera (optional)'))):
+            if index % 4 == 0:
+                browser_row = QHBoxLayout()
+                body.addLayout(browser_row)
             control = QCheckBox(name)
             control.setChecked(key in selected_browsers)
             self.browser_controls[key] = control
             browser_row.addWidget(control)
-        body.addLayout(browser_row)
         self.browser_keep_domains = QPlainTextEdit()
         self.browser_keep_domains.setPlaceholderText('Keep cookies for these domains, comma-separated: example.com, another.example')
         self.browser_keep_domains.setPlainText(', '.join(self.initial.get('browser_keep_domains', [])))
@@ -407,6 +431,10 @@ class InitialSetupWizard(QWizard):
             self._category(body, identifier, identifier + ' (saved category)', True, False)
         if not self.category_controls:
             body.addWidget(_label('No additional categories were reported. The Cleaner page can preview the available categories later.'))
+        from .widgets.smart_setup_choices import SmartSetupChoices
+        self.smart_setup = SmartSetupChoices(body, self.initial,
+            add_check=lambda key, text: self._check(body, key, text),
+            add_note=lambda text: body.addWidget(_label(text)))
         body.addStretch()
 
     def _category(self, body, identifier, name, checked, unavailable):
@@ -1102,6 +1130,8 @@ class InitialSetupWizard(QWizard):
                 result[key] = control.value()
             elif isinstance(control, QComboBox):
                 result[key] = control.currentText()
+        result.update(self.smart_setup.collect())
+        result.update(self.unattended_setup.collect())
         result.update({'setup_version':SETUP_VERSION, 'optimization_mode':self.optimization_mode.currentData(), 'automation_mode':next(mode for mode,button in self.cadence_buttons.items() if button.isChecked()),
             'cleanup_category_ids':[key for key,control in self.category_controls.items() if control.isChecked()],
             'consumer_debloat_package_names':[key for key,control in self.consumer_package_controls.items() if control.isChecked()],
@@ -1184,12 +1214,24 @@ class InitialSetupWizard(QWizard):
     def refresh_summary(self):
         settings = self.collect_choices(validate=False)
         actions = []
+        if settings.get('unattended_auto_clean_enabled'):
+            actions.append('Unattended Auto Clean: saving approves these exact choices, enables sign-in launch and Startup cadence, and skips future launch/post-run prompts while unchanged. Open browsers: '
+                + ('skip for this run' if settings['unattended_browser_policy'] == 'skip_open' else 'request graceful closure; skip if still open or unknown')
+                + '. Deletion/uninstallation can be permanent. Permission, unknown installer and restart requirements remain deferred.')
         if settings.get('launch_at_sign_in'):
             actions.append('Launch Optimus at Windows sign-in using a managed startup entry; maintenance still follows the selected cadence and any Windows UAC prompt remains yours to approve')
         if settings.get('request_admin_on_startup'):
             actions.append('Request administrator access once at each normal app launch using Windows UAC; declining keeps Optimus open with standard access')
         if settings.get('cleanup_enabled'):
             actions.append('Permanently delete eligible old user temporary files')
+        if settings.get('smart_cleaning_enabled'):
+            actions.append('Smart Cleaning while Optimus is open after session approval: check only saved junk categories every '
+                + str(settings['smart_maintenance_poll_seconds']) + ' seconds; clean at '
+                + str(settings['smart_cleaning_threshold_bytes']) + ' bytes with at least '
+                + str(settings['smart_cleaning_cooldown_seconds']) + ' seconds between attempts; incomplete previews are skipped')
+        if settings.get('browser_exit_cleaning_enabled'):
+            actions.append('After an observed exit and ' + str(settings['browser_exit_grace_seconds'])
+                + '-second grace period, automatically clean selected browser categories and cookie exceptions without closing a browser. Selected history/cookies can be cleared and sign you out; private rollback backups remain.')
         if settings.get('browser_cache_enabled'):
             actions.append('Permanently delete eligible browser-cache files')
         for key, label in (('browser_history_enabled', 'browsing history'), ('browser_cookies_enabled', 'cookies and site sign-ins'), ('browser_download_history_enabled', 'download-list records (downloaded files stay)')):
@@ -1227,6 +1269,10 @@ class InitialSetupWizard(QWizard):
             ('privacy_diagnostics_enabled', ('privacy_disable_optional_diagnostics', 'privacy_disable_app_diagnostics'))):
             if settings.get(master):
                 actions.extend('Windows privacy: ' + self.controls[key].text() for key in children if settings.get(key))
+        for key in ('privacy_block_silent_consumer_apps_enabled', 'privacy_disable_cloud_promotions_enabled',
+                    'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled'):
+            if settings.get(key):
+                actions.append('Windows privacy: ' + self.controls[key].text() + '; original values saved for guarded undo. This does not block all installers or app/account data sharing.')
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'selected':
             actions.append('Install only listed WinGet IDs: ' + (', '.join(settings['software_update_ids']) or '[no IDs entered]'))
             actions.append('Package/source agreements: ' + ('explicitly accepted' if settings['software_update_agreements_accepted'] else 'NOT accepted; Save will be refused'))
@@ -1289,7 +1335,7 @@ class InitialSetupWizard(QWizard):
         lines.extend('- ' + text for text in actions or ['None; this configuration is scan/report only.'])
         lines.extend(['', 'SCAN / REPORT ONLY'])
         lines.extend('- ' + text for text in reviews)
-        lines.extend(['', 'PRESERVATION AND REVOKING APPROVAL', 'Bing Wallpaper is protected. Review policies do not apply changes. Only saved approved scopes can be changed without per-run prompts; turn a tool off or return its policy to Review to revoke approval. Recycle bins, supported startup backups and Windows driver recovery have limits; cleanup is permanent.', '', 'Save does not run maintenance unless Run selected maintenance now is checked.'])
+        lines.extend(['', 'PRESERVATION AND REVOKING APPROVAL', 'Bing Wallpaper is protected. Review policies do not apply changes. Only saved approved scopes can be changed without per-run prompts; turn a tool off or return its policy to Review to revoke approval. Recycle bins, supported startup backups and Windows driver recovery have limits; cleanup is permanent.', '', 'Save does not run maintenance unless Run selected maintenance now is checked. Unattended approval enables sign-in launch and Startup cadence for future launches.'])
         self.summary.setPlainText('\n'.join(lines))
 
     def validateCurrentPage(self):
@@ -1309,6 +1355,10 @@ class InitialSetupWizard(QWizard):
             return
         try:
             preferences = self.collect_choices()
+            if preferences.get('unattended_auto_clean_enabled') is True:
+                from .workflow import Preferences
+                from .unattended_configuration import approve_unattended_settings
+                preferences = approve_unattended_settings(Preferences.validate(preferences))
             from .automation import save_setup
             saved = save_setup(self.backend.data_dir, preferences, self.backend.save_preferences,
                                run_now=self.run_now_checkbox.isChecked())

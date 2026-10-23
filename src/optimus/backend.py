@@ -13,8 +13,9 @@ from .sampler import ResourceSampler
 from .workflow import Preferences, Workflow
 from . import performance
 from .filesystem import resolve_data_root, default_data_root
+from .extended_backend import ExtendedMaintenanceBackend
 
-class Backend:
+class Backend(ExtendedMaintenanceBackend):
     def __init__(self, data_dir: Path | None = None):
         self.data_dir = resolve_data_root(Path(data_dir)) if data_dir is not None else default_data_root()
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -559,7 +560,7 @@ class Backend:
         if browser_prompt is not None:
             profile = self.browser_privacy_engine._profile(profile_id)
             identifiers = {'Microsoft Edge': 'edge', 'Google Chrome': 'chrome', 'Brave': 'brave',
-                           'Vivaldi': 'vivaldi', 'Mozilla Firefox': 'firefox'}
+                           'Vivaldi': 'vivaldi', 'Mozilla Firefox': 'firefox', 'Opera': 'opera'}
             browser_id = identifiers.get(profile['browser'])
             if not browser_id:
                 raise ValueError('This browser is not supported by the close-and-clean prompt.')
@@ -634,6 +635,7 @@ class Backend:
         return {'path': str(destination / 'audit.json')}
 
     def close(self):
+        self._close_optional_tools()
         self.sampler.stop()
         self.bridge.close()
 

@@ -202,7 +202,7 @@ class DetailedSettingsWindow(QMainWindow):
     appearanceChanged = Signal(dict)
     PAGE_NAMES = ("Dashboard", "Cleaner", "Browser privacy", "Performance", "Startup",
                   "Applications", "Updates", "Drivers", "Disk analyzer", "Duplicate finder",
-                  "Debloat", "Cloud drive", "Schedules", "Registry review", "Restore/history", "Settings")
+                  "Debloat", "Cloud drive", "Schedules", "Smart cleaning", "Workers", "File utilities", "Recovery", "Registry review", "Restore/history", "Settings")
     DESCRIPTIONS = {
         "Dashboard": "Measured resource use and practical next steps. Review each change before applying it.",
         "Cleaner": "Preview temporary files and browser caches, then delete only the reviewed list.",
@@ -220,6 +220,10 @@ class DetailedSettingsWindow(QMainWindow):
         "Registry review": "Review missing executable registrations in your own account and remove one reviewed entry with a backup.",
         "Restore/history": "Review changes and restore settings that have a supported undo record.",
         "Settings": "Appearance, window motion and supported Windows maintenance tools.",
+        "Smart cleaning": "Opt-in cleanup thresholds and browser-exit privacy using your saved categories.",
+        "Workers": "Cached status for additional tools without starting another scan or installer.",
+        "File utilities": "Authenticated file encryption, verified split/join and reviewed selected-file overwrite.",
+        "Recovery": "Verified driver backups, exact-device rollback and Windows restore-point controls.",
     }
 
     def __init__(self, backend, *, smoke_test=False):
@@ -250,7 +254,7 @@ class DetailedSettingsWindow(QMainWindow):
         self.setStyleSheet(self._qss())
         self._build_shell()
         for builder in ("dashboard", "cleaner", "browser", "performance", "startup", "applications",
-                        "updates", "drivers", "storage", "duplicates", "debloat", "cloud", "schedules", "registry", "history", "settings"):
+                        "updates", "drivers", "storage", "duplicates", "debloat", "cloud", "schedules", "registry", "history", "settings", "extended_tools"):
             getattr(self, "_build_" + builder)()
         self.tray = None
         self._window_reveal = None
@@ -395,6 +399,20 @@ class DetailedSettingsWindow(QMainWindow):
         layout.addWidget(widget)
         return bar
 
+    def _build_extended_tools(self):
+        from .widgets.smart_maintenance_panel import SmartMaintenancePanel
+        from .widgets.recovery_panel import RecoveryPanel
+        from .widgets.file_utilities_panel import FileUtilitiesPanel
+        from .widgets.worker_grid import WorkerBoard
+        for page, attribute, factory in (
+            ('Smart cleaning', 'smart_maintenance_panel', SmartMaintenancePanel),
+            ('Workers', 'worker_board', WorkerBoard),
+            ('File utilities', 'file_utilities_panel', FileUtilitiesPanel),
+            ('Recovery', 'recovery_panel', RecoveryPanel)):
+            panel = factory(self)
+            setattr(self, attribute, panel)
+            self.layouts[page].addWidget(panel)
+
     def _button(self, layout, text, callback, *, primary=False):
         button = QPushButton(text)
         button.setCursor(Qt.PointingHandCursor)
@@ -414,6 +432,8 @@ class DetailedSettingsWindow(QMainWindow):
     def select_page(self, name, *, load=True):
         if name not in self.pages:
             return
+        if not self.busy and self.status.text().startswith('Wait for the current operation before closing'):
+            self.status.setText('Ready. Choose a tool to inspect its current scope.')
         self.stack.setCurrentWidget(self.pages[name])
         self.navigation[name].setChecked(True)
         self.page_title.setText(name.upper())
@@ -1526,6 +1546,10 @@ class DetailedSettingsWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        for name in ('smart_maintenance_panel', 'recovery_panel', 'file_utilities_panel', 'worker_board'):
+            panel = getattr(self, name, None)
+            if panel is not None:
+                panel.shutdown()
         if self._privacy_restore_dialog is not None:
             self._privacy_restore_dialog.shutdown()
         if hasattr(self, 'privacy_panel'):
@@ -1670,8 +1694,10 @@ class WorkflowWorker(QRunnable):
         self.backend, self.settings, self.cancel = backend, settings, cancel
         self.signals = WorkflowSignals()
         self._browser_prompts = None
-        if settings.get('browser_cache_enabled', True) or any(settings.get(key, False) for key in (
-                'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')):
+        from .unattended_configuration import matches_unattended
+        self._unattended = matches_unattended(settings)
+        if not self._unattended and (settings.get('browser_cache_enabled', True) or any(settings.get(key, False) for key in (
+                'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled'))):
             from .browser_prompts import BrowserPromptBridge
             self._browser_prompts = BrowserPromptBridge(prompt_parent)
 
@@ -1680,7 +1706,18 @@ class WorkflowWorker(QRunnable):
         restore_priority = lower_worker_priority()
         try:
             kwargs = {'progress_callback': self.signals.progress.emit, 'cancel_event': self.cancel}
-            if self._browser_prompts is not None:
+            if self._unattended:
+                def approved_browser_choice(info):
+                    from .unattended_configuration import matches_unattended
+                    try:
+                        current = self.backend.preferences()
+                        return (not self.cancel.is_set() and matches_unattended(current)
+                            and current.get('unattended_scope_hash') == self.settings.get('unattended_scope_hash')
+                            and self.settings.get('unattended_browser_policy') == 'close_gracefully')
+                    except (AttributeError, OSError, ValueError, TypeError):
+                        return False
+                kwargs['browser_prompt'] = approved_browser_choice
+            elif self._browser_prompts is not None:
                 kwargs['browser_prompt'] = lambda info: self._browser_prompts.request(info, self.cancel)
             result = self.backend.optimize(self.settings, **kwargs)
             self.signals.result.emit(result)
@@ -1951,6 +1988,7 @@ class OptimizationProgressWindow(QDialog):
 
     def __init__(self, owner, cancel):
         super().__init__(owner)
+        self.owner = owner
         # Cancellation/dismissal must run immediately, before a queued saved
         # continuation can start; this window keeps its own close guard.
         self._optimus_reveal_open_only = True
@@ -2013,15 +2051,13 @@ class OptimizationProgressWindow(QDialog):
         header_layout.addWidget(self.description, 4, 0)
         header_layout.addWidget(self.loading_animation, 0, 1, 5, 1, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(header)
-        worker_row = QHBoxLayout()
-        worker_row.setSpacing(7)
-        self.worker_cards = {}
+        from .widgets.worker_grid import WorkerGrid
+        self.worker_grid = WorkerGrid(WorkflowWorkerCard, self)
+        self.worker_cards = self.worker_grid.cards
         for identity, title in (('maintenance', 'Maintenance'), ('software_updates', 'App updates'),
                                 ('driver_updates', 'Driver updates')):
-            card = WorkflowWorkerCard(title, self)
-            self.worker_cards[identity] = card
-            worker_row.addWidget(card, 1)
-        layout.addLayout(worker_row)
+            self.worker_grid.ensure(identity, title)
+        layout.addWidget(self.worker_grid)
         self.background_status = WorkflowSummaryLabel()
         self.background_status.setObjectName('BackgroundStatus')
         self.background_status.hide()
@@ -2077,6 +2113,9 @@ class OptimizationProgressWindow(QDialog):
         self.loading_animation.start()
 
     def _refresh_worker_elapsed(self):
+        status = getattr(getattr(self.owner, 'backend', None), 'worker_status', None)
+        if callable(status):
+            self.worker_grid.update_jobs(status())
         for card in self.worker_cards.values():
             card.refresh_elapsed()
 
@@ -2201,8 +2240,9 @@ class OptimizationProgressWindow(QDialog):
             for job in jobs:
                 if not isinstance(job, dict):
                     continue
-                if job.get('id') in ('software_updates', 'driver_updates'):
-                    self.worker_cards[job['id']].update_state(job)
+                card = self.worker_grid.ensure(job.get('id'), job.get('title') or str(job.get('id', '')).replace('_', ' ').title())
+                if card is not None:
+                    card.update_state(job)
                 reason = display(job.get('description'))
                 extra = job.get('wait_reason')
                 if isinstance(extra, str) and extra.strip() and extra not in reason:
@@ -2750,15 +2790,22 @@ class SecurityReviewDialog(QDialog):
 
 
 class OptimusWindow(QMainWindow):
-    def __init__(self, backend, *, smoke_test=False, defer_activation=False):
+    def __init__(self, backend, *, smoke_test=False, defer_activation=False, require_launch_review=False):
         super().__init__()
         self.backend, self.smoke_test = backend, smoke_test
         self._defer_activation = defer_activation
+        from .launch_review import LaunchConsent
+        self._launch_consent = LaunchConsent(required=require_launch_review and not smoke_test)
+        self._launch_review_active = False
+        self._launch_review_dialog = None
+        self._session_approved_callback = None
+        self._session_invalidated_callback = None
         self.busy = False
         self._quitting = False
         self._close_when_idle = False
         self._settings_window = None
         self._sandbox_window = None
+        self._revert_dialog = None
         self._setup_wizard = None
         self._worker = None
         self._pending_post_review = None
@@ -2788,7 +2835,7 @@ class OptimusWindow(QMainWindow):
         self.setStyleSheet(self._qss())
         self.canvas = StarfieldCanvas(motion_allowed(self.config))
         layout = QVBoxLayout(self.canvas)
-        layout.setContentsMargins(35, 35, 35, 35)
+        layout.setContentsMargins(22, 22, 22, 22)
         layout.addStretch(3)
         brand = QLabel('OPTIMUS')
         brand.setAlignment(Qt.AlignCenter)
@@ -2800,30 +2847,33 @@ class OptimusWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet('font-size:12px;letter-spacing:4px;color:#94a3b8;background:transparent;')
         layout.addWidget(subtitle)
-        layout.addSpacing(38)
+        layout.addSpacing(10)
         self.main_buttons = []
-        for label, callback, primary in (
-            ('1 click Optimize and debloat', self.start_optimization, True),
-            ('Settings', self.open_settings, False), ('Sandbox', self.open_sandbox, False)):
+        for label, callback, role in (
+            ('1 click Optimize and debloat', self.start_optimization, 'primary'),
+            ('Settings', self.open_settings, 'secondary'), ('Sandbox', self.open_sandbox, 'secondary'),
+            ('Revert', self.open_revert, 'danger')):
             row = QHBoxLayout()
             row.addStretch()
             button = QPushButton(label)
-            button.setMinimumHeight(62)
+            button.setMinimumHeight(52)
             button.setMaximumWidth(430)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet('QPushButton {font-size:16px;font-weight:700;border-radius:10px;padding:14px;'+
-                ('background:#1f9cff;color:#07111f;border:1px solid #6ac0ff;' if primary else 'background:#101925;color:#d6e2f0;border:1px solid #33455d;')+
-                '} QPushButton:hover {background:' + ('#54b4ff' if primary else '#192b40')
-                + ';} QPushButton:pressed {padding-top:17px;} QPushButton:focus {border:2px solid #d5eaff;}'
+            button.setStyleSheet('QPushButton {font-size:16px;font-weight:700;border-radius:10px;padding:10px;'+
+                ('background:#1f9cff;color:#07111f;border:1px solid #6ac0ff;' if role == 'primary' else
+                 'background:#a42b3e;color:#fff;border:1px solid #f07788;' if role == 'danger' else
+                 'background:#101925;color:#d6e2f0;border:1px solid #33455d;')+
+                '} QPushButton:hover {background:' + ('#54b4ff' if role == 'primary' else '#c83950' if role == 'danger' else '#192b40')
+                + ';} QPushButton:pressed {padding-top:12px;} QPushButton:focus {border:2px solid #d5eaff;}'
                 + ' QPushButton:disabled {background:#152333;color:#8394aa;border:1px solid #283a50;}')
             button.clicked.connect(callback)
             row.addWidget(button, 4)
             row.addStretch()
             layout.addLayout(row)
-            layout.addSpacing(10)
+            layout.addSpacing(6)
             self.main_buttons.append(button)
-        layout.addSpacing(16)
+        layout.addSpacing(8)
         self.status = QLabel('Your configured tools. One local workspace.')
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setWordWrap(True)
@@ -2852,6 +2902,92 @@ class OptimusWindow(QMainWindow):
         method = getattr(self.backend, 'preferences', None)
         return method() if callable(method) else {}
 
+    def session_approved(self, settings=None):
+        """Pure approval check, also usable by background busy predicates."""
+        if not self._launch_consent.required:
+            return True
+        try:
+            return self._launch_consent.allows(self._settings() if settings is None else settings)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def invalidate_session_review(self, reason='Saved actions changed. Review this launch before automatic maintenance.'):
+        if not self._launch_consent.required:
+            return
+        self._launch_consent.invalidate()
+        controller = getattr(self, '_automation_controller', None)
+        if controller is not None:
+            controller.stop()
+        timer = getattr(self, '_automation_timer', None)
+        if timer is not None:
+            timer.stop()
+        callback = self._session_invalidated_callback
+        note = ''
+        if callable(callback):
+            try:
+                note = callback() or ''
+            except Exception as error:
+                note = 'Automatic-runtime stop needs review: ' + str(error)
+        self.status.setText(reason + (' ' + str(note) if note else ''))
+
+    def _ask_launch_review(self, settings):
+        from .launch_review import ask_launch_review
+        return ask_launch_review(self, settings)
+
+    def review_launch(self):
+        """Approve this process's exact saved scope or open Settings paused."""
+        if self.smoke_test or self._quitting or self._close_when_idle or self.busy or self._launch_review_active:
+            return False
+        if self._settings_window is not None and self._settings_window.busy:
+            self.status.setText('Wait for the active settings operation before reviewing Auto Clean.')
+            return False
+        if not self._launch_consent.required:
+            return True
+        self._launch_review_active = True
+        approved = None
+        try:
+            self.invalidate_session_review('Review the saved actions before Auto Clean. Automatic maintenance is paused.')
+            from .automation import CURRENT_SETUP_VERSION
+            from .launch_review import scope_fingerprint
+            for unused in range(4):
+                settings = self._settings()
+                from .unattended_configuration import matches_unattended
+                choice = 'auto_clean' if matches_unattended(settings) else self._ask_launch_review(settings)
+                if self._close_when_idle or self._quitting:
+                    return False
+                if choice == 'adjust_settings':
+                    self.open_settings(page='Settings')
+                    self.status.setText('Adjust your saved choices. Auto Clean and automatic maintenance remain paused until reviewed.')
+                    return False
+                if choice != 'auto_clean':
+                    self.status.setText('Automatic maintenance is paused. Choose Optimize to review this launch again.')
+                    return False
+                if settings.get('setup_version', 0) < CURRENT_SETUP_VERSION:
+                    if not self.open_initial_setup(first_run=True):
+                        self.status.setText('Setup was not completed. Automatic maintenance remains paused.')
+                        return False
+                    continue  # The saved setup must be shown and approved again.
+                current = self._settings()
+                if scope_fingerprint(current) != scope_fingerprint(settings):
+                    self.status.setText('Saved actions changed during review. Review the refreshed choices.')
+                    continue
+                self._launch_consent.approve(current)
+                approved = current
+                break
+            if approved is None:
+                self.status.setText('Saved actions keep changing. Automatic maintenance remains paused; review again when ready.')
+                return False
+        except (OSError, ValueError, TypeError) as error:
+            self.status.setText('Launch review could not finish. Automatic maintenance remains paused: ' + str(error))
+            return False
+        finally:
+            self._launch_review_active = False
+        self.start_optimization()
+        callback = self._session_approved_callback
+        if callable(callback) and self.session_approved():
+            callback()
+        return True
+
     def open_initial_setup(self, checked=False, *, first_run=False):
         if self.busy or (self._settings_window is not None and self._settings_window.busy):
             self.status.setText('Wait for the current operation before opening setup questions.')
@@ -2870,10 +3006,12 @@ class OptimusWindow(QMainWindow):
             if accepted:
                 self.workflow_settings = dict(wizard.saved_preferences)
                 run_now = bool(wizard.run_now)
+                if self._launch_consent.required:
+                    self.invalidate_session_review('Setup choices saved. Review their actions before Auto Clean.')
                 analysis_error = None
                 # Apply only the explicitly saved read-only sampler choice here.
                 method = getattr(self.backend, 'analysis_start' if self.workflow_settings.get('background_analysis_enabled') else 'analysis_stop', None)
-                if callable(method):
+                if callable(method) and self.session_approved(self.workflow_settings):
                     try:
                         if self.workflow_settings.get('background_analysis_enabled'):
                             method(self.workflow_settings.get('analysis_interval', 5))
@@ -2911,7 +3049,14 @@ class OptimusWindow(QMainWindow):
                     settings_window.workflow_consumer_baseline = [name for name,control in getattr(settings_window, 'consumer_package_controls', {}).items() if control.isChecked()]
                     if hasattr(settings_window, 'speed_enhancements_panel'):
                         settings_window.speed_enhancements_panel.sync_settings(self.workflow_settings)
+                    if hasattr(settings_window, 'workflow_unattended_browser'):
+                        combo = settings_window.workflow_unattended_browser
+                        combo.setCurrentIndex(max(0, combo.findData(self.workflow_settings.get('unattended_browser_policy', 'skip_open'))))
+                    from .launch_review import scope_fingerprint
+                    settings_window.workflow_review_baseline = scope_fingerprint(self.workflow_settings)
                 message = 'Setup choices saved. ' + ('Starting the maintenance you selected.' if run_now else 'Maintenance will follow your saved cadence; no run was started now.')
+                if self._launch_consent.required and not self.session_approved(self.workflow_settings):
+                    message = 'Setup choices saved. Review the updated actions before Auto Clean; automatic maintenance is paused.'
                 if analysis_error:
                     message += ' Background analysis could not be updated: ' + analysis_error
                 self.status.setText(message)
@@ -2930,6 +3075,8 @@ class OptimusWindow(QMainWindow):
         if self.busy:
             self.status.setText('Wait for the active workflow or request cancellation in its progress window.')
             return
+        if self._launch_consent.required:
+            self.invalidate_session_review('Settings opened. Automatic maintenance is paused until you review Auto Clean again.')
         if self._settings_window is None:
             self._settings_window = DetailedSettingsWindow(self.backend, smoke_test=self.smoke_test)
             self._settings_window._main_window = self
@@ -3066,6 +3213,34 @@ class OptimusWindow(QMainWindow):
             controls[key]=checkbox
             toggles.addWidget(checkbox,index,0)
         layout.addLayout(toggles)
+        unattended = WrappingCheckBox('Auto clean with these settings — launch at sign-in and run without Optimus prompts')
+        unattended.setChecked(settings.get('unattended_auto_clean_enabled', False) is True)
+        controls['unattended_auto_clean_enabled'] = unattended
+        layout.addWidget(unattended)
+        unattended_browser = QComboBox()
+        unattended_browser.addItem('Skip open browsers without asking', 'skip_open')
+        unattended_browser.addItem('Request graceful browser close and clean without asking', 'close_gracefully')
+        unattended_browser.setCurrentIndex(max(0, unattended_browser.findData(settings.get('unattended_browser_policy', 'skip_open'))))
+        window.workflow_unattended_browser = unattended_browser
+        layout.addWidget(unattended_browser)
+        unattended_note = QLabel('Saving this opt-in approves the selected temporary/browser deletion, app removals, updates and privacy actions '
+                                'for unattended launches. It enables sign-in launch and startup cadence. Windows administrator consent can still appear. '
+                                'Choosing graceful browser close can close windows and lose unsaved forms; the default skips open browsers. '
+                                'Unsupported or interactive actions remain in results. No automatic reboot or forced browser termination is requested. '
+                                'Changing saved scopes elsewhere invalidates this approval until you save it again here or in setup.')
+        unattended_note.setTextFormat(Qt.PlainText)
+        unattended_note.setWordWrap(True)
+        layout.addWidget(unattended_note)
+        def sync_unattended_controls():
+            enabled = unattended.isChecked()
+            if enabled:
+                controls['launch_at_sign_in'].setChecked(True)
+                cadence.setCurrentIndex(cadence.findData('startup'))
+            controls['launch_at_sign_in'].setEnabled(not enabled)
+            cadence.setEnabled(not enabled)
+            unattended_browser.setEnabled(enabled)
+        unattended.toggled.connect(sync_unattended_controls)
+        sync_unattended_controls()
         continuation_note = QLabel('Saving automatic continuation approves supported Defender/firewall fixes and updates within your existing saved scopes and agreements after a completed scan. Process choices, application removal and restarts remain manual. App and Windows driver updates share a single background installer lane while independent steps continue. Drive optimization uses eligible Windows SSD TRIM/HDD operations after fresh checks.')
         continuation_note.setWordWrap(True)
         layout.addWidget(continuation_note)
@@ -3119,6 +3294,21 @@ class OptimusWindow(QMainWindow):
             controls[key] = control
             privacy_layout.addWidget(control)
         layout.addLayout(privacy_layout)
+        for key, label in (
+            ('privacy_block_silent_consumer_apps_enabled', 'Reduce silent Windows consumer-app installations (supported preferences/policies)'),
+            ('privacy_disable_cloud_promotions_enabled', 'Disable supported Windows cloud and account promotions (edition dependent)'),
+            ('privacy_disable_clipboard_sync_enabled', 'Disable Windows cross-device clipboard sharing (supported editions)'),
+            ('privacy_disable_recall_snapshots_enabled', 'Disable Recall snapshots and ask Windows to delete previous snapshots — irreversible')):
+            control = WrappingCheckBox(label)
+            control.setChecked(settings.get(key, False) is True)
+            controls[key] = control
+            layout.addWidget(control)
+        privacy_limit = QLabel('Reinstall controls cover supported Windows consumer-content settings, not every vendor installer. '
+                              'Recall policy changes can delete existing snapshots; restoring the policy cannot recover them. '
+                              'Unsupported editions/builds are reported without writing ineffective policy values.')
+        privacy_limit.setTextFormat(Qt.PlainText)
+        privacy_limit.setWordWrap(True)
+        layout.addWidget(privacy_limit)
         security_note = QLabel('Defender and Windows security policy control detections and remediation. Optimus does not identify ordinary apps as spyware from their names or network activity, or block arbitrary app traffic. Privacy preferences affect supported Windows settings; they do not prevent all required diagnostics or third-party data collection. Each selected security fix asks Yes or No after the run.')
         security_note.setWordWrap(True)
         layout.addWidget(security_note)
@@ -3197,7 +3387,8 @@ class OptimusWindow(QMainWindow):
         layout.addWidget(setup_button)
         save=QPushButton('Save one-click configuration')
         def save_configuration():
-            value=dict(self._settings())
+            current_settings = dict(self._settings())
+            value = dict(current_settings)
             value.update(window.workflow_mode_overlay)
             for key,control in controls.items():
                 chosen = control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText()
@@ -3206,6 +3397,18 @@ class OptimusWindow(QMainWindow):
             chosen_consumers = [name for name,control in consumer_controls.items() if control.isChecked()]
             if 'consumer_debloat_package_names' in window.workflow_force_keys or chosen_consumers != window.workflow_consumer_baseline or 'consumer_debloat_package_names' not in value:
                 value['consumer_debloat_package_names'] = chosen_consumers
+            value['unattended_browser_policy'] = unattended_browser.currentData()
+            if value.get('unattended_auto_clean_enabled') is True:
+                from .workflow import Preferences
+                from .unattended_configuration import approve_unattended_settings
+                from .launch_review import scope_fingerprint
+                try:
+                    if scope_fingerprint(current_settings) != window.workflow_review_baseline:
+                        raise ValueError('Saved choices changed outside this form. Run setup questions again to review them before approving unattended cleaning.')
+                    value = approve_unattended_settings(Preferences.validate(value))
+                except (ValueError, TypeError) as error:
+                    window._error('Unattended approval was not saved: ' + str(error) + ' Complete setup before enabling this option.')
+                    return
             if value.get('windows_security_updates_enabled') and value.get('windows_security_updates_install_approved') and not value.get('windows_security_update_agreements_accepted'):
                 window._error('Accept Microsoft update agreements for automatic Windows Security/Critical patches, or leave installation approval off. No automatic reboot is requested.')
                 return
@@ -3215,6 +3418,8 @@ class OptimusWindow(QMainWindow):
                 window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
                 window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
                 self.workflow_settings=result if isinstance(result,dict) else value
+                from .launch_review import scope_fingerprint
+                window.workflow_review_baseline = scope_fingerprint(self.workflow_settings)
                 window.speed_enhancements_panel.sync_settings(self.workflow_settings)
                 self.config.ui_motion_enabled=bool(self.appearance.get('motion',True)) and not bool(value.get('reduce_motion',False))
                 self.canvas.motion=motion_allowed(self.config)
@@ -3234,6 +3439,8 @@ class OptimusWindow(QMainWindow):
         tabs.addTab(appearance_scroll,'Appearance and Windows tools')
         outer.addWidget(tabs)
         window.workflow_controls=controls
+        from .launch_review import scope_fingerprint
+        window.workflow_review_baseline = scope_fingerprint(settings)
         window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,QSpinBox) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
         window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
 
@@ -3243,6 +3450,21 @@ class OptimusWindow(QMainWindow):
         self.canvas.motion = motion_allowed(self.config)
         self.canvas.sync_motion()
         self.setStyleSheet(self._qss())
+
+    def open_revert(self, checked=False):
+        if (self.busy or self._quitting or self._close_when_idle or self._setup_wizard is not None
+                or self._post_review_active or self._settings_window is not None and self._settings_window.busy):
+            self.status.setText('Wait for the active operation or questions before reviewing Revert.')
+            return
+        self.invalidate_session_review('Revert opened. Automatic maintenance is paused while you review existing changes.')
+        if self._revert_dialog is None:
+            from .widgets.revert_dialog import RevertDialog
+            self._revert_dialog = RevertDialog(self)
+        self._revert_dialog.show()
+        self._revert_dialog.raise_()
+        self._revert_dialog.activateWindow()
+        if not self.smoke_test:
+            QTimer.singleShot(0, self._revert_dialog.refresh)
 
     def open_sandbox(self, checked=False):
         if self._setup_wizard is not None:
@@ -3284,6 +3506,12 @@ class OptimusWindow(QMainWindow):
             self.activate_existing_window()
             return
         from .automation import CURRENT_SETUP_VERSION
+        if not self.session_approved(settings):
+            if self._launch_review_active:
+                self.status.setText('Finish the current launch review before Auto Clean.')
+                return
+            self.review_launch()
+            return
         if int(settings.get('setup_version', 0)) < CURRENT_SETUP_VERSION:
             self.open_initial_setup(first_run=True)
             return
@@ -3360,6 +3588,9 @@ class OptimusWindow(QMainWindow):
 
     def _prepare_post_reviews(self, result, settings):
         self._pending_post_review = None
+        from .unattended_configuration import matches_unattended
+        if matches_unattended(settings):
+            return  # Findings remain in the report; unattended mode opens no questions.
         if self._completed_result(result):
             security, processes = result.get('security_review'), result.get('process_review')
             if ((isinstance(security, dict) and security.get('recommendations'))
@@ -3413,6 +3644,9 @@ class OptimusWindow(QMainWindow):
         except Exception:
             enabled = False
         if enabled:
+            if not self.session_approved():
+                self.invalidate_session_review('Saved choices changed. Automatic follow-up is paused until a new launch review.')
+                return
             self._start_auto_continue(progress, automatic=True)
 
     def _start_auto_continue(self, progress, *, automatic=False):
@@ -3421,6 +3655,9 @@ class OptimusWindow(QMainWindow):
                 or not progress.isVisible() or not progress.completed
                 or self._security_review_dialog is not None or self._setup_wizard is not None
                 or self._settings_window is not None and self._settings_window.busy):
+            return
+        if not self.session_approved():
+            self.invalidate_session_review('Saved choices changed. Review Auto Clean before starting additional automatic actions.')
             return
         report, settings, plan = self._pending_auto_fixes
         if not plan.get('actions') or not callable(getattr(self.backend, 'apply_available_fixes', None)):
@@ -3499,7 +3736,8 @@ class OptimusWindow(QMainWindow):
             yes_label='Yes — review', no_label='No — skip')
 
     def _offer_post_optimization_reviews(self, result, settings):
-        if self.smoke_test or self._quitting:
+        from .unattended_configuration import matches_unattended
+        if self.smoke_test or self._quitting or matches_unattended(settings):
             self._post_review_active = False
             return
         self._post_review_active = True
@@ -3678,8 +3916,7 @@ class OptimusWindow(QMainWindow):
         """
         if self.smoke_test or self._quitting:
             return False
-        if (self._setup_wizard is not None or self._post_review_active
-                or self._settings_window is not None and self._settings_window.busy):
+        if self._setup_wizard is not None or self._post_review_active:
             self.status.setText('Finish the active setup, recommendation or settings operation before safely exiting.')
             return False
         self._close_when_idle = True
@@ -3687,6 +3924,24 @@ class OptimusWindow(QMainWindow):
         self._pending_post_review = None
         self._pending_auto_fixes = None
         self._post_review_generation += 1
+        dialog = self._launch_review_dialog
+        if dialog is not None:
+            dialog.reject()
+        optional_stop = getattr(self.backend, 'request_optional_stop', None)
+        if callable(optional_stop):
+            try:
+                optional_stop()
+            except Exception as error:
+                self.status.setText('Optional tools could not acknowledge cancellation: ' + str(error))
+        if self._revert_dialog is not None and self._revert_dialog._worker is not None:
+            self._revert_dialog.cancel()
+        settings_busy = self._settings_window is not None and self._settings_window.busy
+        if settings_busy:
+            for name in ('recovery_panel', 'file_utilities_panel', 'smart_maintenance_panel'):
+                panel = getattr(self._settings_window, name, None)
+                event = getattr(panel, '_cancel', None)
+                if event is not None:
+                    event.set()
         controller = getattr(self, '_automation_controller', None)
         if controller is not None:
             controller.stop()
@@ -3703,14 +3958,28 @@ class OptimusWindow(QMainWindow):
                 progress.description.setText('Stopping safely. No further work will start. Active operations are allowed to finish and save their outcomes before Optimus closes.')
                 progress.show()
             self.status.setText('Stopping safely. Waiting for the current operations and saved outcomes before exiting.')
+        elif settings_busy:
+            self.status.setText('Stopping safely. Waiting for the current settings operation to save its outcome.')
+            QTimer.singleShot(100, self._finish_optional_stop)
         else:
             QTimer.singleShot(0, self.quit_application)
         return True
+
+    def _finish_optional_stop(self):
+        if self._quitting or not self._close_when_idle:
+            return
+        if self.busy or self._settings_window is not None and self._settings_window.busy:
+            QTimer.singleShot(200, self._finish_optional_stop)
+            return
+        self.quit_application()
 
     def shutdown(self):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        self.invalidate_session_review('Optimus is closing; automatic maintenance is stopped.')
+        if self._revert_dialog is not None:
+            self._revert_dialog.shutdown()
         if self._security_review_dialog is not None:
             self._security_review_dialog.shutdown()
         if self.busy:

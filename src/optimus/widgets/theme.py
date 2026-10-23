@@ -12,6 +12,7 @@ A custom accent colour can override either theme's accent for easy tinting.
 from __future__ import annotations
 
 from enum import IntEnum
+from pathlib import Path
 
 class Severity(IntEnum):
     INFO = 0
@@ -138,6 +139,7 @@ def build_qss(name: str = "cyber", accent: str | None = None,
     pad_pill  = f"{px(5)} {px(14)}"
     pad_input = px(7)
     ind_wh    = px(18)   # checkbox indicator
+    check_image = (Path(__file__).parents[1] / 'assets' / 'checkbox-check.svg').as_posix()
     # Status-strip chip height scales too so chips don't clip larger text.
     try:
         chip_px = int(str(p['chip_h']).replace("px", "").strip())
@@ -304,7 +306,13 @@ QComboBox QAbstractItemView {{
     color: {p['text']};
     selection-background-color: {accent_44};
 }}
-QCheckBox::indicator {{ width: {ind_wh}; height: {ind_wh}; }}
+QCheckBox::indicator {{ width: {ind_wh}; height: {ind_wh};
+    border: 1px solid {p['dim']}; border-radius: 3px; background: {p['panel']}; }}
+QCheckBox::indicator:checked {{ background: {p['accent']}; border-color: {p['accent']};
+    image: url("{check_image}"); }}
+QCheckBox::indicator:indeterminate {{ background: {p['accent']}; border: 3px solid {p['dim']}; }}
+QCheckBox::indicator:hover {{ border-color: {p['text']}; }}
+QCheckBox::indicator:disabled {{ border-color: {p['border']}; background: {p['panel2']}; }}
 QProgressBar {{
     background: {p['bg']};
     border: 1px solid {p['border']};

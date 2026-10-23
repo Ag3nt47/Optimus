@@ -14,6 +14,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -24,7 +25,7 @@ if str(ROOT / 'src') not in sys.path:
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QAbstractButton, QMessageBox, QScrollArea,
-    QTabWidget, QWizard)
+    QDialog, QPlainTextEdit, QPushButton, QTabWidget, QWizard)
 
 from optimus.automation import CURRENT_SETUP_VERSION
 from optimus.filesystem import _ordinary_data_path
@@ -32,11 +33,20 @@ from optimus.native_settings import full_native_settings
 from optimus.native_ui import NativeOptimusWindow, NativeSetupWizard
 from optimus.onboarding import InitialSetupWizard
 from optimus.ui import OptimizationProgressWindow, OptimusWindow
+from optimus.launch_review import ask_launch_review
+from optimus.widgets.recovery_panel import RecoveryPanel
 from optimus.widgets.questions import make_yes_no_dialog
 from optimus.workflow import full_optimization_settings
 
 
 VIEWPORTS = ((850, 650), (1024, 768))
+OPTIONAL_OPERATIONS = ('configure_smart_maintenance', 'activate_smart_maintenance',
+    'smart_maintenance_preview', 'smart_maintenance_stop', 'driver_recovery_scan',
+    'driver_backup_export', 'driver_backup_verify', 'driver_rollback', 'system_restore_scan',
+    'system_restore_create', 'system_restore_delete', 'system_restore_open',
+    'file_utilities_capabilities', 'file_utilities_encrypt', 'file_utilities_decrypt',
+    'file_utilities_split', 'file_utilities_join', 'file_utilities_shred_plan', 'file_utilities_shred_apply',
+    'change_history_scan', 'change_history_revert')
 MANUAL_GAPS = [
     {'area': 'CPU and RAM', 'review': 'Run representative workloads and compare measured CPU, memory pressure and responsiveness. Fixture configuration readback cannot establish a speed gain or identify every unnecessary process.'},
     {'area': 'GPU', 'review': 'Check actual GPU utilization, VRAM, temperatures and graphics drivers separately. GPU/shader cache cleanup is not GPU tuning; no overclock or unsupported voltage change is tested.'},
@@ -45,6 +55,7 @@ MANUAL_GAPS = [
     {'area': 'Files, browsers and cloud', 'review': 'Exercise disposable real profiles, filesystem locks, Trash/Recycle Bin recovery and an explicitly connected test cloud account. No real user file or connected account is touched here.'},
     {'area': 'Accessibility and desktop behavior', 'review': 'Review screenshots, screen readers, high contrast, keyboard order, localization, text scaling, real multi-monitor desktops and animation quality. Offscreen reachability does not prove native desktop usability.'},
     {'area': 'Sandbox and privileged prompts', 'review': 'Review actual source editing/restart handoff, UAC/polkit/macOS authorization, unsaved work and packaging signatures separately. The bot never approves an OS dialog.'},
+    {'area': 'Optional recovery and file tools', 'review': 'Constructors, unsupported UI states and cached worker displays use in-memory fixtures. Separate service tests cover disposable files and injected native adapters. This bot does not export drivers, restore Windows, encrypt user documents or prove physical erasure.'},
 ]
 
 
@@ -71,6 +82,11 @@ class FixtureBackend:
         self.speed_enhancements_history = Mock(return_value=[])
         self.restore_speed_enhancements = Mock()
         self.analysis_start, self.analysis_stop = Mock(), Mock()
+        for name in OPTIONAL_OPERATIONS:
+            setattr(self, name, Mock(side_effect=AssertionError('Only explicitly requested fixture operations may run.')))
+        self.smart_maintenance_status = Mock(return_value={'status': 'stopped', 'running': False,
+            'note': 'Fixture monitoring remains stopped until launch approval.'})
+        self.worker_status = Mock(return_value=[])
 
     def preferences(self):
         return copy.deepcopy(self.settings)
@@ -435,6 +451,195 @@ class CriticalReview:
         self.screenshot(settings, prefix + '-speed-deferred')
         settings.close()
 
+    def review_launch(self, window, backend, dimensions, prefix):
+        """Render the real launch dialog; Adjust is the only simulated choice."""
+        viewport = (480, 400) if dimensions == VIEWPORTS[0] else (760, 660)
+        saved = backend.preferences()
+        saved.update(cleanup_enabled=True, cleanup_age_days=0, m365_debloat_enabled=True,
+            consumer_debloat_enabled=True, consumer_debloat_package_names=['Microsoft.Copilot'],
+            browser_cookies_enabled=True, browser_history_enabled=True,
+            browser_cleanup_browsers=['chrome', 'opera'], browser_keep_domains=['example.com'],
+            privacy_disable_clipboard_sync_enabled=True, privacy_disable_recall_snapshots_enabled=True)
+        original = backend.preferences()
+
+        def inspect(dialog):
+            self.viewport(dialog, viewport, prefix + '.launch-review')
+            controls = {button.text(): button for button in dialog.findChildren(QPushButton)}
+            self.buttons(dialog, viewport, prefix + '.launch-review', list(controls.values()))
+            negative, positive = controls.get('Adjust settings'), controls.get('Auto Clean')
+            self.check(prefix + '.launch-review.negative-default', negative is not None
+                and positive is not None and negative.isDefault() and not positive.autoDefault(),
+                'The actual per-launch warning must visibly offer Auto Clean and default to Adjust settings.')
+            text = dialog.findChild(QPlainTextEdit)
+            shown = text.toPlainText() if text is not None else ''
+            self.check(prefix + '.launch-review.actual-warning', text is not None and text.isReadOnly()
+                and 'Microsoft 365 hub/companion' in shown and 'Microsoft.Copilot' in shown
+                and 'cookies' in shown and 'sign you out' in shown and 'example.com' in shown
+                and 'permanently deletes previous Recall snapshots' in shown
+                and 'cannot recover deleted snapshots' in shown
+                and 'local clipboard history is unchanged' in shown,
+                'Real saved-action text must disclose selected app removals, browser sign-out and irreversible Recall snapshot deletion.')
+            self.check(prefix + '.launch-review.scroll-access', text is not None
+                and text.height() > 80 and (viewport[0] > 480 or text.verticalScrollBar().maximum() > 0),
+                'A narrow review must keep the action buttons visible while its complete warning remains scrollable.')
+            self.screenshot(dialog, prefix + '-launch-review')
+            if negative is not None:
+                negative.click()
+            return QDialog.Accepted
+
+        with patch('PySide6.QtWidgets.QDialog.exec', inspect):
+            choice = ask_launch_review(window, saved)
+        self.check(prefix + '.launch-review.no-implicit-actions', choice == 'adjust_settings'
+            and backend.preferences() == original and not backend.analysis_start.called
+            and not backend.optimize.called
+            and not any(getattr(backend, name).called for name in OPTIONAL_OPERATIONS),
+            'Rendering and choosing Adjust must not save preferences, collect data, start cleanup or activate optional services.')
+
+    def review_optional_tools(self, window, backend, dimensions, prefix):
+        """Inspect production panels with inert services and an unsupported backend."""
+        window.open_settings(page='Settings')
+        settings = window._settings_window
+        self.viewport(settings, dimensions, prefix + '.optional-settings')
+        self.check(prefix + '.optional.no-constructor-actions',
+            not any(getattr(backend, name).called for name in OPTIONAL_OPERATIONS),
+            'Constructing Smart Cleaning, Recovery and File utilities panels must not scan, save, start monitors or mutate files.')
+        for page, attribute, controls in (
+            ('Smart cleaning', 'smart_maintenance_panel', ('save_button', 'preview_button', 'pause_button')),
+            ('File utilities', 'file_utilities_panel', ('encrypt_button', 'decrypt_button', 'split_button', 'join_button')),
+            ('Recovery', 'recovery_panel', ('driver_refresh', 'driver_export', 'driver_rollback', 'backup_verify',
+                                           'restore_refresh', 'restore_create', 'restore_delete', 'restore_open'))):
+            settings.select_page(page, load=False)
+            panel = getattr(settings, attribute)
+            self.buttons(settings, dimensions, prefix + '.optional.' + attribute,
+                [getattr(panel, name) for name in controls])
+            self.screenshot(settings, prefix + '-' + attribute.replace('_', '-'))
+        smart = settings.smart_maintenance_panel
+        self.check(prefix + '.optional.smart-stopped-honesty', 'stopped' in smart.summary.text().lower()
+            and not backend.activate_smart_maintenance.called and not backend.configure_smart_maintenance.called,
+            'The Smart panel must report stopped fixture monitoring without activating or saving it.')
+        files = settings.file_utilities_panel
+        self.check(prefix + '.optional.file-explicit-selection', files._plan is None
+            and not files.overwrite_button.isEnabled() and 'No files have been inspected or changed' in files.status.text(),
+            'File utilities must start without a file selection, overwrite plan or fabricated completed action.')
+        unsupported = RecoveryPanel(SimpleNamespace(backend=SimpleNamespace(), busy=False, smoke_test=False))
+        try:
+            self.viewport(unsupported, dimensions, prefix + '.recovery-unsupported')
+            controls = (unsupported.driver_refresh, unsupported.driver_export, unsupported.driver_rollback,
+                unsupported.backup_verify, unsupported.restore_refresh, unsupported.restore_create,
+                unsupported.restore_delete, unsupported.restore_open)
+            self.check(prefix + '.optional.recovery-unsupported-disabled', all(not control.isEnabled() for control in controls)
+                and unsupported._driver_plan is None and unsupported._restore_plan is None,
+                'A backend with no recovery APIs must expose no enabled mutation or inventory operation.')
+            unsupported.refresh_drivers()
+            self.check(prefix + '.optional.recovery-unsupported-honesty', 'unavailable' in unsupported.status.text().lower()
+                and 'No operation was started' in unsupported.status.text(),
+                'An unsupported direct request must report unavailable and never pretend recovery completed.')
+            self.screenshot(unsupported, prefix + '-recovery-unsupported')
+        finally:
+            unsupported.shutdown()
+            unsupported.close()
+            unsupported.deleteLater()
+            drain(self.app)
+        self.check(prefix + '.optional.no-navigation-actions',
+            not any(getattr(backend, name).called for name in OPTIONAL_OPERATIONS),
+            'Reviewing optional pages and disabled controls must leave every operation counter at zero.')
+        settings.close()
+
+    def review_additional_workers(self, window, backend, dimensions, prefix):
+        """Exercise production polling/reflow with named cached fixture workers."""
+        jobs = [
+            {'id': 'driver_backup', 'title': 'Driver backup', 'status': 'running',
+             'description': 'Hashing the exported fixture driver packages', 'current': None, 'total': None},
+            {'id': 'system_restore', 'title': 'System Restore', 'status': 'needs_review',
+             'description': 'Fixture provider unavailable; no restore point was created', 'current': None, 'total': None},
+            {'id': 'file_tools', 'title': 'Verify file parts', 'status': 'completed',
+             'description': 'Two disposable fixture parts matched their manifest', 'current': 2, 'total': 2}]
+        progress = OptimizationProgressWindow(window, threading.Event())
+        original = backend.worker_status.return_value
+        backend.worker_status.return_value = jobs
+        try:
+            progress.update_progress({'stage': 'Inspect current resource usage', 'percentage': 10,
+                'description': 'Production status cards are displaying cached fixtures only.', 'jobs': []})
+            progress._refresh_worker_elapsed()
+            self.viewport(progress, dimensions, prefix + '.additional-workers')
+            cards = progress.worker_cards
+            self.check(prefix + '.additional-workers.actual-poll', len(cards) == 6
+                and all(identity in cards for identity in ('driver_backup', 'system_restore', 'file_tools'))
+                and backend.worker_status.called,
+                'The real progress-window status poll must add actual named optional workers to its three maintenance/update cards.')
+            self.check(prefix + '.additional-workers.count-honesty',
+                'No item count' in cards['driver_backup'].progress.format()
+                and 'No item count' in cards['system_restore'].progress.format()
+                and cards['system_restore'].status.text() == 'Needs review'
+                and cards['file_tools'].progress.maximum() == 2 and cards['file_tools'].progress.value() == 2,
+                'Unknown item counts and unavailable recovery remain explicit; only the fixture with a real count shows 2/2.')
+            grid = progress.worker_grid
+            for width, expected in ((440, 1), (1000, 3)):
+                grid.resize(width, grid.height())
+                grid.reflow(force=True)
+                self.check(prefix + f'.additional-workers.reflow-{expected}', grid._columns == expected
+                    and grid.grid.getItemPosition(3)[:2] == (3 // expected, 3 % expected),
+                    'Additional worker cards must reflow through the production grid, without opening another window.',
+                    evidence={'requested_grid_width': width, 'columns': grid._columns,
+                              'fourth_card_position': list(grid.grid.getItemPosition(3))})
+            drain(self.app)
+
+            self.screenshot(progress, prefix + '-additional-workers')
+            settings = window._settings_window
+            settings.select_page('Workers', load=False)
+            board = settings.worker_board
+            board.refresh()
+            self.viewport(settings, dimensions, prefix + '.worker-board')
+            self.check(prefix + '.additional-workers.board-poll', set(board.grid.cards) == {job['id'] for job in jobs}
+                and 'Needs review' == board.grid.cards['system_restore'].status.text(),
+                'The Workers settings page must display the same cached optional workers without starting operations.')
+            self.screenshot(settings, prefix + '-worker-board')
+            settings.close()
+            self.check(prefix + '.additional-workers.no-operation',
+                not any(getattr(backend, name).called for name in OPTIONAL_OPERATIONS),
+                'Polling worker status and resizing cards must never dispatch an optional operation.')
+        finally:
+            backend.worker_status.return_value = original
+            progress.completed = True
+            progress.spinner.stop()
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
+    def review_revert(self, window, backend, dimensions, prefix):
+        window.open_revert()  # Smoke construction never queues inventory.
+        dialog = window._revert_dialog
+        original = window.smoke_test
+        window.smoke_test = False  # All hooks are still forbidden fixture mocks.
+        try:
+            dialog._set_inventory({'plan_id': 'a' * 32, 'complete': True, 'items': [
+                {'selection_id': 'b' * 32, 'record_id': 'c' * 32, 'provider': 'change',
+                 'kind': 'Startup', 'target': 'Disposable fixture registration', 'status': 'applied',
+                 'undo_available': True, 'reason': 'Native restorer revalidates this record.'},
+                {'selection_id': 'd' * 32, 'record_id': 'e' * 32, 'provider': 'history:runs',
+                 'kind': 'Temporary-file deletion', 'target': 'Fixture receipt', 'status': 'completed',
+                 'undo_available': False, 'reason': 'No universal automatic undo is available.'}]})
+            dialog._controls()
+            self.viewport(dialog, dimensions, prefix + '.revert')
+            self.buttons(dialog, dimensions, prefix + '.revert',
+                [button for button in dialog._buttons if button.isVisible()])
+            self.check(prefix + '.revert.explicit-selection', dialog._selected() == []
+                and dialog.revert_all_button.isEnabled() and not dialog.revert_selected_button.isEnabled()
+                and dialog.close_button.isDefault(),
+                'Revert must default to no selection and a non-destructive Close action; available does not mean already restored.')
+            dialog.select_all()
+            self.check(prefix + '.revert.supported-only', [row['selection_id'] for row in dialog._selected()] == ['b' * 32]
+                and not dialog.table.item(1, 0).flags() & Qt.ItemIsUserCheckable,
+                'Select all available must exclude the irreversible cleanup receipt.')
+            dialog.clear_selection()
+            self.screenshot(dialog, prefix + '-revert-history')
+            self.check(prefix + '.revert.no-constructor-actions',
+                not any(getattr(backend, name).called for name in OPTIONAL_OPERATIONS),
+                'Constructing Revert, showing fixture history and selecting rows must never run a scan or undo operation.')
+        finally:
+            window.smoke_test = original
+            dialog.close()
+
     def review_update_wait(self, window, dimensions, prefix):
         """Replay the stale-stage regression without starting an updater."""
         cancel = threading.Event()
@@ -697,12 +902,17 @@ class CriticalReview:
                 factory = OptimusWindow if self.system == 'win32' else NativeOptimusWindow
                 window = factory(backend, smoke_test=True)
                 self.viewport(window, dimensions, prefix + '.main')
-                self.check(prefix + '.main.three-actions', len(window.main_buttons) == 3,
-                    'The home screen must retain its three primary actions.')
+                self.check(prefix + '.main.four-actions', len(window.main_buttons) == 4
+                    and window.main_buttons[-1].text() == 'Revert',
+                    'The home screen must offer Optimize, Settings, Sandbox and the requested Revert action.')
                 self.buttons(window, dimensions, prefix + '.main', window.main_buttons)
                 self.screenshot(window, prefix + '-main')
+                self.review_launch(window, backend, dimensions, prefix)
                 self.review_setup(backend, dimensions, prefix)
                 self.review_speed(window, backend, dimensions, prefix)
+                self.review_optional_tools(window, backend, dimensions, prefix)
+                self.review_additional_workers(window, backend, dimensions, prefix)
+                self.review_revert(window, backend, dimensions, prefix)
                 self.review_update_wait(window, dimensions, prefix)
                 self.review_workflow(window, backend, dimensions, prefix)
                 self.check(prefix + '.no-background-analysis', backend.analysis_start.call_count == 0,

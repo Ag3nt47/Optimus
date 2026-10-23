@@ -77,7 +77,7 @@ def test_small_progress_window_keeps_cancel_visible_and_body_scrollable(progress
     assert visible.intersects(area.viewport().rect())
 
 
-def test_short_landing_window_retains_all_three_controls_with_scroll_access(app, tmp_path):
+def test_short_landing_window_retains_all_four_controls_with_scroll_access(app, tmp_path):
     backend = SimpleNamespace(data_dir=tmp_path, preferences=lambda: dict(DEFAULTS, reduce_motion=True))
     window = OptimusWindow(backend, smoke_test=True)
     window.setMinimumSize(0, 0)
@@ -89,7 +89,7 @@ def test_short_landing_window_retains_all_three_controls_with_scroll_access(app,
         area = window.landing_scroll
         assert area.verticalScrollBar().maximum() > 0
         assert area.horizontalScrollBar().maximum() == 0
-        assert len(window.main_buttons) == 3
+        assert len(window.main_buttons) == 4
         assert len({button.width() for button in window.main_buttons}) == 1
         for button in window.main_buttons:
             area.ensureWidgetVisible(button)

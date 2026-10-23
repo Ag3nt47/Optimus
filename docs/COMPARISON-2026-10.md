@@ -2,6 +2,8 @@
 
 Research date: **21 October 2026**. This is a feature and engineering comparison, not a claim that Optimus reproduces another product's implementation or paid service.
 
+**Implementation update for 0.10.0:** the original baseline/roadmap below is historical. Optimus now includes default-off Smart threshold and browser-exit cleaning, calendar-month cadence, every-launch consent, opt-in Opera, supported Windows privacy/reinstall controls, verified driver/System Restore recovery, and separately reviewed file encryption/split/join/overwrite. See [the current removal/options catalog](REMOVAL_OPTIONS.md) and [feature coverage](FEATURES.md). It still has no universal driver catalog, general leftover-removal engine, Google/Dropbox adapter, VPN service, Android app or human support subscription. Native macOS/Linux desktop applications are provided with the [documented platform limits](PLATFORMS.md).
+
 ## Evidence and scope
 
 The Optimus baseline is the source inspected in this checkout before the 0.6.2 enhancements, whose package version was 0.6.1. Relevant implementations include [feature coverage](FEATURES.md), [workflow/preferences](../src/optimus/workflow.py), [cleanup](../src/optimus/cleaner.py), [startup inventory](../src/optimus/engine/PersistenceInventory.ps1), [elevation](../src/optimus/elevation.py), and [outcome verification](../src/optimus/verification.py). Source inspection establishes intended behavior; it does not establish successful installation of every vendor update, real-account cloud access, or performance improvement on every computer.

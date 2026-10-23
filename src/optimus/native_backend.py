@@ -599,4 +599,5 @@ class NativeBackend(Backend):
         return verify_native_outcomes(self, report, cancel_event=cancel_event, timeout=timeout)
 
     def close(self):
+        self._close_optional_tools()
         self.sampler.stop()

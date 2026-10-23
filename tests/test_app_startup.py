@@ -77,7 +77,7 @@ def test_denied_startup_elevation_still_shows_gui_and_explains_access(monkeypatc
     gui.exec.assert_called_once_with()
 
 
-def test_restart_readiness_is_a_real_session_and_resumes_saved_behavior(monkeypatch, tmp_path):
+def test_restart_readiness_is_a_real_session_but_waits_for_new_launch_review(monkeypatch, tmp_path):
     import optimus.backend
     backend = SimpleNamespace(data_dir=tmp_path,
         preferences=Mock(return_value={'background_analysis_enabled':True,'analysis_interval':9,'request_admin_on_startup':True}),
@@ -96,10 +96,12 @@ def test_restart_readiness_is_a_real_session_and_resumes_saved_behavior(monkeypa
         assert app.main(['--restart-ready-file', str(marker)]) == 0
     request.assert_not_called()
     backend.is_admin.assert_not_called()
-    backend.analysis_start.assert_called_once_with(9)
-    window_factory.assert_called_once_with(backend, smoke_test=False)
+    backend.analysis_start.assert_not_called()
+    window_factory.assert_called_once_with(backend, smoke_test=False, require_launch_review=True)
     controller_factory.assert_called_once()
-    assert [call.args[0] for call in timer.singleShot.call_args_list] == [750,1500]
+    assert [call.args[0] for call in timer.singleShot.call_args_list] == [750,0]
+    controller.stop.assert_called_once_with()
+    timer.return_value.start.assert_not_called()
     assert not marker.exists()
 
 
@@ -138,6 +140,48 @@ def test_explicit_gui_probe_never_resumes_analysis_setup_cadence_or_uac(monkeypa
     import json
     report = json.loads(capsys.readouterr().out)
     assert report['status'] == 'passed' and report['read_only'] is True and report['mutations'] == 0
+
+
+@pytest.mark.parametrize('stop_fails', [False, True])
+def test_normal_gui_starts_saved_runtime_only_after_approval_and_rechecks_each_tick(monkeypatch, tmp_path, stop_fails):
+    import optimus.backend
+    backend = SimpleNamespace(data_dir=tmp_path,
+        preferences=Mock(return_value={'background_analysis_enabled':True,'analysis_interval':9}),
+        analysis_start=Mock(), analysis_stop=Mock(), activate_smart_maintenance=Mock(),
+        smart_maintenance_stop=Mock(), close=Mock())
+    if stop_fails:
+        backend.smart_maintenance_stop.side_effect = RuntimeError('fixture monitor stop failed')
+    monkeypatch.setattr(optimus.backend, 'Backend', lambda:backend)
+    monkeypatch.setattr(app.sys, 'platform', 'win32')
+    monkeypatch.setattr(app, 'ctypes', SimpleNamespace(windll=SimpleNamespace(shell32=Mock())))
+    gui, window, controller = Mock(), Mock(), Mock()
+    window.session_approved.return_value = True
+    window._quitting=window._close_when_idle=window.busy=False
+    window._setup_wizard=window._settings_window=None
+    with patch('PySide6.QtWidgets.QApplication', return_value=gui), \
+         patch('PySide6.QtCore.QTimer') as timer, patch('PySide6.QtGui.QIcon'), \
+         patch('optimus.ui.OptimusWindow', return_value=window), \
+         patch('optimus.gui_startup.SetupAutomationController', return_value=controller):
+        def event_loop():
+            backend.analysis_start.assert_not_called(); backend.activate_smart_maintenance.assert_not_called()
+            timer.return_value.start.assert_not_called()
+            window._session_approved_callback()
+            backend.analysis_start.assert_called_once_with(9)
+            busy_reader = backend.activate_smart_maintenance.call_args.args[0]
+            assert busy_reader() is False
+            automatic_tick = timer.return_value.timeout.connect.call_args.args[0]
+            window.session_approved.return_value=False
+            assert busy_reader() is True
+            automatic_tick()
+            controller.tick.assert_not_called()
+            window.invalidate_session_review.assert_called_once()
+            note = window._session_invalidated_callback()
+            backend.smart_maintenance_stop.assert_called_once_with(wait=False)
+            backend.analysis_stop.assert_called_once_with()
+            assert ('fixture monitor stop failed' in note) is stop_fails
+            return 0
+        gui.exec.side_effect = event_loop
+        assert app.main([])==0
 
 
 def test_smoke_test_remains_read_only_without_saved_background_actions(monkeypatch):

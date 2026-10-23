@@ -287,6 +287,11 @@ def _uncertain(result, *, native=False):
 
 def pending_updates_barrier(backend):
     """Read owned unresolved records for both serial and parallel workflows."""
+    recovery = getattr(backend, 'recovery_mutation_barrier', None)
+    if callable(recovery):
+        reason = recovery()
+        if reason:
+            return str(reason)
     probe = ParallelAppUpdates(backend, '0' * 32, WINDOWS_SOFTWARE, None, None)
     return probe._pending()
 

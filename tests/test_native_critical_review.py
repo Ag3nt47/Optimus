@@ -155,7 +155,7 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
     by_id = {item['id']: item for item in report['checks']}
     for dimensions in bot.VIEWPORTS:
         prefix = f'{dimensions[0]}x{dimensions[1]}'
-        for suffix in ('main.three-actions', 'setup.no-implicit-save', 'speed.no-implicit-actions',
+        for suffix in ('main.four-actions', 'setup.no-implicit-save', 'speed.no-implicit-actions',
             'speed.unsaved-approval', 'speed.single-worker', 'speed.close-guard',
             'speed.cancel-completes', 'speed.deferred-honesty', 'workflow.single-initial-worker',
             'workflow.explicit-auto-continue', 'workflow.unverified-honesty',
@@ -167,7 +167,16 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'updates-waiting.foreground-resumes', 'updates-waiting.three-worker-cards',
             'updates-waiting.driver-handoff', 'updates-concurrent.discovery',
             'updates-concurrent.maintenance-gate', 'updates-concurrent.installer-gate',
-            'updates-deferred.compact-reason', 'updates-deferred.layout', 'updates-deferred.honest-state'):
+            'updates-deferred.compact-reason', 'updates-deferred.layout', 'updates-deferred.honest-state',
+            'launch-review.negative-default', 'launch-review.actual-warning',
+            'launch-review.scroll-access', 'launch-review.no-implicit-actions',
+            'optional.no-constructor-actions', 'optional.smart-stopped-honesty',
+            'optional.file-explicit-selection', 'optional.recovery-unsupported-disabled',
+            'optional.recovery-unsupported-honesty', 'optional.no-navigation-actions',
+            'additional-workers.actual-poll', 'additional-workers.count-honesty',
+            'additional-workers.reflow-1', 'additional-workers.reflow-3',
+            'additional-workers.board-poll', 'additional-workers.no-operation',
+            'revert.explicit-selection', 'revert.supported-only', 'revert.no-constructor-actions'):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed'
     assert by_id['confirmation.negative-default']['status'] == 'passed'
     assert report['screenshots'] and all((reviewer.output / item['file']).is_file() for item in report['screenshots'])
@@ -182,6 +191,42 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
     summary = bot.github_summary(report)
     assert 'not AI review' in markdown and 'No host maintenance was applied' in summary
     assert 'critical-review.json' in summary and 'Manual review remains required' in summary
+
+
+def test_launch_warning_review_detects_a_missing_irreversible_recall_disclosure(reviewer, monkeypatch):
+    original = bot.ask_launch_review
+    def incomplete(parent, settings):
+        return original(parent, dict(settings, privacy_disable_recall_snapshots_enabled=False))
+    monkeypatch.setattr(bot, 'ask_launch_review', incomplete)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_launch(window, backend, bot.VIEWPORTS[0], 'warning-defect')
+        by_id = {row['id']:row for row in reviewer.report['checks']}
+        assert by_id['warning-defect.launch-review.actual-warning']['status'] == 'failed'
+        assert by_id['warning-defect.launch-review.no-implicit-actions']['status'] == 'passed'
+    finally:
+        reviewer.dispose(window)
+
+
+def test_additional_worker_review_detects_a_grid_that_refuses_narrow_reflow(reviewer, monkeypatch):
+    from optimus.widgets.worker_grid import WorkerGrid
+    original = WorkerGrid.reflow
+    def broken(grid, **kwargs):
+        original(grid, **kwargs)
+        if grid.width() == 440:
+            grid._columns = 3
+    monkeypatch.setattr(WorkerGrid, 'reflow', broken)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        window.open_settings(page='Settings')
+        reviewer.review_additional_workers(window, backend, bot.VIEWPORTS[0], 'grid-defect')
+        by_id = {row['id']:row for row in reviewer.report['checks']}
+        assert by_id['grid-defect.additional-workers.reflow-1']['status'] == 'failed'
+        assert by_id['grid-defect.additional-workers.no-operation']['status'] == 'passed'
+    finally:
+        reviewer.dispose(window)
 
 
 @pytest.mark.parametrize(('defect', 'expected_failure'), [

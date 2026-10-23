@@ -78,7 +78,7 @@ def test_opening_settings_honors_saved_choice_and_never_scans_or_applies(window)
     assert panel.apply_button.isEnabled()
     assert not panel.save_button.isEnabled()
     assert panel.details.isReadOnly()
-    assert len(window.main_buttons) == 3
+    assert len(window.main_buttons) == 4
     for name in ('speed_enhancements_scan', 'apply_speed_enhancements', 'speed_enhancements_history', 'restore_speed_enhancements'):
         getattr(window.backend, name).assert_not_called()
     assert window.backend.saved == []

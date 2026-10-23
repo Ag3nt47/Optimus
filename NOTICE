@@ -11,6 +11,10 @@ texts accompany the bundled packages; see https://doc.qt.io/qtforpython-6/licens
 and https://code.qt.io/pyside/pyside-setup for corresponding source.
 psutil uses the BSD 3-Clause license: https://github.com/giampaolo/psutil .
 Send2Trash uses the BSD 3-Clause license: https://github.com/arsenetar/send2trash .
+Cryptography uses the Apache-2.0 OR BSD-3-Clause licenses. Its binary wheels
+include cryptographic dependencies; see https://cryptography.io/en/latest/faq/
+and the accompanying cryptography license texts. CFFI and pycparser retain
+their MIT/BSD notices in docs/licenses.
 PyInstaller has its GPL license with its bootloader distribution exception:
 https://pyinstaller.org/en/stable/license.html .
 

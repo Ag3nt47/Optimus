@@ -275,9 +275,9 @@ def test_junk_preview_is_invalidated_before_changed_age(window):
     window._run.assert_not_called()
 
 
-def test_main_controls_remain_exactly_three(qapp,backend):
+def test_main_controls_include_requested_fourth_revert_action(qapp,backend):
     main=OptimusWindow(backend,smoke_test=True)
-    assert [button.text() for button in main.main_buttons]==['1 click Optimize and debloat','Settings','Sandbox']
+    assert [button.text() for button in main.main_buttons]==['1 click Optimize and debloat','Settings','Sandbox','Revert']
     main.shutdown();main.close();main.deleteLater()
 
 

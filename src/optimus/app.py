@@ -319,7 +319,8 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
     app.setWindowIcon(QIcon(str(Path(__file__).with_name('assets') / 'optimus.svg')))
     read_only_gui = args.smoke_test or args.startup_probe
     window = OptimusWindow(backend, smoke_test=read_only_gui,
-                           **({'defer_activation': True} if staged_restart else {}))
+                           **({'defer_activation': True} if staged_restart else {}),
+                           **({'require_launch_review': True} if not read_only_gui else {}))
     if args.startup_probe:
         window.setEnabled(False)
     if elevation.get('note'):
@@ -339,21 +340,62 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
         window.show()
         if not read_only_gui:
             window.tray.show()
-            try:
-                _resume_saved_analysis(backend)
-            except Exception as error:
-                window.status.setText('Background analysis could not resume: ' + str(error))
             from .gui_startup import SetupAutomationController
             controller = SetupAutomationController(backend, window, modal_active=lambda: app.activeModalWidget() is not None)
+            controller.stop()  # No cadence or first-run prompt before launch review.
             window._automation_controller = controller
             timer = QTimer(window)
             timer.setInterval(30000)
-            timer.timeout.connect(controller.tick)
+            def automatic_tick():
+                if not window.session_approved():
+                    window.invalidate_session_review('Saved actions changed. Automatic maintenance is paused until reviewed.')
+                    return
+                controller.tick()
+            timer.timeout.connect(automatic_tick)
             app.aboutToQuit.connect(controller.stop)
             app.aboutToQuit.connect(timer.stop)
-            timer.start()
             window._automation_timer = timer
-            QTimer.singleShot(1500, controller.tick)
+
+            def pause_automatic_session():
+                controller.stop()
+                timer.stop()
+                errors = []
+                stop = getattr(backend, 'smart_maintenance_stop', None)
+                if callable(stop):
+                    try:
+                        stop(wait=False)
+                    except Exception as error:
+                        errors.append('Smart Maintenance stop: ' + str(error))
+                stop = getattr(backend, 'analysis_stop', None)
+                if callable(stop):
+                    try:
+                        stop()
+                    except Exception as error:
+                        errors.append('Background analysis stop: ' + str(error))
+                return '; '.join(errors)
+
+            def resume_approved_session():
+                if not window.session_approved() or window._quitting or window._close_when_idle:
+                    return
+                try:
+                    _resume_saved_analysis(backend)
+                except Exception as error:
+                    window.status.setText('Background analysis could not resume: ' + str(error))
+                activate = getattr(backend, 'activate_smart_maintenance', None)
+                if callable(activate):
+                    try:
+                        activate(lambda: not window.session_approved() or window.busy or window._close_when_idle
+                                 or window._quitting or window._setup_wizard is not None
+                                 or window._settings_window is not None and window._settings_window.busy)
+                    except Exception as error:
+                        window.status.setText('Smart Maintenance could not resume: ' + str(error))
+                controller.stopped = False
+                timer.start()
+                QTimer.singleShot(1500, automatic_tick)
+
+            window._session_invalidated_callback = pause_automatic_session
+            window._session_approved_callback = resume_approved_session
+            QTimer.singleShot(0, window.review_launch)
 
     if staged_restart:
         window.tray.hide()
@@ -391,6 +433,18 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
                     if not decorative.ready:
                         raise AssertionError('The bundled decorative loading GIF could not be decoded.')
                     decorative.deleteLater()
+                    # Exercise frozen dependencies without reading user files,
+                    # saving passwords or applying any maintenance.
+                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+                    from PySide6.QtGui import QPixmap
+                    key = Scrypt(salt=os.urandom(16), length=32, n=16384, r=8, p=1).derive(b'Optimus packaging probe')
+                    cipher, nonce = AESGCM(key), os.urandom(12)
+                    probe = b'Optimus in-memory file-utility self-test'
+                    if cipher.decrypt(nonce, cipher.encrypt(nonce, probe, b'package'), b'package') != probe:
+                        raise AssertionError('The bundled file-utility cryptography self-test failed.')
+                    if QPixmap(str(Path(__file__).parent / 'assets' / 'checkbox-check.svg')).isNull():
+                        raise AssertionError('The bundled checkbox indicator could not be decoded.')
                 if args.screenshot:
                     args.screenshot.parent.mkdir(parents=True, exist_ok=True)
                     if not window.grab().save(str(args.screenshot)):

@@ -1,6 +1,6 @@
 # Native platforms and downloads
 
-Optimus 0.9.9 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.10.0 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
@@ -24,7 +24,10 @@ Native startup registration uses the application's current location. Move the ap
 
 | Function family | Windows | macOS / Linux |
 | --- | --- | --- |
-| Three-control interface, setup choices, stage progress, cancellation | Native Qt | Native Qt |
+| Main controls including Revert, launch consent, setup choices, responsive worker cards, stage progress and cancellation | Native Qt | Native Qt |
+| Smart threshold/browser-exit cleaning and calendar-month cadence | Opt-in, while open after launch approval | Opt-in, while open after launch approval; native path/ownership limits apply |
+| Authenticated file encryption, split/join and separately reviewed overwrite | Shared native implementation | Shared native implementation |
+| Driver rollback and System Restore management | Exact-device guarded rollback and reviewed restore-point controls | Unsupported; no Windows recovery APIs are called |
 | Automatic speed enhancements and conditional undo | AC-only power mode on supported Windows 11; existing High Performance plan on eligible battery-free desktops | Charger-only Low Power Mode correction on supported macOS when already authorized; offered performance profile on eligible Linux mains-powered desktops. Battery/unknown/managed/unsupported states defer |
 | Advanced update compatibility | Saved WinGet non-security force mode; legacy MoSetup CPU-policy preparation and a separately invoked media-upgrade script | Windows compatibility changes are unavailable; native package and OS requirements remain authoritative |
 | Local allowlisted temporary/cache cleanup | Windows categories and paths | Native per-user temporary/cache paths; no indiscriminate system-folder deletion |

@@ -10,6 +10,9 @@ import pytest
 
 from optimus.system_privacy import SystemPrivacy, _CONTROLS, _script
 
+LEGACY_CONTROL_COUNT = sum(control['master'] in ('privacy_advertising_enabled', 'privacy_diagnostics_enabled')
+                           for control in _CONTROLS.values())
+
 
 def dword(value):
     return {'exists': True, 'type': 'DWord', 'value': value}
@@ -172,7 +175,7 @@ def test_selected_privacy_controls_have_exact_scopes_and_required_diagnostics_fl
     runner.values['optional_diagnostics'] = dword(3)
     runner.values['app_diagnostics'] = dword(0)
     result = tool.apply_privacy(settings())
-    assert result['status'] == 'completed' and result['changed_count'] == len(_CONTROLS)
+    assert result['status'] == 'completed' and result['changed_count'] == LEGACY_CONTROL_COUNT
     assert result['failed_items'] == 0
     assert runner.values['advertising_id'] == dword(0)
     assert runner.values['tailored_experiences'] == dword(1)
@@ -191,7 +194,7 @@ def test_originals_are_durably_saved_before_each_registry_write(fixture):
         item = next(item for item in report['items'] if item['id'] == payload['control'])
         assert item['status'] == 'prepared' and item['before'] == payload['expected']
     runner.before_write = inspect
-    assert tool.apply_privacy(settings())['changed_count'] == len(_CONTROLS)
+    assert tool.apply_privacy(settings())['changed_count'] == LEGACY_CONTROL_COUNT
 
 
 def test_journal_failure_prevents_every_mutation(fixture):

@@ -126,7 +126,8 @@ class NativeSetupWizard(QWizard):
         body.addWidget(self.mode)
         self.cadence = QComboBox()
         for value, label in (('manual', 'Only when I click Optimize'), ('startup', 'Each Optimus startup'),
-                             ('daily', 'Daily while Optimus is open'), ('weekly', 'Weekly while Optimus is open')):
+                             ('daily', 'Daily while Optimus is open'), ('weekly', 'Weekly while Optimus is open'),
+                             ('monthly', 'Monthly by the local calendar while Optimus is open')):
             self.cadence.addItem(label, value)
         self.cadence.setCurrentIndex(max(0, self.cadence.findData(self.initial.get('automation_mode'))))
         body.addWidget(self.cadence)
@@ -139,7 +140,7 @@ class NativeSetupWizard(QWizard):
         note(body, 'The speed package changes only a supported power policy after fresh mains-power, permission and policy checks. Battery, custom and unsupported configurations are deferred. Settings provides current review and guarded restore; no speed gain is assumed.')
         self.check(body, 'reduce_motion', 'Reduce animation and starfield motion')
         note(body, 'Raising process priority may need OS permission. It does not create additional CPU or RAM. '
-             'Daily and weekly maintenance stop when Optimus exits. Sign-in registration takes effect at the next login.')
+             'Daily, weekly and monthly maintenance stop when Optimus exits. Monthly uses the same local calendar time next month, clamped to its final day. Sign-in registration takes effect at the next login.')
         self.interval = QSpinBox()
         self.interval.setRange(2, 60)
         self.interval.setSuffix(' seconds between background samples')
@@ -150,6 +151,18 @@ class NativeSetupWizard(QWizard):
         self.priority.setCurrentText(self.initial.get('codex_priority', 'High'))
         body.addWidget(self.priority)
         self.mode.currentIndexChanged.connect(self._preset)
+        from .widgets.unattended_setup_choices import UnattendedSetupChoices
+        self.unattended_setup = UnattendedSetupChoices(body, self.initial,
+            add_check=lambda key, text: self.check(body, key, text),
+            add_note=lambda text: note(body, text))
+        def unattended_controls(enabled):
+            if enabled:
+                self.controls['launch_at_sign_in'].setChecked(True)
+                self.cadence.setCurrentIndex(self.cadence.findData('startup'))
+            self.controls['launch_at_sign_in'].setEnabled(not enabled)
+            self.cadence.setEnabled(not enabled)
+        self.unattended_setup.enabled.toggled.connect(unattended_controls)
+        unattended_controls(self.unattended_setup.enabled.isChecked())
         body.addStretch()
 
     def _build_cleanup(self):
@@ -186,7 +199,7 @@ class NativeSetupWizard(QWizard):
         self.browsers = QListWidget()
         self.browsers.setMaximumHeight(140)
         for key, label in (('chrome', 'Google Chrome'), ('chromium', 'Chromium'), ('firefox', 'Firefox'), ('brave', 'Brave'),
-                           ('vivaldi', 'Vivaldi'), ('edge', 'Microsoft Edge')):
+                           ('vivaldi', 'Vivaldi'), ('edge', 'Microsoft Edge'), ('opera', 'Opera (optional)')):
             check_item(self.browsers, label, key, key in self.initial['browser_cleanup_browsers'])
         body.addWidget(self.browsers)
         selection_buttons(body, self.browsers)
@@ -197,6 +210,10 @@ class NativeSetupWizard(QWizard):
              'Safari databases and macOS protected app containers are excluded. Broad /tmp and system folder purges are not used. '
              'Native user temporary files retain a seven-day minimum even in Full mode; recent or observed open files '
              'and coordination files stay protected. Missing process access can defer that temporary-file scope.')
+        from .widgets.smart_setup_choices import SmartSetupChoices
+        self.smart_setup = SmartSetupChoices(body, self.initial,
+            add_check=lambda key, text: self.check(body, key, text),
+            add_note=lambda text: note(body, text))
 
     def _build_duplicates(self):
         body = self.page_body('Duplicate files', 'Choose concrete personal folders and a retention rule.')
@@ -330,6 +347,30 @@ class NativeSetupWizard(QWizard):
         for key in ('auto_continue_fixes_enabled', 'parallel_app_updates_enabled'):
             self.controls[key].toggled.connect(continuation_summary)
         continuation_summary()
+        self.smart_summary = note(body, '')
+        def smart_summary(*_):
+            choices = self.smart_setup.collect()
+            self.smart_summary.setText('Smart Cleaning: ' + ('enabled at ' + str(choices['smart_cleaning_threshold_bytes']) + ' bytes'
+                if choices['smart_cleaning_enabled'] else 'disabled') + '. Browser-exit cleanup: '
+                + ('enabled for saved browser categories; history/cookies can be removed and sign you out, with kept domains and rollback backups'
+                   if choices['browser_exit_cleaning_enabled'] else 'disabled')
+                + '. Monitoring requires Optimus to be open and the current session approved.')
+        for control in self.smart_setup.checks.values():
+            control.toggled.connect(smart_summary)
+        for control in self.smart_setup.numbers.values():
+            control.valueChanged.connect(smart_summary)
+        smart_summary()
+        self.unattended_summary = note(body, '')
+        def unattended_summary(*_):
+            self.unattended_summary.setText('Unattended Auto Clean: ' + (
+                'saving approves the exact current scope, enables sign-in launch and Startup cadence, and skips future launch/post-run prompts while unchanged. '
+                'Temporary/browser records and selected apps can be permanently removed. Open browsers: '
+                + ('skip' if self.unattended_setup.browser_policy.currentData() == 'skip_open' else 'request graceful closure; skip if still open or unknown')
+                + '. Unknown installer outcomes, permission prompts and restarts are deferred.'
+                if self.unattended_setup.enabled.isChecked() else 'disabled; each launch requires review before automatic actions.'))
+        self.unattended_setup.enabled.toggled.connect(unattended_summary)
+        self.unattended_setup.browser_policy.currentIndexChanged.connect(unattended_summary)
+        unattended_summary()
         note(body, 'Native capability information explains what was measured, what is supported and what requires '
              'manual OS controls. Registry cleanup, Windows consumer-app removals, Defender scans and DPAPI-backed '
              'cloud sign-in are Windows-specific. No substitute is presented as an equivalent security fix.')
@@ -345,7 +386,8 @@ class NativeSetupWizard(QWizard):
         value = full_native_settings(self.initial)
         for key, control in self.controls.items():
             if key in value and key not in ('launch_at_sign_in', 'software_update_all_approved',
-                    'software_update_agreements_accepted', 'startup_changes_approved', 'duplicate_changes_approved'):
+                    'software_update_agreements_accepted', 'startup_changes_approved', 'duplicate_changes_approved',
+                    'smart_cleaning_enabled', 'browser_exit_cleaning_enabled', 'unattended_auto_clean_enabled'):
                 control.setChecked(bool(value[key]))
         self.intensity.setCurrentText('High')
         self.age.setValue(0)
@@ -374,6 +416,8 @@ class NativeSetupWizard(QWizard):
     def collect(self):
         value = dict(self.initial)
         value.update({key: control.isChecked() for key, control in self.controls.items()})
+        value.update(self.smart_setup.collect())
+        value.update(self.unattended_setup.collect())
         value.update(optimization_mode=self.mode.currentData(), automation_mode=self.cadence.currentData(),
                      setup_version=CURRENT_SETUP_VERSION, cleanup_age_days=self.age.value(),
                      intensity=self.intensity.currentText(),
@@ -396,7 +440,11 @@ class NativeSetupWizard(QWizard):
             return
         try:
             self.run_now = self.run_after.isChecked()
-            self.saved_preferences = save_setup(self.backend.data_dir, self.collect(), self.backend.save_preferences,
+            value = self.collect()
+            if value.get('unattended_auto_clean_enabled') is True:
+                from .unattended_configuration import approve_unattended_settings
+                value = approve_unattended_settings(value)
+            self.saved_preferences = save_setup(self.backend.data_dir, value, self.backend.save_preferences,
                                                run_now=self.run_now, validator=NativePreferences.validate)
         except (OSError, ValueError, RuntimeError) as error:
             QMessageBox.warning(self, 'Choices could not be saved', str(error))
@@ -450,6 +498,9 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         self._build_native_updates()
         self._build_native_history()
         self._build_native_capabilities()
+        for name in ('Smart cleaning', 'Workers', 'File utilities', 'Recovery'):
+            self.page(name)
+        self._build_extended_tools()
 
     def page(self, name, *, scroll=True):
         content = QWidget()
@@ -714,9 +765,14 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         if getattr(self, '_native_shutdown', False):
             return
         self._native_shutdown = True
+        for name in ('smart_maintenance_panel', 'worker_board', 'file_utilities_panel', 'recovery_panel'):
+            panel = getattr(self, name, None)
+            if panel is not None:
+                panel.shutdown()
         self.process_harness_panel.shutdown()
         self.privacy_panel.shutdown()
         self.speed_enhancements_panel.shutdown()
+        self.pool.waitForDone()
 
 
 class NativeOptimusWindow(OptimusWindow):
@@ -729,10 +785,13 @@ class NativeOptimusWindow(OptimusWindow):
             accepted = wizard.exec() == QDialog.Accepted
             if accepted:
                 self.workflow_settings = wizard.saved_preferences
+                if self._launch_consent.required:
+                    self.invalidate_session_review('Setup choices saved. Review their actions before Auto Clean.')
                 if self._settings_window is not None:
                     self._settings_window.speed_enhancements_panel.sync_settings(self.workflow_settings)
-                method = self.backend.analysis_start if self.workflow_settings['background_analysis_enabled'] else self.backend.analysis_stop
-                method(self.workflow_settings['analysis_interval']) if self.workflow_settings['background_analysis_enabled'] else method()
+                if self.session_approved(self.workflow_settings):
+                    method = self.backend.analysis_start if self.workflow_settings['background_analysis_enabled'] else self.backend.analysis_stop
+                    method(self.workflow_settings['analysis_interval']) if self.workflow_settings['background_analysis_enabled'] else method()
                 self.config.ui_motion_enabled = not self.workflow_settings['reduce_motion'] and bool(self.appearance.get('motion', True))
                 self.canvas.motion = self.config.ui_motion_enabled
                 self.canvas.sync_motion()
@@ -749,6 +808,8 @@ class NativeOptimusWindow(OptimusWindow):
         if self.busy or self._setup_wizard is not None:
             self.status.setText('Finish the current operation or setup questions first.')
             return
+        if self._launch_consent.required:
+            self.invalidate_session_review('Settings opened. Automatic maintenance is paused until you review Auto Clean again.')
         if self._settings_window is None:
             self._settings_window = NativeSettingsWindow(self.backend, self, smoke_test=self.smoke_test)
         self._settings_window.show()
@@ -758,6 +819,10 @@ class NativeOptimusWindow(OptimusWindow):
             self._settings_window.select_page(page)
 
     def _offer_post_optimization_reviews(self, result, settings):
+        from .unattended_configuration import matches_unattended
+        if matches_unattended(settings):
+            self._post_review_active = False
+            return
         try:
             if self._progress_window is not None:
                 self._progress_window.hide()

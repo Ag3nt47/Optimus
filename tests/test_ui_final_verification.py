@@ -73,7 +73,7 @@ def test_completed_report_is_visible_before_user_continues_to_prompts(qapp, tmp_
         main._offer_post_optimization_reviews.assert_not_called()
         assert progress.cancel_button.text() == 'Continue to recommendations'
         assert main._post_review_active and not main.busy
-        assert len(main.main_buttons) == 3
+        assert len(main.main_buttons) == 4
         assert '1 unverified' in progress.verification_summary.text()
         assert '"needs_review"' in progress.verification_details.toPlainText()
         observed.append('report-visible')
@@ -155,7 +155,7 @@ def test_read_only_observed_changes_are_prominent_with_expanded_evidence(qapp, t
         assert '"new_count": 1' in progress.verification_details.toPlainText()
         assert progress.verification_details.isReadOnly()
         assert progress.verification_summary.isVisible()
-        assert len(main.main_buttons) == 3
+        assert len(main.main_buttons) == 4
     finally:
         dispose(main, qapp)
 

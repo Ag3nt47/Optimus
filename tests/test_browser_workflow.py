@@ -63,7 +63,7 @@ def test_privacy_switches_require_real_booleans(key, invalid):
         Preferences.validate({key: invalid})
 
 
-@pytest.mark.parametrize('invalid', ('chrome', ('chrome',), None, [True], ['opera'],
+@pytest.mark.parametrize('invalid', ('chrome', ('chrome',), None, [True], ['opera-beta'],
                                       ['Chrome'], ['chrome.exe'], ['C:/Chrome']))
 def test_browser_scope_requires_exact_canonical_browser_ids(invalid):
     with pytest.raises(ValueError):

@@ -106,10 +106,10 @@ def test_cloud_page_constructs_without_connecting(window):
     assert window.cloud_panel._plan is None
 
 
-def test_primary_window_has_exactly_three_buttons(qapp, tmp_path):
+def test_primary_window_has_four_requested_buttons(qapp, tmp_path):
     value = OptimusWindow(SimpleNamespace(data_dir=tmp_path, preferences=lambda: {}), smoke_test=True)
     try:
-        assert [button.text() for button in value.findChildren(QPushButton)] == ['1 click Optimize and debloat','Settings','Sandbox']
+        assert [button.text() for button in value.findChildren(QPushButton)] == ['1 click Optimize and debloat','Settings','Sandbox','Revert']
         assert value.windowTitle() == 'Optimus: Computer optimization tool'
     finally:
         value.shutdown()
