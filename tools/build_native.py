@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,7 @@ def build_command(source, destination, system=None, machine=None):
     source, destination = Path(source), Path(destination)
     command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
                '--name', 'Optimus', '--paths', str(source / 'src'), '--collect-all', 'optimus',
+               '--collect-data', 'certifi',
                '--collect-submodules', 'psutil', '--collect-submodules', 'send2trash',
                '--distpath', str(destination), '--workpath', str(destination.parent / 'pyinstaller-work'),
                '--specpath', str(destination.parent)]
@@ -81,6 +83,49 @@ def configure_macos_metadata(bundle, source):
         plistlib.dump(value, stream)
 
 
+def _tls_probe_environment(environment, root):
+    """Make bundled trust necessary without changing the builder's own store."""
+    result = dict(environment)
+    for key in ('SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'):
+        result.pop(key, None)
+    empty_file, empty_directory = root / 'empty-default-ca.pem', root / 'empty-default-ca'
+    empty_file.write_bytes(b'')
+    empty_directory.mkdir()
+    # OpenSSL's default file/directory routes deliberately contain no roots.
+    # Native platform stores may still exist; the probe separately proves that
+    # the packaged Mozilla file alone contains usable roots.
+    result.update(SSL_CERT_FILE=str(empty_file), SSL_CERT_DIR=str(empty_directory))
+    return result
+
+
+def _verified_tls_report(directory):
+    reports = list(directory.glob('tls-trust-*.json'))
+    if len(reports) != 1 or reports[0].is_symlink():
+        raise RuntimeError('The packaged TLS trust probe did not produce one ordinary report.')
+    with reports[0].open('rb') as stream:
+        raw = stream.read(16385)
+    if len(raw) > 16384:
+        raise RuntimeError('The packaged TLS trust report exceeds its input limit.')
+    try:
+        value = json.loads(raw.decode('utf-8-sig'))
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError('The packaged TLS trust report is not valid JSON.') from error
+    if (not isinstance(value, dict) or value.get('schema') != 1 or type(value.get('schema')) is not int
+            or value.get('command') != 'tls-probe' or value.get('status') != 'ready'
+            or value.get('trust_source') != 'system_plus_bundled_mozilla'
+            or value.get('hostname_checking') is not True
+            or value.get('certificate_verification') != 'CERT_REQUIRED'
+            or type(value.get('network_requests')) is not int or value['network_requests'] != 0
+            or value.get('maintenance_applied') is not False
+            or not isinstance(value.get('bundle_sha256'), str)
+            or re.fullmatch('[0-9a-f]{64}', value['bundle_sha256']) is None
+            or any(type(value.get(key)) is not int or not 0 < value[key] <= maximum
+                   for key, maximum in (('bundle_size_bytes', 16 * 1024 * 1024),
+                                        ('bundled_ca_count', 100000), ('trusted_ca_count', 100000)))):
+        raise RuntimeError('The packaged TLS trust probe did not prove strict bundled certificate trust.')
+    return value
+
+
 def verify_package(executable, *, output=None):
     """Exercise the real packaged UI and inventory without maintenance/UAC."""
     environment = dict(os.environ)
@@ -99,6 +144,9 @@ def verify_package(executable, *, output=None):
         (root / 'home').mkdir()
         for command in (smoke, ['--startup-probe'], ['--process-scan', '--output', str(root / 'scan')]):
             subprocess.run([str(executable), *command], check=True, timeout=150, env=environment)
+        subprocess.run([str(executable), '--tls-probe', '--output', str(root / 'tls')],
+                       check=True, timeout=150, env=_tls_probe_environment(environment, root))
+        tls_trust = _verified_tls_report(root / 'tls')
         if screenshot is not None and (not screenshot.is_file() or not screenshot.stat().st_size):
             raise RuntimeError('The packaged interface screenshot was not produced.')
         reports = sorted((root / 'scan').rglob('*.json'))
@@ -112,7 +160,8 @@ def verify_package(executable, *, output=None):
                for action in value.get('actions', []) if isinstance(action, dict)):
             raise RuntimeError('A read-only process scan preselected a mutation.')
         result = {'target': target_name(), 'executable': str(executable),
-                  'checks': ['interface smoke test', 'startup probe', 'read-only process report'],
+                  'checks': ['interface smoke test', 'startup probe', 'read-only process report', 'bundled TLS trust probe'],
+                  'tls_trust': tls_trust,
                   'json_reports': len(reports), 'process_rows': sum(len(value['processes']) for value in inventories),
                   'inventory_complete': [value.get('complete') for value in inventories], 'maintenance_applied': False}
         if screenshot is not None:

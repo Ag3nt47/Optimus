@@ -14,6 +14,8 @@ A first-time user gets **Yes — update then setup** instead. Completing setup a
 
 The Windows updater downloads the exact stable release asset and checks both GitHub's asset SHA256 digest and the release's SHA256SUMS entry. It rejects downgrades, changed release identities and malformed or incomplete archives. Extraction has path, link, file-count, size and expansion limits. The complete application is staged beside the existing version; a running executable is never overwritten.
 
+The updater retains native certificate roots and also loads the bundled, pinned Mozilla CA data from Certifi. HTTPS certificate validation and hostname checking remain required. An offline `--tls-probe` verifies that the packaged app can load the bundled roots even when default CA paths are unavailable. The probe makes no network request; it does not prove live GitHub reachability. No global SSL or operating-system trust settings are changed.
+
 Release checksums detect corrupt or inconsistent downloads. They are not independent publisher code signing: the current Windows executable is unsigned, and the release account remains part of the trust boundary.
 
 A separate handoff process waits for the exact old interface to exit normally and for maintenance ownership to be released. It does not kill processes or approve Windows dialogs. Unsaved Sandbox work can cancel the handoff. The verified new version starts through the normal administrator-consent path. Declining elevation retains the application's normal protected-operation limits.

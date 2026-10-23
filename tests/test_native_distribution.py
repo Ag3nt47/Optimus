@@ -38,6 +38,7 @@ def test_artifact_identity_uses_actual_platform_architecture(system, machine, ex
     command = build.build_command(Path('project'), Path('dist'), system, machine)
     assert '--collect-submodules' in command
     assert 'send2trash' in command
+    assert command[command.index('--collect-data') + 1] == 'certifi'
     if system == 'darwin':
         assert command[command.index('--target-arch') + 1] == machine
 
@@ -106,8 +107,19 @@ def test_checksums_are_for_archives_not_the_previous_checksum_file(tmp_path):
     assert result.read_text() == hashlib.sha256(b'one').hexdigest() + '  one.zip\n'
 
 
-def fake_packaged_commands(monkeypatch, payload):
+def ready_tls_payload():
+    return {'schema': 1, 'command': 'tls-probe', 'status': 'ready',
+            'trust_source': 'system_plus_bundled_mozilla', 'bundle_sha256': 'a' * 64,
+            'bundle_size_bytes': 1000, 'bundled_ca_count': 10, 'trusted_ca_count': 12,
+            'hostname_checking': True, 'certificate_verification': 'CERT_REQUIRED',
+            'network_requests': 0, 'maintenance_applied': False}
+
+
+def fake_packaged_commands(monkeypatch, payload, tls_payload=None):
     commands = []
+    # Keep standalone fixture runs independent of platform.machine()'s native
+    # subprocess fallback while subprocess.run is intentionally mocked below.
+    monkeypatch.setattr(build, 'target_name', lambda: 'Fixture-native-target')
     def run(argv, **options):
         commands.append((argv, options))
         if '--screenshot' in argv:
@@ -118,6 +130,15 @@ def fake_packaged_commands(monkeypatch, payload):
             destination = Path(argv[argv.index('--output') + 1])
             destination.mkdir(parents=True)
             (destination / 'fixture.json').write_text(json.dumps(payload), encoding='utf-8')
+        if '--tls-probe' in argv:
+            destination = Path(argv[argv.index('--output') + 1])
+            destination.mkdir(parents=True)
+            (destination / 'tls-trust-fixture.json').write_text(json.dumps(
+                ready_tls_payload() if tls_payload is None else tls_payload), encoding='utf-8')
+            assert Path(options['env']['SSL_CERT_FILE']).read_bytes() == b''
+            assert not list(Path(options['env']['SSL_CERT_DIR']).iterdir())
+            assert 'REQUESTS_CA_BUNDLE' not in options['env']
+            assert 'CURL_CA_BUNDLE' not in options['env']
     monkeypatch.setattr(build.subprocess, 'run', run)
     return commands
 
@@ -126,10 +147,12 @@ def test_packaged_verification_uses_only_read_only_commands_and_real_report(monk
     calls = fake_packaged_commands(monkeypatch, {'processes': [{'pid': 123}], 'complete': False,
                                                'actions': [{'selected': False}]})
     result = build.verify_package(tmp_path / 'Optimus', output=tmp_path / 'evidence.json')
-    assert [arguments[1] for arguments, _ in calls] == ['--smoke-test', '--startup-probe', '--process-scan']
+    assert [arguments[1] for arguments, _ in calls] == ['--smoke-test', '--startup-probe', '--process-scan', '--tls-probe']
     assert all(options['check'] and options['timeout'] == 150 for _, options in calls)
     assert result['process_rows'] == 1 and result['inventory_complete'] == [False]
     assert result['maintenance_applied'] is False
+    assert result['tls_trust'] == ready_tls_payload()
+    assert result['checks'][-1] == 'bundled TLS trust probe'
     assert '--screenshot' in calls[0][0] and (tmp_path / 'evidence.png').is_file()
     assert json.loads((tmp_path / 'evidence.json').read_text()) == result
 
@@ -156,6 +179,48 @@ def test_packaged_verification_rejects_empty_inventory_or_preselected_changes(mo
     fake_packaged_commands(monkeypatch, payload)
     with pytest.raises(RuntimeError, match=error):
         build.verify_package(tmp_path / 'Optimus')
+
+
+@pytest.mark.parametrize('key,value', [('hostname_checking', False),
+    ('certificate_verification', 'CERT_NONE'), ('bundle_sha256', 'unknown'),
+    ('bundled_ca_count', 0), ('trusted_ca_count', False), ('bundle_size_bytes', 0),
+    ('network_requests', True), ('network_requests', 1), ('maintenance_applied', True),
+    ('trust_source', 'host_only'), ('schema', True)])
+def test_packaged_verification_rejects_tls_trust_without_strict_bundled_evidence(monkeypatch, tmp_path, key, value):
+    tls = ready_tls_payload()
+    tls[key] = value
+    fake_packaged_commands(monkeypatch, {'processes': [{'pid': 123}]}, tls)
+    with pytest.raises(RuntimeError, match='strict bundled certificate trust'):
+        build.verify_package(tmp_path / 'Optimus')
+
+
+def test_tls_probe_uses_isolated_empty_default_routes_without_mutating_builder_environment(tmp_path):
+    original = {'HOME': 'fixture-home', 'SSL_CERT_FILE': 'host-ca.pem',
+                'SSL_CERT_DIR': 'host-ca-dir', 'REQUESTS_CA_BUNDLE': 'requests-ca',
+                'CURL_CA_BUNDLE': 'curl-ca', 'UNCHANGED': 'yes'}
+    snapshot = dict(original)
+    result = build._tls_probe_environment(original, tmp_path)
+    assert original == snapshot
+    assert result['HOME'] == 'fixture-home' and result['UNCHANGED'] == 'yes'
+    assert Path(result['SSL_CERT_FILE']).read_bytes() == b''
+    assert not list(Path(result['SSL_CERT_DIR']).iterdir())
+    assert 'REQUESTS_CA_BUNDLE' not in result and 'CURL_CA_BUNDLE' not in result
+
+
+@pytest.mark.parametrize('contents', [b'not json', b'x' * 16385])
+def test_tls_report_is_bounded_and_malformed_evidence_cannot_pass(tmp_path, contents):
+    (tmp_path / 'tls-trust-fixture.json').write_bytes(contents)
+    with pytest.raises(RuntimeError, match='JSON|input limit'):
+        build._verified_tls_report(tmp_path)
+
+
+def test_missing_or_ambiguous_tls_report_cannot_pass(tmp_path):
+    with pytest.raises(RuntimeError, match='one ordinary report'):
+        build._verified_tls_report(tmp_path)
+    for name in ('one', 'two'):
+        (tmp_path / ('tls-trust-' + name + '.json')).write_text(json.dumps(ready_tls_payload()))
+    with pytest.raises(RuntimeError, match='one ordinary report'):
+        build._verified_tls_report(tmp_path)
 
 
 def release_files(tmp_path):

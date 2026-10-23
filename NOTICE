@@ -15,6 +15,7 @@ Cryptography uses the Apache-2.0 OR BSD-3-Clause licenses. Its binary wheels
 include cryptographic dependencies; see https://cryptography.io/en/latest/faq/
 and the accompanying cryptography license texts. CFFI and pycparser retain
 their MIT/BSD notices in docs/licenses.
+Certifi and its unmodified Mozilla CA bundle use MPL-2.0; see docs/licenses/certifi-LICENSE.txt and https://github.com/certifi/python-certifi .
 PyInstaller has its GPL license with its bootloader distribution exception:
 https://pyinstaller.org/en/stable/license.html .
 

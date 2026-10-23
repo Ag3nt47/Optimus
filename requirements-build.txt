@@ -7,3 +7,4 @@ Send2Trash==2.1.0
 cryptography==50.0.2
 cffi==2.1.0
 pycparser==3.0
+certifi==2026.10.23

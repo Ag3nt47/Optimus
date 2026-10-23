@@ -20,7 +20,6 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
-import ssl
 import stat
 import struct
 import subprocess
@@ -34,6 +33,7 @@ import uuid
 import zipfile
 
 from .automation import CURRENT_SETUP_VERSION, RunLease
+from .tls_context import create_update_tls_context
 from .filesystem import _ordinary_data_path, resolve_data_root
 from .speed_enhancements import _current_owner
 
@@ -152,7 +152,7 @@ class GitHubTransport:
     """Unauthenticated public requests; no signed redirect URL is persisted."""
     def _open(self, url, accept):
         _tls(url)
-        opener = urllib.request.build_opener(_Redirects(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        opener = urllib.request.build_opener(_Redirects(), urllib.request.HTTPSHandler(context=create_update_tls_context()))
         request = urllib.request.Request(url, headers={'User-Agent': 'Optimus-Self-Update', 'Accept': accept,
             'X-GitHub-Api-Version': '2022-11-28', 'Accept-Encoding': 'identity'})
         return opener.open(request, timeout=15)

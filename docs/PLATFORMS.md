@@ -1,6 +1,6 @@
 # Native platforms and downloads
 
-Optimus 0.11.6 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.11.7 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
@@ -68,7 +68,7 @@ python tools/test_native.py
 python tools/build_native.py
 ```
 
-`tools/test_native.py` selects the same tests locally and in CI: the complete Python suite on Windows; every `tests/test_native*.py` plus its explicit `PORTABLE_SUITES` list on macOS/Linux. Native tests cover the actual platform counterparts; Windows contract fixtures remain in the Windows job. The build helper checks the actual interpreter architecture, builds an onedir application (`.app` on macOS), applies Windows Qt/ICU normalization only on Windows, copies allowlisted source and licenses, and runs `--smoke-test`, `--startup-probe` and `--process-scan` against the packaged executable. Those checks do not apply maintenance. Source packaging excludes local configuration, runtime reports, credentials and private folders. macOS source/licenses are under `Contents/Resources`; its final bundle is ad-hoc signed after packaging. Linux archives preserve links and executable bits.
+`tools/test_native.py` selects the same tests locally and in CI: the complete Python suite on Windows; every `tests/test_native*.py` plus its explicit `PORTABLE_SUITES` list on macOS/Linux. Native tests cover the actual platform counterparts; Windows contract fixtures remain in the Windows job. The build helper checks the actual interpreter architecture, builds an onedir application (`.app` on macOS), applies Windows Qt/ICU normalization only on Windows, copies allowlisted source and licenses, and runs `--smoke-test`, `--startup-probe`, `--process-scan` and `--tls-probe` against the packaged executable. The offline TLS probe validates bundled certificate roots and strict verification with empty default CA locations; it does not contact GitHub or apply maintenance. Those checks do not apply maintenance. Source packaging excludes local configuration, runtime reports, credentials and private folders. macOS source/licenses are under `Contents/Resources`; its final bundle is ad-hoc signed after packaging. Linux archives preserve links and executable bits.
 
 GitHub Actions builds Windows x64, macOS arm64, macOS x86_64 and Linux x86_64 independently. Windows also runs all eight native PowerShell fixture suites. Each job uploads Python test results and packaged-check evidence, including when a later step fails. Tagged releases require all four native jobs to succeed before publishing the separate archives and combined checksums. Release publication verifies the complete artifact set and refuses to overwrite different existing release bytes.
 

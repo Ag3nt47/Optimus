@@ -24,6 +24,7 @@ def parser():
     commands.add_argument('--process-scan', action='store_true', help='Export a read-only process and launch-evidence report; no actions are applied.')
     commands.add_argument('--verify-run', type=_run_identity, metavar='RUN_ID', help='Verify a completed saved workflow without repeating its actions or opening the interface.')
     commands.add_argument('--startup-probe', action='store_true', help='Inspect GUI startup without UAC, setup, background analysis or maintenance, then exit.')
+    commands.add_argument('--tls-probe', action='store_true', help='Verify bundled TLS certificate trust without network requests, UAC, interface or maintenance.')
     commands.add_argument('--startup-mode', choices=('on', 'off', 'status'), help='Configure or inspect this user\'s native sign-in launch without running maintenance.')
     commands.add_argument('--speed-enhancements', choices=('status', 'apply', 'history'), help='Inspect, apply saved speed-enhancement choices, or list their recovery records without opening the interface.')
     commands.add_argument('--speed-restore', type=_speed_identity, metavar='RUN_ID', help='Restore one exact recorded speed-enhancement change without opening the interface.')
@@ -185,9 +186,57 @@ def _safe_stop_command(backend):
                      'This acknowledges the request, not completion; active installers are allowed to finish.'
                      if accepted else 'No compatible running Optimus window acknowledged the stop request. No process was terminated.')}
 
+def _tls_probe_command(destination=None):
+    """Inspect packaged certificate trust without constructing any app service."""
+    from .tls_context import trust_probe
+    result = trust_probe()
+    if (not isinstance(result, dict) or result.get('status') != 'ready'
+            or result.get('trust_source') != 'system_plus_bundled_mozilla'
+            or result.get('hostname_checking') is not True
+            or result.get('certificate_verification') != 'CERT_REQUIRED'
+            or type(result.get('network_requests')) is not int or result['network_requests'] != 0
+            or result.get('maintenance_applied') is not False
+            or not isinstance(result.get('bundle_sha256'), str)
+            or re.fullmatch('[0-9a-f]{64}', result['bundle_sha256']) is None
+            or any(type(result.get(key)) is not int or not 0 < result[key] <= maximum
+                   for key, maximum in (('bundle_size_bytes', 16 * 1024 * 1024),
+                                        ('bundled_ca_count', 100000), ('trusted_ca_count', 100000)))):
+        raise ValueError('The TLS trust probe did not prove a strict bundled certificate context.')
+    payload = dict(result, schema=1, command='tls-probe')
+    raw = (json.dumps(payload, sort_keys=True) + '\n').encode('utf-8')
+    if len(raw) > 16384:
+        raise ValueError('The TLS trust probe exceeds its report limit.')
+    if destination is not None:
+        from .filesystem import _ordinary_data_path
+        folder = Path(os.path.abspath(destination))
+        if len(str(folder)) > 1024:
+            raise ValueError('The TLS report directory exceeds its path limit.')
+        _ordinary_data_path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        _ordinary_data_path(folder)
+        report = folder / ('tls-trust-' + uuid.uuid4().hex + '.json')
+        # A probe never opens preferences/the locator or replaces a report.
+        # Exclusive creation also makes windowed builds inspectable.
+        with report.open('xb') as stream:
+            stream.write(raw)
+            stream.flush()
+        _ordinary_data_path(report, file=True)
+        payload['report'] = str(report)
+    return payload
+
+
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(actual_arguments)
+    if args.tls_probe:
+        try:
+            print(json.dumps(_tls_probe_command(args.output)))
+            return 0
+        except (ImportError, OSError, ValueError, RuntimeError) as error:
+            print(json.dumps({'status': 'error', 'command': 'tls-probe',
+                              'network_requests': 0, 'maintenance_applied': False,
+                              'error': str(error)[:2048]}), file=sys.stderr)
+            return 2
     if args.self_update_worker:
         # The exact core transaction is self-contained. Do not initialize a
         # backend/GUI, request UAC, acquire a GUI lease or start saved actions.

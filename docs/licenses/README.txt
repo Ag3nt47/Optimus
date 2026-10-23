@@ -29,3 +29,6 @@ Additional file-utility dependencies:
 - OpenSSL: https://openssl-library.org/source/ (Apache-2.0 for bundled 3.x)
 - cffi 2.1.0: https://foss.heptapod.net/pypy/cffi (MIT)
 - pycparser 3.0: https://github.com/eliben/pycparser (BSD-3-Clause)
+
+Certifi: unmodified Mozilla CA bundle and license, MPL-2.0.
+See certifi-LICENSE.txt and https://github.com/certifi/python-certifi .
