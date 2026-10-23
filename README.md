@@ -29,7 +29,7 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
-Version **0.10.0** adds the launch warning, default-off Smart Cleaning/browser-exit cleaning, calendar-month scheduling, opt-in Opera support, privacy controls, verified driver/System Restore recovery, authenticated file utilities and a red Revert control. Additional worker cards fit within the existing windows. [Detailed scope and removal options](docs/REMOVAL_OPTIONS.md) document defaults and limitations. The launch review supersedes the unattended startup behavior described in older release notes below.
+Version **0.10.1** adds the launch warning, default-off Smart Cleaning/browser-exit cleaning, calendar-month scheduling, opt-in Opera support, privacy controls, verified driver/System Restore recovery, authenticated file utilities and a red Revert control. Intel Mac builds compile the current cryptography dependency with isolated static OpenSSL to avoid a packaged-library conflict. Additional worker cards fit within the existing windows. [Detailed scope and removal options](docs/REMOVAL_OPTIONS.md) document defaults and limitations. The launch review supersedes the unattended startup behavior described in older release notes below.
 
 Version **0.9.9** lets approved Windows Update drivers attempt a verified quiet installation even when their metadata allows user input. Quiet mode and suppressed source prompts must be established before download or installation; unsupported quiet handlers remain for review. It also adds cooperative safe stopping: Close requests cancellation, waits for active work and preserves final receipts before exit. Cancel keeps the results window open. A local safe-stop command requests the same behavior without killing installers.
 
@@ -146,7 +146,7 @@ On macOS or Linux:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r requirements-build.txt
+python tools/install_build_dependencies.py
 python -m pip install -e . --no-deps
 python tools/test_native.py
 python -m optimus

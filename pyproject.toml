@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optimus-computer-optimization-tool"
-version = "0.10.0"
+version = "0.10.1"
 description = "Optimus: Computer optimization tool - open-source native desktop maintenance"
 requires-python = ">=3.11"
 license = "MIT"

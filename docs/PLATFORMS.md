@@ -1,6 +1,6 @@
 # Native platforms and downloads
 
-Optimus 0.10.0 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.10.1 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
@@ -59,7 +59,7 @@ Native duplicate recycling records a durable recovery map before moving an extra
 Build each artifact on its own operating system and CPU architecture. PyInstaller does not cross-compile macOS from Windows or Linux from macOS. From an activated Python 3.12 virtual environment:
 
 ```sh
-python -m pip install -r requirements-build.txt
+python tools/install_build_dependencies.py
 python -m pip install -e . --no-deps
 python tools/test_native.py
 python tools/build_native.py
@@ -68,6 +68,8 @@ python tools/build_native.py
 `tools/test_native.py` selects the same tests locally and in CI: the complete Python suite on Windows; every `tests/test_native*.py` plus its explicit `PORTABLE_SUITES` list on macOS/Linux. Native tests cover the actual platform counterparts; Windows contract fixtures remain in the Windows job. The build helper checks the actual interpreter architecture, builds an onedir application (`.app` on macOS), applies Windows Qt/ICU normalization only on Windows, copies allowlisted source and licenses, and runs `--smoke-test`, `--startup-probe` and `--process-scan` against the packaged executable. Those checks do not apply maintenance. Source packaging excludes local configuration, runtime reports, credentials and private folders. macOS source/licenses are under `Contents/Resources`; its final bundle is ad-hoc signed after packaging. Linux archives preserve links and executable bits.
 
 GitHub Actions builds Windows x64, macOS arm64, macOS x86_64 and Linux x86_64 independently. Windows also runs all eight native PowerShell fixture suites. Each job uploads Python test results and packaged-check evidence, including when a later step fails. Tagged releases require all four native jobs to succeed before publishing the separate archives and combined checksums. Release publication verifies the complete artifact set and refuses to overwrite different existing release bytes.
+
+The build dependency helper uses official binary cryptography/CFFI wheels on supported targets. Current cryptography releases no longer supply Intel Mac wheels, so Intel Mac source builds require Rust, Xcode tools and Homebrew OpenSSL. The helper requests static linkage with a fresh source build and checks that the Rust binding has no external OpenSSL dependency. Packaged smoke tests exercise AES-GCM and Scrypt in memory before publishing. See [PyCA's macOS build instructions](https://cryptography.io/en/50.0.0/installation/#building-cryptography-on-macos). Portable downloads include the result; end users do not need these build tools.
 
 CI is evidence for the environments listed above. It cannot reproduce every distribution, GPU, security policy, driver catalog, browser installation or user's approvals; incomplete or permission-limited inventories remain visible for review.
 
