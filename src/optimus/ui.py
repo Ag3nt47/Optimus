@@ -1827,7 +1827,13 @@ class WorkflowWorkerCard(QFrame):
         # measured height; otherwise its extra line can overlap fixed details.
         margins = self.layout().contentsMargins()
         width = max(1, self.contentsRect().width() - margins.left() - margins.right())
-        self.status.setFixedHeight(max(self.status.fontMetrics().lineSpacing(), self.status.heightForWidth(width)))
+        height = max(self.status.fontMetrics().lineSpacing(), self.status.heightForWidth(width))
+        if self.status.minimumHeight() == height and self.status.maximumHeight() == height:
+            return
+        # Resizing the scroll body also resizes every card. Invalidating an
+        # unchanged card here queues another body layout and can move focused
+        # content after QScrollArea has already scrolled it into view.
+        self.status.setFixedHeight(height)
         self.layout().invalidate()
         self.setMinimumHeight(self.layout().minimumSize().height())
 

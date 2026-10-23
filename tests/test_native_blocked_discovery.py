@@ -1,5 +1,6 @@
 """Read-only search evidence remains visible when an old installer blocks changes."""
 import copy
+from unittest.mock import Mock
 
 import pytest
 
@@ -105,6 +106,20 @@ def test_long_blocked_status_reflows_without_overlapping_the_count(progress, app
         assert card.progress.geometry().bottom() < card.elapsed.geometry().top()
     assert len({card.width() for card in progress.worker_cards.values()}) <= 2
     assert progress.rect().contains(progress.cancel_button.geometry())
+
+
+def test_unchanged_status_measurement_does_not_invalidate_scroll_layout_again(progress, app, monkeypatch):
+    progress.resize(640, 480)
+    progress.update_progress({'stage': 'Continue maintenance', 'percentage': 50,
+        'jobs': [blocked_job('software_updates', 5)]})
+    app.processEvents()
+    card = progress.worker_cards['software_updates']
+    card._fit_status()
+    invalidate = Mock(wraps=card.layout().invalidate)
+    monkeypatch.setattr(card.layout(), 'invalidate', invalidate)
+    for unused in range(5):
+        card._fit_status()
+    invalidate.assert_not_called()
 
 
 @pytest.mark.parametrize(('identity', 'evidence_key'), [('software_updates', 'app_scan'), ('driver_updates', 'driver_scan')])
