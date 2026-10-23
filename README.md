@@ -31,7 +31,7 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
-Version **0.11.8** separates each worker's **Overall** completion from its current-item ring. The ring shows the reported download, installation or operation percentage and resets for the next package or phase. Windows Update and supported WinGet output provide native progress where available; opaque installers remain indeterminate. CPU use and queue counts never substitute for an individual operation percentage.
+Version **0.11.9** separates each worker's **Overall** completion from its current-item ring. The ring shows the reported download, installation or operation percentage and resets for the next package or phase. Windows Update and supported WinGet output provide native progress where available; opaque installers remain indeterminate. CPU use and queue counts never substitute for an individual operation percentage.
 
 Version **0.11.7** checks GitHub for a newer stable Optimus release before normal startup maintenance. On supported Windows installations, **Yes — update then Auto Clean** downloads and verifies the release first, preserves saved choices, and performs a guarded restart before that unchanged approved cleanup. No or an unavailable check continues normal launch review. See [startup updates](docs/SELF_UPDATE.md) for verification, consent and platform limits.
 

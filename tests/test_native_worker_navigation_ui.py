@@ -216,7 +216,10 @@ def test_worker_has_overall_and_current_item_progress_independent_of_cpu(progres
 
 
 @pytest.mark.parametrize('identity', ['software_updates', 'driver_updates'])
-def test_item_ring_resets_for_each_package_and_phase_and_does_not_fake_terminal_success(progress, identity):
+def test_item_ring_resets_for_each_package_and_phase_and_does_not_fake_terminal_success(progress, identity, monkeypatch):
+    # Animation policy belongs to the environment, independently of progress.
+    # Pin it here; the reduced-motion behavior is exercised separately below.
+    monkeypatch.setattr("optimus.widgets.header_controls.motion_allowed", lambda config=None: True)
     window, backend = progress
     def publish(key, phase, percent, *, current=0, status='installing'):
         window.update_progress({'stage': 'Maintenance continues', 'percentage': 40,
@@ -237,6 +240,10 @@ def test_item_ring_resets_for_each_package_and_phase_and_does_not_fake_terminal_
     assert card.completion.text() == 'Overall: 50%'
     publish('Fixture.B', 'install', None, current=1)
     assert card.activity_ring.value_text() == '—'
+    monkeypatch.setattr("optimus.widgets.header_controls.motion_allowed", lambda config=None: False)
+    card.activity_ring._sync()
+    assert card.activity_ring.value_text() == '—' and not card.activity_ring.timer.isActive()
+    monkeypatch.setattr("optimus.widgets.header_controls.motion_allowed", lambda config=None: True)
     publish('Fixture.B', 'install', 99.99, current=1)
     assert card.activity_ring.value_text() == '99%'
     for status in ('failed', 'needs_review', 'cancelled', 'deferred', 'completed_with_errors', 'completed'):
