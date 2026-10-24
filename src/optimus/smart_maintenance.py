@@ -27,7 +27,8 @@ from .smart_configuration import SMART_DEFAULTS, validate_smart_configuration
 
 _SCOPES = ('cleanup_enabled', 'cleanup_age_days', 'cleanup_category_ids', 'intensity',
            'browser_cache_enabled', 'browser_history_enabled', 'browser_cookies_enabled',
-           'browser_download_history_enabled', 'browser_cleanup_browsers', 'browser_keep_domains')
+           'browser_download_history_enabled', 'browser_cleanup_browsers', 'browser_keep_domains',
+           'toolkit_settings', 'drive_space_guard_enabled', 'drive_space_guard_target_gib')
 
 
 def _number(value):
@@ -48,13 +49,14 @@ class SmartMaintenance:
     """
     def __init__(self, backend, *, settings_provider=None, clock=None, monotonic=None,
                  lease_factory=RunLease, barrier_reader=pending_updates_barrier,
-                 browser_runner=run_browser_cleanup, busy_reader=None):
+                 browser_runner=run_browser_cleanup, busy_reader=None, volume_reader=None):
         self.backend = backend
         self.data_dir = Path(backend.data_dir)
         self.directory = self.data_dir / 'smart-maintenance'
         self.settings_provider = settings_provider or backend.preferences
         self.clock, self.monotonic = clock or time.time, monotonic or time.monotonic
         self.lease_factory, self.barrier_reader, self.browser_runner = lease_factory, barrier_reader, browser_runner
+        self.volume_reader = volume_reader
         self.busy_reader = busy_reader or (lambda: bool(getattr(getattr(backend, 'workflow', None), 'active', False))
             or bool(getattr(getattr(backend, 'bridge', None), '_busy', False))
             or bool(getattr(getattr(backend, 'bridge', None), '_pending', {})))
@@ -71,6 +73,9 @@ class SmartMaintenance:
 
     def configure(self, saved_settings):
         configuration = validate_smart_configuration(saved_settings)
+        from .toolkit_configuration import validate_configuration
+        configuration['low_space_cleaning'] = validate_configuration(saved_settings.get('toolkit_settings', {}))['low_space_cleaning']
+        configuration['drive_space_guard_enabled'] = saved_settings.get('drive_space_guard_enabled', True)
         with self._lock:
             self._configuration = configuration
             if not configuration['browser_exit_cleaning_enabled']:
@@ -92,7 +97,7 @@ class SmartMaintenance:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return self.status()
-            if not any(self._configuration[key] for key in ('smart_cleaning_enabled', 'browser_exit_cleaning_enabled')):
+            if not self._enabled(self._configuration):
                 return self._publish(dict(self._status, status='disabled'))
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, name='Optimus Smart Maintenance', daemon=False)
@@ -127,7 +132,19 @@ class SmartMaintenance:
         age = settings.get('cleanup_age_days', 7)
         if type(age) is not int or not 0 <= age <= 3650:
             raise ValueError('The saved cleanup age is invalid.')
+        from .toolkit_configuration import validate_configuration
+        settings['toolkit_settings'] = validate_configuration(settings.get('toolkit_settings', {}))
+        enabled, target = settings.get('drive_space_guard_enabled', True), settings.get('drive_space_guard_target_gib', 2.0)
+        if type(enabled) is not bool or type(target) not in (int, float) or not math.isfinite(target) or not 1 <= target <= 2:
+            raise ValueError('Choose an explicit drive-space guard and a target from 1 to 2 GiB.')
+        settings.update(drive_space_guard_enabled=enabled, drive_space_guard_target_gib=target)
         return settings
+
+    @staticmethod
+    def _enabled(settings):
+        low = settings.get('low_space_cleaning', settings.get('toolkit_settings', {}).get('low_space_cleaning', {}))
+        return (any(settings[key] for key in ('smart_cleaning_enabled', 'browser_exit_cleaning_enabled'))
+                or low.get('enabled') is True and settings.get('drive_space_guard_enabled', True) is True)
 
     def _write(self, path, value):
         _ordinary_data_path(self.directory)
@@ -153,7 +170,7 @@ class SmartMaintenance:
                 or not isinstance(value['attempts'], dict) or len(value['attempts']) > 100):
             raise ValueError('Smart Maintenance history ownership or schema requires review.')
         for key, stamp in value['attempts'].items():
-            if not isinstance(key, str) or (key != 'junk' and not re.fullmatch(r'browser:[a-z][a-z0-9_-]{0,39}', key)) or not _number(stamp):
+            if not isinstance(key, str) or (key not in ('junk', 'low-space') and not re.fullmatch(r'browser:[a-z][a-z0-9_-]{0,39}', key)) or not _number(stamp):
                 raise ValueError('Smart Maintenance attempt history is malformed.')
         pending = value['pending']
         if pending is not None:
@@ -170,6 +187,9 @@ class SmartMaintenance:
         previous = state['attempts'].get(key)
         return previous is None or now - previous >= settings['smart_cleaning_cooldown_seconds']
 
+    def _junk_cool(self, state, now, settings):
+        return all(self._cool(state, key, now, settings) for key in ('junk', 'low-space'))
+
     def _categories(self, settings):
         selected = list(settings.get('cleanup_category_ids') or [])
         if settings.get('cleanup_enabled') is True:
@@ -182,10 +202,10 @@ class SmartMaintenance:
             and ':' not in identity and identity in known and known[identity].get('available') is True
             and not known[identity].get('process_names')))
 
-    def _scan(self, categories, settings):
+    def _scan(self, categories, settings, *, max_files=20_000, max_seconds=5):
         age = settings['cleanup_age_days']
         age = max(30, age) if settings.get('intensity') == 'Low' else age
-        plan = self.backend.cleaner.scan(categories, age, max_files=20_000, max_seconds=5)
+        plan = self.backend.cleaner.scan(categories, age, max_files=max_files, max_seconds=max_seconds)
         if isinstance(plan, dict) and isinstance(plan.get('id'), str) and re.fullmatch('[a-f0-9]{32}', plan['id']):
             self._unused_plans.append(plan['id'])
         if not isinstance(plan, dict) or not isinstance(plan.get('files'), list) or len(plan['files']) > 20_000:
@@ -203,7 +223,8 @@ class SmartMaintenance:
         if not isinstance(outcome, dict):
             raise ValueError('The cleanup did not return a result.')
         summary = {key: copy.deepcopy(outcome[key]) for key in
-            ('deleted_count', 'deleted_bytes', 'skipped_count', 'failed_items', 'cancelled', 'partial', 'log_path', 'note') if key in outcome}
+            ('deleted_count', 'deleted_bytes', 'skipped_count', 'failed_items', 'cancelled', 'partial', 'log_path', 'note',
+             'trigger_reason', 'volume_checks', 'target_met', 'volume_check_error') if key in outcome}
         summary['errors'] = [str(error)[:500] for error in outcome.get('errors', [])[:20]]
         if isinstance(outcome.get('items'), list):
             summary['items'] = []
@@ -238,7 +259,7 @@ class SmartMaintenance:
             if not isinstance(outcome, dict):
                 raise ValueError('The cleanup returned no usable outcome.')
             if outcome.get('cancelled') is not True:
-                if key == 'junk' and (any(type(outcome.get(field)) is not int or outcome[field] < 0 for field in
+                if key in ('junk', 'low-space') and (any(type(outcome.get(field)) is not int or outcome[field] < 0 for field in
                     ('deleted_count', 'deleted_bytes', 'skipped_count')) or not isinstance(outcome.get('errors'), list)):
                     raise ValueError('The junk cleanup result is incomplete; its outcome requires review.')
                 if key.startswith('browser:') and (type(outcome.get('failed_items')) is not int
@@ -257,6 +278,97 @@ class SmartMaintenance:
         state['pending'] = None
         self._write(self.directory / 'state.json', state)
         return {'trigger': key, 'status': receipt['status'], 'result': receipt['result'], 'receipt': str(self.directory / (identity + '.json'))}
+
+    def _low_space(self, settings, state, now, report, *, apply, cancelled):
+        from .low_space_cleanup import LowSpacePlanner, MAX_CATEGORIES, MAX_FILES, MAX_SCAN_SECONDS
+        if (settings['toolkit_settings']['low_space_cleaning']['enabled'] is not True
+                or settings['drive_space_guard_enabled'] is not True or not self._junk_cool(state, now, settings)):
+            return
+        planner = LowSpacePlanner(settings, volume_reader=self.volume_reader)
+        observation = planner.observe()
+        report['checks'].append({'kind': 'low_space', 'volumes': planner.summary(observation),
+            'note': 'Existing selected categories only; unknown or healthy volumes are preserved.'})
+        selected = self._categories(settings)
+        available = self.backend.cleaner.categories()
+        if not isinstance(available, list) or len(available) > 2000:
+            raise ValueError('Cleanup category roots are unavailable.')
+        known = {row['id']: row for row in available if isinstance(row, dict) and isinstance(row.get('id'), str)}
+        deadline = time.monotonic() + MAX_SCAN_SECONDS
+        scanned, inspected = 0, 0
+        for category_id in selected:
+            if cancelled():
+                break
+            if inspected >= MAX_CATEGORIES or scanned >= MAX_FILES or time.monotonic() >= deadline:
+                report['checks'].append({'kind': 'low_space_limit', 'note': 'The bounded low-space check ended; remaining categories await a later check.'})
+                report['status'] = 'partial'
+                break
+            category = known.get(category_id)
+            try:
+                observation = planner.observe()
+                target = planner.target(category, observation)
+                if target is None:
+                    continue
+                inspected += 1
+                plan = self._scan([category_id], settings, max_files=MAX_FILES - scanned,
+                    max_seconds=max(1, math.ceil(deadline - time.monotonic())))
+                scanned += len(plan['files'])
+                check = {'kind': 'low_space_category', 'category_id': category_id,
+                    'bytes': plan['total_bytes'], 'complete': self._complete(plan), 'mountpoint': target['mountpoint']}
+                report['checks'].append(check)
+                if not check['complete']:
+                    report['status'] = 'partial'
+                    continue
+                current, before = planner.revalidate(category, target, plan)
+                check['still_below_target'] = current is not None
+                if current is None or not plan['files'] or not apply or cancelled():
+                    continue
+            except (OSError, ValueError) as error:
+                report['checks'].append({'kind': 'low_space_category', 'category_id': category_id,
+                    'complete': False, 'error': type(error).__name__ + ': ' + str(error)[:1000]})
+                report['status'] = 'partial'
+                continue
+
+            def clean_category():
+                if cancelled() or self.busy_reader() or _scope(self._settings()) != _scope(settings):
+                    return {'cancelled': True, 'note': 'Cancelled, busy or saved choices changed before low-space cleanup.'}
+                barrier = self.barrier_reader(self.backend)
+                if barrier:
+                    return {'cancelled': True, 'note': 'Low-space cleanup deferred: ' + str(barrier)[:1000]}
+                from .adaptive_maintenance import checkpoint
+                readiness = checkpoint(self.backend)
+                if readiness is not None and not readiness['allowed']:
+                    return {'cancelled': True, 'note': 'Low-space cleanup deferred: ' + ' '.join(readiness['reasons'])}
+                try:
+                    current, before_apply = planner.revalidate(category, target, plan)
+                except (OSError, ValueError) as error:
+                    return {'cancelled': True, 'note': 'Low-space candidate verification deferred: ' + str(error)[:1000]}
+                if current is None:
+                    return {'cancelled': True, 'note': 'The volume recovered or changed; no low-space cleanup was started.'}
+                # Volume and file identity checks can take time. Resource/idle
+                # readiness must still permit entry after those checks finish.
+                readiness = checkpoint(self.backend)
+                if readiness is not None and not readiness['allowed']:
+                    return {'cancelled': True, 'note': 'Low-space cleanup deferred after file verification: ' + ' '.join(readiness['reasons'])}
+                if cancelled() or self.busy_reader() or _scope(self._settings()) != _scope(settings):
+                    return {'cancelled': True, 'note': 'Cancellation, activity or saved choices changed during the volume/file checks.'}
+                barrier = self.barrier_reader(self.backend)
+                if barrier:
+                    return {'cancelled': True, 'note': 'Low-space cleanup deferred: ' + str(barrier)[:1000]}
+                # Consume the original Cleaner preview unchanged. This helper
+                # cannot forge or widen its privately retained approval records.
+                outcome = self.backend.cleaner.apply(plan)
+                if not isinstance(outcome, dict):
+                    raise ValueError('The low-space cleanup returned no usable result.')
+                outcome.update(trigger_reason='low_space', volume_checks={'before': planner.summary(before_apply)},
+                               target_met=None)
+                try:
+                    after = planner.observe()
+                    outcome['volume_checks']['after'] = planner.summary(after)
+                    outcome['target_met'] = planner.recovered(category, target, after)
+                except (OSError, ValueError) as error:
+                    outcome['volume_check_error'] = type(error).__name__ + ': ' + str(error)[:1000]
+                return outcome
+            report['actions'].append(self._attempt(state, 'low-space', now, clean_category, cancelled))
 
     def _browser_transition(self, browser_id, status, current):
         rows = status.get('processes') if isinstance(status, dict) else None
@@ -297,7 +409,7 @@ class SmartMaintenance:
             if cancelled():
                 report['status'] = 'cancelled'
                 return self._publish(report)
-            if not any(settings[key] for key in ('smart_cleaning_enabled', 'browser_exit_cleaning_enabled')):
+            if not self._enabled(settings):
                 report['status'] = 'disabled'
                 return self._publish(report)
             if apply and self.busy_reader():
@@ -318,7 +430,8 @@ class SmartMaintenance:
                 now, current = self.clock(), self.monotonic()
                 if not _number(now) or not _number(current):
                     raise ValueError('The monitoring clock is invalid.')
-                if settings['smart_cleaning_enabled'] and self._cool(state, 'junk', now, settings):
+                self._low_space(settings, state, now, report, apply=apply, cancelled=cancelled)
+                if settings['smart_cleaning_enabled'] and self._junk_cool(state, now, settings):
                     categories = self._categories(settings)
                     if categories and not cancelled():
                         plan = self._scan(categories, settings)

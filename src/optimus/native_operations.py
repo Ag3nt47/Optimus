@@ -339,11 +339,20 @@ class NativePackages:
         self._last_scan = result
         return result
 
-    def apply(self, identity, *, confirmed=False, cancel_event=None):
+    def apply(self, identity, *, confirmed=False, cancel_event=None, progress_callback=None):
         if confirmed is not True:
             raise ValueError('Explicit package update approval is required.')
+        if progress_callback is not None and not callable(progress_callback):
+            raise ValueError('An optional native install progress observer must be callable.')
         if not isinstance(identity, str) or len(identity) > 280:
             raise ValueError('Choose one exact native package identity.')
+        def observe(phase, percent=None, *, terminal=False):
+            if progress_callback is not None:
+                try:
+                    progress_callback({'key': 'software:update:' + identity, 'label': identity,
+                        'phase': phase, 'percent': percent, 'item_terminal': terminal})
+                except Exception:
+                    pass  # Display failures cannot abandon or replay native work.
         with self._lock:
             no_install = {'installer_started': False, 'outcomeKnown': True, 'running': False}
             if cancel_event is not None and cancel_event.is_set():
@@ -361,6 +370,9 @@ class NativePackages:
             if shutil.disk_usage(Path.home()).free < 2 * 1024 ** 3:
                 return {**no_install, 'exitCode': 0, 'skipped': True, 'requiresReview': True,
                         'note': 'At least 2 GiB free on the user filesystem is required before installation; individual packages may need more.'}
+            # Native broker commands expose no authenticated intermediate
+            # percentage through this adapter. Keep the install indeterminate.
+            observe('install')
             if self.manager == 'brew':
                 argv = [self.executable, 'upgrade', '--formula' if item['kind'] == 'formula' else '--cask', '--', item['native_name']]
                 result = self.runner.run(argv, timeout=900, cancel_event=cancel_event)
@@ -377,6 +389,7 @@ class NativePackages:
             if result.get('cancelled'):
                 return dict(result, **no_install)
             result.update(installer_started=True, outcomeKnown=True, running=False)
+            observe('verify')
             after = next((row for row in self.installed() if row['id'] == identity), None)
             result['installed_version'] = after['version'] if after else None
             result['verified'] = bool(result['exitCode'] == 0 and after and after['version'] == item['available'] and after['version'] != item['version'])
@@ -384,6 +397,8 @@ class NativePackages:
             if result['exitCode'] == 0 and not result['verified']:
                 result['requiresReview'] = True
                 result['note'] = 'The package manager returned success but the installed-version change could not be verified.'
+            if result['verified'] is True and result.get('restartNeeded') is not True:
+                observe('install', 100.0, terminal=True)
             return result
 
 

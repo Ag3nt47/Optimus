@@ -96,3 +96,22 @@ def test_backend_wrappers_forward_the_same_callback_without_constructing_service
     Backend.cleanup_apply(fixture, {'id': 'fixture'}, progress_callback=observer)
     Backend.apply_system_privacy(fixture, {}, progress_callback=observer)
     assert len(calls) == 3 and all(options['progress_callback'] is observer for _, options in calls)
+
+
+def test_workflow_routes_exact_debloat_item_progress_and_does_not_retry_errors(tmp_path):
+    backend = MockBackend(tmp_path)
+    calls, events = [], []
+    def apply(plan, *, progress_callback=None):
+        calls.append(plan)
+        progress_callback({'current': 0, 'total': 2, 'item': 1, 'id': 'mock-target',
+            'item_progress': {'key': 'debloat:consumer-apps:mock-target', 'label': 'Fixture app',
+                              'phase': 'uninstall', 'percent': 37}, 'description': 'Uninstall: Fixture app'})
+        raise TypeError('Fixture error after removal entry')
+    backend.debloat_apply = apply
+    report = Workflow(backend).run(config(cleanup_enabled=False, consumer_debloat_enabled=True), events.append)
+    assert len(calls) == 1
+    item = next(event for event in events if (event.get('item_progress') or {}).get('phase') == 'uninstall')
+    assert item['item_progress']['percent'] == 37
+    assert item['stage'] == 'Remove selected consumer app group'
+    assert item['percentage'] != item['item_progress']['percent']
+    assert next(stage for stage in report['stages'] if stage['title'] == item['stage'])['status'] == 'failed'

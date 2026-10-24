@@ -66,7 +66,7 @@ class FixtureMaintenance:
     def _pin_status(self, package):
         return self.pin
 
-    def _run(self, arguments, *, timeout):
+    def _run(self, arguments, *, timeout, progress_callback=None):
         self.commands.append(list(arguments))
         operation = arguments[1]
         identity = arguments[arguments.index('--id') + 1] if '--id' in arguments else IDENTITY
@@ -81,6 +81,8 @@ class FixtureMaintenance:
             return result(catalog_text(identity, version, self.kind))
         assert operation in ('install', 'uninstall'), arguments
         self.actions.append(list(arguments))
+        if progress_callback is not None:
+            progress_callback({'phase': operation, 'percent': 12.0})
         if self.error:
             raise self.error
         if self.mutate:
@@ -143,7 +145,7 @@ def test_missing_app_is_installed_with_exact_quiet_release_and_fresh_readback(ba
     for flag in ('--force', '--ignore-security-hash', '--allow-reboot', '--purge', '--override', '--uninstall-previous'):
         assert flag not in command
     assert command[command.index('--version') + 1] == '2.0'
-    assert gate.call_count == progress.call_count == 1
+    assert gate.call_count == 1 and progress.call_count >= 3
     receipt, = journals(backend)
     assert receipt['status'] == 'completed' and receipt['installer_prepared'] is True
     assert receipt['result']['items'][0]['result']['verified'] is True
@@ -175,6 +177,69 @@ def test_installed_app_is_removed_at_exact_installed_version(backend):
     assert '--all' not in command and '--purge' not in command
     assert report['items'][0]['result']['after'] is None
     assert report['items'][0]['status'] == 'completed'
+
+
+@pytest.mark.parametrize('action,desired', [('install', 'keep_installed'), ('uninstall', 'keep_uninstalled')])
+def test_presence_reports_native_item_progress_and_only_finishes_after_readback(backend, action, desired):
+    if action == 'uninstall':
+        backend.maintenance.installed[IDENTITY] = '1.0'
+    events = []
+    report = apply(backend, settings(desired=desired), item_callback=events.append)
+    values = [event['item_progress'] for event in events]
+    assert values[0]['phase'] == action and values[0]['percent'] is None
+    assert any(value['phase'] == action and value['percent'] == 12.0 for value in values)
+    assert values[-2]['phase'] == 'verify' and values[-2]['percent'] is None
+    assert values[-1]['phase'] == action and values[-1]['percent'] == 100.0
+    assert all(value['key'] == 'presence:winget:' + IDENTITY for value in values)
+    assert report['items'][0]['result']['verified'] is True
+
+
+@pytest.mark.parametrize('problem', ['postcondition', 'native_failure', 'restart', 'incomplete'])
+def test_presence_never_reports_terminal_100_for_unverified_or_restart_outcome(backend, problem):
+    backend.maintenance.installed[IDENTITY] = '1.0'
+    if problem == 'postcondition':
+        backend.maintenance.mutate = False
+    elif problem == 'native_failure':
+        backend.maintenance.native_code = 1603
+    elif problem == 'restart':
+        backend.maintenance.native_code = 3010
+    else:
+        original = backend.maintenance._run
+        def incomplete(arguments, **options):
+            native = original(arguments, **options)
+            if arguments[1] == 'uninstall':
+                native.capture_complete = False
+            return native
+        backend.maintenance._run = incomplete
+    events = []
+    report = apply(backend, settings(desired='keep_uninstalled'), item_callback=events.append)
+    assert not any(event['item_progress']['percent'] == 100 for event in events)
+    assert len(backend.maintenance.actions) == 1
+    if problem == 'incomplete':
+        assert report['outcomeKnown'] is False
+        assert journals(backend)[0]['status'] == 'uncertain'
+
+
+def test_presence_progress_resets_for_next_identity_and_cannot_receive_late_ticks(backend):
+    config = settings(desired='keep_uninstalled')
+    config['software_app_rules'].append(dict(config['software_app_rules'][0], id='Example.Second'))
+    backend.maintenance.installed = {IDENTITY: '1.0', 'Example.Second': '1.0'}
+    callbacks, events = [], []
+    original = backend.maintenance._run
+    def run(arguments, *, timeout, progress_callback=None):
+        if progress_callback is not None:
+            callbacks.append(progress_callback)
+        return original(arguments, timeout=timeout, progress_callback=progress_callback)
+    backend.maintenance._run = run
+    report = apply(backend, config, item_callback=events.append)
+    assert len(report['items']) == 2 and all(row['status'] == 'completed' for row in report['items'])
+    starts = [event for event in events if event.get('progress_only') is not True]
+    assert [event['item_progress']['percent'] for event in starts] == [None, None]
+    assert starts[0]['item_progress']['key'] != starts[1]['item_progress']['key']
+    count = len(events)
+    for callback in callbacks:
+        callback({'phase': 'uninstall', 'percent': 50.0})
+    assert len(events) == count
 
 
 @pytest.mark.parametrize('desired,installed', [('keep_installed', True), ('keep_uninstalled', False)])

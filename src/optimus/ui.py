@@ -969,12 +969,12 @@ class DetailedSettingsWindow(QMainWindow):
         layout = self.layouts['Applications']
         bar = self._toolbar(layout)
         self._button(bar, 'Refresh programs', self.load_apps)
-        self._button(bar, 'Uninstall selected', self.uninstall_app)
+        self._button(bar, 'Review uninstall', self.uninstall_app)
         self._button(bar, 'Windows Installed apps', lambda: self._run('system_tool', 'installed-apps'))
         bar.addStretch()
         self.apps_table = DataTable([('Program', 'Name'), ('Version', 'Version'), ('Publisher', 'Publisher'), ('Type', 'Type'), ('Location', 'InstallLocation')])
         layout.addWidget(self.apps_table, 1)
-        self._note(layout, 'Use the supported uninstaller. Removal may affect application data and is not undone by restoring an Optimus settings record.')
+        self._note(layout, 'This review opens the supported system controls or a native removal plan; it does not run a managed uninstall. External uninstallers show their own progress. Automatic maintenance shows removal percentages when its provider reports them. Removal may affect application data and is not undone by restoring an Optimus settings record.')
 
     def load_apps(self):
         self._run('installed_apps', done=lambda r: self._page_table_ready('Applications', self.apps_table, r))
@@ -2242,7 +2242,7 @@ class WorkflowWorkerCard(QFrame):
             or legacy_unsearched)
         labels = {'not_started': 'Not started', 'not_run': 'Not run', 'not_selected': 'Not selected', 'pending': 'Queued',
                   'running': 'Running', 'waiting': 'Running; maintenance is waiting',
-                  'scanning': 'Scanning', 'preparing': 'Preparing', 'installing': 'Installing',
+                  'scanning': 'Scanning', 'preparing': 'Preparing', 'installing': 'Installing', 'uninstalling': 'Uninstalling',
                   'waiting_for_maintenance': 'Waiting for maintenance',
                   'waiting_for_installer': 'Waiting for installer',
                   'waiting_for_preparation': 'Waiting for update preparation',
@@ -2255,6 +2255,15 @@ class WorkflowWorkerCard(QFrame):
         if (not maintenance and raw_status in ('running', 'installing') and self._item_progress is not None
                 and self._item_progress.get('phase') in ('download', 'downloading')):
             self.status.setText('Downloading')
+        if raw_status in ('running', 'installing', 'uninstalling') and self._item_progress is not None:
+            item_phase = self._item_progress.get('phase')
+            operation = {'install': 'Installing', 'installing': 'Installing',
+                         'uninstall': 'Uninstalling', 'uninstalling': 'Uninstalling'}.get(item_phase)
+            if operation:
+                item_percent = self._item_progress.get('percent')
+                percent_text = ('percentage unavailable' if item_percent is None else
+                    ('~' if self._item_progress.get('estimated') is True else '') + str(int(item_percent)) + '%')
+                self.status.setText(operation + ' · ' + percent_text)
         if self._finished_with_skips:
             self.status.setText('Finished with skips' + ('; scan incomplete' if state.get('scan_complete') is not True else ''))
         self.status.setStyleSheet('color:#e8b34b;' if self._finished_with_skips else '')
@@ -2311,7 +2320,7 @@ class WorkflowWorkerCard(QFrame):
             self._elapsed_base = None
         elif self._elapsed_base is not None and self._elapsed_active and self._elapsed_clock.isValid():
             self._elapsed_base += self._elapsed_clock.elapsed() / 1000
-        self._elapsed_active = not scan_not_started and raw_status in ('pending', 'running', 'waiting', 'scanning', 'preparing', 'installing',
+        self._elapsed_active = not scan_not_started and raw_status in ('pending', 'running', 'waiting', 'scanning', 'preparing', 'installing', 'uninstalling',
                                              'waiting_for_maintenance', 'waiting_for_installer', 'waiting_for_preparation')
         self._elapsed_clock.start()
         self.refresh_elapsed()
@@ -2725,9 +2734,14 @@ class OptimizationProgressWindow(QDialog):
             reason_groups = {}
             def job_status_text(job):
                 item = job.get('item_progress')
-                if (job.get('status') in ('running', 'installing') and isinstance(item, dict)
-                        and item.get('phase') in ('download', 'downloading')):
-                    return 'downloading'
+                if job.get('status') in ('running', 'installing', 'uninstalling') and isinstance(item, dict):
+                    item_phase = item.get('phase')
+                    if item_phase in ('download', 'downloading'):
+                        return 'downloading'
+                    if item_phase in ('install', 'installing'):
+                        return 'installing'
+                    if item_phase in ('uninstall', 'uninstalling'):
+                        return 'uninstalling'
                 if (job.get('presentation_status') == 'finished_with_skips' and job.get('worker_finished') is True
                         and job.get('continuation_blocked') is False):
                     return 'finished with skips' + ('; scan incomplete' if job.get('scan_complete') is not True else '')

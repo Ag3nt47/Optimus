@@ -144,6 +144,28 @@ def test_native_percent_parsing_is_phase_bound_and_never_infers_terminal_success
     assert events[-1]=={'phase':'working','percent':None}
 
 
+def test_native_uninstall_percent_parsing_requires_provider_phase_and_never_claims_success():
+    events = []
+    parser = winget.WinGetProgressParser(events.append)
+    parser.feed('45%\rStarting package uninstall...\n\x1b[32m████ 42%\x1b[0m\r99%\r100%\rSuccessfully uninstalled\n')
+    assert events[0] == {'phase': 'working', 'percent': None}
+    assert {'phase': 'uninstall', 'percent': 42.0} in events
+    assert {'phase': 'uninstall', 'percent': 99.0} in events
+    assert not any(event['percent'] == 100 for event in events)
+    assert events[-1]['percent'] is None
+    parser.feed('87%\r')
+    assert events[-1] == {'phase': 'working', 'percent': None}
+
+
+def test_bound_uninstall_terminal_closes_reporter_and_drops_late_native_ticks():
+    events = []
+    reporter = items.BoundItemProgress(events.append, 'presence:winget:A.B', 'A.B')
+    reporter({'phase': 'uninstall', 'percent': None})
+    reporter({'phase': 'uninstall', 'percent': 100, 'item_terminal': True})
+    reporter({'phase': 'uninstall', 'percent': 12})
+    assert [event['item_progress']['percent'] for event in events] == [None, 100.0]
+
+
 @pytest.mark.parametrize('line,expected', [('12.5 MB / 25.0 MB',50.0),('0 KB / 25 KB',0.0),
     ('25 MB / 25 MB',99.0),('25 KB / 0 KB',None),('26 MB / 25 MB',None),
     ('512 KB / 1 MB',50.0),('12,5 MB / 25,0 MB',None),('-1 MB / 25 MB',None)])

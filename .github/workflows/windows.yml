@@ -64,6 +64,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-Maintenance.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-UninstallProgress.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-RegistryTools.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-RegistryIntegration.ps1

@@ -21,6 +21,18 @@ Fullscreen detection is best effort across mixed-DPI displays. A deferred action
 is recorded and the remaining eligible work continues. A later approved run or
 Smart Cleaning tick can retry when conditions improve.
 
+The Health tab also offers **low-space cleaning**, separately off by default.
+While Optimus remains open after launch approval, this can trigger the existing
+selected junk/cache categories when a verified local drive falls below its saved
+1–2 GiB free-space target, even when the 500 MB junk-size trigger is off. The
+drive-space guard must remain enabled. It does not add any cleanup folder or
+browser-data scope, lower the saved age, close an application or reserve storage.
+Each bounded category batch retains the normal identity checks, maintenance lock,
+installer/readiness gates and junk-cleaning cooldown. Current drive space is
+checked before applying and after each batch; healthy or unknown volumes are
+preserved. Further eligible categories stop when space recovers. A target can
+remain unmet when approved files are insufficient, busy or changed.
+
 ## Clean exact application caches
 
 App caches offers separate Discord, Spotify, Steam and Teams selections, an age

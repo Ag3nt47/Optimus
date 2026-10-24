@@ -1268,6 +1268,8 @@ class InitialSetupWizard(QWizard):
             actions.append('Read-only drive-space checks before and after maintenance; warn below '
                 + str(settings.get('drive_space_guard_target_gib', 2.0))
                 + ' GiB free. This is not an exclusive disk reservation and grants no extra deletion.')
+        if settings.get('toolkit_settings', {}).get('low_space_cleaning', {}).get('enabled') is True:
+            actions.append('Low-space cleaning while Optimus is open after approval: clean only already selected eligible junk/cache categories on verified local drives below the saved free-space target. Requires the drive-space guard; saved ages and cooldown apply. Browser data and unselected categories stay excluded; sufficient space is not guaranteed.')
         if settings.get('smart_cleaning_enabled'):
             actions.append('Smart Cleaning while Optimus is open after session approval: check only saved junk categories every '
                 + str(settings['smart_maintenance_poll_seconds']) + ' seconds; clean at '

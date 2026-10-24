@@ -154,6 +154,31 @@ def test_unrelated_valid_nonce_and_malformed_progress_do_not_change_current_item
     complete(transport, task)
 
 
+def test_exact_native_removal_item_identity_survives_progress_transport(transport):
+    seen = []
+    task = request_in_thread(transport, seen.append)
+    value = {'key': 'debloat:consumer-apps:appx-fixture', 'label': 'Fixture app',
+             'phase': 'uninstall', 'percent': 41}
+    frame(transport.process, {'kind': 'progress', 'id': task.request_id, 'progress': value})
+    wait_for(lambda: seen)
+    assert seen == [dict(value, percent=41.0)]
+    assert task.request_id in pending(transport.bridge)
+    complete(transport, task)
+
+
+@pytest.mark.parametrize('fields', [{'key': 'A'}, {'label': 'A'}, {'key': '', 'label': 'A'},
+                                  {'key': 'A', 'label': None}])
+def test_partial_or_invalid_native_item_identity_is_not_replaced_by_generic_identity(transport, fields):
+    seen = []
+    task = request_in_thread(transport, seen.append)
+    frame(transport.process, {'kind': 'progress', 'id': task.request_id,
+        'progress': dict(fields, phase='uninstall', percent=77)})
+    tick(transport.process, task.request_id, 'checking', 12)
+    wait_for(lambda: seen)
+    assert seen == [{'phase': 'checking', 'percent': 12.0}]
+    complete(transport, task)
+
+
 def test_callback_exception_cannot_abort_or_replay_the_native_operation(transport):
     observer = Mock(side_effect=RuntimeError('Disposable observer failure.'))
     task = request_in_thread(transport, observer)

@@ -64,6 +64,54 @@ def test_cosmetic_changes_and_key_order_do_not_change_approved_actions():
     assert matches_unattended(dict(reversed(list(saved.items()))))
 
 
+@pytest.mark.parametrize('change', [dict(drive_space_guard_enabled=False),
+    dict(drive_space_guard_target_gib=1.5), dict(drive_space_guard_target_gib=2.0)])
+def test_low_space_cleanup_approval_binds_guard_and_target(change):
+    saved = approved(toolkit_settings={'low_space_cleaning': {'enabled': True}},
+        drive_space_guard_enabled=True, drive_space_guard_target_gib=1.0)
+    assert matches_unattended(saved)
+    changed = copy.deepcopy(saved)
+    changed.update(change)
+    assert not matches_unattended(changed)
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_low_space_guard_toggle_is_scoped_even_when_initially_disabled(enabled):
+    saved = approved(toolkit_settings={'low_space_cleaning': {'enabled': True}},
+        drive_space_guard_enabled=enabled)
+    assert matches_unattended(saved)
+    saved['drive_space_guard_enabled'] = not enabled
+    assert not matches_unattended(saved)
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_drive_guard_remains_read_only_exclusion_when_low_space_cleaning_is_off(legacy):
+    settings = Preferences.validate(dict(DEFAULTS, setup_version=2, unattended_auto_clean_enabled=True))
+    if legacy:
+        settings['toolkit_settings'].pop('low_space_cleaning')
+    saved = approve_unattended_settings(settings)
+    saved.update(drive_space_guard_enabled=False, drive_space_guard_target_gib=1.25)
+    assert matches_unattended(saved)
+
+
+@pytest.mark.parametrize('key,value', [('drive_space_guard_enabled', 1),
+    ('drive_space_guard_target_gib', None), ('drive_space_guard_target_gib', True),
+    ('drive_space_guard_target_gib', float('nan')), ('drive_space_guard_target_gib', 3)])
+def test_invalid_low_space_guard_cannot_keep_or_gain_unattended_approval(key, value):
+    saved = approved(toolkit_settings={'low_space_cleaning': {'enabled': True}})
+    saved[key] = value
+    assert not matches_unattended(saved)
+    with pytest.raises(ValueError):
+        approve_unattended_settings(saved)
+
+
+@pytest.mark.parametrize('key', ['drive_space_guard_enabled', 'drive_space_guard_target_gib'])
+def test_missing_low_space_guard_cannot_keep_automatic_deletion_approval(key):
+    saved = approved(toolkit_settings={'low_space_cleaning': {'enabled': True}})
+    del saved[key]
+    assert not matches_unattended(saved)
+
+
 def test_turning_off_then_on_cannot_revive_a_previous_approval():
     saved = approved()
     disabled = Preferences.validate(dict(saved, unattended_auto_clean_enabled=False))

@@ -122,8 +122,21 @@ function Start-OptimusDesktopEdgeScript {
     return [pscustomobject]@{id=$Target.id;name=$Target.name;status='Opened original script in a visible administrator console; its APPLY gate controls execution';removed=$false;processId=$process.Id;restartNeeded=$false;requiresUserInteraction=$true;sha256=$Target.sha256}
 }
 
+function Publish-OptimusMaintenanceProgress {
+    param([scriptblock]$ProgressCallback,[string]$Action,$Target,
+        [ValidateSet('uninstall','verify','failed','review')][string]$Phase,$Percent)
+    if ($null -eq $ProgressCallback) { return }
+    try {
+        # The existing cmdlets/registered uninstallers do not expose a stable
+        # intermediate percentage here. Never estimate one from elapsed time.
+        $null = & $ProgressCallback ([pscustomobject]@{
+            key=('debloat:'+$Action+':'+[string]$Target.id)
+            label=[string]$Target.name;phase=$Phase;percent=$Percent
+        })
+    } catch { } # Display failures must not interrupt a native removal.
+}
 function Invoke-OptimusEdgeUninstall {
-    param([Parameter(Mandatory=$true)]$Target)
+    param([Parameter(Mandatory=$true)]$Target,[scriptblock]$ProgressCallback)
     if ($Target.method -eq 'windows-dialog') {
         Start-Process 'ms-settings:appsfeatures' -ErrorAction Stop
         return [pscustomobject]@{id=$Target.id;name=$Target.name;status='Windows uninstall settings opened';removed=$false;restartNeeded=$false}
@@ -138,6 +151,7 @@ function Invoke-OptimusEdgeUninstall {
         if ($Target.payload.systemLevel) { $arguments+='--system-level' }
     } else { throw 'Unsupported Edge uninstall method.' }
     $process=Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
+    Publish-OptimusMaintenanceProgress -ProgressCallback $ProgressCallback -Action edge -Target $Target -Phase verify -Percent $null
     $remaining=@(Get-OptimusEdgeTarget)
     $exitCode=[int]$process.ExitCode
     $exitCodeHex='0x'+([BitConverter]::ToUInt32([BitConverter]::GetBytes($exitCode),0)).ToString('X8')
@@ -152,7 +166,7 @@ function Invoke-OptimusEdgeUninstall {
     return [pscustomobject]@{id=$Target.id;name=$Target.name;status=$status;reason=$reason;removed=$verified;exitCode=$exitCode;exitCodeHex=$exitCodeHex;restartNeeded=($exitCode -eq 3010);requiresReview=(-not $verified);skipped=$noMatchingPackage;remainingDetected=($remaining.Count -gt 0);note=$note}
 }
 function Invoke-OptimusMaintenanceRequest {
-    param([Parameter(Mandatory=$true)][string]$Operation,$Arguments)
+    param([Parameter(Mandatory=$true)][string]$Operation,$Arguments,[scriptblock]$ProgressCallback)
     if ($Operation -notin @('maintenance_preview','maintenance_apply')) { throw 'Unknown maintenance operation.' }
     $action=[string]$Arguments.action
     if ($action -notin @('consumer-apps','m365','outlook','edge','office-desktop','desktop-edge-script')) { throw 'Unknown optional-app action.' }
@@ -184,19 +198,29 @@ function Invoke-OptimusMaintenanceRequest {
     # Revalidation for every selected target completes before the first mutation.
     $results=@()
     foreach ($target in $selected) {
+        $progressPhase=if($target.kind -in @('office-dialog','desktop-edge-script') -or
+            ($target.kind -eq 'edge' -and $target.method -eq 'windows-dialog')){'review'}else{'uninstall'}
+        $nativeRestartNeeded=$null
+        Publish-OptimusMaintenanceProgress -ProgressCallback $ProgressCallback -Action $action -Target $target -Phase $progressPhase -Percent $null
         try {
             switch ($target.kind) {
                 'appx' {
                     Remove-AppxPackage -Package ([string]$target.packageFullName) -ErrorAction Stop
+                    Publish-OptimusMaintenanceProgress -ProgressCallback $ProgressCallback -Action $action -Target $target -Phase verify -Percent $null
                     if (@(Get-AppxPackage -Name $target.name | Where-Object { $_.PackageFullName -ceq $target.packageFullName }).Count) { throw 'The app remains registered for this account.' }
                     $results+=[pscustomobject]@{id=$target.id;name=$target.name;scope=$target.scope;status='Removed';removed=$true;restartNeeded=$false}
                 }
                 'provisioned' {
-                    Remove-AppxProvisionedPackage -Online -PackageName ([string]$target.packageFullName) -ErrorAction Stop | Out-Null
+                    $nativeRemoval=@(Remove-AppxProvisionedPackage -Online -PackageName ([string]$target.packageFullName) -ErrorAction Stop)
+                    if($nativeRemoval.Count -eq 1 -and $nativeRemoval[0].RestartNeeded -is [bool]){
+                        $nativeRestartNeeded=$nativeRemoval[0].RestartNeeded
+                    }
+                    Publish-OptimusMaintenanceProgress -ProgressCallback $ProgressCallback -Action $action -Target $target -Phase verify -Percent $null
                     if (@(Get-AppxProvisionedPackage -Online | Where-Object { $_.PackageName -ceq $target.packageFullName }).Count) { throw 'The package remains provisioned.' }
-                    $results+=[pscustomobject]@{id=$target.id;name=$target.name;scope=$target.scope;status='Provisioning removed for future new accounts';removed=$true;restartNeeded=$false}
+                    $status=if($nativeRestartNeeded -eq $true){'Provisioning removed for future new accounts; restart required'}elseif($null -eq $nativeRestartNeeded){'Provisioning removed for future new accounts; restart status requires review'}else{'Provisioning removed for future new accounts'}
+                    $results+=[pscustomobject]@{id=$target.id;name=$target.name;scope=$target.scope;status=$status;removed=$true;restartNeeded=$nativeRestartNeeded;requiresReview=($nativeRestartNeeded -ne $false)}
                 }
-                'edge' { $results+=Invoke-OptimusEdgeUninstall -Target $target }
+                'edge' { $results+=Invoke-OptimusEdgeUninstall -Target $target -ProgressCallback $ProgressCallback }
                 'desktop-edge-script' { $results+=Start-OptimusDesktopEdgeScript -Target $target }
                 'office-dialog' {
                     Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\control.exe') -ArgumentList 'appwiz.cpl' -ErrorAction Stop
@@ -204,7 +228,18 @@ function Invoke-OptimusMaintenanceRequest {
                 }
                 default { throw 'Unsupported target kind.' }
             }
-        } catch { $results+=[pscustomobject]@{id=$target.id;name=$target.name;status='Failed or partially removed';error=$_.Exception.Message;removed=$false;restartNeeded=$false} }
+        } catch { $results+=[pscustomobject]@{id=$target.id;name=$target.name;status='Failed or partially removed';error=$_.Exception.Message;removed=$false;restartNeeded=$(if($target.kind -eq 'provisioned'){$nativeRestartNeeded}else{$false});requiresReview=$true} }
+        $last=$results[-1]
+        if($last.removed -eq $true -and $last.restartNeeded -is [bool] -and $last.restartNeeded -eq $false){
+            Publish-OptimusMaintenanceProgress -ProgressCallback $ProgressCallback -Action $action -Target $target -Phase uninstall -Percent 100
+        }elseif($last.removed -eq $true){
+            Publish-OptimusMaintenanceProgress -ProgressCallback $ProgressCallback -Action $action -Target $target -Phase review -Percent $null
+        }elseif($progressPhase -ne 'review'){
+            Publish-OptimusMaintenanceProgress -ProgressCallback $ProgressCallback -Action $action -Target $target -Phase failed -Percent $null
+        }
     }
-    return [pscustomobject]@{action=$action;results=$results;restartNeeded=(@($results | Where-Object restartNeeded).Count -gt 0);note='Only selected scopes were processed. Store reinstalls do not restore deleted app-local data.'}
+    $restartNeeded=$false
+    if(@($results|Where-Object{$_.restartNeeded -is [bool] -and $_.restartNeeded -eq $true}).Count){$restartNeeded=$true}
+    elseif(@($results|Where-Object{$_.restartNeeded -isnot [bool]}).Count){$restartNeeded=$null}
+    return [pscustomobject]@{action=$action;results=$results;restartNeeded=$restartNeeded;requiresReview=(@($results|Where-Object{$_.requiresReview -eq $true}).Count -gt 0);note='Only selected scopes were processed. Store reinstalls do not restore deleted app-local data.'}
 }

@@ -5,6 +5,7 @@ import copy
 import hashlib
 import hmac
 import json
+import math
 import re
 
 UNATTENDED_DEFAULTS = {'unattended_auto_clean_enabled': False,
@@ -13,6 +14,7 @@ UNATTENDED_SETUP_VERSION = 2
 _EXCLUDED = frozenset(('unattended_scope_hash', 'reduce_motion', 'theme', 'motion',
                        'ui_theme', 'ui_motion_enabled',
                        'drive_space_guard_enabled', 'drive_space_guard_target_gib'))
+_LOW_SPACE_GUARD_KEYS = frozenset(('drive_space_guard_enabled', 'drive_space_guard_target_gib'))
 
 
 def validate_unattended_configuration(settings):
@@ -36,7 +38,23 @@ def validate_unattended_configuration(settings):
 
 
 def _scope_hash(settings):
-    value = {key: value for key, value in settings.items() if key not in _EXCLUDED}
+    toolkit = settings.get('toolkit_settings', {})
+    if not isinstance(toolkit, dict):
+        raise ValueError('The unattended maintenance toolkit scope is invalid.')
+    low_space = toolkit.get('low_space_cleaning', {})
+    if not isinstance(low_space, dict) or type(low_space.get('enabled', False)) is not bool:
+        raise ValueError('The unattended low-space cleanup choice is invalid.')
+    excluded = _EXCLUDED
+    if low_space.get('enabled') is True:
+        enabled, target = settings.get('drive_space_guard_enabled'), settings.get('drive_space_guard_target_gib')
+        if (type(enabled) is not bool or type(target) not in (int, float)
+                or not math.isfinite(target) or not 1 <= target <= 2):
+            raise ValueError('Low-space cleanup approval requires the exact saved drive guard and target.')
+        # These fields were read-only observations before low-space cleanup.
+        # Preserve older hashes when it is off, but bind them to approval when
+        # they can change which automatic deletion batches are eligible.
+        excluded = _EXCLUDED - _LOW_SPACE_GUARD_KEYS
+    value = {key: value for key, value in settings.items() if key not in excluded}
     try:
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'),
                              ensure_ascii=True, allow_nan=False).encode('ascii')

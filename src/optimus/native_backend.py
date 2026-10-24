@@ -380,8 +380,9 @@ class NativeBackend(Backend):
     def update_app(self, package_id):
         return self.native_packages.apply(package_id, confirmed=True)
 
-    def update_app_unattended(self, package_id, *, cancel_event=None):
-        return self.native_packages.apply(package_id, confirmed=True, cancel_event=cancel_event)
+    def update_app_unattended(self, package_id, *, cancel_event=None, progress_callback=None):
+        options = {'progress_callback': progress_callback} if progress_callback is not None else {}
+        return self.native_packages.apply(package_id, confirmed=True, cancel_event=cancel_event, **options)
 
     def app_presence_inspect(self, package_id, source='winget'):
         return {'id': package_id, 'source': source, 'supported': False, 'read_only': True,

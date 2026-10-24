@@ -527,7 +527,7 @@ class Workflow:
                 ('edge_debloat_enabled', 'edge', 'Uninstall Microsoft Edge using the supported installer'),
             ):
                 if configuration[key]:
-                    def remove_group(action=action):
+                    def remove_group(action=action, label=label):
                         plan = self.backend.debloat_preview(action)
                         if cancelled():
                             return {'cancelled': True, 'reason': 'Cancelled after preview; no packages were removed.'}
@@ -540,7 +540,9 @@ class Workflow:
                         ids = [item['id'] for item in targets if item.get('id')]
                         if not ids:
                             return {'skipped': True, 'reason': 'No eligible installed targets found.'}
-                        outcome = self.backend.debloat_apply({'planId': plan['planId'], 'selectedIds': ids, 'confirmed': True})
+                        from .item_progress import accepts_progress_callback
+                        options = {'progress_callback': item_progress(label)} if accepts_progress_callback(self.backend.debloat_apply) else {}
+                        outcome = self.backend.debloat_apply({'planId': plan['planId'], 'selectedIds': ids, 'confirmed': True}, **options)
                         if isinstance(outcome, dict) and isinstance(outcome.get('results'), list):
                             refused = sum(not isinstance(item, dict) or bool(item.get('error')) or item.get('removed') is False for item in outcome['results'])
                             if refused:

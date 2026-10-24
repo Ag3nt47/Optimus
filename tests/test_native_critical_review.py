@@ -183,6 +183,7 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'worker-controls.stale-revision', 'worker-controls.history-only',
             'worker-controls.history-forward', 'worker-controls.pending-local', 'worker-controls.stale-session',
             'item-progress.current-item', 'item-progress.phase-reset', 'item-progress.phase-value',
+            'item-progress.uninstall-value', 'item-progress.uninstall-unknown',
             'item-progress.cpu-isolation', 'item-progress.next-package-reset',
             'item-progress.unknown', 'item-progress.queue-isolation',
             'metrics.system-network', 'metrics.fixture-only',
@@ -302,6 +303,41 @@ def test_progress_review_detects_stale_or_invented_current_item_percentages(revi
         findings = {row['id']: row for row in reviewer.report['checks']}
         assert findings['progress-defect.item-progress.' + check]['status'] == 'failed'
         assert findings['progress-defect.metrics.fixture-only']['status'] == 'passed'
+        backend.optimize.assert_not_called()
+        backend.apply_available_fixes.assert_not_called()
+    finally:
+        reviewer.dispose(window)
+
+
+@pytest.mark.parametrize('defect,check', [('status', 'uninstall-value'),
+    ('caption', 'uninstall-value'), ('accessibility', 'uninstall-value'),
+    ('unknown-status', 'uninstall-unknown')])
+def test_progress_review_detects_missing_uninstall_percent_or_action_explanation(reviewer, monkeypatch, defect, check):
+    from optimus.ui import WorkflowWorkerCard
+    original = WorkflowWorkerCard.set_live_metrics
+
+    def broken(card, metrics, computer=None):
+        original(card, metrics, computer)
+        item = card._item_progress or {}
+        if item.get('phase') != 'uninstall':
+            return
+        if defect == 'status':
+            card.status.setText('Running')
+        elif defect == 'caption':
+            card.activity_ring.phase_caption = 'Current item'
+        elif defect == 'accessibility':
+            card.activity_ring.setAccessibleDescription('Current item')
+        elif item.get('percent') is None:
+            card.status.setText('Uninstalling')
+
+    monkeypatch.setattr(WorkflowWorkerCard, 'set_live_metrics', broken)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_worker_controls_and_metrics(window, backend, bot.VIEWPORTS[0], 'uninstall-defect')
+        findings = {row['id']: row for row in reviewer.report['checks']}
+        assert findings['uninstall-defect.item-progress.' + check]['status'] == 'failed'
+        assert findings['uninstall-defect.metrics.fixture-only']['status'] == 'passed'
         backend.optimize.assert_not_called()
         backend.apply_available_fixes.assert_not_called()
     finally:

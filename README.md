@@ -33,6 +33,10 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
+Version **0.12.3** adds **low-space automatic cleanup** and clearer **install/uninstall progress**. In **Settings → Maintenance toolkit → Health**, opt in to cleaning already selected temporary/cache categories when their verified local drive falls below your saved 1–2 GiB target. This trigger works while Optimus is open after launch approval, independently of the 500 MB junk threshold. It keeps your existing age limits, cooldown, workload limits and installer checks, preserves healthy/unknown volumes, and remeasures space between category batches. It cannot guarantee the target will be reached and does not reserve disk space. The new trigger starts off; enabling it or changing its drive target requires the current saved approval.
+
+Worker cards show **Installing · 75%** or **Uninstalling · 52%** when a supported native provider reports that percentage, separately from overall queue progress. Each item resets. Native installer-phase completion is separate from final maintenance verification; saved install/uninstall rules, debloat and native package adapters require their existing readback before terminal 100%. AppX, Chocolatey and native package commands that publish no trustworthy intermediate percentage show **percentage unavailable** through install/removal and verification instead. External system uninstallers display their own progress. [Details and limits](docs/install-uninstall-progress.md).
+
 Version **0.12.2** adds an optional maintenance toolkit for the small costs that accumulate over time. New scopes start **off**, and opening settings never runs a scan, approves removal or changes existing choices. Save exact scopes in **Settings → Maintenance toolkit** or the first-start questions; the normal one-click workflow includes only the enabled choices.
 
 | Addition | What it does | Practical boundary |

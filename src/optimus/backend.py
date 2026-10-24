@@ -582,8 +582,9 @@ class Backend(ExtendedMaintenanceBackend):
     def debloat_preview(self, action):
         return self.maintenance.debloat_preview(action)
 
-    def debloat_apply(self, plan):
-        return self.maintenance.debloat_apply(plan)
+    def debloat_apply(self, plan, *, progress_callback=None):
+        options = {'progress_callback': progress_callback} if progress_callback is not None else {}
+        return self.maintenance.debloat_apply(plan, **options)
 
     def changes(self):
         return (self._list(self.bridge.request('changes')) + self.performance_controller.allocation_history()

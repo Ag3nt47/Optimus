@@ -136,7 +136,13 @@ function Invoke-OptimusRequest {
             }
             Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true) -ProgressCallback $progressCallback
         }
-        default { Invoke-OptimusMaintenanceRequest -Operation ([string]$Request.operation) -Arguments $arg }
+        default {
+            $progressCallback=$null
+            if($Request.operation -ceq 'maintenance_apply' -and $arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
+                $progressCallback=New-OptimusProgressCallback -RequestId ([string]$Request.id)
+            }
+            Invoke-OptimusMaintenanceRequest -Operation ([string]$Request.operation) -Arguments $arg -ProgressCallback $progressCallback
+        }
     }
 }
 while($null -ne ($line=[Console]::ReadLine())) {

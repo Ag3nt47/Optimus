@@ -53,6 +53,18 @@ def test_constructing_settings_never_runs_scans_or_changes_preferences(panel):
     assert panel.backend.method_calls==[('preferences',(),{})]
 
 
+def test_low_space_choice_is_default_off_and_saves_only_on_explicit_save(panel):
+    field=panel.editor.fields[('low_space_cleaning','enabled')]
+    assert not field.isChecked()
+    panel.editor.tabs.setCurrentIndex(4)
+    field.setChecked(True)
+    assert panel.window.settings['toolkit_settings']=={} and not panel.window.calls
+    panel.save();panel.window.finish()
+    assert panel.window.settings['toolkit_settings']['low_space_cleaning']=={'enabled':True}
+    assert panel.window.settings['unrelated_setting']=='preserve'
+    assert len(panel.window.calls)==1
+
+
 def test_select_all_apps_neither_enables_cleanup_nor_approves_loss_of_undo(panel):
     before=panel.editor.choices()
     button=next(item for item in panel.editor.findChildren(QPushButton) if item.text()=='Select all apps')

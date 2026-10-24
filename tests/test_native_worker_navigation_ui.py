@@ -288,6 +288,60 @@ def test_native_byte_counter_estimate_is_labeled_and_does_not_replace_overall(pr
     assert card.activity_ring.value_text() == '~62%'
 
 
+@pytest.mark.parametrize('phase,caption,verb', [('install', 'Install', 'Installing'),
+    ('installing', 'Install', 'Installing'), ('uninstall', 'Uninstall', 'Uninstalling'),
+    ('uninstalling', 'Uninstall', 'Uninstalling')])
+@pytest.mark.parametrize('percent,expected', [(0, '0%'), (49.9, '49%'), (99.99, '99%'), (100, '100%')])
+def test_install_and_uninstall_percent_is_visible_and_independent_of_queue(progress, phase, caption, verb, percent, expected):
+    window, _ = progress
+    window.update_progress({'stage': 'Maintenance continues', 'percentage': 35,
+        'jobs': [{'id': 'software_updates', 'status': 'running', 'current': 1, 'total': 4,
+            'item_progress': {'key': 'presence:winget:Fixture.App', 'label': 'Fixture App',
+                              'phase': phase, 'percent': percent}}]})
+    card = window.worker_cards['software_updates']
+    assert card.status.text() == verb + ' · ' + expected
+    assert card.activity_ring.value_text() == expected
+    assert card.activity_ring.phase_caption == caption
+    assert card.activity_ring.accessibleDescription().startswith(caption + ': ' + expected)
+    assert card.completion.text() == 'Overall: 25%'
+    assert card.progress.value() == 1 and card.progress.maximum() == 4
+    assert '— ' + verb.lower() in window.background_status.text()
+    card.set_live_metrics({'cpu_percent': 90})
+    assert card.activity_ring.value_text() == expected
+
+
+@pytest.mark.parametrize('phase,verb', [('install', 'Installing'), ('uninstall', 'Uninstalling')])
+def test_opaque_installer_reports_unknown_and_resets_previous_item_percent(progress, phase, verb):
+    window, _ = progress
+    card = window.worker_cards['software_updates']
+    card.update_state({'status': 'running', 'current': 1, 'total': 2,
+        'item_progress': {'key': 'Fixture.A', 'label': 'A', 'phase': 'download', 'percent': 83}})
+    card.update_state({'status': 'running', 'current': 1, 'total': 2,
+        'item_progress': {'key': 'Fixture.B', 'label': 'B', 'phase': phase, 'percent': None}})
+    assert card.status.text() == verb + ' · percentage unavailable'
+    assert card.activity_ring.value_text() == '—'
+    assert 'indeterminate' in card.activity_ring.toolTip()
+    assert card.completion.text() == 'Overall: 50%'
+    # A failed/reviewed operation does not borrow a reported or queue-based 100%.
+    card.update_state({'status': 'failed', 'current': 2, 'total': 2,
+        'item_progress': {'key': 'Fixture.B', 'label': 'B', 'phase': phase, 'percent': 100}})
+    assert card.status.text() == 'Failed'
+    assert card.activity_ring.value_text() == '—'
+
+
+def test_foreground_debloat_uses_uninstall_item_progress_not_workflow_percentage(progress):
+    window, _ = progress
+    window.update_progress({'stage': 'Remove selected consumer app group', 'percentage': 60,
+        'item_progress': {'key': 'debloat:remove-bloat:fixture', 'label': 'Fixture consumer app',
+                          'phase': 'uninstall', 'percent': 42}})
+    card = window.worker_cards['maintenance']
+    assert card.status.text() == 'Uninstalling · 42%'
+    assert card.completion.text() == 'Overall: 60%'
+    assert card.activity_ring.value_text() == '42%'
+    assert card.activity_ring.phase_caption == 'Uninstall'
+    assert 'Fixture consumer app' in card.activity_ring.toolTip()
+
+
 def test_connection_strip_reports_cached_internet_state_and_passive_rate(app):
     from optimus.widgets.live_activity import LiveSystemStatus
     strip = LiveSystemStatus()

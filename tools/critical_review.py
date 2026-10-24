@@ -861,9 +861,10 @@ class CriticalReview:
                 'Smoke-test progress must not construct or start a machine metrics sampler.')
             progress._live_metrics_service = cached
             state = {'stage': 'Fixture maintenance', 'percentage': 37, 'stage_status': 'running',
+                'description': 'Removing approved Fixture consumer app; fixture display only.',
                 'resource_totals': {'removed_known': True, 'removed_bytes': 157286400, 'removed_files': 137},
-                'item_progress': {'key': 'fixture-maintenance', 'label': 'Fixture resource inventory',
-                                  'phase': 'scan', 'percent': 42.},
+                'item_progress': {'key': 'fixture-maintenance', 'label': 'Fixture consumer app',
+                                  'phase': 'uninstall', 'percent': 52.},
                 'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 4,
                           'description': 'Download approved Fixture.AppOne.',
                           'resource_totals': {'installed_known': True, 'installed_items': 1,
@@ -884,7 +885,7 @@ class CriticalReview:
                 'Each of the three live workers must expose labelled Back, Next and Cancel controls.')
             self.buttons(progress, dimensions, prefix + '.worker-controls',
                 [button for identity in cursors for button in cards[identity].navigation_buttons.values()])
-            self.check(prefix + '.item-progress.current-item', cards['maintenance'].activity_ring.value_percent == 42
+            self.check(prefix + '.item-progress.current-item', cards['maintenance'].activity_ring.value_percent == 52
                 and cards['software_updates'].activity_ring.value_percent == 25
                 and cards['driver_updates'].activity_ring.value_percent is None
                 and cards['software_updates'].activity_ring.accessibleName() == 'Current item progress'
@@ -893,6 +894,14 @@ class CriticalReview:
                 and cards['software_updates'].activity_ring.health != 'error'
                 and cards['driver_updates'].activity_ring.health == 'waiting',
                 'Each ring must use the named current item phase, independently of CPU and overall/queue progress; an unknown driver percentage stays unavailable.')
+            self.check(prefix + '.item-progress.uninstall-value',
+                cards['maintenance'].status.text() == 'Uninstalling · 52%'
+                and cards['maintenance'].activity_ring.value_text() == '52%'
+                and cards['maintenance'].activity_ring.phase_caption == 'Uninstall'
+                and cards['maintenance'].activity_ring.accessibleDescription().startswith('Uninstall: 52%.')
+                and 'Fixture consumer app' in cards['maintenance'].activity_ring.accessibleDescription()
+                and cards['maintenance'].completion.text() == 'Overall: 37%',
+                'The named consumer-app uninstall must show its reported 52% in status, ring and accessibility, independently of the maintenance workflow 37%.')
             self.check(prefix + '.worker-totals.confirmed-amounts',
                 'Removed: 150.0 MiB' in cards['maintenance'].totals.text()
                 and '137 files' in cards['maintenance'].totals.text()
@@ -920,11 +929,17 @@ class CriticalReview:
             app_phase('fixture-app-one', 'Fixture.AppOne', 'install', None)
             self.check(prefix + '.item-progress.phase-reset',
                 cards['software_updates'].activity_ring.value_percent is None
-                and cards['software_updates'].activity_ring.value_text() == '—',
+                and cards['software_updates'].activity_ring.value_text() == '—'
+                and cards['software_updates'].activity_ring.phase_caption == 'Install'
+                and cards['software_updates'].status.text() == 'Installing · percentage unavailable',
                 'A new install phase without native progress must clear the previous download 25%, not inherit it.')
             app_phase('fixture-app-one', 'Fixture.AppOne', 'install', 75.)
             self.check(prefix + '.item-progress.phase-value',
                 cards['software_updates'].activity_ring.value_percent == 75
+                and cards['software_updates'].activity_ring.value_text() == '75%'
+                and cards['software_updates'].activity_ring.phase_caption == 'Install'
+                and cards['software_updates'].activity_ring.accessibleDescription().startswith('Install: 75%.')
+                and cards['software_updates'].status.text() == 'Installing · 75%'
                 and cards['software_updates'].progress.value() == 1
                 and cards['software_updates'].progress.maximum() == 4,
                 'The current install 75% must remain distinct from one of four processed packages.')
@@ -932,7 +947,7 @@ class CriticalReview:
             progress._update_live_metrics()
             self.check(prefix + '.item-progress.cpu-isolation',
                 cards['software_updates'].activity_ring.value_percent == 75
-                and cards['maintenance'].activity_ring.value_percent == 42
+                and cards['maintenance'].activity_ring.value_percent == 52
                 and cards['driver_updates'].activity_ring.value_percent is None,
                 'Later worker CPU observations must never overwrite current-item percentages or fill an unknown ring.')
             app_phase('fixture-app-one', 'Fixture.AppOne', 'install', 100.)
@@ -944,12 +959,20 @@ class CriticalReview:
                 'The next package must begin at its reported 0%, independently of the previous package 100% and queue counts.')
             drain(self.app)
             self.screenshot(progress, prefix + '-worker-item-progress-reset')
-            app_phase('fixture-app-two', 'Fixture.AppTwo', 'download', None, current=3)
+            app_phase('fixture-app-two', 'Fixture.AppTwo', 'uninstall', None, current=3)
             self.check(prefix + '.item-progress.unknown',
                 cards['software_updates'].activity_ring.value_percent is None
                 and cards['software_updates'].activity_ring.value_text() == '—'
                 and cards['software_updates'].activity_ring.active,
                 'An active package without native percentage must use an indeterminate ring; reduced motion can stop animation without inventing a percentage.')
+            self.check(prefix + '.item-progress.uninstall-unknown',
+                cards['software_updates'].status.text() == 'Uninstalling · percentage unavailable'
+                and '— uninstalling' in progress.background_status.text()
+                and cards['software_updates'].activity_ring.phase_caption == 'Uninstall'
+                and cards['software_updates'].activity_ring.accessibleDescription().startswith('Uninstall: —.')
+                and 'indeterminate' in cards['software_updates'].activity_ring.accessibleDescription()
+                and cards['software_updates'].activity_ring.value_percent is None,
+                'An opaque uninstall must have an explicit uninstall label and accessible unknown-progress explanation; queue counts cannot produce a percentage.')
             self.check(prefix + '.item-progress.queue-isolation',
                 cards['software_updates'].progress.value() == 3
                 and cards['software_updates'].progress.maximum() == 4

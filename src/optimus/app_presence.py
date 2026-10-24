@@ -20,6 +20,7 @@ from .automation import CURRENT_SETUP_VERSION
 from .filesystem import _ordinary_data_path
 from .speed_enhancements import _current_owner, _private_json
 from .update_holds import load_update_holds, matching_update_hold
+from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
 
 SOURCES = (
     'https://learn.microsoft.com/en-us/windows/package-manager/winget/install',
@@ -171,8 +172,11 @@ class WindowsAppPresence:
         self.backend = backend
         self.maintenance = backend.maintenance
 
-    def _run(self, arguments, timeout=90):
-        return self.maintenance._run([self.maintenance._winget(), *arguments], timeout=timeout)
+    def _run(self, arguments, timeout=90, *, progress_callback=None):
+        options = {'timeout': timeout}
+        if progress_callback is not None and accepts_progress_callback(self.maintenance._run):
+            options['progress_callback'] = progress_callback
+        return self.maintenance._run([self.maintenance._winget(), *arguments], **options)
 
     def _source(self):
         result = self._run(['source', 'export', '--name', 'winget', '--disable-interactivity'])
@@ -248,9 +252,12 @@ class WindowsAppPresence:
         _require(hold is None, 'The exact application release has a saved automatic update hold.',
                  failure_kind='update_hold', failure_scope='package')
 
-    def execute(self, snapshot, action, cancel_event=None, *, navigation=None, approval_callback=None):
+    def execute(self, snapshot, action, cancel_event=None, *, navigation=None, approval_callback=None,
+                progress_callback=None):
         """Internal: caller saved durable intent and still owns the installer lane."""
         _require(action in ('install', 'uninstall'), 'Unsupported application presence action.')
+        if progress_callback is not None and not callable(progress_callback):
+            raise PresencePreflightError('An optional application progress observer must be callable.')
         if cancel_event is not None and cancel_event.is_set():
             return _known('Cancelled before the application installer started.', cancelled=True, skipped=True)
         try:
@@ -282,14 +289,20 @@ class WindowsAppPresence:
         if cancel_event is not None and cancel_event.is_set():
             return _known('Cancelled before the application installer started.', cancelled=True, skipped=True)
         try:
-            result = self._run(arguments, timeout=1800)
+            result = self._run(arguments, timeout=1800, progress_callback=progress_callback)
         except (FileNotFoundError, PermissionError) as error:
             raise PresencePreflightError('WinGet could not be started; no application installer was launched.') from error
         except Exception as error:
+            if (getattr(error, 'installer_started', None) is False
+                    and getattr(error, 'outcomeKnown', None) is True
+                    and getattr(error, 'running', None) is False):
+                raise PresencePreflightError('The native progress console could not be prepared; no installer was launched.') from error
             return {'installer_started': True, 'outcomeKnown': False, 'running': True,
                 'uncertain': True, 'requiresReview': True, 'error': str(error)[:2000],
                 'note': 'Application installer outcome is unknown; no automatic retry is allowed.'}
         try:
+            _require(getattr(result, 'capture_complete', True) is True,
+                     'The package-manager transcript was incomplete; its native outcome needs review.')
             text = _text(result)
             code = result.returncode & 0xffffffff
         except Exception as error:
@@ -306,6 +319,11 @@ class WindowsAppPresence:
             value.update(uncertain=True, requiresReview=True,
                          note='Another installer is still running; no retry or later conflicting action was started.')
             return value
+        if progress_callback is not None:
+            try:
+                progress_callback({'phase': 'verify', 'percent': None})
+            except Exception:
+                pass  # A display observer cannot change native lifecycle handling.
         try:
             self._source()
             after = self.installed(fresh['id'])
@@ -317,6 +335,11 @@ class WindowsAppPresence:
         value.update(verified=verified and code in (0, 3010, 1641), after=after,
             note='Requested application presence confirmed by a fresh exact installed query.' if verified and code in (0, 3010, 1641)
                  else 'The requested application presence was not confirmed; review the package-manager result.')
+        if progress_callback is not None and value['verified'] is True and not restart:
+            try:
+                progress_callback({'phase': action, 'percent': 100.0, 'item_terminal': True})
+            except Exception:
+                pass
         return value
 
 
@@ -388,6 +411,7 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
             break
         row = {'id': rule['id'], 'source': rule['source'], 'presence': rule['presence']}
         launched = False
+        reporter = None
         if navigation is not None and navigation.begin_item('presence:' + rule['source'] + ':' + rule['id'],
                 'Apply saved presence: ' + rule['id'], kind='mutation', retryable=False, phase='checking') is not True:
             break
@@ -425,15 +449,20 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
                     'installer_prepared': False, 'started_at': time.time(), 'items': items}
                 save()
             if item_callback:
-                item_callback({'current': index, 'total': len(rules), 'item': index + 1, 'id': rule['id'],
-                    'description': ('Installing missing approved app: ' if action == 'install' else 'Uninstalling approved app: ') + rule['id']})
+                progress_key = 'presence:' + rule['source'] + ':' + rule['id']
+                progress_state = {'current': index, 'total': len(rules), 'item': index + 1, 'id': rule['id'],
+                    'description': ('Installing missing approved app: ' if action == 'install' else 'Uninstalling approved app: ') + rule['id']}
+                reporter = BoundItemProgress(item_callback, progress_key, rule['id'], progress_state)
+                item_callback(dict(progress_state, item_progress=normalize_item_progress({
+                    'key': progress_key, 'label': rule['id'], 'phase': action, 'percent': None})))
             _check_cancel(item_cancel)
             approvals_current()
             journal.update(status='running', installer_prepared=True,
                            current_item={'id': rule['id'], 'action': action, 'fingerprint': snapshot['fingerprint']})
             save()  # Durable intent before any package-manager mutation.
             launched = True
-            outcome = provider.execute(snapshot, action, item_cancel, navigation=navigation, approval_callback=approvals_current)
+            outcome = provider.execute(snapshot, action, item_cancel, navigation=navigation,
+                                       approval_callback=approvals_current, progress_callback=reporter)
             if navigation is not None and navigation.local_requested() and not cancelled() and outcome.get('cancelled') is True:
                 outcome = dict(outcome, cancelled=False, navigation_skipped=True, skipped=True)
             row.update(status='completed' if outcome.get('verified') is True else 'cancelled' if outcome.get('cancelled') is True
@@ -477,6 +506,8 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
             if shared_reason:
                 break
         finally:
+            if reporter is not None:
+                reporter.close()
             if navigation is not None:
                 outcome = row.get('result', {})
                 navigation.finish(row.get('status', 'cancelled' if cancelled() else 'not_started'),

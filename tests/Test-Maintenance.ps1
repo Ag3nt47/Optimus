@@ -36,8 +36,15 @@ $script:Packages[0].PackageFullName='Microsoft.BingWeather_2.0.0.0_x64__8wekyb3d
 try{Invoke-OptimusMaintenanceRequest -Operation maintenance_apply -Arguments @{action='consumer-apps';targets=@($good);confirmation='REMOVE'}|Out-Null}catch{$blocked=$true}
 Assert-OptimusTest ($blocked -and $script:Calls.Count -eq 0) 'stale version rejected'
 $script:Packages[0].PackageFullName='Microsoft.BingWeather_1.0.0.0_x64__8wekyb3d8bbwe'
-$result=Invoke-OptimusMaintenanceRequest -Operation maintenance_apply -Arguments @{action='consumer-apps';targets=@($good);confirmation='REMOVE'}
+$script:ProgressEvents=@()
+$observer={param($value) $script:ProgressEvents+=@($value); 'Observer output must not enter the operation result'}
+$result=Invoke-OptimusMaintenanceRequest -Operation maintenance_apply -Arguments @{action='consumer-apps';targets=@($good);confirmation='REMOVE'} -ProgressCallback $observer
 Assert-OptimusTest ($script:Calls.Count -eq 1 -and $result.results[0].removed) 'only exact selected package removed in fixture'
+Assert-OptimusTest ($script:ProgressEvents.Count -eq 3) 'one opaque removal start, readback and verified completion'
+Assert-OptimusTest (($script:ProgressEvents.phase -join '|') -ceq 'uninstall|verify|uninstall') 'native uninstall phases remain separate'
+Assert-OptimusTest ($null -eq $script:ProgressEvents[0].percent -and $null -eq $script:ProgressEvents[1].percent -and $script:ProgressEvents[2].percent -eq 100) 'no invented intermediate uninstall percent'
+Assert-OptimusTest (@($script:ProgressEvents|Where-Object{$_.key -cne ('debloat:consumer-apps:'+$good.id)}).Count -eq 0) 'progress bound to exact removal target'
+Assert-OptimusTest ($result -isnot [array]) 'observer pipeline output discarded'
 Assert-OptimusTest (@($script:Packages|Where-Object{$_.Name -eq 'Microsoft.WindowsStore'}).Count -eq 1) 'Store preserved in fixture'
 $blocked=$false;try{Invoke-OptimusMaintenanceRequest -Operation maintenance_preview -Arguments @{action='consumer-apps';includeProvisioned=$true}|Out-Null}catch{$blocked=$true}
 Assert-OptimusTest $blocked 'future-account scope requires admin'

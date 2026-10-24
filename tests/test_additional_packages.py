@@ -251,3 +251,49 @@ def test_missing_provider_is_truthfully_unavailable(tmp_path):
 def test_disabled_provider_never_discovers_manager(tmp_path):
     service=AdditionalPackages(Backend(tmp_path),discover=lambda:pytest.fail('No discovery expected'))
     assert service.run({'enabled':False},lease=None)['skipped'] is True
+
+
+def test_additional_provider_progress_resets_each_item_and_ignores_vendor_percent_text(tmp_path):
+    harness = Harness(tmp_path)
+    original = harness.service.installer
+    def install(arguments, **options):
+        # Arbitrary package-script output has no trusted percentage contract.
+        options['progress_callback']({'phase': 'install', 'percent': 71})
+        return original(arguments, **options)
+    harness.service.installer = install
+    events = []
+    result = harness.run(progress_callback=events.append)
+    assert [row['status'] for row in result['items']] == ['completed', 'completed']
+    assert [(event['item_progress']['key'], event['item_progress']['phase'], event['item_progress']['percent']) for event in events] == [
+        (key, phase, percent) for key in ('additional:chocolatey:alpha', 'additional:chocolatey:beta')
+        for phase, percent in [('install', None), ('verify', None), ('install', 100.0)]]
+    assert [event['current'] for event in events] == [0, 0, 0, 1, 1, 1]
+    assert all(event['total'] == 2 for event in events)
+    count = len(events)
+    for _, options in harness.calls:
+        options['progress_callback']({'phase': 'install', 'percent': 88})
+    assert len(events) == count
+
+
+@pytest.mark.parametrize('problem', ['known_failure', 'restart', 'readback', 'wrong_version', 'unknown'])
+def test_additional_progress_only_reaches100_after_successful_exact_readback(tmp_path, problem):
+    harness = Harness(tmp_path, codes=(1603, 1603) if problem == 'known_failure' else (3010, 0) if problem == 'restart' else (0, 0), post_error=problem == 'readback')
+    if problem == 'wrong_version':
+        harness.installed = 'alpha|1.0\nbeta|3.0\n'
+    if problem == 'unknown':
+        harness.service.installer = lambda *args, **options: (_ for _ in ()).throw(ConsoleOutcomeError('Unknown native child'))
+    events = []
+    harness.run(progress_callback=events.append)
+    assert events and events[0]['item_progress']['phase'] == 'install'
+    assert not any(event['item_progress']['percent'] == 100 for event in events)
+
+
+def test_additional_observer_errors_are_display_only_and_invalid_observer_never_installs(tmp_path):
+    harness = Harness(tmp_path)
+    def error(_):
+        raise RuntimeError('Display observer failed')
+    assert all(row['status'] == 'completed' for row in harness.run(progress_callback=error)['items'])
+    count = len(harness.calls)
+    with pytest.raises(ValueError):
+        harness.run(progress_callback=42)
+    assert len(harness.calls) == count

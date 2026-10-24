@@ -32,16 +32,16 @@ class WorkerActivityRing(QWidget):
         self.estimated = estimated is True
         self.health = health if health in self.COLORS else 'unverified'
         self.active = active is True
-        self.phase_caption = {'download': 'Download', 'install': 'Install', 'backup': 'Backup',
+        self.phase_caption = {'download': 'Download', 'install': 'Install', 'uninstall': 'Uninstall', 'backup': 'Backup',
             'verify': 'Verify', 'scan': 'Scan', 'cleanup': 'Clean', 'optimize': 'Optimize',
-            'prepare': 'Prepare', 'downloading': 'Download', 'installing': 'Install',
+            'prepare': 'Prepare', 'downloading': 'Download', 'installing': 'Install', 'uninstalling': 'Uninstall',
             'backing_up': 'Backup', 'verifying': 'Verify', 'scanning': 'Scan',
             'working': 'Working', 'waiting': 'Waiting', 'driver_offers': 'Offers',
             'device_query': 'Devices', 'driver_records': 'Drivers', 'device_records': 'Devices',
             'system_query': 'System', 'installed_driver_query': 'Drivers'}.get(phase, 'Current item')
         detail = str(description or 'The current operation has not reported a percentage.')[:2000]
         self.setToolTip(detail)
-        self.setAccessibleDescription('Current item: ' + self.value_text() + '. ' + detail)
+        self.setAccessibleDescription(self.phase_caption + ': ' + self.value_text() + '. ' + detail)
         self._sync()
         self.update()
 

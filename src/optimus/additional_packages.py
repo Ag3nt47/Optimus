@@ -188,6 +188,9 @@ class AdditionalPackages:
         from .parallel_updates import pending_updates_barrier
         from .speed_enhancements import _current_owner, _private_json
         from .winget_console import ConsolePreflightError
+        from .item_progress import BoundItemProgress, normalize_item_progress
+        if progress_callback is not None and not callable(progress_callback):
+            raise ValueError('An optional additional install progress observer must be callable.')
         config = validate_configuration(configuration)
         if not config['enabled']:
             return {'skipped': True, 'items': [], 'installer_started': False, 'failed_items': 0}
@@ -215,9 +218,8 @@ class AdditionalPackages:
         result = {'schema': 1, 'items': rows, 'installer_started': False, 'failed_items': 0, 'restartNeeded': False,
                   'outcomeKnown': True, 'running': False, 'provider': 'chocolatey', 'source': SOURCE}
         approval_hash = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
-        for offer in scan['items']:
-            if offer['id'].casefold() not in selected:
-                continue
+        selected_offers = [offer for offer in scan['items'] if offer['id'].casefold() in selected]
+        for index, offer in enumerate(selected_offers):
             ownership = _ownership_note(self.backend.preferences())
             if ownership:
                 rows.append(dict(offer, status='deferred', reason=ownership))
@@ -265,7 +267,17 @@ class AdditionalPackages:
                       'argv_sha256': hashlib.sha256(json.dumps(arguments, ensure_ascii=True, separators=(',', ':')).encode('ascii')).hexdigest()}
             _private_json(path, record)
             row = dict(offer, status='needs_review', uncertain=True)
+            progress_key = 'additional:chocolatey:' + offer['id']
+            progress_state = {'current': index, 'total': len(selected_offers), 'item': index + 1,
+                              'id': offer['id'], 'description': 'Update approved Chocolatey package: ' + offer['id']}
+            reporter = BoundItemProgress(progress_callback, progress_key, offer['id'], progress_state)
             try:
+                if progress_callback is not None:
+                    try:
+                        progress_callback(dict(progress_state, item_progress=normalize_item_progress({
+                            'key': progress_key, 'label': offer['id'], 'phase': 'install', 'percent': None})))
+                    except Exception:
+                        pass
                 try:
                     if cancel_event is not None and cancel_event.is_set():
                         raise ValueError('Cancelled before the additional package installer started.')
@@ -275,13 +287,17 @@ class AdditionalPackages:
                 except Exception as error:
                     raise ConsolePreflightError(str(error)[:500]) from error
                 result['installer_started'] = True
-                native = self.installer(arguments, timeout=1800, progress_callback=progress_callback or (lambda event: None))
+                # Chocolatey's existing --no-progress command has no trusted
+                # item-percentage protocol. Drain output without interpreting
+                # arbitrary package-script text as a native percentage.
+                native = self.installer(arguments, timeout=1800, progress_callback=lambda event: None)
                 code, receipt = _native_receipt(native, arguments)
                 restart = code in (1641, 3010, 350, 1604)
                 if code == 0:
                     # Native completion remains known even if this separate
                     # post-install read fails. It must not block the next app.
                     verification_error = None
+                    reporter({'phase': 'verify', 'percent': None})
                     try:
                         if _ordinary_executable(Path(scan['executable'])) != scan['executable_sha256']:
                             raise ValueError('The provider identity changed before version verification.')
@@ -295,6 +311,8 @@ class AdditionalPackages:
                                        'installer_started': True, 'verified': verified, 'console_receipt': receipt})
                     if verification_error:
                         row['reason'] = 'Native completion was verified; the separate provider-version check was unavailable: ' + verification_error
+                    if verified:
+                        reporter({'phase': 'install', 'percent': 100.0, 'item_terminal': True})
                 else:
                     row.update(status='restart_required' if restart else 'failed', uncertain=False,
                                result={'exitCode': code, 'outcomeKnown': True, 'running': False, 'restartNeeded': restart,
@@ -311,6 +329,8 @@ class AdditionalPackages:
                 row.update(reason=type(error).__name__ + ': ' + str(error)[:500])
                 record.update(status='uncertain', result={'items': [row], 'outcomeKnown': False, 'uncertain': True})
                 result.update(outcomeKnown=False, uncertain=True)
+            finally:
+                reporter.close()
             _private_json(path, record)
             rows.append(row)
             result['failed_items'] += row['status'] in ('failed', 'needs_review')

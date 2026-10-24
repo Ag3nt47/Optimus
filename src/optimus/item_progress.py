@@ -88,7 +88,8 @@ class BoundItemProgress:
                     self.callback(event)
             except Exception:
                 pass  # A display callback cannot abandon an active installer.
-            if state.get('item_terminal') is True and value['phase'] == 'install' and value['percent'] == 100:
+            if (state.get('item_terminal') is True and value['phase'] in ('install', 'uninstall')
+                    and value['percent'] == 100):
                 self.closed = True
 
     def close(self):

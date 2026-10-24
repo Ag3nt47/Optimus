@@ -146,13 +146,18 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
             result.update(stop_reason='Saved application rules or update approvals changed; remaining packages require fresh review.')
             break
         work = WorkItem(navigation, 'software:update:' + row['id'], 'Update ' + row['id'], external=cancel_event, kind='mutation')
+        from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
+        progress_key = 'software:update:' + row['id']
+        progress_state = {'description': 'Updating approved native package ' + row['id'],
+                          'id': row['id'], 'current': index, 'total': len(selected)}
         if item_callback:
-            item_callback({'description': 'Updating approved native package ' + row['id'],
-                           'id': row['id'], 'current': index, 'total': len(selected)})
+            item_callback(dict(progress_state, item_progress=normalize_item_progress({
+                'key': progress_key, 'label': row['id'], 'phase': 'checking', 'percent': None})))
         if _cancelled(cancel_event):
             work.finish('cancelled', mutation_started=False)
             result['cancelled'] = True
             break
+        reporter = BoundItemProgress(item_callback, progress_key, row['id'], progress_state)
         try:
             if work.requested():
                 outcome = navigation_skip()
@@ -160,7 +165,8 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
                 outcome = dict(navigation_skip('Saved app approvals changed before launch.'), navigation_cancelled=False)
             else:
                 work.installing()
-                outcome = backend.update_app_unattended(row['id'], cancel_event=work.cancel_event)
+                options = {'progress_callback': reporter} if callable(item_callback) and accepts_progress_callback(backend.update_app_unattended) else {}
+                outcome = backend.update_app_unattended(row['id'], cancel_event=work.cancel_event, **options)
                 if (work.requested() and outcome.get('cancelled') is True and outcome.get('installer_started') is False
                         and outcome.get('outcomeKnown') is True and outcome.get('running') is False):
                     outcome = dict(outcome, navigation_cancelled=True)
@@ -193,6 +199,8 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
             result['failed_items'] += 1
             work.finish('failed', mutation_started=not known, outcome_known=known, message=str(error))
             break
+        finally:
+            reporter.close()
     processed = {item['id'] for item in result['items']}
     result['deferred_ids'] = [row['id'] for row in selected if row['id'] not in processed]
     result['navigation_cancelled_items'] = sum(isinstance(item.get('result'), dict) and item['result'].get('navigation_cancelled') is True for item in result['items'])

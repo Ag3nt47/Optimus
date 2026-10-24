@@ -115,4 +115,34 @@ class Tests(unittest.TestCase):
             rows = self.tool.schedules_list()
             self.assertEqual([r['name'] for r in rows], ['\\Optimus-Audit-fixture'])
 
+    def test_13_removal_progress_is_bound_to_exact_saved_selection(self):
+        plan = self.tool.debloat_preview('consumer-apps')
+        events = []
+        original = self.bridge.request
+        def request(operation, **arguments):
+            if operation == 'maintenance_apply':
+                observer = arguments['progress_callback']
+                self.assertIs(arguments['reportProgress'], True)
+                for key, percent in [('debloat:consumer-apps:another-app', 90),
+                                     ('debloat:consumer-apps:appx-fixture', None),
+                                     ('debloat:consumer-apps:appx-fixture', 100)]:
+                    observer({'key': key, 'label': 'Untrusted label', 'phase': 'uninstall', 'percent': percent})
+            return original(operation, **arguments)
+        self.bridge.request = request
+        self.tool.debloat_apply({'planId': plan['planId'], 'selectedIds': ['appx-fixture'], 'confirmed': True},
+                               progress_callback=events.append)
+        self.assertEqual(len(events), 2)
+        self.assertEqual([event['item_progress']['percent'] for event in events], [None, 100.0])
+        self.assertTrue(all(event['item_progress']['label'] == 'Microsoft.BingWeather' for event in events))
+        self.assertTrue(all(event['current'] == 0 and event['total'] == 1 and event['id'] == 'appx-fixture' for event in events))
+
+    def test_14_invalid_removal_observer_is_rejected_before_persisting_or_bridge(self):
+        plan = self.tool.debloat_preview('consumer-apps')
+        with self.assertRaises(ValueError):
+            self.tool.debloat_apply({'planId': plan['planId'], 'selectedIds': ['appx-fixture'], 'confirmed': True},
+                                   progress_callback=42)
+        saved = json.loads((self.tool.plan_dir / (plan['planId'] + '.json')).read_text())
+        self.assertEqual(saved['state'], 'preview')
+        self.assertEqual(len(self.bridge.calls), 1)
+
 if __name__ == '__main__': unittest.main(verbosity=2)

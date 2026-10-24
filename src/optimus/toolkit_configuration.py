@@ -15,6 +15,7 @@ DEFAULTS = {'adaptive': copy.deepcopy(ADAPTIVE), 'application_caches': copy.deep
             'storage_growth': copy.deepcopy(STORAGE), 'recovery_retention': copy.deepcopy(RETENTION),
             'history': {'enabled': False, 'sample_seconds': 5},
             'diagnostics': {'enabled': False, 'integrity_symptoms': []},
+            'low_space_cleaning': {'enabled': False},
             'installer_space': {'enabled': False, 'destination': '', 'required_bytes': None},
             'resume': {'enabled': False, 'resident_handoff_enabled': False}, 'providers': copy.deepcopy(PROVIDERS)}
 
@@ -31,7 +32,7 @@ def validate_configuration(value):
                            ('storage_growth', validate_storage), ('recovery_retention', validate_retention),
                            ('providers', validate_providers)):
         result[key] = validator(result[key])
-    for key in ('history', 'diagnostics', 'installer_space', 'resume'):
+    for key in ('history', 'diagnostics', 'installer_space', 'resume', 'low_space_cleaning'):
         if type(result[key]['enabled']) is not bool:
             raise ValueError(key + ' must be on or off.')
     if type(result['resume']['resident_handoff_enabled']) is not bool:
@@ -61,6 +62,10 @@ def launch_descriptions(settings):
     config = validate_configuration(settings.get('toolkit_settings', {}))
     actions, checks = [], []
     cache, retention = config['application_caches'], config['recovery_retention']
+    if config['low_space_cleaning']['enabled']:
+        actions.append('While Optimus is open after launch approval, clean only already selected eligible junk/cache categories on verified local volumes below the saved '
+                       + str(settings.get('drive_space_guard_target_gib', 2.0))
+                       + ' GiB target. Saved ages, cooldown and scope limits apply; open-browser data and new cleanup categories are excluded. The drive-space guard must remain on; sufficient space is not guaranteed.')
     if cache['enabled']:
         actions.append('Delete eligible rebuildable application caches for ' + ', '.join(cache['apps'])
                        + f"; at least {cache['min_age_days']} days old, within saved file/byte limits. Active or uncertain applications are skipped.")

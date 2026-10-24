@@ -370,6 +370,20 @@ class NativeConsoleFixtureTests(unittest.TestCase):
         return console.run_winget_console([self.executable, '-I', '-u', '-c', source, *extra],
             timeout=timeout, progress_callback=callback)
 
+    def test_native_console_reports_uninstall_percent_before_harmless_fixture_exits(self):
+        callbacks = []
+        source = ("import time;print('Starting package uninstall...',flush=True);"
+                  "print('37%',flush=True);time.sleep(.3);"
+                  "print('100%',flush=True);time.sleep(.2)")
+        result = self.run_child(source, callback=lambda value: callbacks.append((time.monotonic(), value)))
+        finished = time.monotonic()
+        self.assertEqual(result.returncode, 0)
+        self.assertIs(result.capture_complete, True)
+        self.assertIs(result.console_receipt['verified'], True)
+        self.assertTrue(any(value['phase'] == 'uninstall' and value['percent'] == 37
+                            and when < finished - .1 for when, value in callbacks))
+        self.assertFalse(any(value['percent'] == 100 for _, value in callbacks))
+
     def test_native_packaged_probe_protocol_uses_only_local_declared_fixture(self):
         with tempfile.TemporaryDirectory(prefix='optimus-console-probe-') as directory:
             self.assertEqual(console.console_progress_probe(directory), 0)

@@ -49,9 +49,14 @@ class WinGetProgressParser:
             self._emit('download')
         elif text in ('Starting package install...', 'Starting package installation...'):
             self._emit('install')
+        elif text in ('Starting package uninstall...', 'Starting package uninstallation...'):
+            # WinGet's uninstall handlers expose native progress through the
+            # same reporter as installation. Generic EXE handlers may expose
+            # only a spinner; keep those removals indeterminate.
+            self._emit('uninstall')
         elif text == 'Successfully verified installer hash':
             self._emit('verify')
-        elif self.phase in ('download', 'install') and (match := _PERCENT.fullmatch(text)) is not None:
+        elif self.phase in ('download', 'install', 'uninstall') and (match := _PERCENT.fullmatch(text)) is not None:
             value = float(match['percent'])
             # Native 100 is withheld until the caller has a successful result;
             # this parser never synthesizes a terminal success percentage.

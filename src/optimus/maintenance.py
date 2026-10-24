@@ -145,7 +145,9 @@ class Maintenance:
         self._write_json(self.plan_dir / (plan["planId"] + ".json"), plan)
         return plan
 
-    def debloat_apply(self, plan: dict[str, Any]) -> dict[str, Any]:
+    def debloat_apply(self, plan: dict[str, Any], *, progress_callback=None) -> dict[str, Any]:
+        if progress_callback is not None and not callable(progress_callback):
+            raise ValueError('An optional removal progress observer must be callable.')
         if not isinstance(plan, dict) or plan.get("confirmed") is not True:
             raise ValueError("Confirm the displayed removal plan explicitly before applying it.")
         plan_id = str(plan.get("planId", ""))
@@ -172,11 +174,32 @@ class Maintenance:
         saved["selectedIds"] = selected
         saved["state"] = "applying"
         self._write_json(path, saved)
+        options = {}
+        if progress_callback is not None:
+            from .item_progress import normalize_item_progress
+            identities = {'debloat:' + saved['action'] + ':' + identity: (index, known[identity])
+                          for index, identity in enumerate(selected)}
+            def observe(value):
+                item = normalize_item_progress(value)
+                if item is None or item['key'] not in identities:
+                    return
+                index, target = identities[item['key']]
+                # Native package identity is exact; presentation labels come
+                # from the saved, reviewed plan rather than arbitrary output.
+                item['label'] = ' '.join(str(target.get('name') or target['id']).split())[:512]
+                try:
+                    progress_callback({'current': index, 'total': len(selected), 'item': index + 1,
+                        'id': target['id'], 'phase': item['phase'], 'item_progress': item,
+                        'description': item['phase'].replace('_', ' ').capitalize() + ': ' + item['label']})
+                except Exception:
+                    pass  # Observer failures must not abandon a removal.
+            options = {'progress_callback': observe, 'reportProgress': True}
         try:
             result = self._request(
                 "maintenance_apply", action=saved["action"],
                 includeProvisioned=bool(saved.get("includeProvisioned", False)),
                 targets=[known[item] for item in selected], confirmation="REMOVE",
+                **options,
             )
         except Exception as error:
             saved["state"] = "failed"

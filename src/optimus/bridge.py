@@ -53,7 +53,9 @@ class PowerShellBridge:
                                 continue
                             if value.get('kind') == 'progress':
                                 payload = value.get('progress')
-                                normalized = normalize_item_progress(dict(payload, key='native', label='Native operation')) if isinstance(payload, dict) else None
+                                identified = isinstance(payload, dict) and ('key' in payload or 'label' in payload)
+                                normalized = normalize_item_progress(payload if identified else
+                                    dict(payload, key='native', label='Native operation')) if isinstance(payload, dict) else None
                                 if normalized is not None:
                                     with self._pending_lock:
                                         pending = self._pending.get(identity)
@@ -61,7 +63,7 @@ class PowerShellBridge:
                                             # Coalesce display-only ticks: timeout/slow consumers cannot
                                             # build an unbounded stdout queue or block the installer.
                                             self._progress[identity] = {key: field for key, field in normalized.items()
-                                                                       if key not in ('key', 'label')}
+                                                                       if identified or key not in ('key', 'label')}
                                 continue
                             if value.get('kind') not in (None, 'result') or type(value.get('ok')) is not bool:
                                 continue
