@@ -3724,7 +3724,11 @@ class OptimusWindow(QMainWindow):
         window.speed_enhancements_panel = SpeedEnhancementsPanel(window, settings)
         controls['speed_enhancements_enabled'] = window.speed_enhancements_panel.enabled
         layout.addWidget(window.speed_enhancements_panel)
-        layout.addWidget(QLabel('WINDOWS UPDATE COMPATIBILITY — SAVE WITH ONE-CLICK CONFIGURATION'))
+        compatibility_heading = QLabel('WINDOWS UPDATE COMPATIBILITY — SAVE WITH ONE-CLICK CONFIGURATION')
+        compatibility_heading.setObjectName('WindowsUpdateCompatibilityHeading')
+        compatibility_heading.setWordWrap(True)
+        compatibility_heading.setMinimumWidth(0)
+        layout.addWidget(compatibility_heading)
         for key, label, explanation in (
             ('update_compatibility_mode_enabled', 'Use WinGet compatibility mode for approved application updates',
              'Uses the non-security --force option on the initial approved attempt. Exact identity/version, pins, signature/hash and restart checks remain in effect; unknown installer state never triggers a repeated attempt.'),

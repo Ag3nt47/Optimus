@@ -1,10 +1,11 @@
 """Responsive control geometry and decorative motion use fixture windows only."""
 import threading
 import os
+import json
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QScrollArea
+from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QWidget
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtCore import Qt, QPoint, QRect
 from PySide6.QtTest import QTest
@@ -46,8 +47,15 @@ def installed_fixture_fonts(app):
 def ensure_reachable(widget, app):
     parent = widget.parentWidget()
     viewports = []
+    first = []
     while parent is not None:
         if isinstance(parent, QScrollArea):
+            first.append({'viewport': parent.viewport().size().toTuple(),
+                'content': parent.widget().size().toTuple(),
+                'content_minimum': parent.widget().minimumSizeHint().toTuple(),
+                'button': widget.size().toTuple(),
+                'position': widget.mapTo(parent.viewport(), QPoint(0, 0)).toTuple(),
+                'horizontal': [parent.horizontalScrollBar().value(), parent.horizontalScrollBar().maximum()]})
             parent.ensureWidgetVisible(widget, 8, 8)
             viewports.append(parent.viewport())
         parent = parent.parentWidget()
@@ -56,7 +64,59 @@ def ensure_reachable(widget, app):
     for viewport in viewports:
         top = viewport.mapFromGlobal(widget.mapToGlobal(widget.rect().topLeft()))
         bottom = viewport.mapFromGlobal(widget.mapToGlobal(widget.rect().bottomRight()))
-        assert viewport.rect().contains(top) and viewport.rect().contains(bottom)
+        evidence = {'label': widget.text() if hasattr(widget, 'text') else widget.objectName(),
+            'first': first, 'final': {'viewport': viewport.size().toTuple(),
+                'button': widget.size().toTuple(), 'top': top.toTuple(), 'bottom': bottom.toTuple()}}
+        assert viewport.rect().contains(top) and viewport.rect().contains(bottom), json.dumps(evidence, indent=2)
+
+
+def test_reachability_still_rejects_a_button_wider_than_its_viewport(app):
+    window = QWidget()
+    scroll = QScrollArea(window)
+    scroll.setGeometry(0, 0, 220, 100)
+    body = QWidget()
+    body.resize(400, 100)
+    button = QPushButton('Oversized fixture action', body)
+    button.setGeometry(0, 10, 350, 40)
+    scroll.setWidget(body)
+    window.resize(220, 100)
+    window.show()
+    app.processEvents()
+    try:
+        with pytest.raises(AssertionError, match='Oversized fixture action'):
+            ensure_reachable(button, app)
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_long_windows_heading_wraps_without_widening_a_563px_workflow_viewport(window, app):
+    detail = window._settings_window
+    heading = detail.findChild(QLabel, 'WindowsUpdateCompatibilityHeading')
+    if heading is None:
+        # The native form has a different short section heading; the existing
+        # parameterized reachability test exercises its actual layout instead.
+        return
+    detail.setStyleSheet(detail.styleSheet() + build_qss(scale=1.25))
+    detail.resize(850, 650)
+    heading.setStyleSheet('font-size:18px;')
+    parent = heading.parentWidget()
+    while not isinstance(parent, QScrollArea):
+        parent = parent.parentWidget()
+    for _ in range(4):
+        app.processEvents()
+    parent.setFixedWidth(parent.width() + 563 - parent.viewport().width())
+    for _ in range(4):
+        app.processEvents()
+    assert parent.viewport().width() == 563
+    assert heading.fontMetrics().horizontalAdvance(heading.text()) > 563
+    assert heading.wordWrap() and heading.heightForWidth(heading.width()) > heading.fontMetrics().height()
+    assert parent.widget().width() == parent.viewport().width()
+    for button in (detail.speed_enhancements_panel.save_button, detail.speed_enhancements_panel.review_button,
+                   detail.speed_enhancements_panel.apply_button, detail.speed_enhancements_panel.history_button,
+                   detail.speed_enhancements_panel.restore_button):
+        ensure_reachable(button, app)
 
 
 @pytest.mark.parametrize('scale', [1.0, 1.25])
