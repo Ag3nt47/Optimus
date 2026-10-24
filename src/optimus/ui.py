@@ -3687,6 +3687,7 @@ class OptimusWindow(QMainWindow):
 
     def _install_workflow_preferences(self, window):
         from PySide6.QtWidgets import QTabWidget, QScrollArea
+        from .widgets.flow_layout import FlowLayout
         outer = window.layouts['Settings']
         appearance_page = QWidget()
         appearance_layout = QVBoxLayout(appearance_page)
@@ -3875,14 +3876,13 @@ class OptimusWindow(QMainWindow):
         sign_in_status.setObjectName('SignInLaunchStatus')
         sign_in_status.setWordWrap(True)
         layout.addWidget(sign_in_status)
-        sign_in_buttons = QHBoxLayout()
+        sign_in_buttons = FlowLayout()
         check_sign_in = QPushButton('Check sign-in launch status')
         apply_sign_in = QPushButton('Apply sign-in launch choice now')
         check_sign_in.setObjectName('CheckSignInLaunch')
         apply_sign_in.setObjectName('ApplySignInLaunch')
         sign_in_buttons.addWidget(check_sign_in)
         sign_in_buttons.addWidget(apply_sign_in)
-        sign_in_buttons.addStretch()
         layout.addLayout(sign_in_buttons)
         def show_sign_in_status(result):
             if not isinstance(result, dict):
@@ -3951,11 +3951,10 @@ class OptimusWindow(QMainWindow):
         layout.addWidget(privacy_restore)
         from .workflow import CONSUMER_PACKAGE_NAMES
         layout.addWidget(QLabel('CURRENT-USER CONSUMER PACKAGE SCOPE'))
-        consumer_bar = QHBoxLayout()
+        consumer_bar = FlowLayout()
         select_consumer, clear_consumer = QPushButton('Select all consumer packages'), QPushButton('Clear all consumer packages')
         consumer_bar.addWidget(select_consumer)
         consumer_bar.addWidget(clear_consumer)
-        consumer_bar.addStretch()
         layout.addLayout(consumer_bar)
         consumer_controls = {}
         selected_names = set(settings.get('consumer_debloat_package_names', CONSUMER_PACKAGE_NAMES))

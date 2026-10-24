@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QWidget
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtCore import Qt, QPoint, QRect
+from PySide6.QtCore import Qt, QPoint, QRect, QTimer
 from PySide6.QtTest import QTest
 
 from optimus.ui import OptimizationProgressWindow
@@ -46,28 +46,70 @@ def installed_fixture_fonts(app):
 
 def ensure_reachable(widget, app):
     parent = widget.parentWidget()
-    viewports = []
-    first = []
+    scrolls = []
     while parent is not None:
         if isinstance(parent, QScrollArea):
-            first.append({'viewport': parent.viewport().size().toTuple(),
-                'content': parent.widget().size().toTuple(),
-                'content_minimum': parent.widget().minimumSizeHint().toTuple(),
-                'button': widget.size().toTuple(),
-                'position': widget.mapTo(parent.viewport(), QPoint(0, 0)).toTuple(),
-                'horizontal': [parent.horizontalScrollBar().value(), parent.horizontalScrollBar().maximum()]})
-            parent.ensureWidgetVisible(widget, 8, 8)
-            viewports.append(parent.viewport())
+            scrolls.append(parent)
         parent = parent.parentWidget()
-    app.processEvents()
+    def snapshot():
+        return [{'viewport': scroll.viewport().size().toTuple(),
+            'content': scroll.widget().size().toTuple(),
+            'content_minimum': scroll.widget().minimumSizeHint().toTuple(),
+            'button': widget.size().toTuple(),
+            'position': widget.mapTo(scroll.viewport(), QPoint(0, 0)).toTuple(),
+            'horizontal': [scroll.horizontalScrollBar().value(), scroll.horizontalScrollBar().maximum()],
+            'vertical': [scroll.verticalScrollBar().value(), scroll.verticalScrollBar().maximum()]}
+            for scroll in scrolls]
+    first = snapshot()
+    # A nested height-for-width layout may change when the first actual scroll
+    # request drains pending native style/layout events. Repeat navigation
+    # against that settled geometry; the complete final hit area still must fit.
+    for _ in range(2):
+        app.processEvents()
+        for scroll in scrolls:
+            scroll.ensureWidgetVisible(widget, 8, 8)
+            app.processEvents()
+    final = snapshot()
     assert not widget.visibleRegion().isEmpty()
-    for viewport in viewports:
+    for scroll in scrolls:
+        viewport = scroll.viewport()
         top = viewport.mapFromGlobal(widget.mapToGlobal(widget.rect().topLeft()))
         bottom = viewport.mapFromGlobal(widget.mapToGlobal(widget.rect().bottomRight()))
         evidence = {'label': widget.text() if hasattr(widget, 'text') else widget.objectName(),
-            'first': first, 'final': {'viewport': viewport.size().toTuple(),
+            'first': first, 'settled': final, 'final': {'viewport': viewport.size().toTuple(),
                 'button': widget.size().toTuple(), 'top': top.toTuple(), 'bottom': bottom.toTuple()}}
         assert viewport.rect().contains(top) and viewport.rect().contains(bottom), json.dumps(evidence, indent=2)
+    return {'first': first, 'final': final}
+
+
+def test_reachability_repeats_real_navigation_after_a_pending_layout_moves_the_action(app):
+    class PendingLayoutScroll(QScrollArea):
+        adjusted = False
+        def ensureWidgetVisible(self, child, *margins):
+            super().ensureWidgetVisible(child, *margins)
+            if not self.adjusted:
+                self.adjusted = True
+                QTimer.singleShot(0, lambda: child.move(child.x(), child.y() + 60))
+    window = QWidget()
+    scroll = PendingLayoutScroll(window)
+    scroll.setGeometry(0, 0, 260, 200)
+    body = QWidget()
+    body.resize(230, 800)
+    button = QPushButton('Pending layout action', body)
+    button.setGeometry(10, 130, 180, 40)
+    scroll.setWidget(body)
+    window.resize(260, 200)
+    window.show()
+    app.processEvents()
+    try:
+        measured = ensure_reachable(button, app)
+        assert measured['first'][0]['vertical'][0] == 0
+        assert measured['final'][0]['vertical'][0] > 0
+        assert scroll.viewport().rect().contains(button.rect().translated(button.mapTo(scroll.viewport(), QPoint(0, 0))))
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
 
 
 def test_reachability_still_rejects_a_button_wider_than_its_viewport(app):
@@ -101,6 +143,13 @@ def test_long_windows_heading_wraps_without_widening_a_563px_workflow_viewport(w
     detail.setStyleSheet(detail.styleSheet() + build_qss(scale=1.25))
     detail.resize(850, 650)
     heading.setStyleSheet('font-size:18px;')
+    # Native DejaVu metrics exposed these two formerly fixed action pairs.
+    # Exercise the same measured-width pressure on every platform, without
+    # depending on which optional font families the test machine installed.
+    for button in detail.findChildren(QPushButton):
+        if button.objectName() in ('CheckSignInLaunch', 'ApplySignInLaunch') or button.text() in (
+                'Select all consumer packages', 'Clear all consumer packages'):
+            button.setMinimumWidth(300)
     parent = heading.parentWidget()
     while not isinstance(parent, QScrollArea):
         parent = parent.parentWidget()
