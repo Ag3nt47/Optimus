@@ -100,6 +100,42 @@ def test_completed_crash_gap_clears_both_lanes_preserving_parent_preferences_hol
     assert len(json.loads(f.path.read_text())['terminal_items']) == 1
 
 
+def test_authenticated_current_console_owner_does_not_block_its_own_recovery(completed):
+    f = completed
+    created = recovery._utc_epoch('2026-01-02T03:06:30Z')
+    identity = {'pid': 560, 'path': r'D:\Optimus\0.11.13\OptimusConsole.exe',
+        'created_at': created, 'owner': recovery._current_owner()}
+    f.probe['processes'].append({'pid': 560, 'name': 'OptimusConsole.exe',
+        'path': identity['path'], 'started_utc': '2026-01-02T03:06:30Z'})
+    with patch.object(recovery, '_current_console_identity', return_value=identity):
+        assert run(f)['status'] == 'reconciled'
+
+
+@pytest.mark.parametrize('field,value', [('pid', 561), ('path', r'D:\Other\OptimusConsole.exe'),
+    ('created_at', 1.0), ('owner', 'sid:other')])
+def test_console_name_cannot_exempt_unrelated_helper(completed, field, value):
+    f = completed
+    identity = {'pid': 560, 'path': r'D:\Optimus\0.11.13\OptimusConsole.exe',
+        'created_at': recovery._utc_epoch('2026-01-02T03:06:30Z'), 'owner': recovery._current_owner()}
+    f.probe['processes'].append({'pid': 560, 'name': 'OptimusConsole.exe',
+        'path': identity['path'], 'started_utc': '2026-01-02T03:06:30Z'})
+    identity[field] = value
+    original = f.path.read_bytes()
+    with patch.object(recovery, '_current_console_identity', return_value=identity):
+        assert not run(f)['reconciled']
+    assert f.path.read_bytes() == original
+
+
+def test_current_console_exemption_never_exempts_second_monitor(completed):
+    f = completed
+    identity = {'pid': 560, 'path': r'D:\Optimus\0.11.13\OptimusConsole.exe',
+        'created_at': recovery._utc_epoch('2026-01-02T03:06:30Z'), 'owner': recovery._current_owner()}
+    f.probe['processes'].extend({'pid': pid, 'name': 'OptimusConsole.exe',
+        'path': identity['path'], 'started_utc': '2026-01-02T03:06:30Z'} for pid in (560, 561))
+    with patch.object(recovery, '_current_console_identity', return_value=identity):
+        assert not run(f)['reconciled']
+
+
 @pytest.mark.parametrize('change', [
     lambda s: s.replace("'Fixture.App'", "'Other.App'"),
     lambda s: s.replace("'--version' '2.0'", "'--version' '3.0'"),

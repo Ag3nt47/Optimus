@@ -154,6 +154,7 @@ class InitialSetupWizard(QWizard):
         self._build_startup()
         self._build_software()
         self._build_drivers()
+        self._build_toolkit()
         self._build_summary()
         self.optimization_mode.currentIndexChanged.connect(self._mode_changed)
 
@@ -1092,8 +1093,16 @@ class InitialSetupWizard(QWizard):
             self._connection_panel._timer.stop()
         super().reject()
 
+    def _build_toolkit(self):
+        from .widgets.maintenance_toolkit_panel import ToolkitChoices
+        body = self._page('toolkit', '11. Additional maintenance tools',
+            'New scopes start off. Choose workload limits, exact app caches, local folder growth, recovery retention and diagnostics. Repairs remain a separate manual action.')
+        self.toolkit_choices = ToolkitChoices(self.initial.get('toolkit_settings', {}), self)
+        self.toolkit_choices.setMinimumHeight(340)
+        body.addWidget(self.toolkit_choices)
+
     def _build_summary(self):
-        body = self._page('summary', '11. Review your choices',
+        body = self._page('summary', '12. Review your choices',
             'Save choices writes this configuration. It does not start a maintenance run unless you also select Run selected maintenance now below. Automatic cadence applies to the selected operations while the app is open.', on_enter=self.refresh_summary)
         self.summary = QPlainTextEdit()
         self.summary.setReadOnly(True)
@@ -1143,6 +1152,7 @@ class InitialSetupWizard(QWizard):
 
     def collect_choices(self, *, validate=True, section=None):
         result = copy.deepcopy(self.initial)
+        result['toolkit_settings'] = self.toolkit_choices.choices(validate=validate)
         for key, control in self.controls.items():
             if isinstance(control, QCheckBox):
                 result[key] = control.isChecked()

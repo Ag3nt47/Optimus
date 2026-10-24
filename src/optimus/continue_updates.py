@@ -64,7 +64,7 @@ def _summary(stages, *, barrier=None, cancelled=False):
             'queue_drained': not bool(barrier or cancelled)}
 
 
-def run_saved_updates(backend, *, output=None, progress_callback=None, cancel_event=None):
+def run_saved_updates(backend, *, output=None, progress_callback=None, cancel_event=None, _lease=None):
     """Run only currently enabled, saved-approved update scopes under one lease.
 
     Both catalogs are searched together. Their actual installers share the
@@ -75,7 +75,8 @@ def run_saved_updates(backend, *, output=None, progress_callback=None, cancel_ev
     The returned JSON contains a persistent report and live progress-file path;
     this also makes results available when launched from a windowed executable.
     """
-    with RunLease(backend.data_dir) as lease:
+    from .maintenance_toolkit import _lease_context
+    with _lease_context(backend.data_dir, _lease) as lease:
         if _pending_native_request(backend):
             raise RuntimeError('A native Optimus request is still running; wait for its saved outcome before continuing updates.')
         validator = getattr(getattr(backend, 'preference_store', None), 'validate', Preferences.validate)
@@ -172,6 +173,12 @@ def run_saved_updates(backend, *, output=None, progress_callback=None, cancel_ev
                     cancelled=cancel_event is not None and cancel_event.is_set()))
             report['finished_at'] = time.time()
             report['resource_totals'] = mux.worker_resource_snapshots()
+            if configuration.get('toolkit_settings', {}).get('resume', {}).get('enabled') is True:
+                from .update_resume import UpdateResumeService
+                try:
+                    report['update_resume'] = UpdateResumeService(backend).capture(configuration, report, lease=lease)
+                except (OSError, ValueError, RuntimeError) as error:
+                    report['update_resume'] = {'status': 'unavailable', 'reason': str(error)[:1000]}
             if progress_errors:
                 report['progress_write_errors'] = progress_errors
             atomic_json(path, report)

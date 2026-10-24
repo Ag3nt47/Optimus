@@ -11,6 +11,8 @@ $WarningPreference='SilentlyContinue'
 . (Join-Path $PSScriptRoot 'FileTools.ps1')
 . (Join-Path $PSScriptRoot 'UpdateProgress.ps1')
 . (Join-Path $PSScriptRoot 'UpdateRecovery.ps1')
+. (Join-Path $PSScriptRoot 'SystemDiagnostics.ps1')
+. (Join-Path $PSScriptRoot 'AdaptiveProbe.ps1')
 . (Join-Path $PSScriptRoot 'MaintenanceOperations.ps1')
 . (Join-Path $PSScriptRoot 'RegistryTools.ps1')
 function Test-OptimusSameExecutableFile {
@@ -70,6 +72,13 @@ function Invoke-OptimusRequest {
     $arg=$Request.arguments
     switch ([string]$Request.operation) {
         'update_recovery_probe' { Get-OptimusUpdateRecoveryProbe }
+        'system_diagnostics' { Get-OptimusSystemDiagnostics }
+        'adaptive_network' { Get-OptimusAdaptiveNetwork }
+        'windows_integrity' {
+            if($arg.repair -isnot [bool] -or $arg.approved -isnot [bool]){throw 'Explicit Boolean integrity choices are required.'}
+            if($arg.operation_id -isnot [string] -or $arg.operation_id -cnotmatch '^[0-9a-f]{32}$'){throw 'An exact integrity operation identity is required.'}
+            Invoke-OptimusWindowsIntegrity -Repair $arg.repair -Approved $arg.approved -DataRoot $DataRoot -OperationId $arg.operation_id
+        }
         'audit' { Get-SCMFullAudit }
         'process_details' {
             $fresh=Get-SCMProcessIdentity -ProcessId ([int]$arg.record.pid)

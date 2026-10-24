@@ -19,6 +19,8 @@ import uuid
 from typing import Any
 import psutil
 from optimus.browser_paths import native_locations, process_matches
+from optimus.recovery_retention import browser_backup_operation
+from optimus.application_caches import _windows_process_names
 
 _PLATFORM = sys.platform
 
@@ -193,15 +195,30 @@ class BrowserPrivacy:
     @staticmethod
     def _closed(profile: dict[str, Any]) -> None:
         wanted = profile["process"].lower()
+        names, complete = [], True
         try:
             for process in psutil.process_iter(["pid", "name"]):
                 name = process.info.get('name')
                 if not isinstance(name, str) or not name:
-                    raise RuntimeError('A running process name is inaccessible; browser closure cannot be verified.')
-                if name.lower() == wanted or profile.get('browser_id') and process_matches(profile['browser_id'], name, _PLATFORM):
-                    raise RuntimeError(f"Close every {profile['browser']} window and its background processes before scanning, cleaning or restoring this profile.")
-        except (psutil.AccessDenied, psutil.Error) as error:
-            raise RuntimeError("Running browser processes could not be checked safely.") from error
+                    complete = False
+                    break
+                names.append(name)
+        except (psutil.AccessDenied, psutil.Error, OSError):
+            complete = False
+        if not complete and _PLATFORM == 'win32':
+            # Registry/protected system process names can be inaccessible through
+            # psutil under a normal account. A fresh native name snapshot avoids
+            # treating that routine restriction as either browser inactivity or
+            # a permanent reason to skip every browser cleanup.
+            try:
+                names, complete = _windows_process_names()
+            except (OSError, ValueError, AttributeError):
+                names, complete = [], False
+        if not complete or not names:
+            raise RuntimeError('Running browser processes could not be checked completely; closure cannot be verified.')
+        for name in names:
+            if name.lower() == wanted or profile.get('browser_id') and process_matches(profile['browser_id'], name, _PLATFORM):
+                raise RuntimeError(f"Close every {profile['browser']} window and its background processes before scanning, cleaning or restoring this profile.")
 
     @staticmethod
     def _specs(profile: dict[str, Any], categories: list[str]) -> list[dict[str, Any]]:
@@ -341,6 +358,7 @@ class BrowserPrivacy:
                         connection.execute("DELETE FROM " + table)
         return connection.total_changes - before
 
+    @browser_backup_operation
     def apply(self, plan: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(plan, dict) or plan.get("confirmed") is not True:
             raise ValueError("Confirm the displayed privacy cleanup before applying it.")
@@ -435,6 +453,7 @@ class BrowserPrivacy:
                 continue
         return sorted(result, key=lambda item: item.get("createdUtc") or "", reverse=True)
 
+    @browser_backup_operation
     def restore_backup(self, backup_id: str, *, confirmed: bool = False) -> dict[str, Any]:
         if confirmed is not True:
             raise ValueError("Confirm restoration of this private browser backup.")

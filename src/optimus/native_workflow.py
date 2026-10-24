@@ -284,7 +284,7 @@ class NativeWorkflow:
         self.active = False
         self.last_report = None
 
-    def run(self, settings, progress_callback, cancel_event=None, *, browser_prompt=None):
+    def run(self, settings, progress_callback, cancel_event=None, *, browser_prompt=None, _lease=None):
         global_cancel_event = cancel_event
         configuration = self.backend.preference_store.validate(settings)
         if not self.lock.acquire(blocking=False):
@@ -296,7 +296,13 @@ class NativeWorkflow:
                                            independent_stage, ready_maintenance_stages, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
-            lease = RunLease(self.backend.data_dir).acquire()
+            if _lease is None:
+                lease = RunLease(self.backend.data_dir).acquire()
+            else:
+                if (not isinstance(_lease, RunLease) or _lease.handle is None
+                        or _lease.path != self.backend.data_dir / 'maintenance-run.lock'):
+                    raise ValueError('A current supplied maintenance lease is required.')
+                lease = _lease
             unresolved_apps = pending_updates_barrier(self.backend)
             identifier = uuid.uuid4().hex
             self.navigation.begin(identifier, cancel_event=global_cancel_event)
@@ -411,6 +417,13 @@ class NativeWorkflow:
                 stages.append(('Start requested read-only background analysis', lambda: self.backend.analysis_start(configuration.get('analysis_interval', 5))))
             if configuration.get('post_process_review_enabled'):
                 stages.append(('Prepare optional background-program recommendations', lambda: self.backend.process_harness_scan(cancel_event=cancel_event)))
+            if any(section.get('enabled') is True for section in configuration.get('toolkit_settings', {}).values()):
+                factory = getattr(self.backend, '_toolkit', None)
+                if callable(factory):
+                    early, late = factory().stages(configuration, lease=lease, cancel_event=cancel_event,
+                                                 progress_callback=serial_item_progress)
+                    stages[1:1] = [(title, operation) for title, _, operation in early]
+                    stages.extend((title, operation) for title, _, operation in late)
             stages.append(('Capture final native resource report', self.backend.audit))
             if has_space_guard:
                 stages.append(('Recheck drive space buffers', space_guard))
@@ -466,6 +479,8 @@ class NativeWorkflow:
                 stage = {'name': title, 'title': title, 'started_at': time.time(), 'status': 'completed'}
                 serial_job = None
                 try:
+                    from .adaptive_maintenance import checkpoint, deferred_result
+                    assessment = checkpoint(self.backend, title=title)
                     if not navigation_available:
                         result = {'skipped': True, 'navigation_blocked': True, 'requiresReview': True, 'failed_items': 0,
                                   'note': 'The preceding maintenance item has an unresolved outcome; this stage was not started.'}
@@ -473,6 +488,8 @@ class NativeWorkflow:
                         result = {'skipped': True, 'cancelled': True, 'navigation_cancelled': True, 'navigation_not_started': True,
                                   'failed_items': 0, 'installer_started': False, 'outcomeKnown': True,
                                   'note': 'You skipped this exact native maintenance stage before it started.'}
+                    elif assessment is not None and not assessment['allowed']:
+                        result = deferred_result(assessment)
                     elif cleanup_barrier and title in BEFORE_UPDATES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': cleanup_barrier,
@@ -513,7 +530,7 @@ class NativeWorkflow:
                                       navigation_cancelled_items=max(1, result.get('navigation_cancelled_items', 0)))
                     stage['result'] = result
                     if isinstance(result, dict):
-                        if result.get('navigation_blocked') is True:
+                        if result.get('navigation_blocked') is True or result.get('deferred') is True:
                             stage['status'] = 'skipped'
                         if result.get('failed_items', 0):
                             stage['status'] = 'failed'
@@ -577,6 +594,12 @@ class NativeWorkflow:
             report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] or report['cancelled_stages'] else 'completed'
             report['resource_totals'] = progress_callback.resource_snapshot()
             report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
+            if configuration.get('toolkit_settings', {}).get('resume', {}).get('enabled') is True:
+                from .update_resume import UpdateResumeService
+                try:
+                    report['update_resume'] = UpdateResumeService(self.backend).capture(configuration, report, lease=lease)
+                except (OSError, ValueError, RuntimeError) as error:
+                    report['update_resume'] = {'status': 'unavailable', 'reason': str(error)[:1000]}
             atomic_json(path, report)
             record_attempt(self.backend.data_dir, configuration, status='cancelled' if report['cancelled'] else 'failed' if report['failed_stages'] else 'completed',
                            run_id=identifier, validator=self.backend.preference_store.validate)
@@ -604,7 +627,7 @@ class NativeWorkflow:
                     parallel_job.join()
             finally:
                 self.navigation.end((report or {}).get('status', 'failed'))
-                if lease is not None:
+                if lease is not None and _lease is None:
                     lease.release()
                 self.active = False
                 self.lock.release()
@@ -645,7 +668,13 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
             add(label, 'not_applicable', 'Read-only inventory; no mutation postcondition to check.')
             continue
         cleanup = outcome.get('result', outcome)
-        if isinstance(cleanup, dict) and 'deleted_count' in cleanup:
+        from .verification import _TOOLKIT_FILE_STAGES, _TOOLKIT_READ_ONLY_STAGES, toolkit_cleanup_checks
+        if label in _TOOLKIT_FILE_STAGES:
+            for check in toolkit_cleanup_checks(cleanup, stopped=expired):
+                add(label, check['status'], check['reason'] + ' ' + json.dumps(check['evidence'], sort_keys=True))
+        elif label in _TOOLKIT_READ_ONLY_STAGES and outcome.get('read_only') is True:
+            add(label, 'not_applicable', 'Bounded read-only observations or metadata history; no cleanup, repair or performance gain is claimed.')
+        elif isinstance(cleanup, dict) and 'deleted_count' in cleanup:
             checked, remaining = 0, 0
             for row in cleanup.get('files', []):
                 if expired():

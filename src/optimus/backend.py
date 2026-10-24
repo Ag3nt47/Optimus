@@ -105,8 +105,9 @@ class Backend(ExtendedMaintenanceBackend):
         return self.startup_launch_status()
 
     def optimize(self, settings=None, progress_callback=None, cancel_event=None, *, browser_prompt=None):
-        return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event,
-                                 browser_prompt=browser_prompt)
+        from .reboot_workflow import run_with_reboot_resume
+        return run_with_reboot_resume(self, settings or self.preferences(), progress_callback or (lambda event: None),
+                                      cancel_event, browser_prompt=browser_prompt)
 
     def reconcile_completed_updates(self, *, lease=None):
         from .automatic_update_recovery import reconcile_completed_updates

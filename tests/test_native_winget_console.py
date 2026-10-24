@@ -135,6 +135,53 @@ class ConsoleProtocolTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3010)
         self.assertEqual(result.stderr, '')
 
+    def test_authenticated_resident_handoff_releases_queue_but_retains_console_owner(self):
+        arguments = ['C:/fixtures/winget.exe', 'upgrade', '--id', 'Ollama.Ollama', '--exact',
+                     '--source', 'winget', '--version', '2.0', '--silent', '--disable-interactivity']
+        class ResidentConsole(FakeConsole):
+            def launch(native, nonce, values):
+                native.started, native.nonce, native.arguments = True, nonce, list(values)
+                native.channels['output'].put(b'Native installation finished.\n')
+                first = native.rows()[0]
+                handoff = dict(first, event='resident_handoff', exit_code=0, quiescent=False,
+                    job_verified=True, job_active_processes=1, console_client_count=1,
+                    resident_proof={'schema': 1, 'kind': 'verified-ollama-resident-runtime-v1',
+                        'package_id': 'Ollama.Ollama', 'version': '2.0', 'target_pid': 9876,
+                        'restart_required': False, 'install_location': 'D:/Ollama',
+                        'processes': [{'pid': 333, 'path': 'D:/Ollama/ollama app.exe', 'created_at': 10,
+                                       'sha256': 'c' * 64}],
+                        'winget_log_sha256': 'a' * 64, 'installer_log_sha256': 'b' * 64})
+                native.channels['receipt'].put((json.dumps(first) + '\n' + json.dumps(handoff) + '\n').encode('ascii'))
+                threading.Timer(.5, native.complete).start()
+            def complete(native):
+                native.exit = 0
+                native.channels['receipt'].put((json.dumps(native.rows()[1]) + '\n').encode('ascii'))
+                native.channels['receipt'].put(b'')
+        started = time.monotonic()
+        with mock.patch.object(console, '_ConsoleProcess', ResidentConsole):
+            result = console.run_winget_console(arguments, timeout=2, progress_callback=lambda _: None,
+                allow_resident_handoff=True)
+        self.assertLess(time.monotonic() - started, .4)
+        self.assertFalse(result.capture_complete)
+        self.assertTrue(result.native_completion_verified)
+        self.assertFalse(result.console_receipt['quiescent'])
+        native = ResidentConsole.instances[-1]
+        self.assertFalse(native.closed)
+        self.assertEqual(native.close_calls, [])
+        with console._RETAINED_LOCK:
+            owner = next(session for session in console._RETAINED if session.native is native)
+        self.assertTrue(owner.finished.wait(3))
+        self.assertTrue(native.closed)
+
+    def test_new_handoff_payload_is_explicit_and_default_payload_remains_unchanged(self):
+        import base64
+        values = ['C:/fixtures/fake.exe', '--silent']
+        default = console._helper_arguments(432, 'f' * 32, values)
+        enabled = console._helper_arguments(432, 'f' * 32, values, allow_resident_handoff=True)
+        self.assertEqual(json.loads(base64.b64decode(default[-1])), values)
+        self.assertEqual(json.loads(base64.b64decode(enabled[-1])),
+            {'schema': 1, 'arguments': values, 'resident_handoff': True})
+
     def test_timeout_retains_console_drainer_and_handles_until_quiescence(self):
         FakeConsole.automatic = False
         with self.assertRaises(subprocess.TimeoutExpired):
@@ -456,11 +503,76 @@ print('wrapper-finished',flush=True)
             source = ("import subprocess;subprocess.Popen(" + repr([str(windowed), '-I', '-c', descendant])
                       + ");print('wrapper-finished',flush=True)")
             started = time.monotonic()
-            result = self.run_child(source)
+            # Explicit handoff mode must still refuse an unknown GUI child.
+            # This also exercises the real native private-job PID inventory.
+            result = console.run_winget_console([self.executable, '-I', '-u', '-c', source],
+                timeout=5, progress_callback=lambda _: None, allow_resident_handoff=True)
             self.assertGreater(time.monotonic() - started, .5)
             self.assertEqual(marker.read_text(encoding='utf8'), 'finished')
             self.assertTrue(result.console_receipt['job_verified'])
             self.assertEqual(result.console_receipt['job_active_processes'], 0)
+
+    def test_native_authenticated_handoff_keeps_harmless_gui_runtime_alive(self):
+        """Native transport only; classifier evidence has separate offline tests.
+
+        The fixture substitutes its evidence provider inside its private child.
+        It never invokes WinGet, writes ARP keys or installs actual software.
+        """
+        import shutil
+        windowed = Path(self.executable).with_name('pythonw.exe')
+        if not windowed.is_file():
+            self.skipTest('The harmless windowed Python fixture is unavailable.')
+        with tempfile.TemporaryDirectory(prefix='optimus-resident-handoff-fixture-') as directory:
+            folder = Path(directory)
+            wrapper, runtime = folder / 'winget.exe', folder / 'ollama app.exe'
+            shutil.copy2(self.executable, wrapper)
+            shutil.copy2(windowed, runtime)
+            for name in ('python312.dll', 'python3.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'):
+                original = Path(self.executable).with_name(name)
+                if original.is_file():
+                    shutil.copy2(original, folder / name)
+            marker = folder / 'runtime-finished.txt'
+            runtime_code = ("import time;from pathlib import Path;time.sleep(1.4);Path("
+                            + repr(str(marker)) + ").write_text('finished')")
+            (folder / 'upgrade').write_text('import subprocess\nsubprocess.Popen('
+                + repr([str(runtime), '-c', runtime_code]) + ")\nprint('fixture-provider-finished',flush=True)\n")
+            original_arguments = console._helper_arguments
+            def helper(handle, nonce, values, **options):
+                result = original_arguments(handle, nonce, values, **options)
+                # Only this test child substitutes native provider evidence.
+                injection = ("import hashlib,time;from pathlib import Path;"
+                    "import optimus.resident_update_completion as r;"
+                    "r.verify_resident_completion=lambda argv,pid,started,rows:dict("
+                    "schema=1,kind='verified-ollama-resident-runtime-v1',package_id='Ollama.Ollama',"
+                    "version='2.0',target_pid=pid,restart_required=False,install_location=" + repr(directory)
+                    + ",processes=[dict(row,sha256=hashlib.sha256(Path(row['path']).read_bytes()).hexdigest()) for row in rows],"
+                    "winget_log_sha256='a'*64,installer_log_sha256='b'*64);"
+                    )
+                result[result.index('-c') + 1] = result[result.index('-c') + 1].replace(
+                    'from optimus.winget_console import monitor_main;', injection + 'from optimus.winget_console import monitor_main;')
+                return result
+            previous_directory = os.getcwd()
+            try:
+                os.chdir(directory)
+                arguments = [str(wrapper), 'upgrade', '--id', 'Ollama.Ollama', '--exact', '--source',
+                             'winget', '--version', '2.0', '--silent', '--disable-interactivity']
+                with mock.patch.dict(os.environ, {'PYTHONHOME': str(Path(self.executable).parent)}), \
+                        mock.patch.object(console, '_helper_arguments', side_effect=helper):
+                    result = console.run_winget_console(arguments, timeout=5, progress_callback=lambda _: None,
+                        allow_resident_handoff=True)
+                self.assertIs(result.native_completion_verified, True)
+                self.assertIs(result.capture_complete, False)
+                self.assertFalse(marker.exists(), 'The resident GUI fixture exited before handoff.')
+                from optimus.resident_update_completion import verified_resident_handoff
+                self.assertTrue(verified_resident_handoff(result, arguments))
+                with console._RETAINED_LOCK:
+                    owner = next(value for value in console._RETAINED if value.arguments == arguments)
+                self.assertFalse(owner.native.closed)
+                self.assertTrue(owner.finished.wait(8))
+                self.assertEqual(marker.read_text(), 'finished')
+                self.assertTrue(owner.native.closed)
+            finally:
+                os.chdir(previous_directory)
 
     def test_native_preserves_literal_unicode_and_shell_metacharacter_arguments(self):
         values = ('text with spaces', 'a"b', 'c\\d\\', 'é ☃', '$value;$(never)', '`literal`')

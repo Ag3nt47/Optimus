@@ -26,6 +26,16 @@ PORTABLE_SUITES = (
     'test_codex_archives.py', 'test_retention_cleanup.py', 'test_retention_choices_ui.py',
     'test_worker_resource_totals.py',
     'test_automatic_update_recovery.py', 'test_continue_updates.py',
+    'test_application_caches.py', 'test_storage_growth.py', 'test_recovery_retention.py',
+    'test_maintenance_toolkit_integration.py', 'test_browser_native_process_guard.py',
+    'test_performance_history.py', 'test_system_diagnostics.py', 'test_additional_packages.py',
+    'test_toolkit_configuration.py', 'test_maintenance_toolkit_ui.py',
+    'test_update_resume.py', 'test_resident_update_completion.py',
+    'test_adaptive_maintenance.py', 'test_adaptive_toolkit_integration.py',
+    'test_critical_review_toolkit.py',
+    'test_toolkit_cli.py', 'test_reboot_workflow.py',
+    'test_integrity_lifecycle.py', 'test_toolkit_report_archive.py',
+    'test_toolkit_verification.py',
 )
 
 

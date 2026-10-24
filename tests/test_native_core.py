@@ -248,7 +248,10 @@ def test_native_privacy_cleanup_backs_up_restores_and_preserves_bookmarks(tmp_pa
             'CREATE TABLE moz_bookmarks(id INTEGER PRIMARY KEY,fk INTEGER);'
             'INSERT INTO moz_places VALUES(1,"https://fixture.invalid");'
             'INSERT INTO moz_historyvisits VALUES(1,1); INSERT INTO moz_bookmarks VALUES(1,1);')
-    monkeypatch.setattr(browser_privacy.psutil, 'process_iter', lambda *args, **kwargs: [])
+    # A real census always includes the test interpreter. An empty census is
+    # unavailable evidence, not proof that Firefox and its helpers are closed.
+    monkeypatch.setattr(browser_privacy.psutil, 'process_iter', lambda *args, **kwargs:
+        [SimpleNamespace(info={'pid': os.getpid(), 'name': 'optimus-fixture-python'})])
     tool = browser_privacy.BrowserPrivacy(tmp_path / 'Data')
     identity = tool.profiles()[0]['id']
     plan = tool.scan(identity, ['history'])

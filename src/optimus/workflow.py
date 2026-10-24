@@ -16,6 +16,7 @@ from .approval_policy import APPROVAL_DEFAULTS, validate_approvals
 from .smart_configuration import SMART_DEFAULTS, validate_smart_configuration
 from .unattended_configuration import UNATTENDED_DEFAULTS, validate_unattended_configuration
 from .software_app_rules import APP_RULE_DEFAULTS, validate_app_rules
+from .toolkit_configuration import DEFAULTS as TOOLKIT_DEFAULTS, validate_configuration as validate_toolkit
 
 CONSUMER_PACKAGE_NAMES = (
     'Microsoft.BingNews', 'Microsoft.BingWeather', 'Microsoft.Getstarted',
@@ -77,6 +78,7 @@ DEFAULTS.update(copy.deepcopy(APPROVAL_DEFAULTS))
 DEFAULTS.update(copy.deepcopy(SMART_DEFAULTS))
 DEFAULTS.update(copy.deepcopy(UNATTENDED_DEFAULTS))
 DEFAULTS.update(copy.deepcopy(APP_RULE_DEFAULTS))
+DEFAULTS['toolkit_settings'] = copy.deepcopy(TOOLKIT_DEFAULTS)
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _CATEGORY_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
 FINAL_VERIFICATION_STAGE = 'Verify optimization outcomes'
@@ -260,6 +262,7 @@ class Preferences:
         if (result['windows_security_updates_enabled'] and result['windows_security_updates_install_approved']
                 and not result['windows_security_update_agreements_accepted']):
             raise ValueError('Automatic Windows Security/Critical updates require explicit Microsoft agreement acceptance.')
+        result['toolkit_settings'] = validate_toolkit(result['toolkit_settings'])
         return validate_approvals(result)
 
     def save(self, value):
@@ -303,7 +306,7 @@ class Workflow:
         self.active = False
         self.last_report = None
 
-    def run(self, settings, progress_callback, cancel_event=None, *, browser_prompt=None):
+    def run(self, settings, progress_callback, cancel_event=None, *, browser_prompt=None, _lease=None):
         global_cancel_event = cancel_event
         configuration = Preferences.validate(settings)
         if not self.lock.acquire(blocking=False):
@@ -317,7 +320,13 @@ class Workflow:
                                            independent_stage, ready_maintenance_stages, BEFORE_UPDATES, BLOCKED_STAGES, installer_barrier,
                                            pending_updates_barrier, parallel_installer_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
-            lease = RunLease(self.backend.data_dir).acquire()
+            if _lease is None:
+                lease = RunLease(self.backend.data_dir).acquire()
+            else:
+                if (not isinstance(_lease, RunLease) or _lease.handle is None
+                        or _lease.path != self.backend.data_dir / 'maintenance-run.lock'):
+                    raise ValueError('A current supplied maintenance lease is required.')
+                lease = _lease
             recovery = None
             reconcile = getattr(self.backend, 'reconcile_completed_updates', None)
             if callable(reconcile):
@@ -611,6 +620,14 @@ class Workflow:
                     return legacy
                 stages.append(('Review vendor-only and legacy patch sources',
                                'Comparing local inventory to known provider families and official OEM routes. No unofficial package is downloaded or installed, and availability/compatibility remains unverified.', legacy_review))
+            extra = configuration['toolkit_settings']
+            if any(section.get('enabled') is True for section in extra.values()):
+                factory = getattr(self.backend, '_toolkit', None)
+                if callable(factory):
+                    early, late = factory().stages(configuration, lease=lease, cancel_event=cancel_event,
+                        progress_callback=lambda event: item_progress('Maintenance toolkit')(event))
+                    stages[1:1] = early
+                    stages.extend(late)
             stages.append(('Capture final resource report', 'Saving final measurements and the outcome of each operation.', self.backend.audit))
             if configuration['post_process_review_enabled']:
                 def process_review():
@@ -712,6 +729,8 @@ class Workflow:
                 started = time.time()
                 serial_job = None
                 try:
+                    from .adaptive_maintenance import checkpoint, deferred_result
+                    assessment = checkpoint(self.backend, title=title)
                     if not navigation_available:
                         result = {'skipped': True, 'navigation_blocked': True, 'requiresReview': True, 'failed_items': 0,
                                   'note': 'The preceding maintenance item has an unresolved outcome; this stage was not started.'}
@@ -719,6 +738,8 @@ class Workflow:
                         result = {'skipped': True, 'cancelled': True, 'navigation_cancelled': True, 'navigation_not_started': True,
                                   'failed_items': 0, 'installer_started': False, 'outcomeKnown': True,
                                   'note': 'You skipped this exact maintenance stage before it started.'}
+                    elif assessment is not None and not assessment['allowed']:
+                        result = deferred_result(assessment)
                     elif cleanup_barrier and title in BEFORE_UPDATES:
                         result = {'skipped': True, 'review_only': True, 'requiresReview': True,
                                   'failed_items': 0, 'items': [], 'stop_reason': cleanup_barrier,
@@ -772,7 +793,7 @@ class Workflow:
                     interrupted = (global_cancel_event is not None and global_cancel_event.is_set()
                                    or isinstance(result, dict) and result.get('cancelled') is True)
                     navigation_cancelled = isinstance(result, dict) and (result.get('navigation_cancelled') is True or bool(result.get('navigation_cancelled_items')))
-                    status = 'cancelled' if interrupted or navigation_cancelled else 'skipped' if isinstance(result, dict) and result.get('navigation_blocked') else 'failed' if isinstance(result, dict) and result.get('failed_items', 0) else 'completed'
+                    status = 'cancelled' if interrupted or navigation_cancelled else 'skipped' if isinstance(result, dict) and (result.get('navigation_blocked') or result.get('deferred')) else 'failed' if isinstance(result, dict) and result.get('failed_items', 0) else 'completed'
                     stage = {'title': title, 'status': status, 'started_at': started, 'finished_at': time.time(), 'result': result}
                     if serial_job is not None:
                         stage['worker_log_path'] = str(serial_job.path)
@@ -839,6 +860,12 @@ class Workflow:
             report['status'] = 'cancelled' if report['cancelled'] else 'completed_with_errors' if report['failed_stages'] or report['cancelled_stages'] else 'completed'
             report['resource_totals'] = progress_callback.resource_snapshot()
             report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
+            if configuration['toolkit_settings']['resume']['enabled']:
+                from .update_resume import UpdateResumeService
+                try:
+                    report['update_resume'] = UpdateResumeService(self.backend).capture(configuration, report, lease=lease)
+                except (OSError, ValueError, RuntimeError) as error:
+                    report['update_resume'] = {'status': 'unavailable', 'reason': str(error)[:1000]}
             atomic_json(log_path, report)
             if attempt_started:
                 record_attempt(self.backend.data_dir, configuration, status='cancelled' if report['cancelled'] else 'failed' if report['failed_stages'] else 'completed', run_id=run_id,
@@ -873,7 +900,7 @@ class Workflow:
                     if not parallel_job.joined:
                         parallel_job.cancel()
                     parallel_job.join()
-                if lease is not None:
+                if lease is not None and _lease is None:
                     lease.release()
             finally:
                 self.navigation.end((report or {}).get('status', 'failed'))

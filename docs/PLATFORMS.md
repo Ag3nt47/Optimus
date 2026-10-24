@@ -1,6 +1,6 @@
 # Native platforms and downloads
 
-Optimus 0.11.12 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.12.0 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
@@ -24,6 +24,13 @@ Native startup registration uses the application's current location. Move the ap
 
 | Function family | Windows | macOS / Linux |
 | --- | --- | --- |
+| Optional application-cache recipes | Selected Discord/Spotify/Steam/Teams web-cache leaves with complete process checks | Supported native recipe paths; Teams is not offered by the Linux recipe set. Active or unknown applications are skipped |
+| Folder-growth tracking and recovery retention | Selected local metadata scans; bounded report/browser-backup expiry with separate undo-loss approval | Same scoped local mechanisms and native path/ownership checks; remote/cloud/junction roots are excluded |
+| Performance observations/history | Time-weighted CPU/RAM and observed disk/network rates; bounded local comparison summaries | Same available psutil counters; missing metrics remain unknown, and no universal speed score is claimed |
+| Native hardware, boot and memory evidence | Inbox storage/battery providers, recent Diagnostics-Performance events and pagefile facts when accessible | Native memory/swap and available battery facts; Linux current boot summary through existing systemd-analyze. No inbox storage-wear/temperature or Windows boot-event parity is claimed |
+| Adaptive readiness and installer headroom | Native idle/foreground/power/network-cost evidence plus real-volume space estimates | Available resource/battery facts and volume estimates; unsupported interaction/network-cost evidence stays unknown and required conditions defer work |
+| Additional Chocolatey updates and experimental Ollama resident completion | Optional existing standard Chocolatey with conservative one-provider ownership; separately enabled exact Ollama proof with a retained passive observer | Unavailable; existing native-manager updates keep their normal boundaries |
+| Explicit integrity checks and separately approved repair | Supported inbox DISM/SFC, tracked native outcomes, no automatic reboot or uncertain retry | Windows servicing is unavailable; no Windows repair tool is invoked |
 | Main controls including Revert, launch consent, setup choices, responsive worker cards, stage progress and cancellation | Native Qt | Native Qt |
 | GitHub startup release check | Stable release check, explicit update consent, verified side-by-side install and guarded restart on supported writable managed installations | Stable native-asset check and manual download; no automatic bundle replacement or privileged install |
 | Worker Back/Next/Cancel and per-app update rules | Session/item-bound cooperative controls and exact WinGet update choices | Same worker controls and supported native-manager update choices |
@@ -70,7 +77,7 @@ python tools/build_native.py
 
 `tools/test_native.py` selects the same tests locally and in CI: the complete Python suite on Windows; every `tests/test_native*.py` plus its explicit `PORTABLE_SUITES` list on macOS/Linux. Native tests cover the actual platform counterparts; Windows contract fixtures remain in the Windows job. The build helper checks the actual interpreter architecture, builds an onedir application (`.app` on macOS), applies Windows Qt/ICU normalization only on Windows, copies allowlisted source and licenses, and runs `--smoke-test`, `--startup-probe`, `--process-scan` and `--tls-probe` against the packaged executable. The offline TLS probe validates bundled certificate roots and strict verification with empty default CA locations; it does not contact GitHub or apply maintenance. Those checks do not apply maintenance. Source packaging excludes local configuration, runtime reports, credentials and private folders. macOS source/licenses are under `Contents/Resources`; its final bundle is ad-hoc signed after packaging. Linux archives preserve links and executable bits.
 
-GitHub Actions builds Windows x64, macOS arm64, macOS x86_64 and Linux x86_64 independently. Windows also runs all eight native PowerShell fixture suites. Each job uploads Python test results and packaged-check evidence, including when a later step fails. Tagged releases require all four native jobs to succeed before publishing the separate archives and combined checksums. Release publication verifies the complete artifact set and refuses to overwrite different existing release bytes.
+GitHub Actions builds Windows x64, macOS arm64, macOS x86_64 and Linux x86_64 independently. Windows also runs the native PowerShell fixture suites, including unknown update-state checks and read-only health-provider fixtures. Each job uploads Python test results and packaged-check evidence, including when a later step fails. Tagged releases require all four native jobs to succeed before publishing the separate archives and combined checksums. Release publication verifies the complete artifact set and refuses to overwrite different existing release bytes.
 
 The build dependency helper uses official binary cryptography/CFFI wheels on supported targets. Current cryptography releases no longer supply Intel Mac wheels, so Intel Mac source builds require Rust, Xcode tools and Homebrew OpenSSL. The helper requests static linkage with a fresh source build and checks that the Rust binding has no external OpenSSL dependency. Packaged smoke tests exercise AES-GCM and Scrypt in memory before publishing. See [PyCA's macOS build instructions](https://cryptography.io/en/50.0.0/installation/#building-cryptography-on-macos). Portable downloads include the result; end users do not need these build tools.
 

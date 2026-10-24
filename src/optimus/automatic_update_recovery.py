@@ -136,6 +136,7 @@ def parse_completed_winget_log(raw, record, *, now):
         and logs[0].lower().endswith('.log') and '/NORESTART' in arguments,
         'A bounded native no-restart installer log was not linked.')
     return {'package_id': package, 'version': version, 'prepared_at': prepared,
+        'native_arguments': tokens,
         'attempt_id': record['package_attempt']['id'], 'native_pid': pid,
         'started_at': started, 'finished_at': finished, 'application_name': arp[0][0],
         'publisher': arp[0][1], 'installer_path': installer, 'installer_log': logs[0]}
@@ -216,7 +217,24 @@ def _recovery_owner(data_dir, record):
     return original_owner, parent_raw
 
 
-def validate_quiescence(probe, evidence, owner, *, now):
+def _current_console_identity():
+    """Authenticate only this frozen update command, never another helper PID.
+
+    Called after acquiring the maintenance lease. The native census must still
+    independently agree with PID, executable path and creation time below.
+    """
+    if getattr(sys, 'frozen', False) is not True or ntpath.basename(sys.executable).casefold() != 'optimusconsole.exe':
+        return None
+    import psutil
+    process = psutil.Process(os.getpid())
+    executable = process.exe()
+    _require(ntpath.normcase(executable) == ntpath.normcase(sys.executable)
+        and process.name().casefold() == 'optimusconsole.exe', 'The current console identity is unavailable.')
+    return {'pid': os.getpid(), 'path': executable, 'created_at': process.create_time(),
+            'owner': _current_owner()}
+
+
+def validate_quiescence(probe, evidence, owner, *, now, current_console=None):
     _require(isinstance(probe, dict) and type(probe.get('schema')) is int and probe.get('schema') == 1 and probe.get('complete') is True
         and probe.get('review_only') is True and probe.get('wua_busy') is False
         and probe.get('reboot_required') is False and probe.get('owner') == _current_owner(),
@@ -245,7 +263,14 @@ def validate_quiescence(probe, evidence, owner, *, now):
                 and ntpath.normcase(path).startswith(ntpath.normcase(windows.rstrip('\\/') + '\\'))
                 and _utc_epoch(row.get('started_utc')) > evidence['finished_at'],
                 'Windows servicing overlaps the prior installer or its identity is unavailable.')
-        _require(name not in ('winget.exe', 'msiexec.exe', 'optimusconsole.exe')
+        authenticated_self = (name == 'optimusconsole.exe' and isinstance(current_console, dict)
+            and type(current_console.get('pid')) is int and row['pid'] == current_console['pid']
+            and current_console.get('owner') == probe['owner']
+            and isinstance(row.get('path'), str) and isinstance(current_console.get('path'), str)
+            and ntpath.normcase(row['path']) == ntpath.normcase(current_console['path'])
+            and type(current_console.get('created_at')) in (int, float)
+            and abs(_utc_epoch(row.get('started_utc')) - current_console['created_at']) <= .01)
+        _require((name not in ('winget.exe', 'msiexec.exe', 'optimusconsole.exe') or authenticated_self)
             and (servicing or not re.search(r'setup|installer|^wusa\.|^dism\.', name)), 'A native installer may still be running.')
         path = row.get('path') or ''
         _require(isinstance(path, str) and ntpath.normcase(path) != ntpath.normcase(evidence['installer_path']),
@@ -321,6 +346,7 @@ def reconcile_completed_updates(backend, *, lease=None, folder=None, now=None):
     try:
         _require(isinstance(lease, RunLease) and lease.handle is not None
             and lease.path == Path(backend.data_dir) / 'maintenance-run.lock', 'A current maintenance lease is required.')
+        current_console = _current_console_identity()
         directory = Path(backend.data_dir) / 'parallel-updates'
         _ordinary_data_path(directory)
         if not directory.exists():
@@ -344,7 +370,7 @@ def reconcile_completed_updates(backend, *, lease=None, folder=None, now=None):
                 original_owner, parent_raw = _recovery_owner(backend.data_dir, record)
                 probe = backend.automatic_update_recovery_probe()
                 current = time.time() if now is None else now
-                validate_quiescence(probe, evidence, original_owner, now=current)
+                validate_quiescence(probe, evidence, original_owner, now=current, current_console=current_console)
                 _require(_read(path, 8 * 1024 * 1024) == original, 'The updater journal changed before reconciliation.')
                 audit_dir = Path(backend.data_dir) / 'update-reconciliation' / (
                     path.stem + '-' + evidence['attempt_id'] + '-' + uuid.uuid4().hex)

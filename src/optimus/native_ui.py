@@ -90,6 +90,7 @@ class NativeSetupWizard(QWizard):
         self._build_duplicates()
         self._build_startup()
         self._build_updates()
+        self._build_toolkit()
         self._build_summary(first_run)
 
     def page_body(self, title, description):
@@ -476,8 +477,16 @@ class NativeSetupWizard(QWizard):
         worker.signals.finished.connect(finished)
         self.pool.start(worker)
 
+    def _build_toolkit(self):
+        from .widgets.maintenance_toolkit_panel import ToolkitChoices
+        body = self.page_body('Additional maintenance tools', 'Choose optional cache, storage and performance tools. Platform limitations are reported individually.')
+        self.toolkit_choices = ToolkitChoices(self.initial.get('toolkit_settings', {}), self)
+        self.toolkit_choices.setMinimumHeight(340)
+        body.addWidget(self.toolkit_choices)
+
     def collect(self):
         value = dict(self.initial)
+        value['toolkit_settings'] = self.toolkit_choices.choices()
         value.update({key: control.isChecked() for key, control in self.controls.items()})
         value.update(self.smart_setup.collect())
         value.update(self.retention_cleanup.collect())
@@ -564,7 +573,7 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         self._build_native_updates()
         self._build_native_history()
         self._build_native_capabilities()
-        for name in ('Smart cleaning', 'Workers', 'File utilities', 'Recovery'):
+        for name in ('Smart cleaning', 'Maintenance toolkit', 'Workers', 'File utilities', 'Recovery'):
             self.page(name)
         self._build_extended_tools()
 

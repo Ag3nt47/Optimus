@@ -303,6 +303,12 @@ class SmartMaintenance:
             if apply and self.busy_reader():
                 report.update(status='deferred', note='An application operation is active; Smart Maintenance waits for an idle check.')
                 return self._publish(report)
+            if apply:
+                from .adaptive_maintenance import checkpoint
+                readiness = checkpoint(self.backend)
+                if readiness is not None and not readiness['allowed']:
+                    report.update(status='deferred', note=' '.join(readiness['reasons']), adaptive_readiness=readiness)
+                    return self._publish(report)
             with self.lease_factory(self.data_dir):
                 barrier = self.barrier_reader(self.backend)
                 if barrier:

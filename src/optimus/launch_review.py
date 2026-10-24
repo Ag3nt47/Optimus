@@ -62,6 +62,10 @@ def launch_warning(settings):
     from .software_app_rules import app_rules_summary, apply_update_rules
     rule_scope = app_rules_summary(settings)
     actions, checks = [], []
+    from .toolkit_configuration import launch_descriptions
+    extra_actions, extra_checks = launch_descriptions(settings)
+    actions.extend(extra_actions)
+    checks.extend(extra_checks)
     categories = list(settings.get('cleanup_category_ids') or [])
     if settings.get('cleanup_enabled') is True:
         categories.insert(0, 'user-temp')

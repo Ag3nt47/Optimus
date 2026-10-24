@@ -72,6 +72,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-UpdateRecovery.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-SystemDiagnostics.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build, verify and archive the native application
         run: python tools/build_native.py --expected-target ${{ matrix.target }}
       - name: Package public editable source

@@ -31,6 +31,7 @@ BEFORE_UPDATES = frozenset({
     'Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
     'Clean approved native temporary files and caches', 'Clean selected browser data after close or skip choice',
     'Clean archived Codex conversations', 'Clean inactive Angerona logs', 'Clean incomplete download leftovers',
+    'Clean selected application caches', 'Expire selected recovery and report data',
 })
 INDEPENDENT = frozenset({
     'Review installed applications', 'Identify programs contributing to slowdowns',
@@ -42,12 +43,15 @@ INDEPENDENT = frozenset({
     'Review startup registrations', 'Review duplicate configuration', 'Review connected cloud drive',
     'Review available driver updates', 'Review native kernel and hardware-support coverage',
     'Review native startup registrations', 'Review native duplicate copies',
+    'Observe sustained resources before maintenance', 'Review hardware, boot and memory health',
+    'Check installer volume headroom', 'Compare selected folder growth',
 })
 INSTALLER_STAGES = frozenset({
     'Install approved driver updates', 'Check or install Windows security updates',
     'Optimize eligible internal drives', 'Remove selected consumer app group',
     'Remove Microsoft 365 consumer packages', 'Remove new Outlook package',
     'Uninstall Microsoft Edge using the supported installer',
+    'Update approved Chocolatey packages',
 })
 BLOCKED_STAGES = INSTALLER_STAGES | frozenset({
     WINDOWS_SOFTWARE, NATIVE_SOFTWARE, 'Clean temporary files', 'Clean selected additional categories',
@@ -56,6 +60,7 @@ BLOCKED_STAGES = INSTALLER_STAGES | frozenset({
     'Review or disable approved user startup entries', 'Find or recycle approved duplicate copies',
     'Clean approved native temporary files and caches', 'Clean selected browser data after close or skip choice',
     'Clean archived Codex conversations', 'Clean inactive Angerona logs', 'Clean incomplete download leftovers',
+    'Clean selected application caches', 'Expire selected recovery and report data',
 })
 
 
@@ -1279,6 +1284,11 @@ class ParallelInstallerQueue:
 
     def _before_install(self, job, state):
         self._prepared(job, state)
+        from .adaptive_maintenance import checkpoint
+        assessment = checkpoint(self.backend, network=True)
+        if assessment is not None and not assessment['allowed']:
+            job.gate_refusal = ' '.join(assessment['reasons'])
+            return False
         phase = None
         with self.condition:
             while True:
@@ -1294,6 +1304,10 @@ class ParallelInstallerQueue:
                     # Presence rules and later updates share one job-owned
                     # installer slot. Reentry must retain that ownership after
                     # fresh cancellation/barrier checks, rather than deadlock.
+                    assessment = checkpoint(self.backend, network=True)
+                    if assessment is not None and not assessment['allowed']:
+                        job.gate_refusal = ' '.join(assessment['reasons'])
+                        return False
                     return True
                 if not self.maintenance_ready:
                     current = 'waiting_for_maintenance'
@@ -1304,6 +1318,10 @@ class ParallelInstallerQueue:
                     earlier_ready = any(other is not job and other.will_install and other.result is None
                                         for other in self.jobs[:self.jobs.index(job)])
                     if self.active_job is None and not earlier_ready:
+                        assessment = checkpoint(self.backend, network=True)
+                        if assessment is not None and not assessment['allowed']:
+                            job.gate_refusal = ' '.join(assessment['reasons'])
+                            return False
                         self.active_job = job
                         job.mux.background('preparing', {'description': 'Installer slot acquired; rechecking approved scope and current readiness.'})
                         return True

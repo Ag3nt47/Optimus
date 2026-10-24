@@ -113,8 +113,10 @@ def _source_console_executable():
     return str(executable)
 
 
-def _helper_arguments(receipt_handle, nonce, arguments):
-    payload = base64.b64encode(json.dumps(arguments, ensure_ascii=True, separators=(',', ':')).encode('ascii')).decode('ascii')
+def _helper_arguments(receipt_handle, nonce, arguments, *, allow_resident_handoff=False):
+    values = ({'schema': 1, 'arguments': arguments, 'resident_handoff': True}
+              if allow_resident_handoff else arguments)
+    payload = base64.b64encode(json.dumps(values, ensure_ascii=True, separators=(',', ':')).encode('ascii')).decode('ascii')
     tail = [str(receipt_handle), nonce, payload]
     if getattr(sys, 'frozen', False):
         return [_frozen_console_executable(), _FLAG, *tail]
@@ -122,8 +124,20 @@ def _helper_arguments(receipt_handle, nonce, arguments):
     # the base interpreter directly, with only this source package added.
     executable = _source_console_executable()
     source = str(Path(__file__).resolve().parents[1])
-    code = ('import sys;sys.path.insert(0,' + repr(source) + ');'
-            'from optimus.winget_console import monitor_main;raise SystemExit(monitor_main(sys.argv[1:]))')
+    # The trusted base interpreter bypasses a venv redirector, so -I also
+    # bypasses its site-packages. Add only the already-imported dependency's
+    # actual package directory; native private-job image checks need psutil.
+    dependency_code = ''
+    try:
+        import psutil
+    except ModuleNotFoundError:
+        if allow_resident_handoff:
+            raise  # Optional feature cannot start without its native identity dependency.
+    else:
+        dependency = str(Path(psutil.__file__).resolve().parents[1])
+        dependency_code = 'sys.path.append(' + repr(dependency) + ');'
+    code = ('import sys;sys.path.insert(0,' + repr(source) + ');' + dependency_code
+            + 'from optimus.winget_console import monitor_main;raise SystemExit(monitor_main(sys.argv[1:]))')
     return [executable, '-I', '-u', '-c', code, *tail]
 
 
@@ -252,6 +266,23 @@ class _TargetProcess:
             raise RuntimeError('The private target job inventory could not be verified.')
         return accounting.ActiveProcesses
 
+    def process_rows(self):
+        """Exact private-job members, including GUI images before attachment."""
+        import psutil
+        class ProcessIds(ctypes.Structure):
+            _fields_ = [('assigned', w.DWORD), ('listed', w.DWORD),
+                        ('pids', ctypes.c_size_t * 64)]
+        inventory, returned = ProcessIds(), w.DWORD()
+        if (not self.kernel.QueryInformationJobObject(self.job, 3, ctypes.byref(inventory),
+                ctypes.sizeof(inventory), ctypes.byref(returned))
+                or not 1 <= inventory.listed == inventory.assigned <= 8):
+            raise RuntimeError('The remaining private job inventory is unavailable or unsupported.')
+        rows = []
+        for pid in inventory.pids[:inventory.listed]:
+            process = psutil.Process(pid)
+            rows.append({'pid': pid, 'path': process.exe(), 'created_at': process.create_time()})
+        return rows
+
     def close(self):
         for name in ('thread', 'process', 'job'):
             handle = getattr(self, name, None)
@@ -292,7 +323,8 @@ class _ConsoleProcess:
             self.kernel.CloseHandle(value)
 
     def launch(self, nonce, arguments):
-        helper = _helper_arguments(self.handles['receipt_write'], nonce, arguments)
+        helper = _helper_arguments(self.handles['receipt_write'], nonce, arguments,
+            allow_resident_handoff=getattr(self, 'allow_resident_handoff', False))
         command = subprocess.list2cmdline(helper)
         if len(command) >= 32767:
             raise ValueError('The console progress command exceeds the Windows argument bound.')
@@ -388,6 +420,7 @@ class _Session:
         self.output, self.reporting = _Capture(), threading.Event()
         self.launch_ready, self.output_eof, self.receipt_eof, self.finished = (threading.Event() for _ in range(4))
         self.ready, self.fault, self.terminal_error = threading.Event(), threading.Event(), threading.Event()
+        self.provider_ready = threading.Event()
         self.lock, self.latest, self.download = threading.RLock(), [], []
         self.receipts, self.receipt_error = [], False
         self.returncode, self.aborted = None, False
@@ -443,6 +476,7 @@ class _Session:
 
     def _receipt_reader(self):
         data = bytearray()
+        pending = bytearray()
         while True:
             try:
                 block = self.native.read('receipt')
@@ -450,17 +484,27 @@ class _Session:
                     self.launch_ready.wait()
                     if not self.aborted:
                         try:
-                            text = bytes(data).decode('ascii')
-                            values = [json.loads(line) for line in text.splitlines()]
-                            if len(values) != 2 or any(not isinstance(value, dict) for value in values):
+                            if pending or len(self.receipts) not in (2, 3):
                                 raise ValueError('The private console receipt is incomplete.')
-                            self.receipts = values
                         except (ValueError, UnicodeError):
                             self.receipt_error = True
                     self.receipt_eof.set()
                     return
                 if len(data) + len(block) <= _MAX_RECEIPT:
                     data.extend(block)
+                    pending.extend(block)
+                    while b'\n' in pending:
+                        line, _, tail = pending.partition(b'\n')
+                        pending[:] = tail
+                        try:
+                            value = json.loads(bytes(line).decode('ascii'))
+                            if not isinstance(value, dict) or len(self.receipts) >= 3:
+                                raise ValueError('The private console receipt exceeds its bound.')
+                            self.receipts.append(value)
+                            if self._handoff() is not None and not self.receipt_error:
+                                self.provider_ready.set()
+                        except (ValueError, UnicodeError):
+                            self.receipt_error = True
                 else:
                     self.receipt_error = True
             except Exception:
@@ -470,9 +514,11 @@ class _Session:
                 time.sleep(0.25)
 
     def _terminal(self):
-        if not self.receipt_eof.is_set() or self.receipt_error or len(self.receipts) != 2:
+        if not self.receipt_eof.is_set() or self.receipt_error or len(self.receipts) not in (2, 3):
             return None
-        initial, final = self.receipts
+        initial, final = self.receipts[0], self.receipts[-1]
+        if len(self.receipts) == 3 and self._handoff() is None:
+            return None
         fields = ('schema', 'nonce', 'supervisor_pid', 'argv_sha256', 'target_pid')
         if (any(initial.get(key) != final.get(key) for key in fields)
                 or type(initial.get('schema')) is not int or initial['schema'] != 1
@@ -490,6 +536,44 @@ class _Session:
                 or type(final.get('exit_code')) is not int or not 0 <= final['exit_code'] <= 0xffffffff):
             return None
         return final
+
+    def _handoff(self):
+        """A distinct authenticated receipt; never a quiescent/EOF receipt."""
+        if self.receipt_error or len(self.receipts) < 2:
+            return None
+        initial, value = self.receipts[:2]
+        fields = ('schema', 'nonce', 'supervisor_pid', 'argv_sha256', 'target_pid')
+        proof = value.get('resident_proof')
+        if (any(initial.get(key) != value.get(key) for key in fields)
+                or type(initial.get('schema')) is not int or initial['schema'] != 1
+                or type(value.get('schema')) is not int or value['schema'] != 1
+                or initial.get('event') != 'started' or value.get('event') != 'resident_handoff'
+                or initial.get('nonce') != self.nonce or initial.get('supervisor_pid') != self.native.pid
+                or initial.get('argv_sha256') != self.argument_digest
+                or type(initial.get('target_pid')) is not int or initial['target_pid'] <= 0
+                or type(value.get('exit_code')) is not int or value['exit_code'] != 0
+                or value.get('quiescent') is not False or value.get('job_verified') is not True
+                or type(value.get('console_client_count')) is not int or value['console_client_count'] != 1
+                or type(value.get('job_active_processes')) is not int or not 1 <= value['job_active_processes'] <= 8
+                or not isinstance(proof, dict) or proof.get('kind') != 'verified-ollama-resident-runtime-v1'
+                or proof.get('target_pid') != value['target_pid'] or proof.get('restart_required') is not False
+                or proof.get('package_id') != 'Ollama.Ollama'
+                or not isinstance(proof.get('processes'), list)
+                or len(proof['processes']) != value['job_active_processes']
+                or len(self.arguments) < 9 or self.arguments[3] != proof.get('package_id')
+                or self.arguments[8] != proof.get('version')):
+            return None
+        for key in ('winget_log_sha256', 'installer_log_sha256'):
+            if not isinstance(proof.get(key), str) or re.fullmatch(r'[a-f0-9]{64}', proof[key]) is None:
+                return None
+        from .resident_update_completion import verified_resident_handoff
+        transport = subprocess.CompletedProcess(self.arguments, 0, '', '')
+        transport.native_completion_verified, transport.capture_complete = True, False
+        transport.console_receipt = dict(value, resident_handoff_verified=True,
+            output_eof=False, supervisor_exit_code=None, target_exit_code=0)
+        if not verified_resident_handoff(transport, self.arguments):
+            return None
+        return value
 
     def _monitor(self):
         self.launch_ready.wait()
@@ -547,7 +631,7 @@ class _Session:
         self.ready.set()
 
 
-def run_winget_console(arguments, *, timeout, progress_callback):
+def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_handoff=False):
     """Run once in a hidden console; a timeout retains every live native handle.
 
     stdout and stderr share the pseudoconsole's ordered output stream. Callback
@@ -559,6 +643,8 @@ def run_winget_console(arguments, *, timeout, progress_callback):
         raise ValueError('Use a finite positive console worker timeout.')
     if not callable(progress_callback):
         raise ValueError('Console progress needs a callable reporter.')
+    if type(allow_resident_handoff) is not bool:
+        raise ValueError('Resident handoff needs an explicit Boolean choice.')
     started = time.monotonic()
     native = None
     try:
@@ -567,6 +653,7 @@ def run_winget_console(arguments, *, timeout, progress_callback):
         else:
             _source_console_executable()  # Reject a missing helper before preparation.
         native = _ConsoleProcess()
+        native.allow_resident_handoff = allow_resident_handoff
         session = _Session(native, arguments, progress_callback)
         session.start()
     except Exception as error:
@@ -577,6 +664,8 @@ def run_winget_console(arguments, *, timeout, progress_callback):
                 + type(error).__name__ + ').') from error
         raise ConsoleOutcomeError('The console supervisor started but its target outcome is unknown; no retry was attempted.') from error
     while not session.finished.wait(0.025):
+        if allow_resident_handoff and session.provider_ready.is_set() and session._handoff() is not None:
+            break
         if session.terminal_error.is_set():
             session.stop_reporting()
             raise ConsoleOutcomeError('The console supervisor exited without a verified target outcome; '
@@ -585,7 +674,17 @@ def run_winget_console(arguments, *, timeout, progress_callback):
             session.stop_reporting()
             raise subprocess.TimeoutExpired(arguments, timeout, output=session.output.value(), stderr='')
     session.stop_reporting()
-    result = subprocess.CompletedProcess(arguments, session.returncode, session.output.value(), '')
+    handoff = session._handoff() if not session.finished.is_set() else None
+    result = subprocess.CompletedProcess(arguments, 0 if handoff is not None else session.returncode, session.output.value(), '')
+    if handoff is not None:
+        result.capture_complete = False  # Console/job stay owned and drained passively.
+        result.native_completion_verified = True
+        result.console_receipt = dict(handoff, resident_handoff_verified=True,
+            output_eof=False, supervisor_exit_code=None, target_exit_code=0)
+        with session.lock:
+            if session.download:
+                result.download_progress = dict(session.download[0])
+        return result
     result.capture_complete = not session.fault.is_set() and session.output.complete()
     result.console_receipt = {'schema': 1, 'verified': True, 'quiescent': True,
         'console_client_count': 1, 'supervisor_exit_code': 0, 'target_exit_code': session.returncode,
@@ -610,6 +709,14 @@ def monitor_main(arguments):
         return 125
     try:
         values = json.loads(base64.b64decode(payload, validate=True).decode('ascii'))
+        allow_resident_handoff = False
+        if isinstance(values, dict):
+            if (set(values) != {'schema', 'arguments', 'resident_handoff'}
+                    or type(values.get('schema')) is not int or values['schema'] != 1
+                    or values.get('resident_handoff') is not True):
+                return 125
+            allow_resident_handoff = True
+            values = values['arguments']
         target = _arguments(values)
         import msvcrt
         with open('CONIN$', 'r', encoding='utf-8') as console_input, open('CONOUT$', 'w', encoding='utf-8') as console_output:
@@ -629,8 +736,10 @@ def monitor_main(arguments):
                     raise ctypes.WinError(ctypes.get_last_error())
 
             write(dict(common, event='started'))
+            started_at = time.time()
             child.resume()
             returncode = child.wait()
+            proof_attempted = False
             while True:
                 clients = (w.DWORD * 64)()
                 count = kernel.GetConsoleProcessList(clients, len(clients))
@@ -641,6 +750,26 @@ def monitor_main(arguments):
                     count = kernel.GetConsoleProcessList(clients, len(clients))
                 if count == 1 and clients[0] == os.getpid() and child.active_processes() == 0:
                     break
+                if (allow_resident_handoff and not proof_attempted and returncode == 0 and count == 1 and clients[0] == os.getpid()
+                        and child.active_processes() > 0):
+                    proof_attempted = True
+                    try:
+                        from .resident_update_completion import verify_resident_completion
+                        rows = child.process_rows()
+                        proof = verify_resident_completion(target, child.pid, started_at, rows)
+                        if len(json.dumps(proof, ensure_ascii=True, separators=(',', ':'))) > 4096:
+                            raise ValueError('The resident proof exceeds its private receipt bound.')
+                        # Recheck native membership and console clients after
+                        # reading logs/ARP/files. A changed job keeps waiting.
+                        fresh = child.process_rows()
+                        again = (w.DWORD * 64)()
+                        if (fresh == rows and kernel.GetConsoleProcessList(again, len(again)) == 1
+                                and again[0] == os.getpid() and child.active_processes() == len(rows)):
+                            write(dict(common, event='resident_handoff', quiescent=False,
+                                console_client_count=1, job_verified=True, job_active_processes=len(rows),
+                                exit_code=0, resident_proof=proof))
+                    except Exception:
+                        pass  # Unknown/native GUI installers retain the original guard.
                 # An incomplete query or remaining client cannot authorize
                 # console teardown, regardless of the WinGet exit code.
                 time.sleep(0.05)

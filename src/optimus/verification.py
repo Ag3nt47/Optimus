@@ -27,6 +27,10 @@ _ID = re.compile(r'^[a-f0-9]{32}$')
 _GUID = re.compile(r'^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$', re.I)
 _STATES = ('confirmed', 'needs_review', 'unverified', 'not_applicable')
 _MAX_FILES = 20000
+_TOOLKIT_FILE_STAGES = frozenset(('Clean selected application caches', 'Expire selected recovery and report data'))
+_TOOLKIT_READ_ONLY_STAGES = frozenset(('Observe sustained resources before maintenance',
+    'Observe sustained resources after maintenance', 'Review hardware, boot and memory health',
+    'Check installer volume headroom', 'Compare selected folder growth'))
 _NATIVE = r'''
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
@@ -137,6 +141,78 @@ def _no_change_claimed(value):
         elif isinstance(item, list):
             pending.extend((child, depth + 1) for child in item)
     return True
+
+
+def toolkit_cleanup_checks(value, *, stopped=lambda: False, maximum=_MAX_FILES):
+    """Fresh metadata-only postconditions for exact new-toolkit deletion receipts.
+
+    This checks current identity/absence, not causation. POSIX ctime is not birth
+    time: a changed same-inode file cannot prove either deletion or recreation.
+    """
+    checks = []
+    def add(status, reason, **evidence):
+        checks.append({'status': status, 'reason': reason, 'evidence': evidence})
+    if not isinstance(value, dict):
+        add('unverified', 'No usable toolkit cleanup receipt was recorded.')
+        return checks
+    if _no_change_claimed(value) and value.get('deleted_bytes') in (None, 0):
+        add('not_applicable', 'The toolkit operation was explicitly skipped or review-only and claimed no mutation.')
+        return checks
+    expected, expected_bytes, records = value.get('deleted_count'), value.get('deleted_bytes'), value.get('files')
+    if type(expected) is not int or expected < 0 or type(expected_bytes) is not int or expected_bytes < 0:
+        add('unverified', 'The cleanup receipt has no valid confirmed-deletion count and byte total.')
+        return checks
+    if expected == 0 and expected_bytes == 0:
+        add('not_applicable', 'No file deletion was claimed; skipped or unavailable scopes were preserved.')
+    elif not isinstance(records, list) or len(records) != expected:
+        add('unverified', 'Individual original-file receipts do not match the claimed deletion count.')
+    else:
+        counts, seen, checked, recorded_bytes = Counter(), set(), 0, 0
+        for record in records:
+            if stopped() or checked >= maximum:
+                break
+            checked += 1
+            try:
+                if not isinstance(record, dict) or record.get('status') != 'deleted':
+                    raise ValueError('Unrecognized deletion receipt.')
+                path, old = Path(record['path']), record.get('identity')
+                if (not path.is_absolute() or '..' in path.parts or len(str(path)) > 4096
+                        or str(path).startswith(('\\\\', '//'))
+                        or os.name == 'nt' and not re.fullmatch('[A-Za-z]:', ntpath.splitdrive(str(path))[0])
+                        or not isinstance(old, dict) or any(type(old.get(key)) is not int for key in
+                            ('device', 'inode', 'size', 'modified_ns', 'created_ns'))
+                        or old['inode'] <= 0 or old['size'] < 0):
+                    raise ValueError('The original local file identity is incomplete.')
+                key = os.path.normcase(str(path))
+                if key in seen:
+                    raise ValueError('Duplicate deletion receipt.')
+                seen.add(key)
+                recorded_bytes += old['size']
+                current = _ordinary_data_path(path, file=True)
+                if current is None:
+                    counts['absent'] += 1
+                elif (current.st_dev, current.st_ino) != (old['device'], old['inode']):
+                    counts['recreated'] += 1
+                elif current.st_ctime_ns != old['created_ns']:
+                    counts['recreated' if os.name == 'nt' else 'identity_unverified'] += 1
+                else:
+                    counts['original_present'] += 1
+            except (OSError, ValueError, TypeError, KeyError):
+                counts['unreadable'] += 1
+        omitted = max(0, expected - checked)
+        if counts['absent'] or counts['recreated']:
+            add('confirmed', 'Recorded deleted paths are absent or contain a provably different current file identity.',
+                absent=counts['absent'], recreated=counts['recreated'])
+        if counts['original_present']:
+            add('needs_review', 'An unchanged original file identity remains at a supposedly deleted path.',
+                original_present=counts['original_present'])
+        if counts['identity_unverified'] or counts['unreadable'] or omitted or recorded_bytes != expected_bytes:
+            add('unverified', 'Some identities or byte totals could not be independently confirmed within the readback bound.',
+                same_inode_changed=counts['identity_unverified'], unreadable=counts['unreadable'],
+                omitted=omitted, receipt_bytes=recorded_bytes, claimed_bytes=expected_bytes)
+    if value.get('complete') is not True or value.get('journal_error') or value.get('cancelled') is True:
+        add('unverified', 'The operation was partial, cancelled or its final audit was unavailable; verified individual removals do not establish complete scope coverage.')
+    return checks
 
 
 class OutcomeVerification:
@@ -285,6 +361,16 @@ class OutcomeVerification:
         if not isinstance(value, dict):
             if isinstance(value, list): self._add(checks, 'review', title, 'not_applicable', 'This stage collected records and claimed no maintenance change.')
             else: self._add(checks, 'stage_result', title, 'unverified', 'The original stage has no usable outcome record.')
+            return
+        if title in _TOOLKIT_FILE_STAGES:
+            for check in toolkit_cleanup_checks(value, stopped=self._stopped, maximum=max(0, _MAX_FILES - self.files_checked)):
+                self._add(checks, 'toolkit_file_postcondition', title, check['status'], check['reason'],
+                          failure=check['status'] == 'needs_review', **check['evidence'])
+            self.files_checked += min(_MAX_FILES, max(0, value.get('deleted_count', 0))) if type(value.get('deleted_count')) is int else 0
+            return
+        if title in _TOOLKIT_READ_ONLY_STAGES and value.get('read_only') is True:
+            self._add(checks, 'read_only_toolkit_observation', title, 'not_applicable',
+                'This stage records bounded read-only observations or local metadata history; it claims no cleanup, repair or performance gain.')
             return
         if title in ('Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
                      'Scan for spyware and malware', 'Optimize eligible internal drives') and _no_change_claimed(value):

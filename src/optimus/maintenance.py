@@ -221,11 +221,13 @@ class Maintenance:
         return self._request("driver_update_apply", id=parsed, revision=revision)
 
     @staticmethod
-    def _run(arguments: list[str], *, timeout: float = 120, progress_callback=None) -> subprocess.CompletedProcess[str]:
+    def _run(arguments: list[str], *, timeout: float = 120, progress_callback=None,
+             allow_resident_handoff=False) -> subprocess.CompletedProcess[str]:
         if progress_callback is not None:
             if os.name == 'nt':
                 from .winget_console import run_winget_console
-                return run_winget_console(arguments, timeout=timeout, progress_callback=progress_callback)
+                return run_winget_console(arguments, timeout=timeout, progress_callback=progress_callback,
+                    allow_resident_handoff=allow_resident_handoff)
             from .winget_progress import run_winget_with_progress
             return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback)
         return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -525,6 +527,14 @@ class Maintenance:
             run_options = {'timeout': 1800}
             if progress_callback is not None:
                 run_options['progress_callback'] = progress_callback
+                # Explicit experimental opt-in. The retained safe console owner
+                # may remain resident after closing Optimus until Ollama exits.
+                from .workflow import Preferences
+                toolkit = Preferences(self.data_dir).load().get('toolkit_settings', {})
+                resume = toolkit.get('resume', {}) if isinstance(toolkit, dict) else {}
+                if (package_id == 'Ollama.Ollama' and isinstance(resume, dict)
+                        and resume.get('resident_handoff_enabled') is True):
+                    run_options['allow_resident_handoff'] = True
             result = self._run(arguments, **run_options)
         except subprocess.TimeoutExpired:
             # The vendor child can outlive WinGet. Never retry or replay here.
@@ -541,7 +551,9 @@ class Maintenance:
                 raise UpdatePreflightError('The progress console could not be prepared; no application installer was launched.',
                     failure_scope='app_batch', failureKind='manager_unavailable') from error
             raise
-        if getattr(result, 'capture_complete', True) is not True:
+        from .resident_update_completion import verified_resident_handoff
+        resident_handoff = verified_resident_handoff(result, arguments)
+        if getattr(result, 'capture_complete', True) is not True and not resident_handoff:
             raise UpdateOutcomeError('The WinGet transcript was incomplete or exceeded its bound. Restart and installer state could not be verified; no automatic retry is authorized.')
         output = _ANSI.sub("", result.stdout or "")
         stderr = _ANSI.sub("", result.stderr or "")
@@ -570,6 +582,10 @@ class Maintenance:
                 "note": (("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."
                           if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")
                          + (" Saved compatibility mode adds WinGet --force for non-security issues only. Hash/signature verification and installer hard blocks remain in effect." if compatibility_mode else ""))}
+        if resident_handoff:
+            receipt['console_receipt'] = result.console_receipt
+            receipt['resident_runtime_handoff'] = True
+            receipt['note'] += ' Exact native completion was verified; the installed Ollama runtime remains running and its private console is retained passively until it exits.'
         from .item_progress import normalize_item_progress
         observed = getattr(result, 'download_progress', None)
         if isinstance(observed, dict):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 _CREATION = threading.RLock()
 
@@ -13,8 +14,73 @@ class _Cancellation:
     def is_set(self):
         return any(event is not None and event.is_set() for event in self.events)
 
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        sleeper = threading.Event()
+        while not self.is_set():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return False
+            sleeper.wait(.05 if remaining is None else min(.05, remaining))
+        return True
+
 
 class ExtendedMaintenanceBackend:
+    def _toolkit(self):
+        from .maintenance_toolkit import MaintenanceToolkit
+        return self._optional_service('_maintenance_toolkit', lambda _: MaintenanceToolkit(self))
+
+    def configure_toolkit(self, choices):
+        from .toolkit_configuration import validate_configuration
+        settings = self.preferences()
+        settings['toolkit_settings'] = validate_configuration(choices)
+        self.save_preferences(settings)
+        return self._toolkit().status()
+
+    def toolkit_status(self):
+        return self._toolkit().status()
+
+    def maintenance_readiness(self, *, network=False):
+        return self._toolkit().readiness(network=network)
+
+    def toolkit_check(self, *, cancel_event=None):
+        return self._tool_operation('performance_check', 'Sustained performance and system health', self._toolkit().check,
+                                    cancel_event=cancel_event, _supports_progress=False)
+
+    def toolkit_observe(self, *, cancel_event=None):
+        return self._tool_operation('performance_history', 'Performance observation history', self._toolkit().observe,
+                                    cancel_event=cancel_event, _supports_progress=False)
+
+    def toolkit_archive_report(self, *, cancel_event=None):
+        if cancel_event is not None and cancel_event.is_set():
+            return {'status': 'cancelled', 'note': 'No report copy was archived.'}
+        return self._toolkit().archive_last_report()
+
+    def toolkit_preview(self, key, *, cancel_event=None):
+        return self._tool_operation('toolkit_' + key, 'Review ' + key.replace('_', ' '), self._toolkit().preview,
+                                    key, cancel_event=cancel_event, _supports_progress=False)
+
+    def toolkit_apply(self, key, plan=None, *, cancel_event=None):
+        return self._tool_operation('toolkit_' + key, 'Apply ' + key.replace('_', ' '), self._toolkit().apply,
+                                    key, plan, cancel_event=cancel_event)
+
+    def toolkit_integrity(self, *, repair=False, approved=False, cancel_event=None):
+        return self._tool_operation('windows_integrity', 'Windows integrity ' + ('repair' if repair else 'check'),
+                                    self._toolkit().integrity, repair=repair, approved=approved,
+                                    cancel_event=cancel_event, _supports_progress=False)
+
+    def pending_updates_barrier(self):
+        from .parallel_updates import pending_updates_barrier
+        return pending_updates_barrier(self)
+
+    def toolkit_resume(self, *, cancel_event=None):
+        from .update_resume import UpdateResumeService
+        from .continue_updates import run_saved_updates
+        from .automation import RunLease
+        with RunLease(self.data_dir) as lease:
+            return UpdateResumeService(self).resume(self.preferences(),
+                lambda configuration: run_saved_updates(self, cancel_event=cancel_event, _lease=lease), lease=lease)
+
     def _optional_service(self, name, factory):
         with _CREATION:
             if name not in self.__dict__:
@@ -115,6 +181,10 @@ class ExtendedMaintenanceBackend:
         """Read recovery receipts without invoking the updater guard recursively."""
         from pathlib import Path
         from .filesystem import _ordinary_data_path
+        from .system_diagnostics import integrity_mutation_barrier
+        integrity_reason = integrity_mutation_barrier(self.data_dir, reboot_reader=getattr(self, 'security_status', None))
+        if integrity_reason:
+            return integrity_reason
         try:
             for name in ('driver-backups', 'system-restore'):
                 _ordinary_data_path(Path(self.data_dir) / 'recovery' / name)

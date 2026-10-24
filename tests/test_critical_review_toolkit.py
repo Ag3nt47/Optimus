@@ -1,0 +1,84 @@
+"""The UI review inspects new toolkit controls using fixture services only."""
+import importlib.util
+import os
+from pathlib import Path
+
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('optimus_critical_review_toolkit', ROOT / 'tools/critical_review.py')
+bot = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(bot)
+
+
+@pytest.fixture(scope='module')
+def app():
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.mark.parametrize('system', ['win32', 'linux'])
+@pytest.mark.parametrize('dimensions', bot.VIEWPORTS)
+def test_toolkit_geometry_and_production_preview_handlers_use_only_inert_fixtures(tmp_path, app, system, dimensions):
+    reviewer = bot.CriticalReview(tmp_path / 'review', system=system)
+    backend = bot.FixtureBackend(tmp_path / 'in-memory-only', system)
+    factory = bot.OptimusWindow if system == 'win32' else bot.NativeOptimusWindow
+    window = factory(backend, smoke_test=True)
+    try:
+        reviewer.viewport(window, dimensions, 'fixture-main')
+        reviewer.review_toolkit(window, backend, dimensions, 'fixture')
+        failures = [row for row in reviewer.report['checks'] if row['status'] == 'failed']
+        assert not failures, failures
+        by_id = {row['id']: row for row in reviewer.report['checks']}
+        for suffix in ('no-constructor-actions', 'apply-starts-disabled', 'unsaved-preview-refused',
+                       'explicit-save', 'preview-enables-exact-apply', 'negative-approval', 'explicit-apply-once',
+                       'consumed-plan-disabled', 'preview-tab-ownership', 'changed-scope-invalidates-preview',
+                       'explicit-report-archive', 'no-other-actions'):
+            assert by_id['fixture.toolkit.' + suffix]['status'] == 'passed'
+        assert len(reviewer.report['screenshots']) == 8
+        assert not (tmp_path / 'in-memory-only').exists()
+    finally:
+        reviewer.dispose(window)
+        reviewer.close()
+
+
+@pytest.mark.parametrize('system', ['win32', 'linux'])
+def test_setup_toolkit_pages_all_reachable_without_saving_or_running(tmp_path, app, system):
+    reviewer = bot.CriticalReview(tmp_path / 'review', system=system)
+    backend = bot.FixtureBackend(tmp_path / 'in-memory-only', system)
+    try:
+        reviewer.review_setup(backend, (850, 650), 'fixture')
+        failures = [row for row in reviewer.report['checks'] if row['status'] == 'failed']
+        assert not failures, failures
+        assert any(row['id'] == 'fixture.setup-toolkit.selection-controls' for row in reviewer.report['checks'])
+        assert backend.saved == [] and not (tmp_path / 'in-memory-only').exists()
+        assert not any(getattr(backend, name).called for name in bot.OPTIONAL_OPERATIONS)
+        screenshots = {row['name'] for row in reviewer.report['screenshots']}
+        assert {'fixture-setup-toolkit-1', 'fixture-setup-toolkit-3'} <= screenshots
+    finally:
+        reviewer.close()
+
+
+def test_wrapped_checkbox_measurement_uses_real_text_height_and_detects_clipping(tmp_path, app):
+    reviewer = bot.CriticalReview(tmp_path / 'review')
+    window = QWidget()
+    window.setAttribute(Qt.WA_DontShowOnScreen, True)
+    window.resize(320, 220)
+    control = bot.WrappingCheckBox('I explicitly approve losing the old browser history and cookie undo backup', window)
+    control.setGeometry(10, 10, 280, control.heightForWidth(280))
+    window.show()
+    app.processEvents()
+    try:
+        measured = bot.measure_button(control, window, (320, 220), app)
+        assert measured['status'] == 'passed' and measured['wrapped_label']
+        control.resize(280, 20)
+        app.processEvents()
+        assert bot.measure_button(control, window, (320, 220), app)['status'] == 'failed'
+    finally:
+        window.close()
+        window.deleteLater()
+        reviewer.close()
+        app.processEvents()

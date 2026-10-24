@@ -39,6 +39,8 @@ from optimus.widgets.recovery_panel import RecoveryPanel
 from optimus.widgets.questions import make_yes_no_dialog
 from optimus.navigation import NavigationHub
 from optimus.workflow import full_optimization_settings
+from optimus.widgets.wrapping_checkbox import WrappingCheckBox
+from optimus.toolkit_configuration import validate_configuration as validate_toolkit
 
 
 VIEWPORTS = ((850, 650), (1024, 768))
@@ -48,7 +50,9 @@ OPTIONAL_OPERATIONS = ('configure_smart_maintenance', 'activate_smart_maintenanc
     'system_restore_create', 'system_restore_delete', 'system_restore_open',
     'file_utilities_capabilities', 'file_utilities_encrypt', 'file_utilities_decrypt',
     'file_utilities_split', 'file_utilities_join', 'file_utilities_shred_plan', 'file_utilities_shred_apply',
-    'change_history_scan', 'change_history_revert')
+    'change_history_scan', 'change_history_revert', 'configure_toolkit', 'toolkit_status',
+    'toolkit_check', 'toolkit_preview', 'toolkit_apply', 'toolkit_observe', 'toolkit_resume',
+    'toolkit_integrity', 'toolkit_archive_report')
 MANUAL_GAPS = [
     {'area': 'CPU and RAM', 'review': 'Run representative workloads and compare measured CPU, memory pressure and responsiveness. Fixture configuration readback cannot establish a speed gain or identify every unnecessary process.'},
     {'area': 'Item progress and live metrics', 'review': 'Fixture phase percentages prove rendering and reset behavior only. Verify real package-manager/installer progress on supported hosts; an unknown percentage must remain unavailable. Computer CPU, passive adapter traffic, reported link speed and cached OS connectivity do not measure Internet capacity or prove maximum performance.'},
@@ -59,6 +63,7 @@ MANUAL_GAPS = [
     {'area': 'Accessibility and desktop behavior', 'review': 'Review screenshots, screen readers, high contrast, keyboard order, localization, text scaling, real multi-monitor desktops and animation quality. Offscreen reachability does not prove native desktop usability.'},
     {'area': 'Sandbox and privileged prompts', 'review': 'Review actual source editing/restart handoff, UAC/polkit/macOS authorization, unsaved work and packaging signatures separately. The bot never approves an OS dialog.'},
     {'area': 'Optional recovery and file tools', 'review': 'Constructors, unsupported UI states and cached worker displays use in-memory fixtures. Separate service tests cover disposable files and injected native adapters. This bot does not export drivers, restore Windows, encrypt user documents or prove physical erasure.'},
+    {'area': 'Maintenance toolkit', 'review': 'Setup/settings scopes, wrapped controls, preview ownership and explicit fixture approval are exercised. Real cache locks, hardware counters, workload pressure, metered networking, provider agreements and loss of browser undo need separate service/native tests. No real cache, backup, report, package or repair is changed by this review.'},
 ]
 
 
@@ -163,14 +168,33 @@ def reveal_control(control, window, app):
                     break
     app.processEvents()
     scrolls = []
-    for parent in parents:
-        if isinstance(parent, QScrollArea) and parent.widget() is not None and parent.widget().isAncestorOf(control):
-            parent.ensureWidgetVisible(control, 4, 4)
-            app.processEvents()
-            scrolls.append({'vertical': parent.verticalScrollBar().value(),
-                'vertical_max': parent.verticalScrollBar().maximum(),
-                'horizontal': parent.horizontalScrollBar().value(),
-                'horizontal_max': parent.horizontalScrollBar().maximum()})
+    # Newly selected nested pages can complete a height-for-width layout while
+    # ensureWidgetVisible processes its first request. Repeat the real scroll
+    # once against the settled geometry; never count clipped pixels as visible.
+    for attempt in range(2):
+        scrolls = []
+        for parent in parents:
+            if isinstance(parent, QScrollArea) and parent.widget() is not None and parent.widget().isAncestorOf(control):
+                parent.ensureWidgetVisible(control, 4, 4)
+                app.processEvents()
+                # QSpinBox can expose its smaller editor focus rectangle to
+                # ensureWidgetVisible. Scroll against the complete outer
+                # control too, using the same real scrollbar a user can move.
+                position = control.mapTo(parent.viewport(), QPoint(0, 0))
+                vertical, horizontal = parent.verticalScrollBar(), parent.horizontalScrollBar()
+                if position.y() < 0:
+                    vertical.setValue(vertical.value() + position.y() - 4)
+                elif position.y() + control.height() > parent.viewport().height():
+                    vertical.setValue(vertical.value() + position.y() + control.height() - parent.viewport().height() + 4)
+                if position.x() < 0:
+                    horizontal.setValue(horizontal.value() + position.x() - 4)
+                elif position.x() + control.width() > parent.viewport().width():
+                    horizontal.setValue(horizontal.value() + position.x() + control.width() - parent.viewport().width() + 4)
+                app.processEvents()
+                scrolls.append({'vertical': parent.verticalScrollBar().value(),
+                    'vertical_max': parent.verticalScrollBar().maximum(),
+                    'horizontal': parent.horizontalScrollBar().value(),
+                    'horizontal_max': parent.horizontalScrollBar().maximum()})
     return scrolls
 
 
@@ -190,12 +214,14 @@ def measure_button(control, window, viewport, app):
         and visible.width() >= control.width() - 2 and visible.height() >= control.height() - 2
         and geometry.left() >= 0 and geometry.top() >= 0
         and geometry.right() < viewport[0] and geometry.bottom() < viewport[1])
-    legible = bool(name) and (not text or minimum_text_width <= control.width() + 2)
+    wrapped = isinstance(control, WrappingCheckBox)
+    legible = bool(name) and (control.height() + 2 >= control.heightForWidth(control.width())
+                             if wrapped else not text or minimum_text_width <= control.width() + 2)
     return {'label': name, 'status': 'passed' if reachable and legible else 'failed',
         'reason': 'Label and full button are reachable after any required scrolling.' if reachable and legible
             else 'The required action is hidden, clipped, outside the requested viewport or has an unreadable/blank label.',
         'geometry': _rect(geometry), 'visible_region': _rect(visible),
-        'minimum_text_width': minimum_text_width, 'enabled': control.isEnabled(),
+        'minimum_text_width': minimum_text_width, 'wrapped_label': wrapped, 'enabled': control.isEnabled(),
         'visible': visible_to_window, 'scrolls': scrolls}
 
 
@@ -385,6 +411,10 @@ class CriticalReview:
                 body_buttons = [button for button in wizard.currentPage().findChildren(QAbstractButton)
                                 if button.isVisibleTo(wizard) and button.inherits('QPushButton')]
                 self.buttons(wizard, dimensions, prefix + f'.setup.content-{index}', body_buttons)
+                editor = getattr(wizard, 'toolkit_choices', None)
+                if editor is not None and wizard.currentPage().isAncestorOf(editor):
+                    self.review_toolkit_choices(editor, wizard, dimensions, prefix + '.setup-toolkit',
+                                                screenshot_prefix=prefix + '-setup-toolkit', screenshot_tabs=(1, 3))
                 if index in (0, len(wizard.pageIds()) - 1):
                     self.screenshot(wizard, prefix + f'-setup-{index}')
             self.check(prefix + '.setup.no-implicit-save', not backend.saved and backend.preferences() == original,
@@ -405,6 +435,171 @@ class CriticalReview:
         settings.select_page('Settings', load=False)
         if hasattr(settings, 'navigation'):
             self.buttons(settings, dimensions, prefix + '.navigation', list(settings.navigation.values()))
+
+    def review_toolkit_choices(self, editor, window, dimensions, identity, *, screenshot_prefix, screenshot_tabs=()):
+        """Inspect all scoped controls, without saving or enabling maintenance."""
+        initial, selected = editor.choices(), editor.tabs.currentIndex()
+        self.check(identity + '.six-scopes', editor.tabs.count() == 6,
+            'Setup and Settings must expose workload, app caches, folder growth, recovery, measurements and update scopes.')
+        for index in range(editor.tabs.count()):
+            editor.tabs.setCurrentIndex(index)
+            drain(self.app)
+            page = editor.tabs.widget(index)
+            bar, label = editor.tabs.tabBar(), editor.tabs.tabText(index)
+            tab_rect = bar.tabRect(index)
+            self.check(identity + f'.tab-{index}.label', bool(label.strip())
+                and tab_rect.left() >= 0 and tab_rect.right() < bar.width()
+                and bar.fontMetrics().horizontalAdvance(label) <= tab_rect.width(),
+                'The selected toolkit tab must scroll into view with a readable complete label.')
+            controls = page.findChildren(QAbstractButton)
+            self.buttons(window, dimensions, identity + f'.tab-{index}', controls)
+            for number, control in enumerate(editor.fields.values()):
+                if not page.isAncestorOf(control) or isinstance(control, QAbstractButton):
+                    continue
+                scrolls = reveal_control(control, window, self.app)
+                visible = control.visibleRegion().boundingRect()
+                rectangle = control.rect().translated(control.mapTo(window, QPoint(0, 0)))
+                self.check(identity + f'.tab-{index}.field-{number}', control.isVisibleTo(window)
+                    and control.width() > 0 and control.height() > 0
+                    and visible.width() >= control.width() - 2 and visible.height() >= control.height() - 2
+                    and rectangle.left() >= 0 and rectangle.top() >= 0
+                    and rectangle.right() < dimensions[0] and rectangle.bottom() < dimensions[1],
+                    'A scope age, count, size or path input must be completely reachable after real tab and scroll navigation.',
+                    evidence={'geometry': _rect(rectangle), 'visible_region': _rect(visible), 'scrolls': scrolls,
+                              'field': next((list(key) for key, field in editor.fields.items() if field is control), [])})
+            for number, control in enumerate(page.findChildren(QPlainTextEdit)):
+                reveal_control(control, window, self.app)
+                self.check(identity + f'.tab-{index}.text-{number}', control.width() > 60
+                    and control.height() >= 70 and control.isVisibleTo(window),
+                    'Multi-selection input must remain reachable and tall enough to edit separate approved IDs or paths.')
+            if index in screenshot_tabs:
+                if isinstance(page, QScrollArea):
+                    page.verticalScrollBar().setValue(0)
+                    drain(self.app)
+                self.screenshot(window, screenshot_prefix + '-' + str(index))
+        editor.tabs.setCurrentIndex(1)
+        buttons = {button.text(): button for button in editor.tabs.widget(1).findChildren(QPushButton)}
+        original_apps = {key: control.isChecked() for key, control in editor.cache_apps.items()}
+        enabled = editor.fields[('application_caches', 'enabled')].isChecked()
+        select, clear = buttons.get('Select all apps'), buttons.get('Clear all apps')
+        if select is not None and clear is not None:
+            select.click()
+            all_selected = all(control.isChecked() for control in editor.cache_apps.values())
+            clear.click()
+            all_cleared = not any(control.isChecked() for control in editor.cache_apps.values())
+            for key, checked in original_apps.items():
+                editor.cache_apps[key].setChecked(checked)
+        else:
+            all_selected = all_cleared = False
+        self.check(identity + '.selection-controls', all_selected and all_cleared
+            and editor.fields[('application_caches', 'enabled')].isChecked() == enabled,
+            'Select all/Clear all must change app selections without silently enabling cache deletion.')
+        self.check(identity + '.no-implicit-scope-change', editor.choices() == initial,
+            'Reviewing tabs and restoring fixture selections must preserve the initial complete scope.')
+        editor.tabs.setCurrentIndex(selected)
+
+    def review_toolkit(self, window, backend, dimensions, prefix):
+        """Use production handlers with in-memory approvals and inert previews."""
+        original, saved_calls = backend.preferences(), copy.deepcopy(backend.saved)
+        window.open_settings(page='Maintenance toolkit')
+        settings = window._settings_window
+        self.viewport(settings, dimensions, prefix + '.toolkit-settings')
+        settings.select_page('Maintenance toolkit', load=False)
+        panel = settings.maintenance_toolkit_panel
+        panel.window.smoke_test = False
+        editor = panel.editor
+        try:
+            self.check(prefix + '.toolkit.no-constructor-actions',
+                not any(getattr(backend, name).called for name in OPTIONAL_OPERATIONS if 'toolkit' in name),
+                'Opening the toolkit must not save scopes, collect health data, scan files, update or repair anything.')
+            self.review_toolkit_choices(editor, settings, dimensions, prefix + '.toolkit-choices',
+                screenshot_prefix=prefix + '-toolkit-tab', screenshot_tabs=range(6))
+            self.buttons(settings, dimensions, prefix + '.toolkit-actions', list(panel.buttons.values()))
+            self.check(prefix + '.toolkit.apply-starts-disabled', not panel.buttons['Apply reviewed cleanup'].isEnabled(),
+                'Cleanup Apply must start disabled until an exact matching saved preview is available.')
+            editor.tabs.setCurrentIndex(1)
+            editor.fields[('application_caches', 'enabled')].setChecked(True)
+            editor.cache_apps['discord'].setChecked(True)
+            panel.preview()
+            self.check(prefix + '.toolkit.unsaved-preview-refused', not backend.toolkit_preview.called
+                and 'save' in panel.status.text().lower(), 'An unsaved scope must not authorize even a cache preview.')
+            def configure(choices):
+                backend.settings['toolkit_settings'] = validate_toolkit(choices)
+                return {'schema': 1, 'status': 'saved', 'note': 'Fixture choices saved in memory only.'}
+            backend.configure_toolkit.side_effect = configure
+            panel.save()
+            drain(self.app, lambda: not settings.busy)
+            self.check(prefix + '.toolkit.explicit-save', backend.configure_toolkit.call_count == 1
+                and backend.settings['toolkit_settings']['application_caches']['apps'] == ['discord']
+                and not backend.toolkit_apply.called and not backend.toolkit_preview.called,
+                'Save must persist only the selected fixture scope and must not scan or apply cleanup.')
+            plan = {'schema': 1, 'id': 'c' * 32, 'complete': True, 'files': [], 'total_bytes': 128,
+                    'note': 'Fixture preview: 128 candidate bytes; nothing removed.'}
+            backend.toolkit_preview.side_effect = None
+            backend.toolkit_preview.return_value = plan
+            panel.preview()
+            drain(self.app, lambda: not settings.busy)
+            self.check(prefix + '.toolkit.preview-enables-exact-apply', backend.toolkit_preview.call_count == 1
+                and panel._plans.get('application_caches') == plan
+                and panel.buttons['Apply reviewed cleanup'].isEnabled() and not backend.toolkit_apply.called,
+                'A completed saved cache preview may enable Apply, while candidate bytes remain distinct from removed bytes.')
+            self.screenshot(settings, prefix + '-toolkit-preview')
+            with patch('optimus.widgets.maintenance_toolkit_panel.ask_yes_no', return_value=False):
+                panel.apply()
+            self.check(prefix + '.toolkit.negative-approval', not backend.toolkit_apply.called,
+                'Choosing No must preserve the preview and start no cleanup worker.')
+            backend.toolkit_apply.side_effect = None
+            backend.toolkit_apply.return_value = {'schema': 1, 'status': 'completed', 'deleted_bytes': 128,
+                'deleted_count': 1, 'note': 'Fixture only: 128 bytes removed from an in-memory result.'}
+            with patch('optimus.widgets.maintenance_toolkit_panel.ask_yes_no', return_value=True):
+                panel.apply()
+            drain(self.app, lambda: not settings.busy)
+            self.check(prefix + '.toolkit.explicit-apply-once', backend.toolkit_apply.call_count == 1
+                and backend.toolkit_apply.call_args.args[:2] == ('application_caches', plan)
+                and '128' in panel.details.toPlainText(),
+                'One explicit Yes must dispatch exactly the reviewed fixture plan and show actual result totals.')
+            self.check(prefix + '.toolkit.consumed-plan-disabled', 'application_caches' not in panel._plans
+                and not panel.buttons['Apply reviewed cleanup'].isEnabled(),
+                'Apply must consume its UI preview so a completed or failed attempt cannot replay a stale token.')
+            self.screenshot(settings, prefix + '-toolkit-applied')
+            panel._result(plan, origin='application_caches', requested_scope=editor.choices(validate=False))
+            editor.tabs.setCurrentIndex(3)
+            self.check(prefix + '.toolkit.preview-tab-ownership', 'recovery_retention' not in panel._plans
+                and not panel.buttons['Apply reviewed cleanup'].isEnabled(),
+                'An app-cache preview must never authorize the recovery-expiry tab after navigation.')
+            editor.tabs.setCurrentIndex(1)
+            requested = editor.choices(validate=False)
+            editor.fields[('application_caches', 'min_age_days')].setValue(14)
+            panel._result(plan, origin='application_caches', requested_scope=requested)
+            self.check(prefix + '.toolkit.changed-scope-invalidates-preview', not panel._plans
+                and not panel.buttons['Apply reviewed cleanup'].isEnabled(),
+                'Editing a scope or receiving an older asynchronous preview must leave Apply disabled.')
+            backend.toolkit_archive_report.side_effect = None
+            backend.toolkit_archive_report.return_value = {'schema': 1, 'status': 'archived',
+                'note': 'Fixture last-report copy archived in memory only; no file was created.'}
+            archive = panel.buttons.get('Archive last report copy')
+            if archive is not None:
+                archive.click()
+                drain(self.app, lambda: not settings.busy)
+            self.check(prefix + '.toolkit.explicit-report-archive', archive is not None
+                and backend.toolkit_archive_report.call_count == 1
+                and backend.toolkit_archive_report.call_args.args == (),
+                'Archive must request only the backend-owned last eligible report, without accepting arbitrary caller-supplied report data.')
+            self.check(prefix + '.toolkit.no-other-actions', not backend.toolkit_integrity.called
+                and not backend.toolkit_resume.called and not backend.toolkit_check.called
+                and not backend.toolkit_observe.called,
+                'Cache fixtures must not trigger repair, update resumption, health sampling or unrelated workers.')
+        finally:
+            panel.shutdown()
+            settings.busy = False
+            settings.close()
+            backend.settings, backend.saved = original, saved_calls
+            # Later independent worker/revert scenarios assert no optional
+            # actions of their own; do not leak this scenario's explicit
+            # in-memory approvals into their call-history assertions.
+            for name in OPTIONAL_OPERATIONS:
+                if 'toolkit' in name:
+                    setattr(backend, name, Mock(side_effect=AssertionError('Only explicitly requested fixture operations may run.')))
 
     def review_speed(self, window, backend, dimensions, prefix):
         window.open_settings(page='Settings')
@@ -1360,6 +1555,7 @@ class CriticalReview:
                 self.review_setup(backend, dimensions, prefix)
                 self.review_speed(window, backend, dimensions, prefix)
                 self.review_optional_tools(window, backend, dimensions, prefix)
+                self.review_toolkit(window, backend, dimensions, prefix)
                 self.review_additional_workers(window, backend, dimensions, prefix)
                 self.review_worker_controls_and_metrics(window, backend, dimensions, prefix)
                 self.review_maintenance_progress(window, backend, dimensions, prefix)

@@ -202,7 +202,7 @@ class DetailedSettingsWindow(QMainWindow):
     appearanceChanged = Signal(dict)
     PAGE_NAMES = ("Dashboard", "Cleaner", "Browser privacy", "Performance", "Startup",
                   "Applications", "Updates", "Drivers", "Disk analyzer", "Duplicate finder",
-                  "Debloat", "Cloud drive", "Schedules", "Smart cleaning", "Workers", "File utilities", "Recovery", "Registry review", "Restore/history", "Settings")
+                  "Debloat", "Cloud drive", "Schedules", "Smart cleaning", "Maintenance toolkit", "Workers", "File utilities", "Recovery", "Registry review", "Restore/history", "Settings")
     DESCRIPTIONS = {
         "Dashboard": "Measured resource use and practical next steps. Review each change before applying it.",
         "Cleaner": "Preview temporary files and browser caches, then delete only the reviewed list.",
@@ -221,6 +221,7 @@ class DetailedSettingsWindow(QMainWindow):
         "Restore/history": "Review changes and restore settings that have a supported undo record.",
         "Settings": "Appearance, window motion and supported Windows maintenance tools.",
         "Smart cleaning": "Opt-in cleanup thresholds and browser-exit privacy using your saved categories.",
+        "Maintenance toolkit": "Scoped cache cleanup, workload limits, local performance history and supported health diagnostics.",
         "Workers": "Cached status for additional tools without starting another scan or installer.",
         "File utilities": "Authenticated file encryption, verified split/join and reviewed selected-file overwrite.",
         "Recovery": "Verified driver backups, exact-device rollback and Windows restore-point controls.",
@@ -404,8 +405,10 @@ class DetailedSettingsWindow(QMainWindow):
         from .widgets.recovery_panel import RecoveryPanel
         from .widgets.file_utilities_panel import FileUtilitiesPanel
         from .widgets.worker_grid import WorkerBoard
+        from .widgets.maintenance_toolkit_panel import MaintenanceToolkitPanel
         for page, attribute, factory in (
             ('Smart cleaning', 'smart_maintenance_panel', SmartMaintenancePanel),
+            ('Maintenance toolkit', 'maintenance_toolkit_panel', MaintenanceToolkitPanel),
             ('Workers', 'worker_board', WorkerBoard),
             ('File utilities', 'file_utilities_panel', FileUtilitiesPanel),
             ('Recovery', 'recovery_panel', RecoveryPanel)):
@@ -1619,7 +1622,7 @@ class DetailedSettingsWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
-        for name in ('smart_maintenance_panel', 'recovery_panel', 'file_utilities_panel', 'worker_board'):
+        for name in ('smart_maintenance_panel', 'maintenance_toolkit_panel', 'recovery_panel', 'file_utilities_panel', 'worker_board'):
             panel = getattr(self, name, None)
             if panel is not None:
                 panel.shutdown()
@@ -4574,7 +4577,7 @@ class OptimusWindow(QMainWindow):
             self._revert_dialog.cancel()
         settings_busy = self._settings_window is not None and self._settings_window.busy
         if settings_busy:
-            for name in ('recovery_panel', 'file_utilities_panel', 'smart_maintenance_panel'):
+            for name in ('recovery_panel', 'file_utilities_panel', 'smart_maintenance_panel', 'maintenance_toolkit_panel'):
                 panel = getattr(self._settings_window, name, None)
                 event = getattr(panel, '_cancel', None)
                 if event is not None:
