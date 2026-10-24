@@ -97,9 +97,12 @@ class ConsoleProtocolTests(unittest.TestCase):
         FakeConsole.flood = False
         self.patch = mock.patch.object(console, '_ConsoleProcess', FakeConsole)
         self.patch.start()
+        self.interpreter_patch = mock.patch.object(console, '_source_console_executable', return_value=sys.executable)
+        self.interpreter_patch.start()
 
     def tearDown(self):
         self.patch.stop()
+        self.interpreter_patch.stop()
         # Restore only fake sessions whose malformed receipt was deliberate.
         with console._RETAINED_LOCK:
             sessions = list(console._RETAINED)
@@ -259,11 +262,57 @@ class ConsoleProtocolTests(unittest.TestCase):
             self.assertIs(caught.exception.running, False)
             self.assertEqual(FakeConsole.instances, [])
 
+    def test_missing_source_console_interpreter_is_known_no_launch_before_preparation(self):
+        with mock.patch.object(console, '_source_console_executable', side_effect=FileNotFoundError('fixture')):
+            with self.assertRaises(console.ConsolePreflightError) as caught:
+                console.run_winget_console(['C:/fixtures/fake.exe'], timeout=1, progress_callback=lambda _: None)
+        self.assertIs(caught.exception.installer_started, False)
+        self.assertIs(caught.exception.outcomeKnown, True)
+        self.assertIs(caught.exception.running, False)
+        self.assertEqual(FakeConsole.instances, [])
+
     def test_invalid_input_does_not_prepare_or_launch_console(self):
         for arguments, timeout in ((['relative.exe'], 1), (['C:/fake.exe'], float('nan')), (['C:/fake.exe'], True)):
             with self.subTest(arguments=arguments, timeout=timeout), self.assertRaises(ValueError):
                 console.run_winget_console(arguments, timeout=timeout, progress_callback=lambda _: None)
         self.assertEqual(FakeConsole.instances, [])
+
+
+class SourceConsoleSelectionTests(unittest.TestCase):
+    def test_windowed_trusted_base_uses_only_same_directory_console_interpreter(self):
+        with tempfile.TemporaryDirectory(prefix='optimus-source-interpreter-') as directory:
+            windowed = Path(directory) / 'PYTHONW.EXE'
+            executable = Path(directory) / 'python.exe'
+            windowed.write_bytes(b'not executed windowed fixture')
+            executable.write_bytes(b'not executed console fixture')
+            with mock.patch.object(sys, '_base_executable', str(windowed), create=True), \
+                    mock.patch.object(sys, 'executable', 'C:/unrelated/venv/pythonw.exe'):
+                self.assertEqual(console._source_console_executable(), str(executable))
+                self.assertEqual(console._helper_arguments(432, 'f' * 32, ['C:/fixtures/fake.exe'])[0], str(executable))
+                self.assertEqual(console._probe_arguments()[0], str(executable))
+
+    def test_missing_console_sibling_never_falls_back_to_gui_or_other_interpreter(self):
+        with tempfile.TemporaryDirectory(prefix='optimus-source-no-console-') as directory:
+            windowed = Path(directory) / 'pythonw.exe'
+            windowed.write_bytes(b'not executed windowed fixture')
+            with mock.patch.object(sys, '_base_executable', str(windowed), create=True):
+                with self.assertRaises(FileNotFoundError):
+                    console._source_console_executable()
+
+    def test_reparse_console_interpreter_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix='optimus-source-indirect-') as directory:
+            executable = Path(directory) / 'python.exe'
+            executable.write_bytes(b'not executed console fixture')
+            original = Path.lstat
+            def indirect(path):
+                if path == executable:
+                    return type('IndirectFixture', (), {'st_file_attributes': 0x400,
+                        'st_mode': original(path).st_mode})()
+                return original(path)
+            with mock.patch.object(sys, '_base_executable', str(executable), create=True), \
+                    mock.patch.object(Path, 'lstat', indirect):
+                with self.assertRaises(FileNotFoundError):
+                    console._source_console_executable()
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Harmless ConPTY fixture children require Windows.')
@@ -290,6 +339,41 @@ class NativeConsoleFixtureTests(unittest.TestCase):
             with mock.patch.object(console, 'run_winget_console', side_effect=AssertionError('Existing proof was overwritten')):
                 self.assertEqual(console.console_progress_probe(directory), 2)
             self.assertEqual(path.read_bytes(), original)
+
+    def test_native_source_pythonw_frontend_reports_live_download_and_install_progress(self):
+        windowed = Path(self.executable).with_name('pythonw.exe')
+        if not windowed.is_file():
+            self.skipTest('The harmless windowed Python frontend fixture is unavailable.')
+        with tempfile.TemporaryDirectory(prefix='optimus-pythonw-progress-fixture-') as directory:
+            metadata = Path(directory) / 'frontend.json'
+            frontend = ('import json,sys;from pathlib import Path;sys.path.insert(0,'
+                + repr(str(Path(console.__file__).resolve().parents[1])) + ');'
+                + 'from optimus.winget_console import console_progress_probe,_helper_arguments,_probe_arguments;'
+                + 'Path(' + repr(str(metadata)) + ').write_text(json.dumps('
+                + "{'base':sys._base_executable,'stdout_none':sys.stdout is None,"
+                + "'helper':_helper_arguments(432,'f'*32,['C:/fixtures/fake.exe'])[0],"
+                + "'probe':_probe_arguments()[0]}),encoding='utf8');"
+                + 'raise SystemExit(console_progress_probe(' + repr(directory) + '))')
+            child = subprocess.Popen([str(windowed), '-I', '-c', frontend],
+                close_fds=True, creationflags=getattr(subprocess, 'DETACHED_PROCESS', 0x8))
+            self.assertEqual(child.wait(timeout=12), 0)
+            launch = json.loads(metadata.read_text(encoding='utf8'))
+            self.assertEqual(Path(launch['base']).name.casefold(), 'pythonw.exe')
+            self.assertIs(launch['stdout_none'], True)
+            self.assertEqual(launch['helper'], str(windowed.with_name('python.exe')))
+            self.assertEqual(launch['probe'], launch['helper'])
+            report = json.loads((Path(directory) / 'console-progress-probe.json').read_text(encoding='utf8'))
+            self.assertEqual(report['status'], 'passed')
+            self.assertIs(report['frozen'], False)
+            self.assertIs(report['console_query_verified'], True)
+            self.assertIs(report['download_progress_before_exit'], True)
+            self.assertIs(report['install_progress_before_exit'], True)
+            self.assertIs(report['private_receipt_verified'], True)
+            self.assertEqual(report['target_exit_code'], 0)
+            self.assertIs(report['capture_complete'], True)
+            self.assertEqual(report['network_requests'], 0)
+            self.assertEqual(report['real_winget_invocations'], 0)
+            self.assertIs(report['maintenance_applied'], False)
 
     def test_native_console_queries_and_live_download_install_progress(self):
         callbacks = []

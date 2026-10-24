@@ -1,5 +1,6 @@
 """Recovery UI uses fake asynchronous backends; no host recovery work."""
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -7,6 +8,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout
 
 from optimus.widgets import recovery_panel as module
@@ -18,8 +20,7 @@ class InlinePool:
 
 
 @pytest.fixture
-def panel(monkeypatch):
-    app = QApplication.instance() or QApplication([])
+def panel(monkeypatch, app):
     backend = SimpleNamespace(**{name:Mock(return_value={'status':'completed','summary':'Fixture result'}) for name in (
         'driver_recovery_scan','driver_backup_export','driver_backup_verify','driver_rollback',
         'system_restore_scan','system_restore_create','system_restore_delete','system_restore_open')})
@@ -39,6 +40,24 @@ def panel(monkeypatch):
     yield widget, window, backend, prompts
     widget.shutdown(); widget.close(); window.close()
     widget.deleteLater(); window.deleteLater(); app.processEvents()
+
+
+@pytest.fixture(scope='module')
+def app():
+    application = QApplication.instance() or QApplication([])
+    loaded = []
+    # The Windows offscreen plugin may expose no system fonts. Geometry checks
+    # need real glyph metrics rather than the missing-font placeholder boxes.
+    if os.name == 'nt' and not QFontDatabase.families():
+        for name in ('segoeui.ttf', 'seguisb.ttf'):
+            font_path = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'Fonts' / name
+            if font_path.is_file():
+                identity = QFontDatabase.addApplicationFont(str(font_path))
+                if identity >= 0:
+                    loaded.append(identity)
+    yield application
+    for identity in loaded:
+        QFontDatabase.removeApplicationFont(identity)
 
 
 def test_constructor_runs_nothing_and_defaults_to_no_selected_recovery(panel):
@@ -133,8 +152,37 @@ def test_large_backup_preview_is_bounded_and_narrow_layout_reflows(panel):
     widget._result({'status':'completed','items':[{'path':'fixture-'+str(index),'verified':True} for index in range(50000)]})
     assert len(widget.details.toPlainText()) < 10000 and 'additional_rows' in widget.details.toPlainText()
     window.resize(560,1050); window.show(); widget.show(); QApplication.processEvents()
+
+    def resize_and_check_controls(width, height):
+        # Native Windows may adjust the first shown top-level geometry, even
+        # for a bare QWidget. Exercise the user's explicit resize after show.
+        window.resize(width, height)
+        for _ in range(3):
+            QApplication.processEvents()
+        assert window.width() == width
+        assert window.rect().contains(widget.geometry())
+        control_groups = (
+            (widget.driver_refresh, widget.driver_export, widget.device_choices,
+             widget.driver_rollback, widget.backup_choices, widget.backup_verify),
+            (widget.restore_refresh, widget.restore_description, widget.restore_create,
+             widget.restore_choices, widget.restore_delete, widget.restore_open))
+        for tab_index, controls in enumerate(control_groups):
+            widget.tabs.setCurrentIndex(tab_index)
+            for _ in range(3):
+                QApplication.processEvents()
+            page = widget.tabs.currentWidget()
+            assert page.parentWidget().rect().contains(page.geometry())
+            for control in controls:
+                assert page.rect().contains(control.geometry())
+                if callable(getattr(control, 'text', None)):
+                    assert control.fontMetrics().horizontalAdvance(control.text()) <= control.contentsRect().width()
+            assert widget.details.horizontalScrollBar().maximum() == 0
+
+    resize_and_check_controls(560,1050)
     assert window.width() <= 600
     assert widget._columns == 1
+    resize_and_check_controls(850,1050)
+    assert widget._columns == 2
     window.resize(920,800); QApplication.processEvents()
     assert widget._columns == 2
 

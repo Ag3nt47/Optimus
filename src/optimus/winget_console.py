@@ -98,6 +98,21 @@ def _frozen_console_executable():
     return str(helper)
 
 
+def _source_console_executable():
+    # A source launcher can itself be pythonw.exe. Its trusted base path must
+    # select the sibling console interpreter; GUI executables cannot attach to
+    # ConPTY. Do not search PATH or fall back to another Python installation.
+    executable = Path(getattr(sys, '_base_executable', None) or sys.executable)
+    if executable.name.casefold() == 'pythonw.exe':
+        executable = executable.with_name('python.exe')
+    if not executable.is_absolute() or not executable.is_file():
+        raise FileNotFoundError('The source console Python interpreter is unavailable.')
+    if (executable.is_symlink()
+            or getattr(executable.lstat(), 'st_file_attributes', 0) & 0x400):
+        raise FileNotFoundError('The source console Python interpreter must be an ordinary file.')
+    return str(executable)
+
+
 def _helper_arguments(receipt_handle, nonce, arguments):
     payload = base64.b64encode(json.dumps(arguments, ensure_ascii=True, separators=(',', ':')).encode('ascii')).decode('ascii')
     tail = [str(receipt_handle), nonce, payload]
@@ -105,7 +120,7 @@ def _helper_arguments(receipt_handle, nonce, arguments):
         return [_frozen_console_executable(), _FLAG, *tail]
     # The Windows venv redirector can remain a second console client. Invoke
     # the base interpreter directly, with only this source package added.
-    executable = getattr(sys, '_base_executable', None) or sys.executable
+    executable = _source_console_executable()
     source = str(Path(__file__).resolve().parents[1])
     code = ('import sys;sys.path.insert(0,' + repr(source) + ');'
             'from optimus.winget_console import monitor_main;raise SystemExit(monitor_main(sys.argv[1:]))')
@@ -549,6 +564,8 @@ def run_winget_console(arguments, *, timeout, progress_callback):
     try:
         if getattr(sys, 'frozen', False):
             _frozen_console_executable()  # No console or process exists yet.
+        else:
+            _source_console_executable()  # Reject a missing helper before preparation.
         native = _ConsoleProcess()
         session = _Session(native, arguments, progress_callback)
         session.start()
@@ -668,7 +685,7 @@ def _probe_arguments():
     source = str(Path(__file__).resolve().parents[1])
     code = ('import sys;sys.path.insert(0,' + repr(source) + ');'
             'from optimus.winget_console import probe_child_main;raise SystemExit(probe_child_main())')
-    return [getattr(sys, '_base_executable', None) or sys.executable, '-I', '-u', '-c', code]
+    return [_source_console_executable(), '-I', '-u', '-c', code]
 
 
 def console_progress_probe(output_directory):
