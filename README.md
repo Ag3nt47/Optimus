@@ -33,7 +33,7 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
-Version **0.12.0** adds an optional maintenance toolkit for the small costs that accumulate over time. New scopes start **off**, and opening settings never runs a scan, approves removal or changes existing choices. Save exact scopes in **Settings → Maintenance toolkit** or the first-start questions; the normal one-click workflow includes only the enabled choices.
+Version **0.12.1** adds an optional maintenance toolkit for the small costs that accumulate over time. New scopes start **off**, and opening settings never runs a scan, approves removal or changes existing choices. Save exact scopes in **Settings → Maintenance toolkit** or the first-start questions; the normal one-click workflow includes only the enabled choices.
 
 | Addition | What it does | Practical boundary |
 | --- | --- | --- |

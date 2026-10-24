@@ -7,7 +7,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QRect
+from PySide6.QtWidgets import QApplication, QTabBar, QWidget
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('optimus_critical_review_toolkit', ROOT / 'tools/critical_review.py')
@@ -80,5 +81,48 @@ def test_wrapped_checkbox_measurement_uses_real_text_height_and_detects_clipping
     finally:
         window.close()
         window.deleteLater()
+        reviewer.close()
+        app.processEvents()
+
+
+def test_tab_decorative_overhang_does_not_masquerade_as_clipped_painted_label(tmp_path, app):
+    reviewer = bot.CriticalReview(tmp_path / 'review')
+    class NativeBorderTab(QTabBar):
+        def initStyleOption(self, option, index):
+            super().initStyleOption(option, index)
+            option.rect = option.rect.adjusted(-1, 0, 1, 0)
+    bar = NativeBorderTab()
+    bar.addTab('Updates')
+    bar.resize(180, 38)
+    bar.show()
+    app.processEvents()
+    try:
+        measured = bot.measure_tab_label(bar, 0)
+        assert measured['tab_geometry']['x'] == -1
+        assert measured['status'] == 'passed', measured
+        assert measured['painted_text_geometry']['x'] > 0
+    finally:
+        bar.close()
+        bar.deleteLater()
+        reviewer.close()
+        app.processEvents()
+
+
+def test_tab_actual_text_clipping_or_elision_remains_a_failure(tmp_path, app):
+    reviewer = bot.CriticalReview(tmp_path / 'review')
+    owner = QWidget()
+    owner.resize(100, 70)
+    bar = QTabBar(owner)
+    bar.setExpanding(False)
+    bar.addTab('A deliberately long label that cannot fit')
+    bar.setGeometry(0, 0, 65, 38)
+    owner.show()
+    app.processEvents()
+    try:
+        assert bar.width() == 65
+        assert bot.measure_tab_label(bar, 0)['status'] == 'failed'
+    finally:
+        owner.close()
+        owner.deleteLater()
         reviewer.close()
         app.processEvents()

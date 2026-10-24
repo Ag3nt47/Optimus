@@ -23,9 +23,9 @@ if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 
 from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics
+from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QRegion
 from PySide6.QtWidgets import (QApplication, QAbstractButton, QMessageBox, QScrollArea,
-    QCheckBox, QDialog, QPlainTextEdit, QPushButton, QTabWidget, QWizard)
+    QCheckBox, QDialog, QPlainTextEdit, QPushButton, QStyle, QStyleOptionTab, QTabWidget, QToolButton, QWizard)
 
 from optimus.automation import CURRENT_SETUP_VERSION
 from optimus.filesystem import _ordinary_data_path
@@ -223,6 +223,31 @@ def measure_button(control, window, viewport, app):
         'geometry': _rect(geometry), 'visible_region': _rect(visible),
         'minimum_text_width': minimum_text_width, 'wrapped_label': wrapped, 'enabled': control.isEnabled(),
         'visible': visible_to_window, 'scrolls': scrolls}
+
+
+def measure_tab_label(bar, index):
+    """Measure actual styled text, excluding native tab border decoration."""
+    label = bar.tabText(index)
+    option = QStyleOptionTab()
+    bar.initStyleOption(option, index)
+    style = bar.style()
+    text_area = style.subElementRect(QStyle.SE_TabBarTabText, option, bar)
+    painted = style.itemTextRect(option.fontMetrics, text_area,
+        Qt.AlignCenter | Qt.TextShowMnemonic, bool(option.state & QStyle.State_Enabled), option.text)
+    available = QRegion(bar.visibleRegion())
+    for button in bar.findChildren(QToolButton):
+        if button.isVisibleTo(bar):
+            available -= QRegion(button.rect().translated(button.mapTo(bar, QPoint(0, 0))))
+    full_label = option.text.replace('&', '') == label.replace('&', '')
+    passed = (bool(label.strip()) and full_label and not painted.isEmpty()
+              and QRegion(painted).subtracted(available).isEmpty()
+              and bar.tabAt(painted.center()) == index)
+    return {'status': 'passed' if passed else 'failed', 'label': label,
+            'painted_text': option.text, 'tab_geometry': _rect(option.rect),
+            'text_area': _rect(text_area), 'painted_text_geometry': _rect(painted),
+            'visible_region': _rect(available.boundingRect()),
+            'reason': 'The complete painted label and its tab hit area are reachable; native decorative border overhang is excluded.'
+                      if passed else 'The styled tab text is elided, clipped, hidden by a scroll arrow or outside its own reachable tab hit area.'}
 
 
 def documentation_comparison(root=ROOT):
@@ -445,12 +470,9 @@ class CriticalReview:
             editor.tabs.setCurrentIndex(index)
             drain(self.app)
             page = editor.tabs.widget(index)
-            bar, label = editor.tabs.tabBar(), editor.tabs.tabText(index)
-            tab_rect = bar.tabRect(index)
-            self.check(identity + f'.tab-{index}.label', bool(label.strip())
-                and tab_rect.left() >= 0 and tab_rect.right() < bar.width()
-                and bar.fontMetrics().horizontalAdvance(label) <= tab_rect.width(),
-                'The selected toolkit tab must scroll into view with a readable complete label.')
+            measured = measure_tab_label(editor.tabs.tabBar(), index)
+            self.check(identity + f'.tab-{index}.label', measured['status'] == 'passed',
+                       measured['reason'], evidence=measured)
             controls = page.findChildren(QAbstractButton)
             self.buttons(window, dimensions, identity + f'.tab-{index}', controls)
             for number, control in enumerate(editor.fields.values()):

@@ -34,8 +34,13 @@ def test_native_main_keeps_exact_four_buttons_and_settings_constructs(app, backe
         backend.optimize.assert_not_called()
         window.open_settings()
         settings = window._settings_window
-        assert settings.tabs.count() == 12
-        assert 'Registry' not in [settings.tabs.tabText(i) for i in range(settings.tabs.count())]
+        names = [settings.tabs.tabText(i) for i in range(settings.tabs.count())]
+        assert settings.tabs.count() == 13
+        assert 'Registry' not in names and 'Maintenance toolkit' in names
+        settings.tabs.setCurrentIndex(names.index('Maintenance toolkit'))
+        app.processEvents()
+        assert settings.tabs.currentWidget().isAncestorOf(settings.maintenance_toolkit_panel)
+        assert all(section['enabled'] is False for section in settings.maintenance_toolkit_panel.editor.choices().values())
         assert settings.process_harness_panel.actions.count() == 0
         assert settings.privacy_panel._plan is None
     finally:
@@ -55,7 +60,11 @@ def test_native_wizard_defaults_do_not_accept_update_or_file_change_approvals(ap
         assert not value['startup_changes_approved']
         assert not value['duplicate_changes_approved']
         assert wizard.run_after.isChecked()
-        assert wizard.pageIds() and len(wizard.pageIds()) == 6
+        assert wizard.pageIds() and len(wizard.pageIds()) == 7
+        toolkit_pages = [wizard.page(identity) for identity in wizard.pageIds()
+                         if wizard.page(identity).isAncestorOf(wizard.toolkit_choices)]
+        assert len(toolkit_pages) == 1 and 'Additional maintenance' in toolkit_pages[0].title()
+        assert all(section['enabled'] is False for section in value['toolkit_settings'].values())
         assert wizard.browsers.count() == 7
         opera = wizard.browsers.item(6)
         assert opera.text().startswith('Opera')

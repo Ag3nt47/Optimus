@@ -75,9 +75,13 @@ def wizard(qapp, backend):
 
 
 def test_all_nine_tool_categories_have_questions(wizard):
-    expected = {'health','cleanup','uninstaller','duplicates','cloud','performance','startup','software','drivers'}
+    expected = {'health','cleanup','uninstaller','duplicates','cloud','performance','startup','software','drivers','toolkit'}
     assert expected.issubset(wizard.page_ids)
-    assert len(wizard.pageIds()) == 11
+    assert len(wizard.pageIds()) == 12
+    toolkit_page = wizard.page(wizard.page_ids['toolkit'])
+    assert toolkit_page.isAncestorOf(wizard.toolkit_choices)
+    assert 'Additional maintenance' in toolkit_page.title()
+    assert all(section['enabled'] is False for section in wizard.collect_choices()['toolkit_settings'].values())
     assert wizard.size().width() >= 1000
     assert wizard.size().height() >= 780
     assert wizard.buttonText(QWizard.FinishButton) == 'Save choices'

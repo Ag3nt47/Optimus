@@ -42,7 +42,9 @@ def environment(tmp_path):
 
 
 def test_defaults_keep_all_new_mutating_retention_disabled_and_guard_readonly_on():
-    assert len(DEFAULTS) == 99
+    assert len(DEFAULTS) == 100
+    assert all(section['enabled'] is False for section in DEFAULTS['toolkit_settings'].values())
+    assert DEFAULTS['toolkit_settings']['resume']['resident_handoff_enabled'] is False
     for prefix in ('codex_archives', 'angerona_logs', 'failed_downloads'):
         assert DEFAULTS[prefix + '_cleanup_enabled'] is False
         assert DEFAULTS[prefix + '_retention_days'] == 7

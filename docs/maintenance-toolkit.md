@@ -1,6 +1,6 @@
 # Optional maintenance toolkit
 
-Optimus 0.12.0 adds a **Maintenance toolkit** page in Settings and a matching
+Optimus 0.12.1 adds a **Maintenance toolkit** page in Settings and a matching
 question page in initial setup. Existing saved choices are preserved. Every new
 automatic scope starts off; enabling one does not approve the others. The regular
 launch review lists enabled actions, and changing these choices invalidates an

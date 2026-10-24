@@ -36,6 +36,7 @@ PORTABLE_SUITES = (
     'test_toolkit_cli.py', 'test_reboot_workflow.py',
     'test_integrity_lifecycle.py', 'test_toolkit_report_archive.py',
     'test_toolkit_verification.py',
+    'test_navigation_scroll_geometry.py',
 )
 
 

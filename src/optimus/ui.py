@@ -24,6 +24,7 @@ from optimus.widgets.questions import ask_yes_no
 from optimus.widgets.header_controls import HeaderActionButton, install_global_window_reveal, motion_allowed
 from optimus.widgets.wrapping_checkbox import WrappingCheckBox
 from optimus.widgets.local_loading import LocalLoadingAnimation
+from optimus.widgets.navigation_scroll import NavigationScrollArea
 
 
 def field(record, *names, default=""):
@@ -314,7 +315,7 @@ class DetailedSettingsWindow(QMainWindow):
         tag.setObjectName("Tagline")
         tag.setStyleSheet("font-size:9px;letter-spacing:1px;padding:0 2px 15px 2px;")
         nav.addWidget(tag)
-        navigation_scroll = QScrollArea()
+        navigation_scroll = NavigationScrollArea(sidebar)
         navigation_scroll.setWidgetResizable(True)
         navigation_scroll.setFrameShape(QFrame.NoFrame)
         navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
