@@ -887,6 +887,13 @@ class ParallelAppUpdates:
                        'owner': self.owner, 'status': 'prepared', 'started_at': time.time(),
                        'title': title, 'installer_prepared': False,
                        'note': 'No automatic retry is authorized by this record. An unresolved installer record requires manual review; preserve this evidence until installer state is established.'}
+        from .automatic_update_recovery import capture_runtime_owner
+        from psutil import Error as ProcessIdentityError
+        try:
+            self.record['runtime_owner'] = capture_runtime_owner(self.owner, self.record['id'], parent_run_id)
+        except (ProcessIdentityError, OSError) as error:
+            self.record['runtime_owner_unavailable'] = {'schema': 1,
+                'reason': 'The native journal writer identity was unavailable (' + type(error).__name__ + ').'}
         self.result = None
         self.thread = None
         self.stage = {'title': self.title, 'name': self.title, 'status': 'running',

@@ -20,7 +20,7 @@ def _cancelled(event):
 
 
 def run_native_software(backend, settings, *, cancel_event=None, item_callback=None,
-                        prepared_callback=None, before_install=None):
+                        prepared_callback=None, before_install=None, updates_only=False):
     notified = False
     def prepared(state=None):
         nonlocal notified
@@ -39,7 +39,8 @@ def run_native_software(backend, settings, *, cancel_event=None, item_callback=N
             settings = apply_update_rules(settings)
             navigation = cursor_for(backend, 'software_updates', 'App updates')
             presence = None
-            if settings.get('software_updates_enabled') is True and settings.get('software_app_rules'):
+            if (not updates_only and settings.get('software_updates_enabled') is True
+                    and settings.get('software_app_rules')):
                 presence = run_app_presence(backend, settings, cancel_event=cancel_event,
                     item_callback=item_callback, before_install=before_install, navigation=navigation)
                 context['app_presence'] = presence

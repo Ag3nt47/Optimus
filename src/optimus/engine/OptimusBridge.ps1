@@ -10,6 +10,7 @@ $WarningPreference='SilentlyContinue'
 . (Join-Path $PSScriptRoot 'SafeRecycle.ps1')
 . (Join-Path $PSScriptRoot 'FileTools.ps1')
 . (Join-Path $PSScriptRoot 'UpdateProgress.ps1')
+. (Join-Path $PSScriptRoot 'UpdateRecovery.ps1')
 . (Join-Path $PSScriptRoot 'MaintenanceOperations.ps1')
 . (Join-Path $PSScriptRoot 'RegistryTools.ps1')
 function Test-OptimusSameExecutableFile {
@@ -68,6 +69,7 @@ function Invoke-OptimusRequest {
     param($Request)
     $arg=$Request.arguments
     switch ([string]$Request.operation) {
+        'update_recovery_probe' { Get-OptimusUpdateRecoveryProbe }
         'audit' { Get-SCMFullAudit }
         'process_details' {
             $fresh=Get-SCMProcessIdentity -ProcessId ([int]$arg.record.pid)

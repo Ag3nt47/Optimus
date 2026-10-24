@@ -318,6 +318,13 @@ class Workflow:
                                            pending_updates_barrier, parallel_installer_stages, record_installer_outcome)
             progress_callback = ProgressMux(progress_callback)
             lease = RunLease(self.backend.data_dir).acquire()
+            recovery = None
+            reconcile = getattr(self.backend, 'reconcile_completed_updates', None)
+            if callable(reconcile):
+                try:
+                    recovery = reconcile(lease=lease)
+                except Exception as error:
+                    recovery = {'status': 'unavailable', 'error': str(error)[:500]}
             unresolved_apps = pending_updates_barrier(self.backend)
             run_id = uuid.uuid4().hex
             self.navigation.begin(run_id, cancel_event=global_cancel_event)
@@ -327,6 +334,8 @@ class Workflow:
             report = {'id': run_id, 'started_at': time.time(), 'settings': configuration, 'stages': [], 'cancelled': False,
                       'status': 'running', 'note': 'Percent completion measures completed stages and selected items, not elapsed time. Daily/weekly automation runs only while Optimus is open. Review stages do not make changes. Apply stages require the current setup and saved scope approvals; targets are revalidated on each run.'}
             self.last_report = report
+            if recovery is not None:
+                report['automatic_update_reconciliation'] = recovery
             atomic_json(log_path, report)
             if configuration['setup_version'] >= CURRENT_SETUP_VERSION:
                 record_attempt(self.backend.data_dir, configuration, run_id=run_id)

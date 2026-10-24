@@ -58,6 +58,49 @@ def test_cli_commands_are_mutually_exclusive():
         app.parser().parse_args(['--verify-run', RUN, '--startup-mode', 'on'])
 
 
+@pytest.mark.parametrize('status,expected', [('completed', 0), ('completed_with_skips', 0),
+    ('no_enabled_updates', 0), ('blocked', 2), ('needs_review', 2), ('cancelled', 2)])
+def test_update_continuation_dispatches_only_saved_update_service_and_always_closes(tmp_path, monkeypatch, capsys, status, expected):
+    from optimus import backend
+    service = SimpleNamespace(data_dir=tmp_path, close=Mock(), optimize=Mock(), save_preferences=Mock(),
+                              set_startup_launch=Mock(), preferences=Mock(), cleanup_apply=Mock())
+    run = Mock(return_value={'schema': 1, 'status': status, 'updates_only': True})
+    monkeypatch.setattr(app.sys, 'platform', 'win32')
+    monkeypatch.setattr(backend, 'Backend', lambda: service)
+    monkeypatch.setattr('optimus.continue_updates.run_saved_updates', run)
+    monkeypatch.setattr(app, '_run_gui', Mock(side_effect=AssertionError('Update-only cannot open normal maintenance')))
+    destination = tmp_path / 'update-reports'
+    assert app.main(['--continue-updates', '--output', str(destination)]) == expected
+    run.assert_called_once_with(service, output=destination)
+    service.close.assert_called_once_with()
+    service.optimize.assert_not_called()
+    service.save_preferences.assert_not_called()
+    service.set_startup_launch.assert_not_called()
+    service.cleanup_apply.assert_not_called()
+    assert json.loads(capsys.readouterr().out)['status'] == status
+
+
+def test_busy_update_continuation_cli_closes_without_entering_gui_or_modifying_preferences(tmp_path, monkeypatch, capsys):
+    from optimus import backend
+    service = SimpleNamespace(data_dir=tmp_path, close=Mock(), optimize=Mock(), save_preferences=Mock())
+    monkeypatch.setattr(app.sys, 'platform', 'win32')
+    monkeypatch.setattr(backend, 'Backend', lambda: service)
+    monkeypatch.setattr('optimus.continue_updates.run_saved_updates',
+        Mock(side_effect=RuntimeError('Another Optimus process is already running maintenance.')))
+    monkeypatch.setattr(app, '_run_gui', Mock(side_effect=AssertionError('No implicit GUI retry')))
+    assert app.main(['--continue-updates']) == 2
+    service.close.assert_called_once_with()
+    service.optimize.assert_not_called()
+    service.save_preferences.assert_not_called()
+    assert 'already running maintenance' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('other', [['--audit'], ['--update-recovery', 'status'], ['--smoke-test']])
+def test_update_continuation_cannot_combine_with_other_commands(other):
+    with pytest.raises(SystemExit):
+        app.parser().parse_args(['--continue-updates', *other])
+
+
 def test_linked_saved_journal_is_not_accepted(tmp_path):
     completed(tmp_path)
     os.link(tmp_path/'runs'/(RUN+'.json'),tmp_path/'linked.json')

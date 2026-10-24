@@ -129,7 +129,7 @@ def fresh_candidates(scan: Any) -> dict[str, dict[str, Any]]:
 
 
 def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=None, item_callback=None,
-                 prepared_callback=None, before_install=None) -> dict[str, Any]:
+                 prepared_callback=None, before_install=None, updates_only=False) -> dict[str, Any]:
     """Discover now and optionally block before the first native updater call.
 
     The owner retains its job-wide exclusive installer gate until this returns.
@@ -155,7 +155,8 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
             configuration = apply_update_rules(configuration)
             navigation = cursor_for(backend, 'software_updates', 'App updates')
             presence = None
-            if configuration.get('software_updates_enabled') is True and configuration.get('software_app_rules'):
+            if (not updates_only and configuration.get('software_updates_enabled') is True
+                    and configuration.get('software_app_rules')):
                 presence = run_app_presence(backend, configuration, cancel_event=cancel_event,
                     item_callback=item_callback, before_install=before_install, navigation=navigation)
                 context['app_presence'] = presence

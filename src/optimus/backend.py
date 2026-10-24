@@ -108,6 +108,13 @@ class Backend(ExtendedMaintenanceBackend):
         return self.workflow.run(settings or self.preferences(), progress_callback or (lambda event: None), cancel_event,
                                  browser_prompt=browser_prompt)
 
+    def reconcile_completed_updates(self, *, lease=None):
+        from .automatic_update_recovery import reconcile_completed_updates
+        return reconcile_completed_updates(self, lease=lease)
+
+    def automatic_update_recovery_probe(self):
+        return self.bridge.request('update_recovery_probe', timeout=25)
+
     def workflow_navigation_status(self):
         navigation = getattr(self.workflow, 'navigation', None)
         return navigation.snapshot() if navigation is not None else {'active': False, 'session_id': None, 'jobs': []}
