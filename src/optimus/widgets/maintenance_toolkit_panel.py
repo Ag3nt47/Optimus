@@ -23,6 +23,7 @@ class ToolkitChoices(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(Qt.ElideNone)
         outer.addWidget(self.tabs)
         self._adaptive()
         self._caches()
@@ -31,7 +32,7 @@ class ToolkitChoices(QWidget):
         self._health()
         self._updates()
 
-    def _page(self, name, description):
+    def _page(self, name, description, *, short_name=None):
         scroll, body = QScrollArea(), QWidget()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
@@ -46,7 +47,9 @@ class ToolkitChoices(QWidget):
         layout.addLayout(form)
         layout.addStretch()
         scroll.setWidget(body)
-        self.tabs.addTab(scroll, name)
+        index = self.tabs.addTab(scroll, short_name or name)
+        self.tabs.setTabToolTip(index, name + ': ' + description)
+        self.tabs.tabBar().setAccessibleTabName(index, name)
         return form
 
     def _check(self, form, group, key, title):
@@ -99,7 +102,7 @@ class ToolkitChoices(QWidget):
 
     def _caches(self):
         form = self._page('App caches', 'Only tested rebuildable web-cache files are eligible. Accounts, saved media, '
-            'Steam games, downloads and shader caches stay outside these recipes. Active or unknown applications are skipped.')
+            'Steam games, downloads and shader caches stay outside these recipes. Active or unknown applications are skipped.', short_name='Caches')
         self._check(form, 'application_caches', 'enabled', 'Include selected application caches in Optimize')
         self.cache_apps = {}
         from ..application_caches import APP_NAMES
@@ -122,7 +125,7 @@ class ToolkitChoices(QWidget):
 
     def _storage(self):
         form = self._page('Folder growth', 'Compare complete metadata scans of exact selected local folders. '
-            'Drive roots, junctions, remote/cloud filesystems and placeholders are excluded. Partial scans do not replace a complete baseline.')
+            'Drive roots, junctions, remote/cloud filesystems and placeholders are excluded. Partial scans do not replace a complete baseline.', short_name='Growth')
         self._check(form, 'storage_growth', 'enabled', 'Track selected folder growth during Optimize')
         roots = self._text(form, 'storage_growth', 'roots', 'Folders, one per line', multiline=True)
         add = QPushButton('Add a local folder…')
@@ -139,7 +142,7 @@ class ToolkitChoices(QWidget):
     def _retention(self):
         form = self._page('Recovery data', 'Expiry is permanent. Completed browser backup groups are eligible only '
             'with the separate loss-of-undo approval below. Driver backups, Windows restore points, original maintenance journals, '
-            'partial browser backups and pre-restore safety snapshots are protected.')
+            'partial browser backups and pre-restore safety snapshots are protected.', short_name='Recovery')
         self._check(form, 'recovery_retention', 'enabled', 'Include selected expired recovery/report data in Optimize')
         self._spin(form, 'recovery_retention', 'min_age_days', 'Minimum age', 1, 3650, ' days')
         self._check(form, 'recovery_retention', 'exported_reports', 'Expire eligible disposable exported report copies')
@@ -152,7 +155,7 @@ class ToolkitChoices(QWidget):
     def _health(self):
         form = self._page('Measurements', 'Short observations retain comparable CPU, memory, disk and network measurements '
             'locally. Hardware, boot and pagefile details depend on native provider access. Missing measurements remain unavailable. '
-            'Integrity repairs always require a separate explicit action.')
+            'Integrity repairs always require a separate explicit action.', short_name='Health')
         self._check(form, 'history', 'enabled', 'Record before/after observations during Optimize')
         self._spin(form, 'history', 'sample_seconds', 'Observation window', 1, 30, ' seconds')
         self._check(form, 'diagnostics', 'enabled', 'Include read-only hardware, boot and memory diagnostics')

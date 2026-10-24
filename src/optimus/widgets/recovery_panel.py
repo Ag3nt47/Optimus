@@ -87,14 +87,18 @@ class RecoveryPanel(QGroupBox):
         body.addWidget(self.driver_note)
         self.driver_grid = QGridLayout()
         body.addLayout(self.driver_grid)
-        self.driver_refresh = self._button('Refresh devices and backup history', self.refresh_drivers)
-        self.driver_export = self._button('Export and verify driver backup', self.export_drivers)
+        self.driver_refresh = self._button('Refresh devices and backups', self.refresh_drivers,
+            detail='Refresh current device identities and owned driver backup history.')
+        self.driver_export = self._button('Export verified driver backup', self.export_drivers,
+            detail='Export and verify a backup of eligible driver packages.')
         self.device_choices = self._combo('Refresh to select an exact device')
         self.device_choices.currentIndexChanged.connect(self._update_controls)
-        self.driver_rollback = self._button('Roll back selected device', self.rollback_selected)
+        self.driver_rollback = self._button('Roll back device', self.rollback_selected,
+            detail='Review rollback of the exact selected device using its previous Windows driver.')
         self.backup_choices = self._combo('No owned backup selected')
         self.backup_choices.currentIndexChanged.connect(self._update_controls)
-        self.backup_verify = self._button('Verify selected backup files', self.verify_backup)
+        self.backup_verify = self._button('Verify backup files', self.verify_backup,
+            detail='Verify the files in the exact selected owned backup.')
         body.addStretch(1)
         self.tabs.addTab(driver, 'Driver recovery')
         restore = QWidget()
@@ -107,17 +111,19 @@ class RecoveryPanel(QGroupBox):
         body.addWidget(self.restore_note)
         self.restore_grid = QGridLayout()
         body.addLayout(self.restore_grid)
-        self.restore_refresh = self._button('Refresh Windows restore points', self.refresh_restore_points)
+        self.restore_refresh = self._button('Refresh restore points', self.refresh_restore_points)
         self.restore_description = QLineEdit()
         self.restore_description.setPlaceholderText('Description for a new restore point')
         self.restore_description.setMaxLength(160)
         self.restore_description.setAccessibleName('New restore point description')
         self.restore_description.textChanged.connect(self._update_controls)
-        self.restore_create = self._button('Create and verify restore point', self.create_restore_point)
+        self.restore_create = self._button('Create verified restore point', self.create_restore_point)
         self.restore_choices = self._combo('Refresh to select an exact restore point')
         self.restore_choices.currentIndexChanged.connect(self._update_controls)
-        self.restore_delete = self._button('Delete selected restore point', self.delete_restore_point)
-        self.restore_open = self._button('Review selected restore in Windows', self.open_restore)
+        self.restore_delete = self._button('Delete restore point', self.delete_restore_point,
+            detail='Review deletion of the exact selected Windows restore point.')
+        self.restore_open = self._button('Review restore in Windows', self.open_restore,
+            detail='Open the Windows restore wizard for the exact selected restore point.')
         body.addStretch(1)
         self.tabs.addTab(restore, 'System Restore')
         self.status = QLabel('Nothing runs until you select an action. Refresh is read only.')
@@ -134,7 +140,8 @@ class RecoveryPanel(QGroupBox):
         self.details.setMaximumHeight(240)
         self.details.setPlaceholderText('Exact backup, native rollback and restore-point results appear here.')
         layout.addWidget(self.details)
-        self.cancel_button = self._button('Cancel before the next recovery step', self.cancel)
+        self.cancel_button = self._button('Cancel next recovery step', self.cancel,
+            detail='Request cancellation before the next recovery step; an active native operation finishes safely.')
         self.cancel_button.hide()
         layout.addWidget(self.cancel_button)
         self._reflow()
@@ -149,7 +156,7 @@ class RecoveryPanel(QGroupBox):
         return value
 
     @staticmethod
-    def _button(label, callback):
+    def _button(label, callback, *, detail=None):
         value = QPushButton(label)
         value.setAutoDefault(False)
         value.setMinimumHeight(36)
@@ -158,6 +165,9 @@ class RecoveryPanel(QGroupBox):
         value.setMinimumWidth(0)
         value.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         value.setCursor(Qt.PointingHandCursor)
+        if detail:
+            value.setToolTip(detail)
+            value.setAccessibleDescription(detail)
         value.clicked.connect(callback)
         return value
 

@@ -31,16 +31,31 @@ def test_additional_actual_workers_reflow_and_keep_explicit_unknown_counts(app):
     try:
         for identity in ('maintenance', 'software_updates', 'driver_updates'):
             grid.ensure(identity, identity)
-        grid.resize(1000, 400)
         grid.show()
         app.processEvents()
         grid.update_jobs([{'id': 'driver_backup', 'title': 'Driver backup', 'status': 'running',
                            'description': 'Verifying exported files', 'current': None, 'total': None}])
+        app.processEvents()
+        # Navigation labels set the readable card width using the active font.
+        # A fixed 1000px window can correctly fit only two Windows cards.
+        readable = max(card.minimum_readable_width() for card in grid.cards.values())
+        spacing = grid.grid.horizontalSpacing()
+        grid.resize(3 * readable + 2 * spacing + 60, 800)
+        for _ in range(3):
+            app.processEvents()
         assert len(grid.cards) == 4 and grid._columns == 3
         assert grid.grid.getItemPosition(3)[:2] == (1, 0)
+        assert all(card.width() >= readable for card in grid.cards.values())
         assert 'No item count' in grid.cards['driver_backup'].progress.format()
-        grid.resize(440, 800)
-        app.processEvents()
+        grid.resize(2 * readable + spacing + 20, 800)
+        for _ in range(3):
+            app.processEvents()
+        assert grid._columns == 2
+        assert grid.grid.getItemPosition(3)[:2] == (1, 1)
+        assert all(card.width() >= readable for card in grid.cards.values())
+        grid.resize(readable + 20, 800)
+        for _ in range(3):
+            app.processEvents()
         assert grid._columns == 1
         assert grid.grid.getItemPosition(3)[:2] == (3, 0)
         assert grid.ensure('../bad', 'Invalid') is None

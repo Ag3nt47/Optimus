@@ -6,11 +6,12 @@ import sys
 import threading
 
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal, Slot
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QGridLayout, QLabel,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QLabel,
     QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QSizePolicy)
 
 from .questions import ask_yes_no
 from .wrapping_checkbox import WrappingCheckBox
+from .flow_layout import FlowLayout
 
 
 class _Signals(QObject):
@@ -70,16 +71,21 @@ class SpeedEnhancementsPanel(QGroupBox):
         self.scope.setTextFormat(Qt.PlainText)
         self.scope.setWordWrap(True)
         layout.addWidget(self.scope)
-        self._action_columns = None
-        self.action_grid = QGridLayout()
+        # Wrap measured button widths instead of using a fixed two-column
+        # threshold, which can force the whole scroll page wider at native
+        # font sizes or when the user's text scale changes.
+        self.action_grid = FlowLayout()
         self.save_button = QPushButton('Save automatic choice')
         self.save_button.clicked.connect(self.save_choice)
-        self.review_button = QPushButton('Review current opportunities')
+        self.review_button = QPushButton('Review opportunities')
         self.review_button.clicked.connect(self.review)
-        self.apply_button = QPushButton('Apply supported enhancements now')
+        self.apply_button = QPushButton('Apply supported changes')
         self.apply_button.clicked.connect(self.apply_now)
         self.apply_button.setObjectName('Primary')
+        self.action_grid.addWidget(self.save_button)
+        self.action_grid.addWidget(self.review_button)
         layout.addLayout(self.action_grid)
+        layout.addWidget(self.apply_button)
         self.status = QLabel('The saved choice applies on Optimize. Review and Apply now run only when selected.')
         self.status.setTextFormat(Qt.PlainText)
         self.status.setWordWrap(True)
@@ -94,7 +100,7 @@ class SpeedEnhancementsPanel(QGroupBox):
         self.details.setMinimumHeight(100)
         self.details.setMaximumHeight(140)
         layout.addWidget(self.details)
-        self.history_grid = QGridLayout()
+        self.history_grid = FlowLayout()
         self.history = QComboBox()
         self.history.setMinimumWidth(0)
         self.history.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -102,8 +108,11 @@ class SpeedEnhancementsPanel(QGroupBox):
         self.history.currentIndexChanged.connect(self._update_controls)
         self.history_button = QPushButton('Refresh restore history')
         self.history_button.clicked.connect(self.refresh_history)
-        self.restore_button = QPushButton('Restore selected enhancements')
+        self.restore_button = QPushButton('Restore selected changes')
         self.restore_button.clicked.connect(self.restore_selected)
+        layout.addWidget(self.history)
+        self.history_grid.addWidget(self.history_button)
+        self.history_grid.addWidget(self.restore_button)
         layout.addLayout(self.history_grid)
         self.cancel_button = QPushButton('Cancel after current item')
         self.cancel_button.clicked.connect(self.cancel)
@@ -114,31 +123,8 @@ class SpeedEnhancementsPanel(QGroupBox):
             button.setAutoDefault(False)
             button.setMinimumHeight(36)
             button.setCursor(Qt.PointingHandCursor)
-        self._reflow_actions()
         self.enabled.toggled.connect(self._update_controls)
         self._update_controls()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._reflow_actions()
-
-    def _reflow_actions(self):
-        columns = 1 if self.width() < 520 else 2
-        if columns == self._action_columns:
-            return
-        self._action_columns = columns
-        for grid in (self.action_grid, self.history_grid):
-            while grid.count():
-                grid.takeAt(0)
-        for index, button in enumerate((self.save_button, self.review_button)):
-            self.action_grid.addWidget(button, index // columns, index % columns)
-        self.action_grid.addWidget(self.apply_button, 2 if columns == 1 else 1, 0, 1, columns)
-        self.history_grid.addWidget(self.history, 0, 0, 1, columns)
-        for index, button in enumerate((self.history_button, self.restore_button)):
-            self.history_grid.addWidget(button, 1 + index // columns, index % columns)
-        for column in range(2):
-            self.action_grid.setColumnStretch(column, int(column < columns))
-            self.history_grid.setColumnStretch(column, int(column < columns))
 
     def sync_settings(self, settings):
         if not isinstance(settings, dict):

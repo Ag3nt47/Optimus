@@ -89,7 +89,10 @@ def test_ineligible_intent_still_runs_separately_approved_workflow_exactly_once(
 
 def test_disabled_resume_does_not_probe_boot_create_plan_or_own_extra_lease(case):
     case.config['toolkit_settings']['resume']['enabled'] = False
+    case.backend.preference_store.validate = Mock(side_effect=AssertionError('Disabled wrapper must leave validation to Workflow.run.'))
     report = run(case)
+    assert case.backend.workflow.run.call_args.args[0] is case.config
+    case.backend.preference_store.validate.assert_not_called()
     case.boot.assert_not_called()
     assert 'automatic_reboot_resume' not in report
     assert '_lease' not in case.backend.workflow.run.call_args.kwargs

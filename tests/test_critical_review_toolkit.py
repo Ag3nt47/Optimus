@@ -1,5 +1,6 @@
 """The UI review inspects new toolkit controls using fixture services only."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def test_toolkit_geometry_and_production_preview_handlers_use_only_inert_fixture
         reviewer.viewport(window, dimensions, 'fixture-main')
         reviewer.review_toolkit(window, backend, dimensions, 'fixture')
         failures = [row for row in reviewer.report['checks'] if row['status'] == 'failed']
-        assert not failures, failures
+        assert not failures, json.dumps(failures, indent=2, ensure_ascii=False)
         by_id = {row['id']: row for row in reviewer.report['checks']}
         for suffix in ('no-constructor-actions', 'apply-starts-disabled', 'unsaved-preview-refused',
                        'explicit-save', 'preview-enables-exact-apply', 'negative-approval', 'explicit-apply-once',
@@ -53,7 +54,7 @@ def test_setup_toolkit_pages_all_reachable_without_saving_or_running(tmp_path, a
     try:
         reviewer.review_setup(backend, (850, 650), 'fixture')
         failures = [row for row in reviewer.report['checks'] if row['status'] == 'failed']
-        assert not failures, failures
+        assert not failures, json.dumps(failures, indent=2, ensure_ascii=False)
         assert any(row['id'] == 'fixture.setup-toolkit.selection-controls' for row in reviewer.report['checks'])
         assert backend.saved == [] and not (tmp_path / 'in-memory-only').exists()
         assert not any(getattr(backend, name).called for name in bot.OPTIONAL_OPERATIONS)
@@ -124,5 +125,39 @@ def test_tab_actual_text_clipping_or_elision_remains_a_failure(tmp_path, app):
     finally:
         owner.close()
         owner.deleteLater()
+        reviewer.close()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('scale', [1.0, 1.25])
+def test_compact_toolkit_uses_full_readable_tab_labels_without_overflow(tmp_path, app, scale):
+    from optimus.widgets.maintenance_toolkit_panel import ToolkitChoices
+    from optimus.widgets.theme import build_qss
+    from PySide6.QtWidgets import QToolButton
+    reviewer = bot.CriticalReview(tmp_path / 'review')
+    editor = ToolkitChoices()
+    editor.setAttribute(Qt.WA_DontShowOnScreen, True)
+    editor.setStyleSheet(build_qss(scale=scale))
+    editor.resize(560, 450)
+    editor.show()
+    try:
+        bot.drain(app)
+        assert editor.width() == 560
+        bar = editor.tabs.tabBar()
+        assert [bar.tabText(i) for i in range(bar.count())] == [
+            'Workload', 'Caches', 'Growth', 'Recovery', 'Health', 'Updates']
+        assert bar.accessibleTabName(1) == 'App caches'
+        assert bar.accessibleTabName(2) == 'Folder growth'
+        assert bar.accessibleTabName(3) == 'Recovery data'
+        assert bar.accessibleTabName(4) == 'Measurements'
+        for index in range(bar.count()):
+            editor.tabs.setCurrentIndex(index)
+            bot.drain(app)
+            measured = bot.measure_tab_label(bar, index)
+            assert measured['status'] == 'passed', json.dumps(measured, indent=2)
+        assert not any(button.isVisibleTo(bar) for button in bar.findChildren(QToolButton))
+    finally:
+        editor.close()
+        editor.deleteLater()
         reviewer.close()
         app.processEvents()

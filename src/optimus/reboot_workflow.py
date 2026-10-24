@@ -20,6 +20,12 @@ def run_with_reboot_resume(backend, settings, progress_callback, cancel_event=No
     boot probe or extra lease. Enabled mode owns the lease until both the full
     workflow and any claimed continuation receipt are durably finalized.
     """
+    toolkit = settings.get('toolkit_settings') if isinstance(settings, dict) else None
+    resume = toolkit.get('resume') if isinstance(toolkit, dict) else None
+    if not isinstance(resume, dict) or resume.get('enabled') is not True:
+        # Workflow.run owns validation. Preserve its ordinary disabled entry
+        # point and avoid a second full configuration copy on every run.
+        return backend.workflow.run(settings, progress_callback, cancel_event, browser_prompt=browser_prompt)
     from .workflow import Preferences, atomic_json
     validator = getattr(getattr(backend, 'preference_store', None), 'validate', Preferences.validate)
     configuration = validator(settings)
