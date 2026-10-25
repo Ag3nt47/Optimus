@@ -180,7 +180,33 @@ def fixture_service(tmp_path):
     runner = SchedulerFixture()
     launch = {'executable': r'D:\Optimus space\Optimus.exe', 'arguments': [],
               'argument_line': '', 'working_directory': r'D:\Optimus space'}
-    return startup.StartupRegistration(tmp_path, runner=runner, launch_provider=lambda: copy.deepcopy(launch)), runner, launch
+    return startup.StartupRegistration(tmp_path, runner=runner, launch_provider=lambda: copy.deepcopy(launch), headroom_checker=lambda: None), runner, launch
+
+
+def test_space_changed_after_ownership_read_prevents_manifest_and_registration(tmp_path):
+    from optimus.startup_safety import StartupPreflightError
+    service, runner, _ = fixture_service(tmp_path)
+    service.headroom_checker = Mock(side_effect=[None, StartupPreflightError('Fixture free-space changed.')])
+    with pytest.raises(StartupPreflightError):
+        service.set_enabled(True)
+    assert not service.path.exists() and runner.task is None
+    assert [request['operation'] for request in runner.calls] == ['status']
+
+
+def test_rollback_space_changed_after_native_return_preserves_manifest_with_unknown_total_outcome(tmp_path):
+    from optimus.startup_safety import StartupPreflightError
+    service, runner, launch = fixture_service(tmp_path)
+    service.set_enabled(True)
+    launch['executable'] = r'D:\Optimus space\Updated.exe'
+    receipt = service.set_enabled(True)
+    before = service.path.read_bytes()
+    runner.calls.clear()
+    service.headroom_checker = Mock(side_effect=[None, StartupPreflightError('Fixture free-space changed.')])
+    with pytest.raises(startup.StartupRegistrationError, match='native rollback returned') as caught:
+        service.rollback(receipt)
+    assert not isinstance(caught.value, StartupPreflightError)
+    assert service.path.read_bytes() == before
+    assert [request['operation'] for request in runner.calls] == ['status', 'restore']
 
 
 def fixture_backend(tmp_path, service):
@@ -413,8 +439,8 @@ def test_native_request_bounded_timeout_and_no_shell_or_uac(tmp_path, monkeypatc
 
 def test_native_clear_failure_is_preserved(tmp_path, monkeypatch):
     service, _, _ = fixture_service(tmp_path)
-    monkeypatch.setattr(startup.subprocess, 'run', Mock(return_value=SimpleNamespace(returncode=1,stdout='{"ok":false,"error":"Access is denied."}')))
-    with pytest.raises(startup.StartupRegistrationError, match='Access is denied'):
+    monkeypatch.setattr(startup.subprocess, 'run', Mock(return_value=SimpleNamespace(returncode=1,stdout='{"ok":false,"native_error_chain":[{"type":"System.UnauthorizedAccessException","hresult":"0x80070005"}]}')))
+    with pytest.raises(startup.StartupRegistrationError, match='0x80070005'):
         service._native({'operation':'status','manifest':None})
 
 

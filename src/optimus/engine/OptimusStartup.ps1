@@ -85,7 +85,11 @@ function Task-Status($Task,$Manifest,[string]$Sid,[string]$Name) {
     return @{enabled=$enabled;owned=$true;available=$true;state=$(if($enabled){'enabled'}else{'disabled'});reason='Owned user-level sign-in task; Windows administrator consent remains separate.';task_name=$Name;target=$match.executable}
 }
 
+$registrationStarted=$false
 try {
+    if(-not (Get-Command Assert-OptimusStartupHeadroom -CommandType Function -ErrorAction SilentlyContinue)){
+        . (Join-Path $PSScriptRoot 'StartupSafety.ps1')
+    }
     $raw=[Console]::In.ReadToEnd()
     if($raw.Length -gt 131072){throw 'Sign-in request exceeds its size limit.'}
     $request=$raw|ConvertFrom-Json
@@ -98,6 +102,7 @@ try {
     $task=Read-Task $folder $name
     $beforeXml=if($task){$task.Definition.XmlText}else{$null}
     $status=Task-Status $task $request.manifest $sid $name
+    $persisted=if($task -and $status.owned){Read-OptimusPersistedTask $name ([string]$task.Definition.XmlText)}else{$null}
     if($request.operation -eq 'set'){
         if($request.enabled -isnot [bool]){throw 'Sign-in launch must be on or off.'}
         if($status.state -eq 'foreign'){throw $status.reason}
@@ -114,6 +119,8 @@ try {
             $trigger=$definition.Triggers.Create(9);$trigger.UserId=$sid;$trigger.Delay='PT1M';$trigger.Enabled=$true
             $action=$definition.Actions.Create(0);$action.Path=$request.manifest.launch.executable;$action.Arguments=$request.manifest.launch.argument_line;$action.WorkingDirectory=$request.manifest.launch.working_directory
             $flags=if($task){4}else{2}
+            $headroom=Assert-OptimusStartupHeadroom
+            $registrationStarted=$true
             $folder.RegisterTaskDefinition($name,$definition,$flags,$sid,$null,3,$null)|Out-Null
         }elseif($task){$folder.DeleteTask($name,0)}
     }elseif($request.operation -eq 'restore'){
@@ -124,12 +131,19 @@ try {
             $previous=$scheduler.NewTask(0);$previous.XmlText=$request.before_xml
             if($null -eq (Test-Owned $previous $request.before_manifest $sid)){throw 'The rollback task is not owned.'}
             $flags=if($task){4}else{2}
+            $headroom=Assert-OptimusStartupHeadroom
+            $registrationStarted=$true
             $folder.RegisterTaskDefinition($name,$previous,$flags,$sid,$null,3,$null)|Out-Null
         }elseif($task){$folder.DeleteTask($name,0)}
     }
     $task=Read-Task $folder $name
     $status=Task-Status $task $request.manifest $sid $name
     $matched=if($task){Test-Owned $task.Definition $request.manifest $sid}else{$null}
+    $persisted=if($task -and $matched){Read-OptimusPersistedTask $name ([string]$task.Definition.XmlText)}else{$null}
     if($request.operation -eq 'set' -and ($status.state -eq 'foreign' -or $status.enabled -ne $request.enabled)){throw 'Windows sign-in task verification failed; inspect the actual status before retrying.'}
-    @{ok=$true;status=$status;owner_sid=$sid;matched_launch=$matched;before_xml=$beforeXml}|ConvertTo-Json -Depth 12 -Compress
-} catch {@{ok=$false;error=$_.Exception.Message}|ConvertTo-Json -Compress;exit 1}
+    @{ok=$true;status=$status;owner_sid=$sid;matched_launch=$matched;before_xml=$beforeXml;persisted_task=$persisted}|ConvertTo-Json -Depth 12 -Compress
+} catch {
+    if(Get-Command Get-OptimusStartupFailure -CommandType Function -ErrorAction SilentlyContinue){Get-OptimusStartupFailure $_.Exception $registrationStarted|ConvertTo-Json -Depth 6 -Compress}
+    else{@{ok=$false;error='The native startup verification helper is unavailable.'}|ConvertTo-Json -Compress}
+    exit 1
+}

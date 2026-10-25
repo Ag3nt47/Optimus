@@ -13,6 +13,7 @@ import uuid
 
 from .filesystem import _ordinary_data_path
 from .workflow import atomic_json
+from .startup_safety import require_windows_startup_headroom, native_failure
 
 
 class StartupRegistrationError(RuntimeError):
@@ -45,11 +46,12 @@ def launch_specification():
 
 
 class StartupRegistration:
-    def __init__(self, data_dir, *, runner=None, launch_provider=None):
+    def __init__(self, data_dir, *, runner=None, launch_provider=None, headroom_checker=None):
         self.data_dir = Path(data_dir)
         self.path = self.data_dir / 'startup-launch.json'
         self.runner = runner or self._native
         self.launch_provider = launch_provider or launch_specification
+        self.headroom_checker = headroom_checker or require_windows_startup_headroom
         self.lock = threading.RLock()
 
     def _native(self, request):
@@ -72,7 +74,7 @@ class StartupRegistration:
         except ValueError as error:
             raise StartupRegistrationError('Windows returned an unreadable sign-in task result.') from error
         if not isinstance(value, dict) or value.get('ok') is not True:
-            raise StartupRegistrationError(str(value.get('error', 'Windows sign-in task request failed.')) if isinstance(value, dict) else 'Invalid sign-in task result.')
+            raise native_failure(StartupRegistrationError, value, result.returncode)
         if result.returncode:
             raise StartupRegistrationError('Windows sign-in task request did not complete successfully.')
         return value
@@ -150,6 +152,8 @@ class StartupRegistration:
     def set_enabled(self, enabled):
         if type(enabled) is not bool:
             raise ValueError('Sign-in launch must be on or off.')
+        if enabled:
+            self.headroom_checker()  # Before the transaction can create any state.
         with self._mutation():
             before = self._manifest()
             inspected = self.runner({'operation': 'status', 'manifest': before})
@@ -164,6 +168,7 @@ class StartupRegistration:
                 self.data_dir.mkdir(parents=True, exist_ok=True)
                 # Persist both old/new ownership before touching Task Scheduler.
                 # A timeout/crash never loses the ability to identify either one.
+                self.headroom_checker()  # Fresh check before manifest writes.
                 atomic_json(self.path, manifest)
             result = self.runner({'operation': 'set', 'enabled': enabled, 'manifest': manifest})
             result['_before_manifest'] = before
@@ -172,6 +177,8 @@ class StartupRegistration:
             return result
 
     def rollback(self, receipt):
+        if receipt.get('before_xml') or receipt.get('_before_manifest') is not None:
+            self.headroom_checker()
         with self._mutation():
             if self._manifest() != receipt['_after_manifest']:
                 raise StartupRegistrationError('Sign-in ownership changed before rollback; the new state was preserved.')
@@ -185,4 +192,8 @@ class StartupRegistration:
                     _ordinary_data_path(self.path, file=True)
                     self.path.unlink()
             else:
+                try:
+                    self.headroom_checker()
+                except ValueError as error:
+                    raise StartupRegistrationError('The native rollback returned, but its manifest restore was deferred by the system-volume preflight. Inspect actual startup state before retrying.') from error
                 atomic_json(self.path, receipt['_before_manifest'])

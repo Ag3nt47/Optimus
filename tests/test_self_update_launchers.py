@@ -269,7 +269,7 @@ def test_native_startup_script_is_update_only_and_preserves_definition_and_acl()
 
 
 def native_adapter(f):
-    adapter = module.WindowsLauncherAdapter(f.data)
+    adapter = module.WindowsLauncherAdapter(f.data, headroom_checker=lambda: None)
     original = copy.deepcopy(f.adapter.startup)
     adapter.registration.path.write_bytes(original['manifest_bytes'])
     state = {'xml': original['xml']}
@@ -277,7 +277,7 @@ def native_adapter(f):
         assert request['operation'] == 'status'
         manifest = request['manifest']
         return {'status': dict(original['status'], target=manifest['launch']['executable']),
-            'owner_sid': manifest['owner_sid'], 'before_xml': state['xml']}
+            'owner_sid': manifest['owner_sid'], 'before_xml': state['xml'], 'persisted_task': {'verified': True}}
     adapter.registration.runner = status
     expected = adapter.startup_snapshot()
     def update(script, request):
@@ -294,7 +294,7 @@ def native_adapter(f):
         return {'updated_existing': True, 'owner_sid': original['owner_sid'],
             'before_xml': original['xml'], 'after_xml': state['xml'],
             'before_xml_sha256': module._sha(original['xml'].encode()),
-            'after_xml_sha256': module._sha(state['xml'].encode())}
+            'after_xml_sha256': module._sha(state['xml'].encode()), 'persisted_task': {'verified': True}}
     adapter._native = Mock(side_effect=update)
     return adapter, expected, state
 
@@ -308,6 +308,27 @@ def test_native_startup_adapter_uses_lock_provider_durable_identity_and_exact_re
     assert result['native_receipt']['updated_existing'] is True
     adapter._native.assert_called_once()
     assert fixture.preferences.read_bytes() == fixture.raw
+
+
+def test_retarget_second_headroom_refusal_preserves_manifest_and_task(fixture):
+    from optimus.startup_safety import StartupPreflightError
+    adapter, expected, state = native_adapter(fixture)
+    before = adapter.registration.path.read_bytes()
+    adapter.headroom_checker = Mock(side_effect=[None, StartupPreflightError('Fixture space fell below 2 GiB.')])
+    with pytest.raises(StartupPreflightError): adapter.retarget_startup(fixture.new, expected)
+    assert adapter.registration.path.read_bytes() == before
+    adapter._native.assert_not_called()
+
+
+def test_snapshot_requires_verified_physical_task_before_manifest_change(fixture):
+    adapter, expected, state = native_adapter(fixture)
+    before = adapter.registration.path.read_bytes()
+    original = adapter.registration.runner
+    adapter.registration.runner = lambda request: dict(original(request), persisted_task={'verified': False})
+    with pytest.raises(ValueError, match='persisted native startup'):
+        adapter.retarget_startup(fixture.new, expected)
+    assert adapter.registration.path.read_bytes() == before
+    adapter._native.assert_not_called()
 
 
 def test_native_startup_adapter_refuses_task_changed_after_backup_before_manifest_mutation(fixture):

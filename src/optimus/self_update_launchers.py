@@ -144,6 +144,7 @@ function UnchangedDefinition([string]$xml){
  foreach($name in @('Command','Arguments','WorkingDirectory')){foreach($node in @($d.SelectNodes('/t:Task/t:Actions/t:Exec/t:'+$name,$ns))){[void]$node.ParentNode.RemoveChild($node)}}
  return $d.DocumentElement.OuterXml
 }
+$registrationStarted=$false
 try{
  $raw=[Console]::In.ReadToEnd();if($raw.Length -gt 131072){throw 'Startup request exceeds bound.'};$r=$raw|ConvertFrom-Json
  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$before=$r.before_manifest;$after=$r.manifest
@@ -154,13 +155,17 @@ try{
  # GetTask must succeed: no absent-task path ever creates or adopts a task.
  $task=$folder.GetTask($name);$definition=Owned $task $before $sid;$oldXml=[string]$definition.XmlText
  if($oldXml.Length -gt 65536 -or (Digest $oldXml) -cne $r.before_xml_sha256){throw 'Existing native task changed after backup.'}
+ $beforePersisted=Read-OptimusPersistedTask $name $oldXml
  $action=$definition.Actions.Item(1);$action.Path=$after.launch.executable;$action.Arguments='';$action.WorkingDirectory=$after.launch.working_directory
  # TASK_UPDATE (4) | TASK_DONT_ADD_PRINCIPAL_ACE (16): never CREATE; retain ACL.
+ $headroom=Assert-OptimusStartupHeadroom
+ $registrationStarted=$true
  $folder.RegisterTaskDefinition($name,$definition,20,$sid,$null,3,$null)|Out-Null
  $readback=$folder.GetTask($name);$verified=Owned $readback $after $sid;$newXml=[string]$verified.XmlText
  if($newXml.Length -gt 65536 -or (UnchangedDefinition $oldXml) -cne (UnchangedDefinition $newXml)){throw 'Native task changed beyond the exact launch action.'}
- @{ok=$true;owner_sid=$sid;updated_existing=$true;before_xml=$oldXml;after_xml=$newXml;before_xml_sha256=(Digest $oldXml);after_xml_sha256=(Digest $newXml)}|ConvertTo-Json -Depth 12 -Compress
-}catch{@{ok=$false;error=$_.Exception.Message}|ConvertTo-Json -Compress;exit 1}
+ $persisted=Read-OptimusPersistedTask $name $newXml
+ @{ok=$true;owner_sid=$sid;updated_existing=$true;before_xml=$oldXml;after_xml=$newXml;before_xml_sha256=(Digest $oldXml);after_xml_sha256=(Digest $newXml);persisted_task=$persisted}|ConvertTo-Json -Depth 12 -Compress
+}catch{Get-OptimusStartupFailure $_.Exception $registrationStarted|ConvertTo-Json -Depth 6 -Compress;exit 1}
 """
 
 
@@ -191,8 +196,10 @@ def _system_powershell():
 class WindowsLauncherAdapter:
     system = 'win32'
 
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, *, headroom_checker=None):
+        from .startup_safety import require_windows_startup_headroom
         self.data_dir = Path(data_dir)
+        self.headroom_checker = headroom_checker or require_windows_startup_headroom
         self.registration = StartupRegistration(self.data_dir, runner=self._startup_status)
         self._root_bindings = None
 
@@ -200,22 +207,36 @@ class WindowsLauncherAdapter:
         executable = _system_powershell()
         environment = {key: value for key, value in os.environ.items() if key.casefold() not in ('psmodulepath', 'systemroot', 'windir')}
         environment.update(PSModulePath=str(executable.parent / 'Modules'), SystemRoot=str(executable.parents[3]), windir=str(executable.parents[3]))
-        encoded = base64.b64encode(script.encode('utf-16-le')).decode()
-        result = subprocess.run([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+        arguments = [str(executable), '-NoLogo', '-NoProfile', '-NonInteractive']
+        if isinstance(script, Path):
+            expected = Path(__file__).with_name('engine') / 'OptimusStartup.ps1'
+            if script != expected:
+                raise ValueError('Only the ordinary installed startup helper can be invoked as a file.')
+            _read(script, 65536)
+            _read(script.with_name('StartupSafety.ps1'), 16384)
+            arguments += ['-ExecutionPolicy', 'RemoteSigned', '-File', str(script)]
+        else:
+            if script == _STARTUP_PS:
+                script = _read(Path(__file__).with_name('engine') / 'StartupSafety.ps1', 16384).decode('utf-8-sig') + '\n' + script
+            encoded = base64.b64encode(script.encode('utf-16-le')).decode()
+            arguments += ['-EncodedCommand', encoded]
+        if len(subprocess.list2cmdline(arguments)) >= 32767:
+            raise ValueError('The native startup command exceeds the Windows command-line limit; no process was launched.')
+        result = subprocess.run(arguments,
             input=json.dumps(request, separators=(',', ':')), capture_output=True, text=True, encoding='utf-8', errors='replace',
             timeout=20, env=environment, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), check=False)
         if len(result.stdout) > 2 * 1024 ** 2:
             raise ValueError('The native launcher result exceeded its bound.')
         value = json.loads(result.stdout.lstrip('\ufeff'))
         if result.returncode != 0 or not isinstance(value, dict) or value.get('ok') is not True:
-            raise ValueError('The native launcher operation failed; inspect its actual state before retrying.')
+            from .startup_safety import native_failure
+            raise native_failure(ValueError, value, result.returncode)
         return value
 
     def _startup_status(self, request):
         if request.get('operation') != 'status':
             raise ValueError('The reused sign-in helper is status-only during self-update.')
-        script = _read(Path(__file__).with_name('engine') / 'OptimusStartup.ps1', 65536).decode('utf-8-sig')
-        return self._native(script, request)
+        return self._native(Path(__file__).with_name('engine') / 'OptimusStartup.ps1', request)
 
     def _links(self, request):
         if request.get('operation') != 'inventory':
@@ -251,10 +272,14 @@ class WindowsLauncherAdapter:
         xml = native.get('before_xml')
         if xml is not None and (not isinstance(xml, str) or len(xml) > _MAX_XML):
             raise ValueError('Native startup XML exceeded its bound.')
+        if (native.get('status', {}).get('owned') is True
+                and (not isinstance(native.get('persisted_task'), dict) or native['persisted_task'].get('verified') is not True)):
+            raise ValueError('The persisted native startup task was not independently verified.')
         return {'status': native['status'], 'owner_sid': native.get('owner_sid'), 'manifest': before,
                 'manifest_bytes': raw, 'xml': xml}
 
     def retarget_startup(self, newexe, expected):
+        self.headroom_checker()  # No manifest/lock/native mutation before this gate.
         registration = self.registration
         with registration._mutation():
             current = self.startup_snapshot()
@@ -265,13 +290,15 @@ class WindowsLauncherAdapter:
             registration.launch_provider = lambda: dict(launch)
             manifest = {'schema': 1, 'owner_token': before['owner_token'], 'owner_sid': current['owner_sid'],
                         'launch': registration.launch_provider(), 'previous_launch': copy.deepcopy(before['launch'])}
+            self.headroom_checker()  # Recheck after the native ownership snapshot.
             atomic_json(registration.path, manifest)
             native = self._native(_STARTUP_PS, {'operation': 'update_existing', 'before_manifest': before,
                 'manifest': manifest, 'before_xml_sha256': _sha(current['xml'].encode('utf-8')),
                 'new_executable_sha256': _sha(_read(newexe, 256 * 1024 ** 2))})
             if (native.get('updated_existing') is not True or native.get('owner_sid') != current['owner_sid']
                     or native.get('before_xml') != current['xml']
-                    or native.get('before_xml_sha256') != _sha(current['xml'].encode('utf-8'))):
+                    or native.get('before_xml_sha256') != _sha(current['xml'].encode('utf-8'))
+                    or not isinstance(native.get('persisted_task'), dict) or native['persisted_task'].get('verified') is not True):
                 raise ValueError('Native startup update did not establish exact existing ownership.')
             after = self.startup_snapshot()
             if (after['manifest'] != manifest or after['status'].get('owned') is not True
