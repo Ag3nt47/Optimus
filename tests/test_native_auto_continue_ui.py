@@ -321,7 +321,7 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
     assert progress.auto_continue_details.isReadOnly()
     for widget in (progress.verification_summary, progress.verification_details,
             progress.auto_continue_summary, progress.auto_continue_details,
-            progress.auto_continue_button, progress.cancel_button, *progress.worker_cards.values()):
+            progress.auto_continue_button, progress.cancel_button):
         assert widget.isVisibleTo(progress)
         assert progress.rect().contains(widget.rect().translated(widget.mapTo(progress, QPoint())))
         assert not progress.content_scroll.isAncestorOf(widget)
@@ -351,8 +351,16 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
     progress.details_toggle.setChecked(True)
     app.processEvents()
     assert progress.log.isVisible() and progress.verification_details.isVisible()
-    assert all(progress.rect().contains(card.rect().translated(card.mapTo(progress, QPoint())))
-        for card in progress.worker_cards.values())
+    # Expanded logs and completed evidence may scroll the body, while the
+    # unchanged four-card dashboard remains reachable and the footer stays put.
+    for card in progress.worker_cards.values():
+        button = card.navigation_buttons['next']
+        progress.body_scroll.ensureWidgetVisible(button, 0, 2)
+        wait_until(app, lambda: progress.body_scroll.viewport().rect().contains(
+            button.rect().translated(button.mapTo(progress.body_scroll.viewport(), QPoint()))))
+        hit = progress.childAt(button.mapTo(progress, button.rect().center()))
+        assert hit is button or hit is not None and button.isAncestorOf(hit)
+    assert progress.rect().contains(progress.cancel_button.rect().translated(progress.cancel_button.mapTo(progress, QPoint())))
 
 
 def test_saved_automatic_choice_continues_once_without_a_second_click(window, app):

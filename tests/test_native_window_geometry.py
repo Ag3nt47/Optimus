@@ -271,13 +271,20 @@ def test_real_content_windows_fit_small_work_area_with_visible_primary_controls(
         child.show()
         settle(app)
         if kind == 'progress':
-            # Four live controls have an honest font-derived usable minimum.
-            # A smaller hypothetical desktop must not force clipping them.
-            assert child.height() >= child.minimumHeight()
-            assert child.width() >= child.minimumWidth()
+            # Small desktops fit the header/footer while the ordinary body
+            # scrolls each unchanged worker into its real viewport.
+            assert available.contains(child.frameGeometry())
+            controls.extend([child.fullscreen.button, child.details_toggle])
             for card in child.worker_cards.values():
-                assert child.rect().contains(card.rect().translated(card.mapTo(child, QPoint())))
-                controls.extend(card.navigation_buttons.values())
+                assert child.body_scroll.widget().rect().contains(card.rect().translated(card.mapTo(child.body_scroll.widget(), QPoint())))
+                for control in card.navigation_buttons.values():
+                    child.body_scroll.ensureWidgetVisible(control, 0, 2)
+                    settle(app)
+                    assert child.body_scroll.viewport().rect().contains(control.rect().translated(control.mapTo(child.body_scroll.viewport(), QPoint())))
+                    measured = bot.measure_button(control, child, (child.width(), child.height()), app)
+                    assert measured['status'] == 'passed', (kind, measured)
+                    hit = child.childAt(control.mapTo(child, control.rect().center()))
+                    assert hit is control or hit is not None and control.isAncestorOf(hit)
         else:
             assert available.contains(child.frameGeometry()), (kind, child.frameGeometry(), child.minimumSizeHint())
         for control in controls:

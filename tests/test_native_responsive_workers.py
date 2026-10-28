@@ -1,4 +1,4 @@
-"""Pinned worker geometry uses disposable Qt fixtures and never starts host work."""
+"""Responsive worker geometry uses disposable Qt fixtures, never host work."""
 import os
 from pathlib import Path
 import threading
@@ -66,6 +66,7 @@ def state():
 def make_window(app, pixels=13):
     owner = QWidget()
     owner.smoke_test = True
+    owner.setProperty('_optimus_no_reveal', True)
     set_font(owner, pixels)
     window = OptimizationProgressWindow(owner, threading.Event())
     window._optimus_no_reveal = True
@@ -102,17 +103,20 @@ def assert_pinned_geometry(window, *, pixels, requested):
     context = f'font={pixels}px requested={requested} actual={window.width(), window.height()}'
     assert window.width() >= window.minimumWidth(), context
     assert window.height() >= window.minimumHeight(), context
-    assert window.worker_grid._columns == 2, context
-    assert window.rect().contains(in_window(window.worker_grid, window)), context
+    assert window.worker_grid._columns in (1, 2), context
+    saved_scroll = window.body_scroll.verticalScrollBar().value()
+    body = window.body_scroll.widget()
+    assert body.rect().contains(in_window(window.worker_grid, body)), context
     cards = [window.worker_cards[identity] for identity in CORE]
     assert all(card.isVisibleTo(window) for card in cards), context
     for index, card in enumerate(cards):
         assert window.worker_grid.rect().contains(card.geometry()), (context, index, card.geometry())
-        assert window.rect().contains(in_window(card, window)), context
+        assert body.rect().contains(in_window(card, body)), context
         assert card.completion.fontMetrics().height() >= pixels, context
         parent = card.parentWidget()
         while parent is not None and parent is not window:
-            assert not isinstance(parent, QAbstractScrollArea), (context, 'Core worker is inside a scroll area')
+            if isinstance(parent, QAbstractScrollArea):
+                assert parent is window.body_scroll, context
             parent = parent.parentWidget()
         essentials = [card.heading, card.status, card.progress, card.totals, card.activity_ring,
             *card.navigation_buttons.values()]
@@ -121,7 +125,6 @@ def assert_pinned_geometry(window, *, pixels, requested):
             assert field.width() > 0 and field.height() > 0, context
             mapped = field.rect().translated(field.mapTo(card, QPoint()))
             assert card.contentsRect().contains(mapped), (context, field.objectName(), mapped, card.rect())
-            assert window.rect().contains(in_window(field, window)), context
         assert not card.heading.geometry().intersects(card.activity_ring.geometry()), context
         assert card.status.geometry().bottom() < card.progress.geometry().top(), context
         assert card.progress.geometry().bottom() < card.totals.geometry().top(), context
@@ -138,6 +141,9 @@ def assert_pinned_geometry(window, *, pixels, requested):
                 assert not left.geometry().intersects(right.geometry()), context
             # A direct hit test catches a footer or details pane overlay even if
             # all individual rectangles happen to lie inside the window.
+            window.body_scroll.ensureWidgetVisible(left, 0, 2)
+            settle(QApplication.instance())
+            assert window.body_scroll.viewport().rect().contains(in_window(left, window.body_scroll.viewport())), context
             point = left.mapTo(window, left.rect().center())
             hit = window.childAt(point)
             assert hit is left or hit is not None and left.isAncestorOf(hit), (context, left.objectName(), hit)
@@ -145,13 +151,16 @@ def assert_pinned_geometry(window, *, pixels, requested):
             assert not in_window(card, window).intersects(in_window(other, window)), context
     assert window.cancel_button.isVisibleTo(window), context
     assert window.rect().contains(in_window(window.cancel_button, window)), context
-    assert in_window(window.worker_grid, window).bottom() < in_window(window.cancel_button, window).top(), context
+    assert in_window(window.body_scroll, window).bottom() < in_window(window.cancel_button, window).top(), context
     assert window.content_scroll.horizontalScrollBar().maximum() == 0, context
+    assert window.body_scroll.horizontalScrollBar().maximum() == 0, context
     assert not window.cancel.is_set(), context
+    window.body_scroll.verticalScrollBar().setValue(saved_scroll)
+    settle(QApplication.instance())
 
 
 @pytest.mark.parametrize('pixels', (13, 20, 26))
-def test_all_four_workers_fit_every_requested_resize_without_grid_scrolling(app, pixels):
+def test_all_four_workers_remain_reachable_at_every_requested_resize(app, pixels):
     owner, window = make_window(app, pixels)
     try:
         # Reuse the same live dialog through every combination to exercise both
@@ -163,6 +172,9 @@ def test_all_four_workers_fit_every_requested_resize_without_grid_scrolling(app,
                 assert_pinned_geometry(window, pixels=pixels, requested=(width, height))
                 if pixels == 13 and (width, height) == (850, 650):
                     assert (window.width(), window.height()) == (850, 650)
+                    assert window.body_scroll.verticalScrollBar().maximum() == 0
+                    assert window.rect().contains(in_window(window.analysis_panel, window))
+                    assert all(window.rect().contains(in_window(window.worker_cards[key], window)) for key in CORE)
     finally:
         dispose(owner, window, app)
 
@@ -203,7 +215,7 @@ def test_current_package_is_visible_in_the_compact_status_with_full_hover_text(a
         dispose(owner, window, app)
 
 
-def test_optional_workers_cannot_expand_or_scroll_the_core_grid(app):
+def test_optional_workers_cannot_expand_or_displace_the_core_grid(app):
     owner, window = make_window(app)
     try:
         window.resize(850, 650)
@@ -218,7 +230,14 @@ def test_optional_workers_cannot_expand_or_scroll_the_core_grid(app):
         for identity in ('driver_backup', 'system_restore', 'file_verify', 'smart_cleaning'):
             assert identity in window.worker_cards
             assert not window.worker_grid.isAncestorOf(window.worker_cards[identity])
-        assert {identity: in_window(window.worker_cards[identity], window) for identity in CORE} == before
+        for identity in CORE:
+            after = in_window(window.worker_cards[identity], window)
+            # A newly needed body scrollbar can narrow both columns equally;
+            # optional cards cannot enlarge or insert rows into the core grid.
+            assert after.top() == before[identity].top()
+            assert after.height() == before[identity].height()
+            assert after.width() <= before[identity].width()
+        assert len({window.worker_cards[key].width() for key in CORE}) <= 2
         assert_pinned_geometry(window, pixels=13, requested=(850, 650))
     finally:
         dispose(owner, window, app)
@@ -265,27 +284,27 @@ def test_open_details_drive_warning_and_result_controls_keep_the_core_visible(ap
         settle(app)
         assert_pinned_geometry(window, pixels=pixels, requested=(850, 650))
         assert window.guard_summary.isVisibleTo(window)
-        assert window.guard_summary.visible_text.startswith('WARNING')
+        assert window.guard_summary.text().startswith('WARNING')
         assert 'shortfall' in window.guard_summary.toolTip()
         assert window.content_scroll.isVisibleTo(window)
         assert window.content_scroll.viewport().height() > 0
         assert window.rect().contains(in_window(window.details_toggle, window))
         assert window.rect().contains(in_window(window.auto_continue_button, window))
-        assert in_window(window.worker_grid, window).bottom() < in_window(window.details_toggle, window).top()
-        assert in_window(window.content_scroll, window).bottom() < in_window(window.auto_continue_button, window).top()
+        assert not window.content_scroll.isAncestorOf(window.analysis_panel)
+        assert in_window(window.body_scroll, window).bottom() < in_window(window.auto_continue_button, window).top()
         assert 'Deliberately.Long.Package.Name' in window.worker_details.toPlainText()
     finally:
         dispose(owner, window, app)
 
 
-def test_screen_fitting_cannot_lower_the_live_control_minimum(app):
+def test_small_screen_uses_body_scrolling_without_forcing_an_oversized_window(app):
     from optimus.widgets.window_geometry import fit_window_to_screen
     owner, window = make_window(app, 26)
     try:
-        minimum = window.minimumSize()
         fit_window_to_screen(window, available=QRect(0, 0, 480, 450))
         settle(app)
-        assert window.minimumSize() == minimum
+        assert window.width() <= 480 and window.height() <= 450
+        assert window.body_scroll.verticalScrollBar().maximum() > 0
         assert_pinned_geometry(window, pixels=26, requested=(480, 450))
     finally:
         dispose(owner, window, app)

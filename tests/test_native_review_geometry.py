@@ -80,6 +80,12 @@ def test_core_controls_remain_visible_after_details_warning_and_font_changes(app
                     fields = [card.heading, card.status, card.progress, card.totals,
                               card.activity_ring, *card.navigation_buttons.values()]
                     for field in fields:
+                        # The body deliberately scrolls on enlarged text or
+                        # expanded logs. Check actual ancestor containment at
+                        # the real reached position, not just logical visibility.
+                        window.body_scroll.ensureWidgetVisible(field, 0, 2)
+                        for _ in range(3):
+                            app.processEvents()
                         unoccluded_by_ancestors(field, window)
                     for first, second in ((card.heading, card.status), (card.status, card.progress),
                                           (card.progress, card.totals)):
@@ -87,6 +93,8 @@ def test_core_controls_remain_visible_after_details_warning_and_font_changes(app
                         second_rect = second.rect().translated(second.mapTo(window, QPoint()))
                         assert not first_rect.intersects(second_rect), 'Essential text rows overlap'
                     for button in card.navigation_buttons.values():
+                        window.body_scroll.ensureWidgetVisible(button, 0, 2)
+                        app.processEvents()
                         hit = window.childAt(button.mapTo(window, button.rect().center()))
                         assert hit is button or hit is not None and button.isAncestorOf(hit)
     finally:

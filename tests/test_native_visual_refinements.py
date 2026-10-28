@@ -232,7 +232,9 @@ def test_foreground_and_background_progress_remain_distinct_and_readable(window,
         assert 'Background: Approved app updates — running (2/4)' == progress.background_status.text()
         assert progress.background_status.toolTip() == progress.background_status.text()
         assert progress.background_status.accessibleDescription() == progress.background_status.text()
-        assert not progress.details_toggle.isChecked() and not progress.background_status.isVisible()
+        assert not progress.details_toggle.isChecked() and progress.background_status.isVisible()
+        assert progress.analysis_panel.isAncestorOf(progress.background_status)
+        assert not progress.content_scroll.isAncestorOf(progress.background_status)
         card = progress.worker_cards['software_updates']
         assert card.status.text() == 'Running' and card.progress.value() == 2 and card.progress.maximum() == 4
         for field in (card.heading, card.status, card.activity_ring, card.progress, card.totals,
@@ -243,12 +245,12 @@ def test_foreground_and_background_progress_remain_distinct_and_readable(window,
         assert 'Approved app updates' in progress.worker_details.toPlainText()
         progress.details_toggle.click()
         app.processEvents()
-        progress.content_scroll.ensureWidgetVisible(progress.background_status)
+        progress.body_scroll.ensureWidgetVisible(progress.background_status)
         app.processEvents()
         assert progress.background_status.isVisible() and not progress.background_status.visibleRegion().isEmpty()
-        shown = QRect(progress.background_status.mapTo(progress.content_scroll.viewport(), QPoint()),
+        shown = QRect(progress.background_status.mapTo(progress.body_scroll.viewport(), QPoint()),
                       progress.background_status.size())
-        assert progress.content_scroll.viewport().rect().contains(shown)
+        assert progress.body_scroll.viewport().rect().contains(shown)
         assert progress.cancel_button.geometry().bottom() < progress.height()
         progress.update_progress({'stage': 'Next foreground stage', 'jobs': []})
         assert progress.background_status.isHidden()

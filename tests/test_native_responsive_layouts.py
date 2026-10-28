@@ -80,7 +80,7 @@ def test_completed_worker_displays_its_full_scan_duration_and_freezes(progress, 
     assert card.elapsed.text() == 'Elapsed: 43s'
 
 
-def test_small_progress_window_clamps_to_readable_four_card_grid_and_scrolls_only_details(progress, app):
+def test_small_progress_window_scrolls_body_with_a_fixed_reachable_footer(progress, app):
     progress.resize(640, 400)
     progress.update_progress({'stage': 'Waiting for background updates', 'percentage': 74,
         'description': 'A long fixture description explains the current operation and its remaining checks. ' * 4,
@@ -88,26 +88,27 @@ def test_small_progress_window_clamps_to_readable_four_card_grid_and_scrolls_onl
                   'description': 'Update deferred: system-drive space below 2 GiB.', 'elapsed_seconds': 43}]})
     app.processEvents()
     assert progress.width() == max(640, progress.minimumWidth())
-    assert progress.height() == progress.minimumHeight() > 400
-    assert progress.minimumHeight() >= progress.layout().minimumSize().height()
-    assert progress.rect().contains(progress.cancel_button.geometry())
+    assert progress.height() == 400
+    assert progress.rect().contains(QRect(progress.cancel_button.mapTo(progress, QPoint()), progress.cancel_button.size()))
     area = progress.content_scroll
     assert not progress.details_toggle.isChecked() and not area.isVisible()
     assert set(progress.worker_cards) == {'maintenance', 'software_updates', 'driver_updates', 'security_scan'}
-    ancestor = progress.worker_grid.parentWidget()
-    while ancestor is not None:
-        assert not isinstance(ancestor, QScrollArea)
-        ancestor = ancestor.parentWidget()
+    assert progress.body_scroll.isAncestorOf(progress.worker_grid)
+    assert not area.isAncestorOf(progress.worker_grid)
 
     def assert_grid_controls_fit():
         for index, card in enumerate(progress.worker_cards.values()):
             assert progress.worker_grid.grid.getItemPosition(progress.worker_grid.grid.indexOf(card))[:2] == divmod(index, 2)
-            assert card.isVisible() and not card.visibleRegion().isEmpty()
-            assert progress.rect().contains(QRect(card.mapTo(progress, QPoint()), card.size()))
+            assert card.isVisible()
+            assert progress.body_scroll.widget().rect().contains(QRect(card.mapTo(progress.body_scroll.widget(), QPoint()), card.size()))
             for button in card.navigation_buttons.values():
+                progress.body_scroll.ensureWidgetVisible(button, 0, 2)
+                app.processEvents()
                 assert button.isVisible()
                 assert card.rect().contains(QRect(button.mapTo(card, QPoint()), button.size()))
-                assert progress.rect().contains(QRect(button.mapTo(progress, QPoint()), button.size()))
+                assert progress.body_scroll.viewport().rect().contains(QRect(button.mapTo(progress.body_scroll.viewport(), QPoint()), button.size()))
+                hit = progress.childAt(button.mapTo(progress, button.rect().center()))
+                assert hit is button or hit is not None and button.isAncestorOf(hit)
 
     assert_grid_controls_fit()
     card = progress.worker_cards['software_updates']
@@ -117,17 +118,20 @@ def test_small_progress_window_clamps_to_readable_four_card_grid_and_scrolls_onl
     progress.details_toggle.click()
     app.processEvents()
     settle_scroll_layout(area, progress.log, app)
-    assert area.verticalScrollBar().maximum() > 0
+    assert progress.body_scroll.verticalScrollBar().maximum() > 0
     assert area.horizontalScrollBar().maximum() == 0
     assert len({card.width() for card in progress.worker_cards.values()}) <= 2
-    grid_before_scroll = QRect(progress.worker_grid.mapTo(progress, QPoint()), progress.worker_grid.size())
     area.ensureWidgetVisible(progress.log)
     app.processEvents()
     visible = QRect(progress.log.mapTo(area.viewport(), QPoint()), progress.log.size())
     assert visible.intersects(area.viewport().rect())
-    assert QRect(progress.worker_grid.mapTo(progress, QPoint()), progress.worker_grid.size()) == grid_before_scroll
+    progress.body_scroll.ensureWidgetVisible(area, 0, 2)
+    app.processEvents()
+    viewport = progress.log.viewport()
+    hit = progress.childAt(viewport.mapTo(progress, viewport.rect().center()))
+    assert hit is viewport or hit is not None and viewport.isAncestorOf(hit)
     assert_grid_controls_fit()
-    assert progress.rect().contains(progress.cancel_button.geometry())
+    assert progress.rect().contains(QRect(progress.cancel_button.mapTo(progress, QPoint()), progress.cancel_button.size()))
 
 
 def test_short_landing_window_retains_all_four_controls_with_scroll_access(app, tmp_path):

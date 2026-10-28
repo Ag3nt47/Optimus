@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
+from test_native_auto_continue_ui import wait_until
 
 from optimus.ui import OptimizationProgressWindow, OptimusWindow
 from optimus.workflow import DEFAULTS
@@ -15,6 +16,11 @@ from optimus.workflow import DEFAULTS
 @pytest.fixture(scope='module')
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def reduced_motion(monkeypatch):
+    monkeypatch.setenv('OPTIMUS_REDUCE_MOTION', '1')
 
 
 def result(**changes):
@@ -57,6 +63,14 @@ def dispose(value, qapp):
 
 
 def assert_pinned_report_visible(progress):
+    def settled():
+        pane = progress.verification_details
+        viewport = pane.viewport()
+        hit = progress.childAt(viewport.mapTo(progress, viewport.rect().center()))
+        return (progress.body_scroll.viewport().rect().contains(
+            progress.completion_review.rect().translated(progress.completion_review.mapTo(progress.body_scroll.viewport(), QPoint())))
+            and (hit is viewport or hit is not None and viewport.isAncestorOf(hit)))
+    wait_until(QApplication.instance(), settled)
     for widget in (progress.verification_summary, progress.verification_details):
         assert widget.isVisibleTo(progress)
         assert not progress.content_scroll.isAncestorOf(widget)

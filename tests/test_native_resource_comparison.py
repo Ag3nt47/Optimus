@@ -85,7 +85,8 @@ def test_comparison_fits_below_global_progress_and_refreshes_without_accumulatio
         assert dialog.content_scroll.horizontalScrollBar().maximum() == 0
         assert dialog.progress.geometry().bottom() < comparison.geometry().top()
         assert comparison.mapTo(dialog, comparison.rect().bottomLeft()).y() < dialog.worker_grid.mapTo(dialog, QPoint()).y()
-        assert dialog.content_scroll.widget().isAncestorOf(dialog.stage)
+        assert not dialog.content_scroll.isAncestorOf(dialog.description)
+        assert dialog.analysis_panel.isAncestorOf(dialog.description)
         assert comparison.removed.geometry().right() < comparison.downloaded.geometry().left()
         dialog.configure_workers({})
         assert comparison.snapshot['removed_known'] is False

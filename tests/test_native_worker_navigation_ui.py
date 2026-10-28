@@ -525,8 +525,8 @@ def test_long_current_step_description_fits_and_keeps_full_accessible_text(progr
         label = window.description
         assert label.text() == text
         assert label.toolTip() == text
-        assert len(label.visible_text.splitlines()) <= 2
-        assert label.height() >= label.fontMetrics().lineSpacing() * 2
+        assert len(label.visible_text.splitlines()) == 1
+        assert label.height() >= label.fontMetrics().lineSpacing()
         assert all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
                    for line in label.visible_text.splitlines())
         assert window.worker_cards['maintenance'].details.text() == text

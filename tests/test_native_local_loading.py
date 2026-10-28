@@ -133,7 +133,7 @@ def test_progress_completion_stops_icon_and_followup_can_restart_it(progress, ap
     assert progress.loading_animation._movie.state() == QMovie.Running
     progress.finish({'status': 'completed', 'stages': []})
     assert progress.loading_animation._movie.state() == QMovie.NotRunning
-    assert not progress.loading_animation.isVisible()
+    assert progress.loading_animation.isVisible()  # A static local poster remains in the visible information panel.
     import threading
     progress.begin_auto_continue(threading.Event())
     assert progress.loading_animation.isVisible()
@@ -153,9 +153,10 @@ def test_large_loading_icon_does_not_push_worker_panels_or_controls_out_of_compa
                   'description': 'The application installer owns the shared installer lane.'}]})
     app.processEvents()
     icon = progress.loading_animation
-    assert (icon.width(), icon.height()) == (128, 117)
+    assert (icon.width(), icon.height()) == (64, 58)
     header = progress._progress_header
-    assert progress.content_scroll.widget().isAncestorOf(icon)
+    assert progress.analysis_panel.isAncestorOf(icon)
+    assert not progress.content_scroll.isAncestorOf(icon)
     assert not header.isAncestorOf(icon)
     assert all(widget.parentWidget() is header for widget in (progress.title, progress.spinner,
         progress.progress, progress.resource_comparison))
@@ -169,10 +170,12 @@ def test_large_loading_icon_does_not_push_worker_panels_or_controls_out_of_compa
     header_bottom = header.mapTo(progress, header.rect().bottomLeft()).y()
     cancel_top = progress.cancel_button.mapTo(progress, progress.cancel_button.rect().topLeft()).y()
     assert all(card.mapTo(progress, card.rect().topLeft()).y() > header_bottom for card in cards)
-    # The animation belongs to expandable details. All four core panels and
-    # every live control fit directly in the window without scrolling a grid.
+    # The real local animation and live information stay visible independently
+    # of the optional process/log section at the normal dashboard size.
     assert set(progress.worker_cards) == {'maintenance', 'software_updates', 'driver_updates', 'security_scan'}
     assert progress.content_scroll.horizontalScrollBar().maximum() == 0
+    assert progress.body_scroll.verticalScrollBar().maximum() == 0
+    assert icon.isVisibleTo(progress) and icon.ready
     for card in cards:
         assert card.isVisibleTo(progress)
         assert progress.rect().contains(card.rect().translated(card.mapTo(progress, QPoint())))
@@ -183,8 +186,12 @@ def test_large_loading_icon_does_not_push_worker_panels_or_controls_out_of_compa
     for _ in range(3):
         app.processEvents()
     assert icon.isVisibleTo(progress) and icon.ready
-    assert all(progress.rect().contains(card.rect().translated(card.mapTo(progress, QPoint()))) for card in cards)
-    assert progress.cancel_button.geometry().bottom() <= 650 and progress.cancel_button.isEnabled()
+    progress.body_scroll.ensureWidgetVisible(icon)
+    for _ in range(3):
+        app.processEvents()
+    assert progress.body_scroll.viewport().rect().contains(icon.rect().translated(icon.mapTo(progress.body_scroll.viewport(), QPoint())))
+    assert progress.rect().contains(progress.cancel_button.rect().translated(progress.cancel_button.mapTo(progress, QPoint())))
+    assert progress.cancel_button.isEnabled()
 
 
 def test_display_extent_is_capped_and_scaled_frames_must_fit_the_existing_memory_budget(animation, monkeypatch):
