@@ -269,7 +269,10 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     finally:
         discovery_reporter.close()
     skipped_discovery=discovery.requested()
-    discovery.finish('cancelled' if skipped_discovery else 'completed',mutation_started=False)
+    discovery_pending=(isinstance(scan,dict) and
+                       (scan.get('outcomeKnown') is False or scan.get('running') is True))
+    discovery.finish('failed' if discovery_pending else 'cancelled' if skipped_discovery else 'completed',
+                     mutation_started=False,outcome_known=not discovery_pending)
     scan_completed_utc=datetime.now(timezone.utc).isoformat()
     scan_duration=max(0,time.monotonic()-scan_clock)
     def proof(eligible_count=None):
@@ -285,6 +288,11 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     evidence=proof()
     def finish(items, **extra):
         return _finish(policy,items,scan=scan,driver_scan=dict(evidence),**extra)
+    if discovery_pending:
+        return finish([],skipped=True,review_only=True,installer_started=False,outcomeKnown=False,
+            running=True,uncertain=True,requiresReview=True,
+            stop_reason='The driver search request has not retired; its native outcome must be reviewed before more work.',
+            navigation_cancelled=skipped_discovery,navigation_cancelled_items=int(skipped_discovery))
     if skipped_discovery:
         return finish([],skipped=True,review_only=True,navigation_cancelled=True,navigation_cancelled_items=1,
             installer_started=False,outcomeKnown=True,running=False,

@@ -13,6 +13,7 @@ from optimus.maintenance import Maintenance
 from optimus.navigation import NavigationHub
 from optimus.workflow import DEFAULTS, Workflow, Preferences
 from optimus.native_workflow import NativeWorkflow
+from optimus.parallel_updates import installer_barrier, _journal_result
 from test_workflow import MockBackend
 from test_automated_system import backend as driver_backend, driver, driver_config
 from test_automated_software import backend as app_backend, configuration
@@ -137,6 +138,21 @@ def test_driver_download_token_reaches_provider_and_next_offer_runs_after_abort_
     result = run_drivers(service, driver_config(driver_approved_updates=[first, second]), cancel_event=global_stop)
     assert order == [first['id'], second['id']] and result['navigation_cancelled_items'] == 1
     assert not result['cancelled'] and not global_stop.is_set()
+
+
+def test_driver_search_timeout_does_not_erase_barrier_when_local_skip_is_pending():
+    service = driver_backend(); hub, global_stop = own(service)
+    def scan(*, cancel_event=None):
+        assert issue(hub, 'driver_updates')['accepted'] and cancel_event.is_set()
+        return {'updates': [], 'resultCode': 4, 'outcomeKnown': False, 'running': True}
+    service.driver_updates_scan = scan
+    result = run_drivers(service, driver_config(), cancel_event=global_stop)
+    assert result['outcomeKnown'] is False and result['running'] is True and result['uncertain'] is True
+    assert installer_barrier(result) and installer_barrier(_journal_result(result))
+    service.driver_update_apply_unattended.assert_not_called()
+    row = next(row for row in hub.snapshot()['jobs'] if row['id'] == 'driver_updates')
+    assert row['control_status'] == 'review_required' and not row['can_next']
+    assert not global_stop.is_set()
 
 
 def test_app_live_installer_waits_for_quiescence_then_continues_without_retry():
