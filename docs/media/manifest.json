@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "version": "0.12.7",
+  "source_commit": "f23962099f3849290f01dc75b9658f6d5d2c98af",
+  "capture": "Actual QWidget.grab() renders with labelled surrounding title/footer",
+  "fixture_scope": "In-memory backend, navigation and mock Sandbox; all metrics and outcomes are simulated. No measured cleanup, performance or native-operation proof.",
+  "primary_button": "Connected only to fixture progress-window handoff",
+  "source_excerpt": "Sandbox shows an excerpt of public src/optimus/ui.py, never saved or executed",
+  "raccoon": "Bundled decorative asset is visible in its production Details section during seconds 5-8; see src/optimus/assets/RACCOON-NOTICE.txt.",
+  "safety": {
+    "real_backend_constructed": false,
+    "host_maintenance_applied": false,
+    "live_metrics_sampler_constructed": false,
+    "sandbox_writes_or_restart": false,
+    "fixture_navigation_skip_requests": 1,
+    "sandbox_workspace_mocked": true,
+    "worker_layout": {
+      "all_visible": true,
+      "outside_scroll": true,
+      "essentials": true,
+      "labels": true,
+      "navigation_hitboxes": true,
+      "no_internal_overlap": true,
+      "equal_cards": true,
+      "no_overlap": true,
+      "two_by_two": true,
+      "footer_clear": true,
+      "cards": [
+        {
+          "x": 7,
+          "y": 155,
+          "width": 530,
+          "height": 165
+        },
+        {
+          "x": 544,
+          "y": 155,
+          "width": 529,
+          "height": 165
+        },
+        {
+          "x": 7,
+          "y": 327,
+          "width": 530,
+          "height": 164
+        },
+        {
+          "x": 544,
+          "y": 327,
+          "width": 529,
+          "height": 164
+        }
+      ]
+    }
+  },
+  "assets": [
+    {
+      "file": "optimus-completed.png",
+      "bytes": 89377,
+      "sha256": "b1e304220082356f0eddad94c34bba29ff511a81db28ce8d406f3080ccf567ef",
+      "width": 1120,
+      "height": 900,
+      "codec": "PNG"
+    },
+    {
+      "file": "optimus-demo.gif",
+      "bytes": 845398,
+      "sha256": "a3758ccfa8941a9f289d1dd09a730a78718a65036470f3c8e91ca73ac7ecd0d9",
+      "width": 1120,
+      "height": 900,
+      "codec": "GIF89a",
+      "pixel_format": "pal8",
+      "fps": 8,
+      "duration_seconds": 10.01,
+      "frames": 80,
+      "audio": false
+    },
+    {
+      "file": "optimus-main.png",
+      "bytes": 138881,
+      "sha256": "cfb5a10105945eb8e7b2a983ce85ba2354b17f6d653c4c2b9cff33af3d9615a3",
+      "width": 1120,
+      "height": 900,
+      "codec": "PNG"
+    },
+    {
+      "file": "optimus-sandbox.png",
+      "bytes": 159260,
+      "sha256": "926f8dc0f488019308374c5b6751db798aeca88c181c35b5ae026c391035326b",
+      "width": 1120,
+      "height": 900,
+      "codec": "PNG"
+    },
+    {
+      "file": "optimus-walkthrough.mp4",
+      "bytes": 541569,
+      "sha256": "936709e9639a700e8695a076a0e62a222d714d7e8220aa471c8c8882584a7545",
+      "width": 1120,
+      "height": 900,
+      "codec": "H.264 / AVC",
+      "pixel_format": "yuv420p",
+      "fps": 12,
+      "duration_seconds": 20,
+      "frames": 240,
+      "audio": false
+    },
+    {
+      "file": "optimus-workers.png",
+      "bytes": 95710,
+      "sha256": "c43bfab8c8917b88b80cb50e67ef4599b2ea293fdfbb9fb2ef01ae1f993dfcbd",
+      "width": 1120,
+      "height": 900,
+      "codec": "PNG"
+    }
+  ],
+  "encoder": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+  "validation": "All PNGs decoded through Qt; both animations fully decoded through FFmpeg with actual codec/duration/frame checks. Screenshots and the five-chapter encoded contact sheet were visually inspected.",
+  "decoder_verification": {
+    "optimus-walkthrough.mp4": {
+      "decoded_frames": 240,
+      "duration_seconds": 20.0,
+      "codec": "h264",
+      "audio_stream": false
+    },
+    "optimus-demo.gif": {
+      "decoded_frames": 80,
+      "duration_seconds": 10.01,
+      "codec": "gif",
+      "audio_stream": false
+    }
+  }
+}
