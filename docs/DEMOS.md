@@ -1,6 +1,6 @@
 # Optimus demo gallery
 
-See the main controls, live worker layout, completion review and editable Sandbox in Optimus 0.12.7.
+See the main controls, live worker layout, bottom resource/disk panel, full-screen controls, completion review and editable Sandbox in Optimus 0.12.8.
 
 **These are sample-data previews.** They render the real Qt interface against an inert fixture backend. Every frame is labelled **SAMPLE DATA DEMO**. Progress, file counts, download sizes, update offers and outcomes are simulated; they do not describe the capture computer or establish a performance gain, successful live update, driver installation or recovery.
 
@@ -8,7 +8,7 @@ The capture does not run cleanup, launch installers, scan with Defender, connect
 
 ## Animated overview
 
-![Sample-data tour of the Optimus main menu, four worker cards, completion evidence and Sandbox](media/optimus-demo.gif)
+![Sample-data tour of the Optimus main menu, four workers, bottom resource panel, completion evidence and Sandbox](media/optimus-demo.gif)
 
 The GIF gives a quick overview. For the video walkthrough, open the linked poster below; GitHub README pages do not need an embedded HTML video player.
 
@@ -24,9 +24,11 @@ Optimize runs saved modules. Settings holds the individual scopes, optional tool
 
 ## Four worker cards
 
-![Optimus sample running view with four core worker cards above a separate details and log area](media/optimus-workers.png)
+![Optimus sample running view with four worker cards and the bottom animation, utilization and drive-buffer panel](media/optimus-workers.png)
 
 Maintenance, App updates, Driver updates and Virus scan have their own state and navigation. Overall queue progress is separate from the current item. Supported providers supply progress; opaque operations remain indeterminate. Next/Cancel requests use the operation's supported boundary, and an active installer keeps its actual outcome. [Worker layout and skip behavior](worker-layout-and-skip.md)
+
+The bottom panel keeps the gag animation, CPU/RAM/network observations and drive free-space targets visible outside the Details toggle. Details reveals Current processes and Stage log. Smaller windows scroll vertically; primary actions stay accessible. The Full screen button or F11 expands the main, progress or Sandbox window, and Esc returns to its previous size.
 
 ## Completion and verification
 

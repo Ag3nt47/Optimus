@@ -1,6 +1,8 @@
 # Worker dashboard and navigation
 
-The maintenance, application-update, driver-update and virus/malware-scan cards stay in the main dashboard. The window adapts their layout and uses a compact presentation when needed; secondary descriptions, histories, logs and optional workers live in a separate details area. Tooltips and accessible descriptions retain the complete explanations. The minimum usable window size follows the active font, so an impossibly small resize is clamped rather than clipping controls.
+The maintenance, application-update, driver-update and virus/malware-scan cards stay in the main dashboard with separate overall and current-item progress. The header retains overall workflow progress and the deleted/downloaded comparison. A responsive bottom rectangle contains the gag animation, live computer/network resource usage and disk-buffer targets, observed free space and shortfalls. These stay outside the Details toggle.
+
+Only Current processes and Stage log collapse behind **Show/Hide details and logs**. The main body scrolls vertically when needed instead of forcing controls outside the screen. Primary actions remain reachable; full-screen buttons and F11 expand the window, and Escape returns from full screen without cancelling the current worker. Tooltips and accessible descriptions retain complete explanations when labels are shortened.
 
 After completion, verification evidence and the exact available-fix scope stay in a bounded review area above the action buttons. Their read-only panes can scroll independently. Collapsing the logs does not hide these results or add another confirmation to the existing manual Apply action.
 
