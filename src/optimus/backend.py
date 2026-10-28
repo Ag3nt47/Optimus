@@ -32,7 +32,7 @@ class Backend(ExtendedMaintenanceBackend):
         from .cloud_drive import CloudDrive
         self.cloud = CloudDrive(self.data_dir)
         from .maintenance import Maintenance
-        self.maintenance = Maintenance(self.bridge, self.data_dir)
+        self.maintenance = Maintenance(self.bridge, self.data_dir, restart_reader=self.security_status)
         self.last_audit = None
         from .process_harness import ProcessHarness
         self.process_harness = ProcessHarness(self)
@@ -245,8 +245,8 @@ class Backend(ExtendedMaintenanceBackend):
     def system_privacy_history(self):
         return self._privacy_service().history()
 
-    def scan_spyware(self, cancel_event=None):
-        return self._privacy_service().scan_spyware(cancel_event=cancel_event)
+    def scan_spyware(self, cancel_event=None, *, progress_callback=None):
+        return self._privacy_service().scan_spyware(cancel_event=cancel_event, progress_callback=progress_callback)
 
     def security_status(self):
         return self._privacy_service().security_status()
@@ -274,12 +274,13 @@ class Backend(ExtendedMaintenanceBackend):
         self._last_legacy_patch_review = report
         return report
 
-    def apply_security_recommendation(self, recommendation_id, cancel_event=None):
+    def apply_security_recommendation(self, recommendation_id, cancel_event=None, *, remediation_consent=None):
         if recommendation_id == 'review_legacy_patches':
             if cancel_event is not None and cancel_event.is_set():
                 return {'cancelled': True, 'review_only': True}
             return getattr(self, '_last_legacy_patch_review', None) or self.legacy_patch_review()
-        return self._privacy_service().apply_recommendation(recommendation_id, cancel_event=cancel_event)
+        options = {'remediation_consent': remediation_consent} if remediation_consent is not None else {}
+        return self._privacy_service().apply_recommendation(recommendation_id, cancel_event=cancel_event, **options)
 
     def browser_cleanup_status(self, browser_id):
         return self.browser_sessions.browser_status(browser_id)

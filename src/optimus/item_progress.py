@@ -30,6 +30,8 @@ def normalize_item_progress(value):
     normalized = {'key': key, 'label': ' '.join(label.split())[:512], 'phase': phase, 'percent': percent}
     if value.get('estimated') is True:
         normalized['estimated'] = True
+    if phase == 'scan' and value.get('progress_source') in ('defender_mpclient', 'defender_cim_progress'):
+        normalized['progress_source'] = value['progress_source']
     # Download counters describe observed package bytes, never installed disk
     # footprint. Keep them phase-bound and bounded across the native bridge.
     if phase in ('download', 'downloading'):

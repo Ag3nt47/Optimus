@@ -188,11 +188,51 @@ function No-OtherProvider($class) {
  $p=Providers $class
  return $p.complete -eq $true -and @($p.items|Where-Object{$_ -notmatch '^((Microsoft Defender|Windows Defender|Windows Security)( Antivirus| Firewall)?|Windows Firewall)$'}).Count -eq 0
 }
+function Defender-ScopeDigest($Value) {
+ $sha=[Security.Cryptography.SHA256]::Create()
+ try{
+  $bytes=[Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Value -Depth 8 -Compress))
+  return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()
+ }finally{$sha.Dispose()}
+}
 function Threats {
  $active=@(Get-MpThreat -ErrorAction Stop|Where-Object{$_.IsActive -eq $true})
- $items=@($active|Select-Object -First 200|ForEach-Object{
-  @{id=[int64]$_.ThreatID;name=[string]$_.ThreatName;active=$true}})
- return @{complete=$true;items=$items;active_count=$active.Count;truncated=($active.Count -gt 200)}
+ $scopeComplete=($active.Count -le 200);$resourceTotal=0;$resourceCharacters=0
+ $items=@(foreach($threat in @($active|Sort-Object ThreatID|Select-Object -First 200)){
+  $name=[string]$threat.ThreatName;$resources=@($threat.Resources)
+  $resourceTotal+=$resources.Count
+  if($resources.Count -lt 1 -or $resourceTotal -gt 2000){$scopeComplete=$false;$resources=@()}
+  foreach($resource in $resources){
+   if($resource -isnot [string] -or $resource.Length -lt 1 -or $resource.Length -gt 8192){$scopeComplete=$false}
+   if($resource -is [string]){$resourceCharacters+=$resource.Length}
+  }
+  if($resourceCharacters -gt 4194304){$scopeComplete=$false;$resources=@()}
+  [string[]]$resourceNames=@($resources|Where-Object{$_ -is [string] -and $_.Length -le 8192})
+  [Array]::Sort($resourceNames,[StringComparer]::Ordinal)
+  @{id=[int64]$threat.ThreatID;name=$name.Substring(0,[Math]::Min(256,$name.Length));active=$true;
+    resource_count=$resources.Count;resource_fingerprint=(Defender-ScopeDigest $resourceNames)}
+ })
+ $detections=@();$detectionsComplete=$false
+ $scopeHistory=@()
+ try{
+  $history=@(Get-MpThreatDetection -ErrorAction Stop|Select-Object -First 201)
+  $detections=@($history|Select-Object -First 200|ForEach-Object{
+   @{threat_id=[int64]$_.ThreatID;status_id=[int]$_.ThreatStatusID;action_success=[bool]$_.ActionSuccess}})
+  $detectionsComplete=($history.Count -le 200)
+  $ids=@($items|ForEach-Object{$_.id})
+  $scopeHistory=@($history|Where-Object{$ids -contains [int64]$_.ThreatID}|Sort-Object ThreatID,DetectionID|ForEach-Object{
+   if($_.DetectionID -isnot [string] -or $_.DetectionID.Length -gt 128){$scopeComplete=$false}
+   $detectionID=if($_.DetectionID -is [string]){$_.DetectionID.Substring(0,[Math]::Min(128,$_.DetectionID.Length))}else{''}
+   [ordered]@{threat_id=[int64]$_.ThreatID;detection_id=$detectionID;
+    initial=if($_.InitialDetectionTime){([datetime]$_.InitialDetectionTime).ToUniversalTime().ToString('o')}else{''};
+    changed=if($_.LastThreatStatusChangeTime){([datetime]$_.LastThreatStatusChangeTime).ToUniversalTime().ToString('o')}else{''};
+    status=[int]$_.ThreatStatusID;action_success=[bool]$_.ActionSuccess}
+  })
+ }catch{$scopeComplete=$false;$detectionsComplete=$false}
+ $scopeComplete=($scopeComplete -and $detectionsComplete)
+ $scope=[ordered]@{version=1;resources=@($items|ForEach-Object{[ordered]@{id=$_.id;count=$_.resource_count;sha256=$_.resource_fingerprint}});detections=$scopeHistory}
+ return @{complete=$true;items=$items;active_count=$active.Count;truncated=($active.Count -gt 200);detections=$detections;detections_complete=$detectionsComplete;
+  active_fingerprint=(Defender-ScopeDigest $scope);active_fingerprint_complete=$scopeComplete}
 }
 function Security-Status {
  $d=Defender;$av=Providers 'AntiVirusProduct';$fwProviders=Providers 'FirewallProduct'
@@ -228,10 +268,41 @@ try {
   if(-not(Is-Admin)){throw [UnauthorizedAccessException]::new('Administrator access is required.')}
   if(-not(Active-Defender)){throw 'Defender is not the active antivirus provider.'}
   $started=[datetime]::UtcNow
-  Start-MpScan -ScanType QuickScan -ErrorAction Stop|Out-Null
+  # Only the exact job returned by this request is observed. Job.Progress may
+  # be empty: the provider's -1/unknown never becomes a time-derived percent.
+  # https://learn.microsoft.com/powershell/module/defender/start-mpscan
+  # https://learn.microsoft.com/dotnet/api/system.management.automation.job.progress?view=powershellsdk-7.6.0
+  # https://learn.microsoft.com/dotnet/api/system.management.automation.progressrecord.percentcomplete?view=powershellsdk-7.6.0
+  $scanJob=Start-MpScan -ScanType QuickScan -AsJob -ErrorAction Stop
+  if($null -eq $scanJob -or $scanJob.InstanceId -isnot [guid] -or $scanJob.InstanceId -eq [guid]::Empty){throw 'Defender returned no owned scan job.'}
+  $scanJobID=$scanJob.InstanceId.ToString().ToLowerInvariant()
+  $lastPublished=-2;$lastNumeric=-1;$numericDisabled=$false
+  do{
+   $candidate=-1
+   $sources=@($scanJob)+@($scanJob.ChildJobs|Select-Object -First 8)
+   foreach($source in $sources){
+    if($null -ne $source.Progress -and $source.Progress.Count -gt 0){
+     $record=$source.Progress[$source.Progress.Count-1]
+     if($record -is [Management.Automation.ProgressRecord] -and $record.PercentComplete -ge 0 -and $record.PercentComplete -lt 100){
+      $candidate=[Math]::Max($candidate,[int]$record.PercentComplete)
+     }
+    }
+   }
+   if($candidate -ge 0 -and $candidate -lt $lastNumeric){$numericDisabled=$true}
+   if($numericDisabled){$candidate=-1}
+   if($candidate -ge 0){$lastNumeric=$candidate}
+   if($candidate -ne $lastPublished){
+    [Console]::Out.WriteLine((@{kind='defender_scan_progress';scan_job_id=$scanJobID;
+      percent=if($candidate -ge 0){$candidate}else{$null}}|ConvertTo-Json -Compress))
+    [Console]::Out.Flush();$lastPublished=$candidate
+   }
+   if([string]$scanJob.State -in @('Running','NotStarted','Blocked')){Start-Sleep -Milliseconds 200}
+  }while([string]$scanJob.State -in @('Running','NotStarted','Blocked'))
+  if([string]$scanJob.State -ne 'Completed'){throw 'Defender scan request did not complete successfully.'}
+  Receive-Job -Job $scanJob -ErrorAction Stop|Out-Null
   $d=Defender;$end=[datetime]::MinValue
   if($d.quick_scan_end){$end=[datetime]::Parse($d.quick_scan_end).ToUniversalTime()}
-  @{ok=$true;completion_verified=($end -ge $started);defender=$d;threats=(Threats)};break
+  @{ok=$true;scan_job_id=$scanJobID;completion_verified=($end -ge $started);defender=$d;threats=(Threats)};break
  }
  'enable_defender_realtime' {
   if(-not(Is-Admin)){throw [UnauthorizedAccessException]::new('Administrator access is required.')}
@@ -258,6 +329,16 @@ try {
   if(-not(Is-Admin)){throw [UnauthorizedAccessException]::new('Administrator access is required.')}
   if(-not(Active-Defender)){throw 'Defender is not the active antivirus provider.'}
   $before=Threats
+  $consent=$P.remediation_consent
+  if($null -eq $consent -or $consent.confirmed -isnot [bool] -or $consent.confirmed -ne $true -or
+     $consent.scope -cne 'all_current_active_defender_threats' -or $before.truncated -or $before.active_count -lt 1){throw 'A fresh explicit all-active Defender threat confirmation is required.'}
+  $approved=@($consent.threat_ids)
+  if($approved.Count -lt 1 -or $approved.Count -gt 200 -or @($approved|Where-Object{($_ -isnot [int] -and $_ -isnot [long]) -or $_ -lt 0}).Count){throw 'Invalid approved Defender threat identities.'}
+  $approved=@($approved|Sort-Object -Unique)
+  $current=@($before.items|ForEach-Object{[int64]$_.id}|Sort-Object -Unique)
+  if($approved.Count -ne $before.active_count -or [string]::Join(',',$approved) -cne [string]::Join(',',$current)){throw 'Active Defender detections changed after confirmation. Review them again.'}
+  if($before.active_fingerprint_complete -ne $true -or $consent.resource_fingerprint -isnot [string] -or
+     $consent.resource_fingerprint -cnotmatch '^[0-9a-f]{64}$' -or $consent.resource_fingerprint -cne $before.active_fingerprint){throw 'Defender threat resources or detection instances changed after confirmation. Review them again.'}
   if($before.active_count -gt 0){Remove-MpThreat -ErrorAction Stop|Out-Null}
   @{ok=$true;before_count=$before.active_count;threats=(Threats)};break
  }
@@ -268,7 +349,12 @@ try {
  }
  $result|ConvertTo-Json -Depth 12 -Compress
 } catch {
- @{ok=$false;error_type=$_.Exception.GetType().Name;permission_denied=($_.Exception -is [UnauthorizedAccessException]);error='Windows refused or could not complete the requested operation.'}|ConvertTo-Json -Compress
+ $errorResult=@{ok=$false;error_type=$_.Exception.GetType().Name;permission_denied=($_.Exception -is [UnauthorizedAccessException]);error='Windows refused or could not complete the requested operation.'}
+ if('__OPERATION__' -eq 'quick_scan'){
+  $errorResult.may_continue=$true
+  if($scanJobID){$errorResult.scan_job_id=$scanJobID}
+ }
+ $errorResult|ConvertTo-Json -Compress
  exit 1
 }
 '''
@@ -285,15 +371,18 @@ def _script(operation, payload):
     return _POWERSHELL.replace('__OPERATION__', operation).replace('__PAYLOAD__', encode(payload or {})).replace('__CONTROLS__', encode(_CONTROLS))
 
 
-def _native_request(operation, payload=None, *, timeout=45, cancel_event=None):
+def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None):
     if _cancelled(cancel_event):
         return {'ok': False, 'cancelled': True, 'may_continue': False}
     if os.name != 'nt':
         return {'ok': False, 'unsupported': True, 'error': 'Windows is required.'}
     executable = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     process = subprocess.Popen([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', _script(operation, payload)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if operation == 'quick_scan' else subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    if operation == 'quick_scan':
+        from .defender_scan import read_scan_process
+        return read_scan_process(process, timeout=timeout, cancel_event=cancel_event, progress_callback=progress_callback)
     deadline = time.monotonic() + timeout
     while True:
         cancelled, expired = _cancelled(cancel_event), time.monotonic() >= deadline
@@ -378,7 +467,17 @@ def _recommendations(status):
         add('review_security', 'Review firewall protection in Windows Security', 'Firewall protection could not be fully verified.')
     count = status.get('active_threat_count')
     if _active(status) and type(count) is int and count > 0:
-        add('remediate_defender_threats', 'Remediate Defender-detected active threats', str(count) + ' active threat(s) were identified by Defender. Use its standard remediation; Optimus will not delete arbitrary files or change threat-action preferences.', True)
+        add('remediate_defender_threats', 'Review removal of all current active Defender threats', str(count) + ' active threat(s) were identified by Defender. Confirmation asks Defender to remediate ALL displayed current active threats under existing Windows policy. Quarantined history is reviewed separately; Optimus will not delete arbitrary files or change threat-action preferences.', True)
+        snapshot = status.get('threats', {})
+        result[-1].update(threat_ids=list(snapshot.get('active_ids', [])),
+                         threat_ids_complete=snapshot.get('active_ids_complete') is True,
+                         threat_names=[item['name'] for item in snapshot.get('items', []) if item.get('active') is True],
+                         resource_fingerprint=snapshot.get('active_fingerprint'),
+                         resource_fingerprint_complete=snapshot.get('active_fingerprint_complete') is True,
+                         remediation_scope='all_current_active_defender_threats')
+    snapshot = status.get('threats', {})
+    if isinstance(snapshot, dict) and snapshot.get('detections'):
+        add('review_security', 'Review quarantined and historical Defender detections', 'Defender reports retained detection history, which can include quarantined, removed, allowed or unresolved items and may predate this scan. Open Windows Security to review it; Optimus does not purge quarantine or claim the system is clean.')
     if status.get('reboot_required') is True:
         add('restart_required', 'Review the pending Windows restart', 'Windows Update reports a pending restart. Open Windows Update and choose when to restart; Optimus will not reboot automatically.')
     unique = {}
@@ -394,10 +493,15 @@ class SystemPrivacy:
         self.runner = runner or _native_request
         self.lock = threading.RLock()
 
-    def _call(self, operation, payload=None, *, timeout=45, cancel_event=None):
+    def _call(self, operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None):
         if _cancelled(cancel_event):
             return {'ok': False, 'cancelled': True}
-        result = self.runner(operation, payload or {}, timeout=timeout, cancel_event=cancel_event)
+        options = {}
+        if progress_callback is not None:
+            from .item_progress import accepts_progress_callback
+            if accepts_progress_callback(self.runner):
+                options['progress_callback'] = progress_callback
+        result = self.runner(operation, payload or {}, timeout=timeout, cancel_event=cancel_event, **options)
         if not isinstance(result, dict):
             raise ValueError('The Windows operation returned invalid metadata.')
         return result
@@ -645,9 +749,10 @@ class SystemPrivacy:
                 raise ValueError('The local Windows security report is unavailable.')
             report = {key: copy.deepcopy(native.get(key)) for key in ('context', 'defender', 'antivirus_providers', 'firewall_providers', 'firewall', 'reboot_required')}
             threats = native.get('threats', {})
-            report['active_threat_count'] = threats.get('active_count') if isinstance(threats, dict) and threats.get('complete') is True and type(threats.get('active_count')) is int else None
-            report['threat_status_complete'] = (isinstance(threats, dict) and threats.get('complete') is True
-                                                and type(threats.get('active_count')) is int and threats['active_count'] >= 0)
+            from .defender_scan import threat_snapshot
+            report['threats'] = threat_snapshot(threats)
+            report['active_threat_count'] = report['threats']['active_count']
+            report['threat_status_complete'] = report['threats']['complete']
             report['errors'] = []
             for key in ('defender', 'antivirus_providers', 'firewall_providers', 'firewall'):
                 value = report.get(key)
@@ -678,18 +783,28 @@ class SystemPrivacy:
         report['note'] = 'Local security checks do not prove that no spyware or data sharing exists. Windows privacy permissions and app/account choices are separate. No protection was disabled.'
         return report
 
-    def scan_spyware(self, cancel_event=None):
+    def scan_spyware(self, cancel_event=None, *, progress_callback=None):
+        from .defender_scan import ScanProgress, threat_snapshot
+        progress = ScanProgress(progress_callback)
         report = {'id': uuid.uuid4().hex, 'kind': 'defender-scan', 'status': 'running', 'items': [], 'errors': [], 'failed_items': 0, 'cancelled': False, 'sources': SOURCES}
+        report.update(scan_type='Defender quick scan for viruses, malware and spyware', completion_verified=False,
+                      progress_capability={'numeric_available': False, 'source': 'defender_cim_progress',
+                          'reason': 'Numeric provider request progress is shown only if Defender emits it. It is not whole-system scan coverage; elapsed time is not a completion estimate.'})
+        progress.emit('preparing', percent=0)
         if _cancelled(cancel_event):
-            return dict(report, status='cancelled', cancelled=True)
+            progress.emit('cancelled')
+            return dict(report, status='cancelled', cancelled=True, elapsed_seconds=progress.elapsed())
         before = self.security_status()
         report['recommendations'] = before['recommendations']
         if not _active(before) or not isinstance(before.get('context'), dict) or before['context'].get('is_admin') is not True:
-            return dict(report, status='blocked', failed_items=1, reason='A verified active Microsoft Defender provider and administrator session are required. Other antivirus products are not replaced or disabled.')
+            progress.emit('blocked')
+            return dict(report, status='blocked', failed_items=1, elapsed_seconds=progress.elapsed(), reason='A verified active Microsoft Defender provider and administrator session are required. Other antivirus products are not replaced or disabled.')
         with self.lock:
             self._journal(report)
             try:
-                outcome = self._call('quick_scan', timeout=900, cancel_event=cancel_event)
+                progress.emit('waiting_for_defender')
+                outcome = self._call('quick_scan', timeout=900, cancel_event=cancel_event, progress_callback=progress.native)
+                report['progress_capability']['numeric_available'] = outcome.get('numeric_progress_observed') is True
                 report['cancelled'] = _cancelled(cancel_event) or outcome.get('cancelled') is True
                 report['scan_may_continue'] = outcome.get('may_continue') is True
                 if report['cancelled']:
@@ -698,22 +813,34 @@ class SystemPrivacy:
                     report.update(status='incomplete', failed_items=1, reason='Defender quick-scan completion was not verified. Check Windows Security; a scan may still be running.')
                 else:
                     threats = outcome.get('threats', {})
-                    report.update(status='completed', active_threat_count=threats.get('active_count') if isinstance(threats, dict) and threats.get('complete') is True else None,
-                                  note='Defender completed a quick scan of its standard scan areas using existing Windows remediation policy. This is not a full-system scan or a guarantee that every spyware program was found. No arbitrary file was deleted by Optimus.')
+                    report['threats'] = threat_snapshot(threats)
+                    report['completion_verified'] = True
+                    report.update(status='completed', active_threat_count=report['threats']['active_count'],
+                                  note='Defender completed a quick scan for viruses, malware and spyware in its standard scan areas using existing Windows remediation policy. Review current and quarantined detections in Windows Security. This is not a full-system scan or a clean-system guarantee. Optimus has not requested additional removal.')
                     after = self.security_status()
                     report['recommendations'] = after['recommendations']
             except Exception as error:
                 report.update(status='failed', failed_items=1, error_type=type(error).__name__, reason='Windows Defender could not complete or verify the scan. Review Windows Security.')
+            report['elapsed_seconds'] = progress.elapsed()
             report['log_path'] = str(self._journal(report))
+            progress.emit(report['status'], percent=100 if report['completion_verified'] else None,
+                          verified=report['completion_verified'])
             return report
 
-    def apply_recommendation(self, recommendation_id, cancel_event=None):
+    def apply_recommendation(self, recommendation_id, cancel_event=None, *, remediation_consent=None):
         if recommendation_id not in _ACTIONS:
             raise ValueError('Choose a supported security recommendation.')
         report = {'id': recommendation_id, 'status': 'running', 'failed_items': 0}
         if _cancelled(cancel_event):
             return dict(report, status='cancelled', cancelled=True)
         current = self.security_status()
+        payload = None
+        if recommendation_id == 'remediate_defender_threats':
+            from .defender_scan import validate_remediation_consent
+            consent = validate_remediation_consent(remediation_consent, current.get('threats', {}))
+            if consent is None:
+                return dict(report, status='blocked', failed_items=1, reason='Review all current active Defender detections and confirm their exact scope before remediation. No additional removal was requested.')
+            payload = {'remediation_consent': consent}
         permitted = {item['id'] for item in current['recommendations']}
         if recommendation_id not in permitted and recommendation_id != 'review_windows_update':
             return dict(report, status='blocked', failed_items=1, reason='The recommendation no longer matches current Windows security state; no change was requested.')
@@ -725,7 +852,7 @@ class SystemPrivacy:
         with self.lock:
             self._journal(journal)
             try:
-                outcome = self._call(recommendation_id, timeout=300, cancel_event=cancel_event)
+                outcome = self._call(recommendation_id, payload, timeout=300, cancel_event=cancel_event)
                 if outcome.get('cancelled') or _cancelled(cancel_event):
                     report.update(status='cancelled', cancelled=True, may_continue=outcome.get('may_continue') is True)
                 elif outcome.get('ok') is not True:

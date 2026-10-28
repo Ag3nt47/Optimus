@@ -23,9 +23,9 @@ SECURITY_FIXES = {
     'enable_defender_realtime': 'Enable Microsoft Defender real-time protection',
     'enable_firewall': 'Enable disabled Windows Firewall profiles',
     'update_defender_signatures': 'Update Microsoft Defender security intelligence',
-    'remediate_defender_threats': 'Remediate Defender-detected active threats',
 }
 MANUAL_SECURITY = {
+    'remediate_defender_threats': ('Review Defender detections and removal', 'Review all currently active Defender threats and confirm their exact displayed scope before asking Defender to remediate. Saved automatic continuation does not approve threat removal. Quarantined or historical detections can be reviewed in Windows Security.'),
     'review_security': ('Review protection in Windows Security', 'Review the active security provider and Windows security policy.'),
     'review_windows_update': ('Review Windows Update', 'Windows Update settings or saved update scope may require review.'),
     'restart_required': ('Choose when to restart Windows', 'A restart must be completed through Windows controls; Optimus does not reboot automatically.'),

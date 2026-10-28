@@ -67,6 +67,7 @@ class NativeFixture:
             self.state['defender']['signature_age_days'] = 0
         elif operation == 'remediate_defender_threats':
             self.state['threats']['active_count'] = 0
+            self.state['threats']['items'] = []
         elif operation in ('review_security', 'review_windows_update', 'restart_required'):
             return {'ok': True, 'opened': 'windowsdefender:' if operation == 'review_security' else 'ms-settings:windowsupdate'}
         else:
@@ -377,8 +378,13 @@ def test_explicit_security_action_rechecks_then_verifies_outcome(fixture, action
     if field == 'realtime':runner.state['defender']['realtime_enabled'] = False
     if field == 'firewall':runner.state['firewall']['profiles'][0]['enabled'] = False
     if field == 'signatures':runner.state['defender']['signature_age_days'] = 3
-    if field == 'threats':runner.state['threats']['active_count'] = 1
-    report = tool.apply_recommendation(action)
+    options = {}
+    if field == 'threats':
+        runner.state['threats'].update(active_count=1, items=[{'id': 42, 'name': 'Fixture detection', 'active': True}],
+                                      active_fingerprint='a' * 64, active_fingerprint_complete=True)
+        options['remediation_consent'] = {'confirmed': True, 'scope': 'all_current_active_defender_threats',
+                                          'threat_ids': [42], 'resource_fingerprint': 'a' * 64}
+    report = tool.apply_recommendation(action, **options)
     assert report['status'] == 'completed' and report['failed_items'] == 0
     assert [entry[0] for entry in mutation_calls(runner)] == [action]
     assert [entry[0] for entry in runner.calls].count('security_status') == 2

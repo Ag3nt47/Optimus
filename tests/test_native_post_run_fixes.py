@@ -104,6 +104,17 @@ def test_preview_is_pure_canonical_and_excludes_optional_process_actions(tmp_pat
         getattr(service, name).assert_not_called()
 
 
+def test_saved_automatic_continuation_never_approves_defender_threat_removal(tmp_path):
+    settings = configuration(auto_continue_fixes_enabled=True)
+    source = parent(settings, security=['remediate_defender_threats'])
+    service = backend(tmp_path, settings, source)
+    preview = service.available_fixes(source, settings)
+    assert preview['actions'] == []
+    assert [item['id'] for item in preview['manual_items']] == ['remediate_defender_threats']
+    service.apply_available_fixes(source, settings)
+    service.apply_security_recommendation.assert_not_called()
+
+
 @pytest.mark.parametrize('flags', [
     {'navigation_cancelled': True}, {'navigation_cancelled_items': 1},
     {'items': [{'result': {'navigation_cancelled': True}}]},
@@ -258,11 +269,11 @@ def test_security_batch_is_one_shot_durable_linked_and_preserves_parent(tmp_path
     events = []
     result = service.apply_available_fixes(source, settings, progress_callback=events.append)
     assert result['status'] == 'completed'
-    assert result['counts']['completed'] == 4
+    assert result['counts']['completed'] == len(SECURITY_FIXES)
     assert result['parent_run_id'] == source['id'] and source == before
     assert service.workflow.last_report is source and not service.workflow.active
     assert result['process_review'] == source['process_review']
-    assert result['final_verification']['counts']['confirmed'] == 4
+    assert result['final_verification']['counts']['confirmed'] == len(SECURITY_FIXES)
     assert result['stages'][-1]['title'] == FINAL_VERIFICATION_STAGE
     assert events[-1]['percentage'] == 100
     assert events[-1]['processes'] == []
@@ -270,7 +281,7 @@ def test_security_batch_is_one_shot_durable_linked_and_preserves_parent(tmp_path
     assert json.loads(Path(result['log_path']).read_text())['summary'] == result['summary']
     with pytest.raises(ValueError, match='already attempted'):
         service.apply_available_fixes(source, settings)
-    assert service.apply_security_recommendation.call_count == 4
+    assert service.apply_security_recommendation.call_count == len(SECURITY_FIXES)
     for name in ('process_harness_apply', 'startup_set', 'uninstall', 'cleanup_apply'):
         getattr(service, name).assert_not_called()
 
