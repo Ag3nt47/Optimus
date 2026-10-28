@@ -20,6 +20,7 @@ _DESCRIPTIONS = {
     'adjust settings': 'Review your choices while automatic maintenance stays paused.',
     'select all': 'Select all available choices in this section; selection alone does not run them.',
     'clear selection': 'Clear the selected choices in this section.',
+    'clear all': 'Clear all available choices in this section.',
     'deselect all': 'Clear the selected choices in this section.',
     'select none': 'Clear the selected choices in this section.',
     'close results': 'Close these results without starting additional recommendations.',
@@ -34,6 +35,14 @@ _DESCRIPTIONS = {
     'back': 'Return to the previous page or item.',
     'next': 'Continue to the next page or item.',
     'finish': 'Save the reviewed setup choices and finish setup.',
+    'discard': 'Discard unsaved changes described in this question.',
+    'ok': 'Accept the choices shown in this dialog.',
+    'follow global / leave installed state': 'Remove this app’s custom rule and follow global update choices without changing its installed state.',
+    'copy code': 'Copy the displayed sign-in code to the clipboard.',
+    'pause for this session': 'Pause automatic monitoring until the next Optimus session.',
+    'resume paused apps': 'Resume apps previously paused through Optimus.',
+    'show details and logs': 'Expand worker explanations, measurements and the stage log.',
+    'hide details and logs': 'Collapse the extra details while keeping the four workers visible.',
 }
 _NAVIGATION = {
     'next': 'Request a safe skip of the current item and continue to the next. An active installer may need to finish.',
@@ -63,9 +72,23 @@ def button_description(button):
         return 'Inspect the selected scope and show its findings.'
     if folded.startswith('preview'):
         return 'Show the proposed scope and actions before applying them.'
+    if folded.startswith(('refresh ', 'load ', 'check ', 'analyze ', 'find ')):
+        return 'Read the current information for this view; this button does not apply maintenance changes.'
+    if folded.startswith(('add ', 'choose ', 'browse')):
+        return 'Choose an item to add to this panel’s scope or saved configuration.'
+    if folded.startswith(('select all ', 'clear all ')):
+        return 'Select all choices in this group.' if folded.startswith('select') else 'Clear all choices in this group.'
+    if folded.startswith(('yes ', 'continue current version')):
+        return 'Start the offered Optimus update before continuing.' if folded.startswith('yes ') else 'Continue with the installed Optimus version.'
+    if folded.startswith('no '):
+        return 'Decline the offered action and continue with the current version.'
     if folded.startswith(('cancel ', 'stop ')):
         return 'Request a safe stop. Active native work may need to return before stopping.'
-    if folded.startswith(('save ', 'apply ')):
+    if folded.startswith('save '):
+        return 'Save the choices shown in this panel for future use.'
+    if folded.startswith('configure '):
+        return 'Open configuration choices for this feature.'
+    if folded.startswith(('apply ', 'set ')):
         return 'Apply the choices shown in this panel using its saved scope and checks.'
     if folded.startswith(('delete ', 'remove ', 'uninstall ', 'wipe ')):
         return 'Run this removal action on the selected scope; review its description and recovery limits.'
@@ -75,6 +98,12 @@ def button_description(button):
         return 'Save the selected export or download to the chosen destination.'
     if folded.startswith(('restore ', 'revert ', 'undo ')):
         return 'Review or restore the selected saved change where recovery is supported.'
+    if folded.startswith(('clean ', 'clear ', 'trash ', 'recycle ')):
+        return 'Clean or recycle the selected data using this panel’s scope and safety checks.'
+    if folded.startswith('install '):
+        return 'Install the selected package using its supported provider and saved approvals.'
+    if folded.startswith('run setup'):
+        return 'Open the step-by-step setup questions to review and change your saved choices.'
     accessible = escape(' '.join(button.accessibleName().split())[:160], quote=False)
     return 'Activate: ' + (safe_name or accessible) + '.' if safe_name or accessible else 'Activate this control.'
 
