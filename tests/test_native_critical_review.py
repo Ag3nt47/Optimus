@@ -205,6 +205,7 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'speed.cancel-completes', 'speed.deferred-honesty', 'workflow.single-initial-worker',
             'workflow.explicit-auto-continue', 'workflow.unverified-honesty',
             'workflow.single-follow-up-worker', 'workflow.follow-up-deferred',
+            'workflow.visible-completion-scope', 'workflow.scope-outside-details',
             'workflow.stale-request', 'workflow.manual-continue',
             'updates-waiting.explicit-state', 'updates-waiting.current-worker',
             'updates-waiting.progress-honesty', 'updates-waiting.cancel-available',
@@ -239,17 +240,27 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'app-rules.exact-choices', 'app-rules.master-off-draft', 'app-rules.presence-warning',
             'revert.explicit-selection', 'revert.supported-only', 'revert.no-constructor-actions',
             'dashboard.standard.viewport', 'dashboard.font25.viewport',
-            'dashboard.standard.all-visible', 'dashboard.standard.outside-scroll',
+            'dashboard.standard.all-visible', 'dashboard.standard.body-scroll',
             'dashboard.standard.essentials', 'dashboard.standard.labels',
             'dashboard.standard.navigation-hitboxes', 'dashboard.standard.equal-cards',
             'dashboard.standard.no-overlap', 'dashboard.standard.no-internal-overlap',
             'dashboard.standard.two-by-two', 'dashboard.standard.footer-clear',
-            'dashboard.font25.all-visible', 'dashboard.font25.outside-scroll',
+            'dashboard.font25.all-reachable', 'dashboard.font25.body-scroll',
             'dashboard.font25.essentials', 'dashboard.font25.labels',
             'dashboard.font25.navigation-hitboxes', 'dashboard.font25.equal-cards',
             'dashboard.font25.no-overlap', 'dashboard.font25.no-internal-overlap',
             'dashboard.font25.two-by-two', 'dashboard.font25.footer-clear',
             'dashboard.fixture-only', 'sandbox.editor-layout', 'sandbox.fixture-only',
+            'analysis.initial-unknown', 'analysis.measured-buffer', 'analysis.passive-metrics',
+            'analysis.foreground-description-retained',
+            'analysis.multi-volume-complete',
+            'analysis.standard.reachable', 'analysis.standard.no-scroll-fit',
+            'analysis.font25.reachable', 'analysis.small.reachable',
+            'analysis.details-only-logs', 'analysis.details-close-preserves-info',
+            'analysis.gag-decode', 'analysis.gag-lifecycle',
+            'analysis.incomplete-not-healthy', 'analysis.disabled-not-healthy',
+            *(f'{window}.fullscreen.{check}' for window in ('main', 'progress', 'sandbox')
+              for check in ('controls', 'keyboard-restore', 'no-cancel')),
             *(f'main.hover-description-{index}' for index in range(4)),
             *(f'sandbox.hover-description-{index}' for index in range(6))):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed', prefix + '.' + suffix
@@ -320,6 +331,116 @@ def test_dashboard_measurement_detects_clipping_unequal_cards_and_overlay(review
         progress.close()
         progress.deleteLater()
         reviewer.dispose(owner)
+
+
+@pytest.mark.parametrize('defect', ('hidden-parent', 'clipped-parent', 'covered'))
+def test_required_action_checks_real_ancestor_clipping_and_hit_target(reviewer, app, defect):
+    window = QWidget()
+    window.resize(320, 220)
+    parent = QWidget(window)
+    parent.setGeometry(0, 0, 300, 180)
+    button = QPushButton('Required action', parent)
+    button.setGeometry(20, 30, 200, 40)
+    show(window, app)
+    try:
+        assert bot.measure_button(button, window, (320, 220), app)['status'] == 'passed'
+        if defect == 'hidden-parent':
+            parent.hide()
+        elif defect == 'clipped-parent':
+            parent.resize(100, 60)
+        else:
+            overlay = QWidget(window)
+            overlay.setGeometry(bot.window_rect(button, window))
+            overlay.show()
+            overlay.raise_()
+        assert bot.measure_button(button, window, (320, 220), app)['status'] == 'failed'
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('defect,failed_check', (
+    ('hidden-panel', 'standard.reachable'), ('missing-warning', 'measured-buffer'),
+    ('invalid-gag', 'gag-decode'), ('extra-details', 'details-only-logs'),
+    ('missing-volume', 'multi-volume-complete'), ('clipped-buffer', 'multi-volume-complete')))
+def test_analysis_review_detects_hidden_information_false_buffer_and_invalid_gag(reviewer, app, monkeypatch,
+                                                                               defect, failed_check):
+    import threading
+    from PySide6.QtWidgets import QPlainTextEdit
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    owner = bot.OptimusWindow(backend, smoke_test=True)
+    progress = bot.OptimizationProgressWindow(owner, threading.Event())
+    try:
+        original = progress._update_space_guard
+        def broken(payload):
+            original(payload)
+            if defect == 'hidden-panel':
+                progress.analysis_panel.hide()
+            elif defect == 'missing-warning':
+                progress.space_guard_icon.hide()
+            elif len((payload or {}).get('volumes', [])) >= 3:
+                if defect == 'missing-volume':
+                    progress.space_guard_status.setText('\n'.join(progress.space_guard_status.text().splitlines()[:-1]))
+                elif defect == 'clipped-buffer':
+                    progress.space_guard_status.setFixedHeight(progress.space_guard_status.fontMetrics().lineSpacing() * 2)
+        monkeypatch.setattr(progress, '_update_space_guard', broken)
+        if defect == 'invalid-gag':
+            progress.loading_animation.set_asset(reviewer.output / 'missing-fixture.gif')
+        elif defect == 'extra-details':
+            progress.content_scroll.widget().layout().addWidget(QPlainTextEdit('Unexpected hidden action scope'))
+        reviewer.review_analysis_panel(progress, (850, 650), 'analysis-defect')
+        by_id = {row['id']: row for row in reviewer.report['checks']}
+        assert by_id['analysis-defect.analysis.' + failed_check]['status'] == 'failed'
+        backend.optimize.assert_not_called()
+        backend.apply_available_fixes.assert_not_called()
+    finally:
+        progress.completed = True
+        progress.close()
+        progress.deleteLater()
+        reviewer.dispose(owner)
+
+
+def test_fullscreen_review_detects_escape_that_cancels_a_worker(reviewer, app, monkeypatch):
+    import threading
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    owner = bot.OptimusWindow(backend, smoke_test=True)
+    progress = bot.OptimizationProgressWindow(owner, threading.Event())
+    try:
+        reviewer.viewport(progress, (850, 650), 'fullscreen-defect')
+        original = progress.fullscreen.exit_full_screen
+        def unsafe_exit():
+            result = original()
+            if result:
+                progress.cancel.set()
+            return result
+        monkeypatch.setattr(progress.fullscreen, 'exit_full_screen', unsafe_exit)
+        reviewer.review_fullscreen(progress, (850, 650), 'fullscreen-defect')
+        by_id = {row['id']: row for row in reviewer.report['checks']}
+        assert by_id['fullscreen-defect.fullscreen.no-cancel']['status'] == 'failed'
+        backend.optimize.assert_not_called()
+    finally:
+        progress.completed = True
+        progress.close()
+        progress.deleteLater()
+        reviewer.dispose(owner)
+
+
+def test_completion_review_detects_action_scope_hidden_before_auto_continue(reviewer, monkeypatch):
+    original = bot.OptimizationProgressWindow.set_auto_continue_plan
+    def broken(progress, *args, **kwargs):
+        original(progress, *args, **kwargs)
+        progress.action_scope.hide()
+    monkeypatch.setattr(bot.OptimizationProgressWindow, 'set_auto_continue_plan', broken)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_workflow(window, backend, (850, 650), 'completion-defect')
+        by_id = {row['id']: row for row in reviewer.report['checks']}
+        assert by_id['completion-defect.workflow.visible-completion-scope']['status'] == 'failed'
+        assert by_id['completion-defect.workflow.explicit-auto-continue']['status'] == 'passed'
+    finally:
+        reviewer.dispose(window)
 
 
 def test_sandbox_review_uses_mock_workspace_and_detects_missing_description(reviewer, monkeypatch):
@@ -737,8 +858,8 @@ def test_maintenance_review_detects_a_long_description_that_is_not_fitted(review
     original = WorkflowSummaryLabel._fit_summary
     def broken(label):
         original(label)
-        if label.text().startswith('Privacy controls (3/9 checked).'):
-            label.visible_text = label.text()
+        if label.text().startswith('Privacy controls (3/9 checked).') or label.objectName() == 'BackgroundStatus':
+            label.visible_text = label.text() * 20
     monkeypatch.setattr(WorkflowSummaryLabel, '_fit_summary', broken)
     backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
     window = bot.OptimusWindow(backend, smoke_test=True)

@@ -23,7 +23,7 @@ if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt
-from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QRegion
+from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QKeyEvent, QMovie, QRegion
 from PySide6.QtWidgets import (QApplication, QAbstractButton, QMessageBox, QScrollArea,
     QCheckBox, QDialog, QPlainTextEdit, QPushButton, QStyle, QStyleOptionTab, QTabWidget, QToolButton, QWizard)
 
@@ -159,25 +159,46 @@ def window_rect(control, window):
     return control.rect().translated(control.mapTo(window, QPoint()))
 
 
-def measure_dashboard(progress):
-    """Measure the four live cards without revealing or scrolling any control."""
+def control_geometry(control, window, *, hit_test=False):
+    """Require the real painted control to fit every clipping ancestor."""
+    rectangle = window_rect(control, window)
+    visible = control.visibleRegion().boundingRect()
+    ancestor, clipped = control.parentWidget(), []
+    while ancestor is not None:
+        if not ancestor.rect().adjusted(-1, -1, 1, 1).contains(window_rect(control, ancestor)):
+            clipped.append(ancestor.objectName() or ancestor.metaObject().className())
+        if ancestor is window:
+            break
+        ancestor = ancestor.parentWidget()
+    hit = window.childAt(control.mapTo(window, control.rect().center()))
+    hit_ok = hit is control or hit is not None and control.isAncestorOf(hit)
+    passed = (control.isVisibleTo(window) and control.isVisible()
+        and control.width() > 0 and control.height() > 0 and not clipped
+        and visible.width() >= control.width() - 2 and visible.height() >= control.height() - 2
+        and window.rect().contains(rectangle) and (not hit_test or hit_ok))
+    return {'reachable': passed, 'geometry': _rect(rectangle), 'visible_region': _rect(visible),
+            'clipped_ancestors': clipped, 'hit': hit_ok}
+
+
+def measure_dashboard(progress, app=None):
+    """Measure fixed geometry and separately reveal each core control if needed."""
+    app = app or QApplication.instance()
     cards = [progress.worker_cards[identity] for identity in CORE_WORKERS]
-    rectangles = [window_rect(card, progress) for card in cards]
-    essentials, hits, labels, outside_scroll, internal_overlap = [], [], [], [], []
+    body = progress.body_scroll
+    initial_scroll = body.verticalScrollBar().value()
+    rectangles = [window_rect(card, body.widget()) for card in cards]
+    initially_visible = all(control_geometry(card, progress)['reachable'] for card in cards)
+    essentials, hits, labels, body_parents, internal_overlap = [], [], [], [], []
     for card in cards:
-        parent, scroll_parent = card.parentWidget(), False
-        while parent is not None and parent is not progress:
-            scroll_parent |= isinstance(parent, QScrollArea)
-            parent = parent.parentWidget()
-        outside_scroll.append(not scroll_parent)
+        body_parents.append(body.widget().isAncestorOf(card) and not progress.content_scroll.isAncestorOf(card))
         controls = [card.heading, card.status, card.progress, card.totals, card.activity_ring,
                     *card.navigation_buttons.values()]
-        essentials.append(all(control.isVisibleTo(progress) and control.width() > 0 and control.height() > 0
-            and card.contentsRect().contains(window_rect(control, card))
-            and progress.rect().contains(window_rect(control, progress))
-            and control.visibleRegion().boundingRect().width() >= control.width() - 2
-            and control.visibleRegion().boundingRect().height() >= control.height() - 2
-            for control in controls))
+        for control in controls:
+            reveal_control(control, progress, app)
+            result = control_geometry(control, progress, hit_test=isinstance(control, QAbstractButton))
+            essentials.append(result['reachable'] and card.contentsRect().contains(window_rect(control, card)))
+            if isinstance(control, QAbstractButton):
+                hits.append(result['reachable'] and result['hit'])
         field_rectangles = [window_rect(control, card) for control in controls]
         internal_overlap.append(any(rect.intersects(other) for index, rect in enumerate(field_rectangles)
                                     for other in field_rectangles[index + 1:]))
@@ -185,12 +206,11 @@ def measure_dashboard(progress):
             and all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
                     for line in label.visible_text.splitlines())
             for label in (card.heading, card.status, card.totals)))
-        for button in card.navigation_buttons.values():
-            hit = progress.childAt(button.mapTo(progress, button.rect().center()))
-            hits.append(hit is button or hit is not None and button.isAncestorOf(hit))
-    return {'all_visible': all(card.isVisibleTo(progress) and progress.rect().contains(rectangle)
-                              for card, rectangle in zip(cards, rectangles)),
-        'outside_scroll': all(outside_scroll), 'essentials': all(essentials), 'labels': all(labels),
+    body.verticalScrollBar().setValue(initial_scroll)
+    app.processEvents()
+    return {'all_visible': initially_visible, 'body_scroll': all(body_parents),
+        'all_reachable': all(essentials) and all(hits),
+        'essentials': all(essentials), 'labels': all(labels),
         'navigation_hitboxes': all(hits),
         'no_internal_overlap': not any(internal_overlap),
         'equal_cards': max(rect.width() for rect in rectangles) - min(rect.width() for rect in rectangles) <= 1
@@ -200,9 +220,11 @@ def measure_dashboard(progress):
         'two_by_two': progress.worker_grid._columns == 2
             and [progress.worker_grid.grid.getItemPosition(index)[:2] for index in range(4)]
                 == [(0, 0), (0, 1), (1, 0), (1, 1)],
-        'footer_clear': window_rect(progress.worker_grid, progress).bottom()
+        'footer_clear': window_rect(body, progress).bottom()
             < window_rect(progress.details_toggle, progress).top()
-            and progress.rect().contains(window_rect(progress.cancel_button, progress)),
+            and all(control_geometry(control, progress, hit_test=True)['reachable']
+                    for control in (progress.cancel_button, progress.details_toggle, progress.fullscreen.button)),
+        'no_horizontal_scroll': body.horizontalScrollBar().maximum() == 0,
         'cards': [_rect(rect) for rect in rectangles]}
 
 
@@ -272,10 +294,8 @@ def measure_button(control, window, viewport, app):
     if not control.icon().isNull():
         minimum_text_width += control.iconSize().width() + 4
     visible_to_window = control.isVisibleTo(window) and control.isVisible()
-    reachable = (visible_to_window and control.width() > 0 and control.height() > 0
-        and visible.width() >= control.width() - 2 and visible.height() >= control.height() - 2
-        and geometry.left() >= 0 and geometry.top() >= 0
-        and geometry.right() < viewport[0] and geometry.bottom() < viewport[1])
+    actual = control_geometry(control, window, hit_test=True)
+    reachable = (actual['reachable'] and geometry.right() < viewport[0] and geometry.bottom() < viewport[1])
     wrapped = isinstance(control, WrappingCheckBox)
     legible = bool(name) and (control.height() + 2 >= control.heightForWidth(control.width())
                              if wrapped else not text or minimum_text_width <= control.width() + 2)
@@ -285,7 +305,7 @@ def measure_button(control, window, viewport, app):
         'geometry': _rect(geometry), 'visible_region': _rect(visible),
         'visible_text': text, 'named_icon_only': not bool(text) and icon_only_named,
         'minimum_text_width': minimum_text_width, 'wrapped_label': wrapped, 'enabled': control.isEnabled(),
-        'visible': visible_to_window, 'scrolls': scrolls}
+        'visible': visible_to_window, 'scrolls': scrolls, 'ancestor_geometry': actual}
 
 
 def measure_tab_label(bar, index):
@@ -1110,21 +1130,25 @@ class CriticalReview:
                 and maintenance.details.text() == description,
                 'Privacy progress must report durably checked selected-policy decisions; unavailable controls are not presented as applied, and the whole workflow retains its own percentage.')
             drain(self.app)
-            progress.details_toggle.setChecked(True)
-            progress.content_scroll.ensureWidgetVisible(progress.description)
+            effective_summary = (progress.background_status if progress.background_status.isVisibleTo(progress)
+                                 else progress.description)
+            reveal_control(effective_summary, progress, self.app)
             drain(self.app)
-            labels = (progress.description,)
+            labels = (effective_summary,)
             self.check(prefix + '.maintenance-progress.description-fit',
-                all(label.text() == description and label.toolTip() == description
-                    and label.accessibleDescription() == description
-                    and len(label.visible_text.splitlines()) <= 2
-                    and label.height() >= label.fontMetrics().lineSpacing() * 2
+                progress.description.text() == description and progress.description.toolTip() == description
+                and progress.description.accessibleDescription() == description
+                and description in progress.analysis_panel.toolTip()
+                and description in progress.analysis_panel.accessibleDescription()
+                and all(len(label.visible_text.splitlines()) <= 2
+                    and label.height() >= label.fontMetrics().lineSpacing() * len(label.visible_text.splitlines())
+                    and control_geometry(label, progress)['reachable']
                     and all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
                         for line in label.visible_text.splitlines()) for label in labels)
                 and maintenance.details.isHidden() and maintenance.details.toolTip() == description
                 and maintenance.details.accessibleDescription() == description
                 and description in progress.worker_details.toPlainText(),
-                'Long operation descriptions must fit the Details pane and remain complete in its worker transcript and accessible tooltip, without expanding the pinned card.')
+                'A bounded effective status remains visible; the full foreground description is retained in the analysis tooltip, accessible text and transcript when background status replaces it.')
             self.check(prefix + '.maintenance-progress.driver-scan-unknown',
                 driver.activity_ring.value_text() == '—' and driver.activity_ring.active
                 and driver.activity_ring.phase_caption == 'Scan'
@@ -1563,6 +1587,21 @@ class CriticalReview:
             self.check(prefix + '.workflow.unverified-honesty', 'Not fully verified' in progress.verification_summary.text()
                 and '0 confirmed' in progress.verification_summary.text(),
                 'An unverified fixture outcome must not display a verified-success summary.')
+            scope_controls = (progress.verification_summary, progress.verification_details,
+                progress.auto_continue_summary, progress.auto_continue_details)
+            scope_geometry = []
+            for control in scope_controls:
+                reveal_control(control, progress, self.app)
+                scope_geometry.append(control_geometry(control, progress))
+            self.check(prefix + '.workflow.visible-completion-scope',
+                all(item['reachable'] for item in scope_geometry)
+                and progress.verification_details.isReadOnly() and progress.auto_continue_details.isReadOnly()
+                and control_geometry(progress.auto_continue_button, progress, hit_test=True)['reachable'],
+                'Verification evidence and the exact automatic-action scope must be reachable before pressing the fixed Auto continue button.',
+                evidence=scope_geometry)
+            self.check(prefix + '.workflow.scope-outside-details', not progress.details_toggle.isChecked()
+                and all(not progress.content_scroll.isAncestorOf(control) for control in scope_controls),
+                'Completion evidence and action scope stay outside the process/log Details toggle.')
             self.screenshot(progress, prefix + '-completed-results')
             progress.auto_continue_button.click()
             drain(self.app, entered_batch.is_set)
@@ -1688,7 +1727,7 @@ class CriticalReview:
             self.check(prefix + '.resource-comparison.placement-and-fit',
                 window_rect(progress.progress, progress).bottom() < window_rect(comparison, progress).top()
                 and window_rect(comparison, progress).bottom() < window_rect(progress.worker_grid, progress).top()
-                and progress.content_scroll.horizontalScrollBar().maximum() == 0
+                and progress.body_scroll.horizontalScrollBar().maximum() == 0
                 and window_rect(comparison.removed, comparison).right()
                     < window_rect(comparison.downloaded, comparison).left()
                 and progress.rect().contains(window_rect(comparison, progress)),
@@ -1706,7 +1745,7 @@ class CriticalReview:
                 card.activity_ring.value_text() == '100%' and card._raw_status == 'needs_review'
                 and 'Active threats: 1' in card.totals.text(),
                 'Verified scan completion with an active threat must keep 100% scan progress and request review, not claim a clean machine.')
-            progress.content_scroll.ensureWidgetVisible(card)
+            reveal_control(card, progress, self.app)
             drain(self.app)
             self.screenshot(progress, prefix + '-antimalware-review')
             progress.configure_workers({})
@@ -1722,7 +1761,7 @@ class CriticalReview:
             drain(self.app)
 
     def review_dashboard(self, window, backend, dimensions, prefix):
-        """All four live workers must be usable without scrolling the dashboard."""
+        """Normal dashboard fits; larger text can reach each control by real scroll."""
         progress = OptimizationProgressWindow(window, threading.Event())
         try:
             progress.configure_workers({'software_updates_enabled': True,
@@ -1748,12 +1787,16 @@ class CriticalReview:
                         f'QFrame#WorkflowWorkerCard QProgressBar {{font-size:{pixels}px;}}')
                 self.viewport(progress, dimensions, prefix + '.dashboard.' + label)
                 measured = measure_dashboard(progress)
-                for name in ('all_visible', 'outside_scroll', 'essentials', 'labels', 'navigation_hitboxes',
-                             'equal_cards', 'no_overlap', 'no_internal_overlap', 'two_by_two', 'footer_clear'):
+                names = ('all_reachable', 'body_scroll', 'essentials', 'labels', 'navigation_hitboxes',
+                         'equal_cards', 'no_overlap', 'no_internal_overlap', 'two_by_two', 'footer_clear',
+                         'no_horizontal_scroll') + (('all_visible',) if pixels is None else ())
+                for name in names:
                     self.check(prefix + '.dashboard.' + label + '.' + name.replace('_', '-'), measured[name],
-                        'Four equal core cards, essential labels and navigation hitboxes must remain inside the window without scrolling the grid.',
+                        'Four equal core cards retain readable labels and actual ancestor/hit-test reachability; normal text fits while enlarged content may scroll vertically.',
                         evidence=measured)
                 self.screenshot(progress, prefix + '-dashboard-' + label)
+            self.review_analysis_panel(progress, dimensions, prefix)
+            self.review_fullscreen(progress, dimensions, prefix + '.progress')
             self.check(prefix + '.dashboard.fixture-only', progress._live_metrics_service is None
                 and not backend.optimize.called and not backend.apply_available_fixes.called,
                 'Dashboard resize and font fixtures must start no host operations or live sampler.')
@@ -1763,6 +1806,184 @@ class CriticalReview:
             progress.close()
             progress.deleteLater()
             drain(self.app)
+
+    def review_fullscreen(self, window, dimensions, prefix):
+        """Use actual UI events on an inert window; Escape must never cancel work."""
+        button = window.fullscreen.button
+        measured = measure_button(button, window, dimensions, self.app)
+        self.check(prefix + '.fullscreen.controls', measured['status'] == 'passed'
+            and button.accessibleName() and 'F11' in button.toolTip(),
+            'Full screen must be a labelled, reachable control with keyboard help.', evidence=measured)
+        before = QRect(window.geometry())
+        cancel = getattr(window, 'cancel', getattr(window, '_cancel', None))
+        was_cancelled = cancel.is_set() if cancel is not None else None
+        def key(value):
+            target = getattr(window, 'editor', button)
+            for kind in (QEvent.KeyPress, QEvent.KeyRelease):
+                self.app.sendEvent(target, QKeyEvent(kind, value, Qt.NoModifier))
+            drain(self.app)
+        button.click()
+        drain(self.app)
+        entered_button = window.isFullScreen() and button.isChecked()
+        if prefix.endswith('.progress'):
+            self.screenshot(window, prefix.replace('.', '-') + '-fullscreen')
+        key(Qt.Key_Escape)
+        restored_escape = not window.isFullScreen() and window.geometry() == before
+        key(Qt.Key_F11)
+        entered_keyboard = window.isFullScreen()
+        key(Qt.Key_F11)
+        restored_keyboard = not window.isFullScreen() and window.geometry() == before
+        self.check(prefix + '.fullscreen.keyboard-restore', entered_button and entered_keyboard
+            and restored_escape and restored_keyboard,
+            'Button/F11 enter full screen; Esc/F11 restore the previous real geometry, including editor focus.',
+            evidence={'before': _rect(before), 'after': _rect(window.geometry()),
+                'button_entered': entered_button, 'keyboard_entered': entered_keyboard})
+        self.check(prefix + '.fullscreen.no-cancel', window.isVisible()
+            and (cancel is None or cancel.is_set() == was_cancelled),
+            'Entering and leaving full screen must neither dismiss the window nor cancel its inert worker.')
+
+    def review_analysis_panel(self, progress, dimensions, prefix):
+        """Bottom information stays outside Details; only passive fixture data is used."""
+        progress.setStyleSheet(progress.owner.styleSheet())
+        progress.details_toggle.setChecked(False)
+        self.viewport(progress, dimensions, prefix + '.analysis')
+        guard = progress.space_guard_status
+        self.check(prefix + '.analysis.initial-unknown', 'unknown' in guard.text().casefold()
+            and 'awaiting' in guard.text().casefold(),
+            'An unmeasured buffer must explicitly await verification, not claim every drive passed.')
+        progress.live_system_status.update_metrics({
+            'computer': {'cpu_percent': 73.5, 'memory_percent': 42., 'cpu_frequency_mhz': 3200},
+            'network': {'kind': 'wifi', 'adapter': 'Fixture radio', 'receive_mbps': 8.,
+                'send_mbps': 1., 'link_mbps': 866., 'is_up': True, 'internet_state': 'unverified'}})
+        payload = {'enabled': True, 'complete': True, 'target_bytes': 2147483648,
+            'volumes': [{'name': 'C:', 'free_bytes': 3221225472, 'target_bytes': 2147483648,
+                'shortfall_bytes': 0, 'below_target': False},
+                {'name': 'D:', 'free_bytes': 1073741824, 'target_bytes': 2147483648,
+                'shortfall_bytes': 1073741824, 'below_target': True}],
+            'warnings': ['Fixture drive D: below target.']}
+        progress._update_space_guard(payload)
+        progress.loading_animation.start()
+        drain(self.app)
+        self.check(prefix + '.analysis.measured-buffer',
+            all(text in guard.text() for text in ('WARNING', 'C:', 'D:', 'free 3.00 GiB',
+                'target 2.00 GiB', 'shortfall 1.00 GiB'))
+            and progress.space_guard_icon.isVisibleTo(progress)
+            and 'does not reserve' in guard.toolTip(),
+            'Measured free/target/shortfall values and a real low-space warning remain distinct from reservation or deletion approval.')
+        self.check(prefix + '.analysis.passive-metrics',
+            all(text in progress.live_system_status.computer.text() for text in ('73.5%', '42.0%', '3.20 GHz'))
+            and all(text in progress.live_system_status.network.text() for text in ('Wi-Fi', '8.00 Mbps', '866 Mbps', 'unverified')),
+            'CPU/RAM and passive traffic remain utilization observations; Internet capacity stays unverified.')
+        effective_summary = (progress.background_status if progress.background_status.isVisibleTo(progress)
+                             else progress.description)
+        visible = (progress.loading_animation, progress.live_system_status.computer,
+            progress.live_system_status.network, effective_summary, guard)
+        self.check(prefix + '.analysis.foreground-description-retained',
+            progress.description.text() in progress.analysis_panel.toolTip()
+            and progress.description.text() in progress.worker_details.toPlainText(),
+            'If background status occupies the bounded summary, complete foreground detail remains in the analysis tooltip and transcript.')
+        for label, size, pixels in (('standard', dimensions, None), ('font25', dimensions, 25),
+                                    ('small', (640, 480), 25)):
+            if pixels is not None:
+                progress.setStyleSheet(progress.owner.styleSheet() + '\nQFrame#WorkflowWorkerCard QLabel, '
+                    f'QFrame#WorkflowWorkerCard QProgressBar {{font-size:{pixels}px;}}')
+            self.viewport(progress, size, prefix + '.analysis.' + label)
+            controls = []
+            for control in visible:
+                reveal_control(control, progress, self.app)
+                controls.append(control_geometry(control, progress))
+            dashboard = measure_dashboard(progress, self.app)
+            self.check(prefix + '.analysis.' + label + '.reachable',
+                all(item['reachable'] for item in controls) and dashboard['all_reachable']
+                and dashboard['footer_clear'] and dashboard['no_horizontal_scroll']
+                and not progress.details_toggle.isChecked(),
+                'Gag, computer/network, buffer values and every worker control must be reachable through actual ancestors while Details stays closed.',
+                evidence={'controls': controls, 'dashboard': dashboard})
+            if label == 'standard':
+                progress.body_scroll.verticalScrollBar().setValue(0)
+                drain(self.app)
+                self.check(prefix + '.analysis.standard.no-scroll-fit',
+                    progress.body_scroll.verticalScrollBar().maximum() == 0
+                    and all(control_geometry(control, progress)['reachable'] for control in visible),
+                    'Normal requested viewports fit the four core cards and bounded bottom information together.')
+            reveal_control(progress.analysis_panel, progress, self.app)
+            self.screenshot(progress, prefix + '-analysis-' + label)
+        progress.setStyleSheet(progress.owner.styleSheet())
+        self.viewport(progress, dimensions, prefix + '.analysis.details')
+        multi = copy.deepcopy(payload)
+        multi['volumes'].append({'name': 'F:', 'free_bytes': 53687091200, 'target_bytes': 2147483648,
+            'shortfall_bytes': 0, 'below_target': False})
+        progress._update_space_guard(multi)
+        reveal_control(guard, progress, self.app)
+        drain(self.app)
+        painted_guard = getattr(guard, 'visible_text', guard.text())
+        self.check(prefix + '.analysis.multi-volume-complete',
+            all(text in painted_guard for text in ('C:', 'D:', 'F:', 'free 50.00 GiB',
+                'target 2.00 GiB', 'shortfall 1.00 GiB'))
+            and guard.height() >= guard.heightForWidth(guard.width())
+            and control_geometry(guard, progress)['reachable']
+            and not progress.details_toggle.isChecked()
+            and progress.body_scroll.horizontalScrollBar().maximum() == 0,
+            'Every C/D/F buffer row must paint its values and remain reachable; a three-line summary cannot silently hide a drive.',
+            evidence={'text': guard.text(), 'painted_text': painted_guard,
+                'required_height': guard.heightForWidth(guard.width()), 'actual_height': guard.height()})
+        self.screenshot(progress, prefix + '-analysis-multivolume')
+        progress.details_toggle.setChecked(True)
+        drain(self.app)
+        content = progress.content_scroll.widget()
+        self.check(prefix + '.analysis.details-only-logs', content.isAncestorOf(progress.processes)
+            and content.isAncestorOf(progress.log)
+            and set(content.findChildren(QPlainTextEdit)) == {progress.processes, progress.log}
+            and all(not content.isAncestorOf(control) and control.isVisibleTo(progress)
+                for control in (progress.analysis_panel, progress.worker_grid, progress.space_guard_status))
+            and progress.content_scroll.isVisibleTo(progress),
+            'Details reveals only Current processes and Stage log; dashboard and bottom information stay in the body.')
+        progress.details_toggle.setChecked(False)
+        drain(self.app)
+        self.check(prefix + '.analysis.details-close-preserves-info', progress.content_scroll.isHidden()
+            and progress.analysis_panel.isVisibleTo(progress) and progress.worker_grid.isVisibleTo(progress),
+            'Closing Details must hide process/log content without hiding bottom information or workers.')
+        movie = progress.loading_animation._movie
+        self.check(prefix + '.analysis.gag-decode', progress.loading_animation.ready
+            and movie is not None and movie.isValid() and movie.jumpToFrame(0)
+            and not movie.currentImage().isNull(),
+            'The bundled gag must decode an actual QMovie frame locally; a label or placeholder cannot establish animation readiness.')
+        ran = paused = resumed = stopped = False
+        if movie is not None and movie.isValid():
+            # Permit animation for this disposable widget only. No OS motion
+            # preference or real application's configuration is changed.
+            with patch('optimus.widgets.local_loading.motion_allowed', return_value=True):
+                progress.loading_animation.start()
+                deadline = time.monotonic() + 2
+                while movie.currentFrameNumber() <= 0 and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.005)
+                ran = movie.state() == QMovie.Running and movie.currentFrameNumber() > 0
+                progress.loading_animation.hide()
+                drain(self.app)
+                paused = movie.state() != QMovie.Running
+                progress.loading_animation.start()
+                drain(self.app)
+                resumed = movie.state() == QMovie.Running
+                progress.loading_animation.stop()
+                stopped = movie.state() != QMovie.Running and progress.loading_animation.isHidden()
+        progress.loading_animation.start()
+        drain(self.app)
+        poster = progress.loading_animation.pixmap()
+        self.check(prefix + '.analysis.gag-lifecycle', ran and paused and resumed and stopped
+            and progress.loading_animation.isVisibleTo(progress)
+            and movie is not None and movie.state() != QMovie.Running
+            and poster is not None and not poster.isNull(),
+            'A real frame advances when motion is permitted; hide pauses, show resumes, stop releases playback, and reduced motion retains a decoded static poster.')
+        progress._update_space_guard({'enabled': True, 'complete': False, 'target_bytes': 2147483648,
+            'volumes': [{'name': 'Unknown', 'free_bytes': None, 'shortfall_bytes': None}], 'warnings': []})
+        self.check(prefix + '.analysis.incomplete-not-healthy', 'needs review' in guard.text()
+            and 'unknown' in guard.text() and progress.space_guard_icon.isVisibleTo(progress),
+            'Incomplete or missing drive counters must stay unknown and require review.')
+        progress._update_space_guard({'enabled': False})
+        self.check(prefix + '.analysis.disabled-not-healthy', 'disabled' in guard.text()
+            and 'unverified' in guard.text() and not progress.space_guard_icon.isVisibleTo(progress),
+            'Disabling the read-only guard cannot imply a measured healthy drive.')
 
     def review_sandbox(self, dimensions, prefix):
         """Render real Sandbox controls against a mock workspace only."""
@@ -1790,6 +2011,7 @@ class CriticalReview:
                     and editor.editor.toPlainText() == workspace.read.return_value,
                     'Sandbox source tree and editor must fit side by side in the requested window.')
                 self.hover_descriptions(editor, buttons, prefix + '.sandbox')
+                self.review_fullscreen(editor, dimensions, prefix + '.sandbox')
                 self.screenshot(editor, prefix + '-sandbox')
                 self.check(prefix + '.sandbox.fixture-only', factory.call_args.args == (root, backend.data_dir)
                     and not forbidden.called and not any(getattr(workspace, name).called
@@ -1827,6 +2049,7 @@ class CriticalReview:
                 self.buttons(window, dimensions, prefix + '.main', window.main_buttons)
                 self.hover_descriptions(window, window.main_buttons, prefix + '.main')
                 self.screenshot(window, prefix + '-main')
+                self.review_fullscreen(window, dimensions, prefix + '.main')
                 self.review_dashboard(window, backend, dimensions, prefix)
                 self.review_sandbox(dimensions, prefix)
                 self.review_launch(window, backend, dimensions, prefix)
