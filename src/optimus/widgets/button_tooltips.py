@@ -15,7 +15,7 @@ _DESCRIPTIONS = {
     'original version': 'Restore the original source in your Sandbox working copy.',
     'history': 'Review saved source versions and choose a revision to restore.',
     'restart optimus': 'Restart Optimus using the saved Sandbox working copy.',
-    'export project': 'Export the editable source project as a ZIP archive.',
+    'export project': 'Export the editable source project to the chosen folder.',
     'auto clean': 'Approve the displayed saved actions and start maintenance.',
     'adjust settings': 'Review your choices while automatic maintenance stays paused.',
     'select all': 'Select all available choices in this section; selection alone does not run them.',
