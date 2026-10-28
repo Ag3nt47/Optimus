@@ -257,7 +257,14 @@ def measure_button(control, window, viewport, app):
     """A scrolled control passes only when its whole button can be reached."""
     scrolls = reveal_control(control, window, app)
     text = control.text().replace('&', '').strip()
-    name = text or control.accessibleName().strip() or control.toolTip().strip()
+    accessible_name = control.accessibleName().strip()
+    # A generic hover description must not turn a blank visible action into a
+    # labelled one. Icon-only actions require an explicit meaningful name;
+    # tooltips describe their action but cannot establish its identity.
+    icon_only_named = (not control.icon().isNull() and bool(accessible_name)
+        and accessible_name.casefold() not in ('button', 'control', 'activate this control.',
+            control.metaObject().className().casefold()))
+    name = text or (accessible_name if icon_only_named else '')
     top_left = control.mapTo(window, QPoint(0, 0))
     geometry = control.rect().translated(top_left)
     visible = control.visibleRegion().boundingRect()
@@ -276,6 +283,7 @@ def measure_button(control, window, viewport, app):
         'reason': 'Label and full button are reachable after any required scrolling.' if reachable and legible
             else 'The required action is hidden, clipped, outside the requested viewport or has an unreadable/blank label.',
         'geometry': _rect(geometry), 'visible_region': _rect(visible),
+        'visible_text': text, 'named_icon_only': not bool(text) and icon_only_named,
         'minimum_text_width': minimum_text_width, 'wrapped_label': wrapped, 'enabled': control.isEnabled(),
         'visible': visible_to_window, 'scrolls': scrolls}
 

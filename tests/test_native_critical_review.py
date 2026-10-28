@@ -11,8 +11,8 @@ from unittest.mock import Mock
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QPushButton, QScrollArea, QWidget
+from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QPushButton, QScrollArea, QStyle, QWidget
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +54,51 @@ def test_measurement_rejects_blank_clipped_or_truncated_required_actions(reviewe
         assert measured['status'] == 'failed'
         assert measured['geometry']['width'] == width
         assert 'unreadable/blank' in measured['reason']
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('accessible_name', ('', 'Cleanup'))
+def test_global_hover_descriptions_cannot_make_a_blank_visible_action_pass(reviewer, app, accessible_name):
+    from optimus.widgets.button_tooltips import install_button_descriptions
+    window = QWidget()
+    window.resize(320, 180)
+    button = QPushButton('', window)
+    button.setAccessibleName(accessible_name)
+    button.setGeometry(20, 30, 180, 40)
+    install_button_descriptions(window)
+    show(window, app)
+    try:
+        app.sendEvent(button, QEvent(QEvent.Enter))
+        assert button.toolTip() and button.accessibleDescription()
+        measured = bot.measure_button(button, window, (320, 180), app)
+        assert measured['status'] == 'failed'
+        assert measured['label'] == '' and measured['visible_text'] == ''
+        assert measured['named_icon_only'] is False
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('accessible_name,expected', (('', 'failed'), ('Open cleanup settings', 'passed')))
+def test_icon_only_action_requires_meaningful_accessible_identity(reviewer, app, accessible_name, expected):
+    from optimus.widgets.button_tooltips import install_button_descriptions
+    window = QWidget()
+    window.resize(320, 180)
+    button = QPushButton('', window)
+    button.setGeometry(20, 30, 80, 40)
+    button.setIcon(window.style().standardIcon(QStyle.SP_DirOpenIcon))
+    button.setAccessibleName(accessible_name)
+    install_button_descriptions(window)
+    show(window, app)
+    try:
+        assert button.toolTip()
+        measured = bot.measure_button(button, window, (320, 180), app)
+        assert measured['status'] == expected
+        assert measured['named_icon_only'] is bool(accessible_name)
     finally:
         window.close()
         window.deleteLater()
