@@ -2078,7 +2078,7 @@ class WorkflowWorkerCard(QFrame):
         self.set_navigation({}, enabled=False)
 
     def set_compact(self, compact=True):
-        """Keep the live controls visible; full secondary text stays in Details."""
+        """Keep live controls visible; retain full secondary text on hover/history."""
         if not compact or self._compact:
             return
         self._compact = True
@@ -2542,6 +2542,21 @@ class OptimizationProgressWindow(QDialog):
         self._outer_layout = outer
         outer.setContentsMargins(7, 7, 7, 7)
         outer.setSpacing(3)
+        # Keep the controls fixed while smaller displays can scroll real content
+        # instead of forcing a window larger than their available desktop.
+        self.body_scroll = QScrollArea(self)
+        self.body_scroll.setObjectName('ProgressBodyScroll')
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setFrameShape(QFrame.NoFrame)
+        self.body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.body_scroll.setMinimumSize(0, 0)
+        body = QWidget()
+        body.setMinimumWidth(0)
+        body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._body_layout = body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(3)
+        self.body_scroll.setWidget(body)
         self.content_scroll = QScrollArea(self)
         self.content_scroll.setWidgetResizable(True)
         self.content_scroll.setFrameShape(QFrame.NoFrame)
@@ -2557,7 +2572,7 @@ class OptimizationProgressWindow(QDialog):
         self._progress_header = header
         header_layout = QGridLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setVerticalSpacing(3)
+        header_layout.setVerticalSpacing(2)
         header_layout.setColumnStretch(0, 1)
         self.title = WorkflowSummaryLabel('OPTIMIZATION IN PROGRESS', max_lines=1)
         self.title.setObjectName('PageTitle')
@@ -2565,6 +2580,9 @@ class OptimizationProgressWindow(QDialog):
         self.title.setMinimumWidth(0)
         self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         header_layout.addWidget(self.title, 0, 0)
+        from .widgets.fullscreen import FullScreenControl
+        self.fullscreen = FullScreenControl(self)
+        header_layout.addWidget(self.fullscreen.button, 0, 1)
         self.spinner = RunSpinner(self)
         old_spinner_label = self.spinner._label
         self.spinner._label = WorkflowSummaryLabel(max_lines=1)
@@ -2575,14 +2593,14 @@ class OptimizationProgressWindow(QDialog):
         self.spinner._label.setMinimumWidth(0)
         self.spinner._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.spinner.start('Preparing')
-        header_layout.addWidget(self.spinner, 1, 0)
-        self.loading_animation = LocalLoadingAnimation(self, extent=128)
+        header_layout.addWidget(self.spinner, 1, 0, 1, 2)
+        self.loading_animation = LocalLoadingAnimation(self, extent=64)
         self.progress = WorkflowProgressBar()
         self.progress.setObjectName('WorkflowProgress')
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat('%p%')
-        header_layout.addWidget(self.progress, 2, 0)
+        header_layout.addWidget(self.progress, 2, 0, 1, 2)
         from .widgets.resource_comparison import ResourceComparison
         self.resource_comparison = ResourceComparison(self)
         self.resource_comparison.layout().setVerticalSpacing(2)
@@ -2597,24 +2615,36 @@ class OptimizationProgressWindow(QDialog):
             setattr(self.resource_comparison, name, bounded)
             previous.hide()
             previous.deleteLater()
-        header_layout.addWidget(self.resource_comparison, 3, 0)
-        self.stage = QLabel('Waiting for workflow preparation')
+        header_layout.addWidget(self.resource_comparison, 3, 0, 1, 2)
+        self.analysis_panel = QFrame(body)
+        self.analysis_panel.setObjectName('ProgressAnalysisPanel')
+        self.analysis_panel.setStyleSheet('QFrame#ProgressAnalysisPanel {border:1px solid #2d4357; border-radius:7px; background:#0e1822;}')
+        self.analysis_panel.setFrameShape(QFrame.StyledPanel)
+        self.analysis_panel.setMinimumWidth(0)
+        self.analysis_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        analysis_layout = QGridLayout(self.analysis_panel)
+        analysis_layout.setContentsMargins(7, 5, 7, 5)
+        analysis_layout.setHorizontalSpacing(10)
+        analysis_layout.setVerticalSpacing(2)
+        analysis_layout.setColumnStretch(1, 1)
+        self.stage = WorkflowSummaryLabel('Waiting for workflow preparation', max_lines=1)
         self.stage.setObjectName('SectionTitle')
         self.stage.setWordWrap(True)
         self.stage.setMinimumWidth(0)
         self.stage.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        layout.addWidget(self.stage)
-        self.description = WorkflowSummaryLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
-        layout.addWidget(self.description)
-        layout.addWidget(self.loading_animation, 0, Qt.AlignRight)
-        self.guard_summary = WorkflowSummaryLabel(max_lines=1)
-        self.guard_summary.setStyleSheet('color:#e8b34b;')
-        self.guard_summary.hide()
-        header_layout.addWidget(self.guard_summary, 4, 0)
+        # The spinner already presents the current stage. Keep the full stage
+        # in the visible analysis tooltip and its read-only history as well.
+        self.stage.hide()
+        self.description = WorkflowSummaryLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.', max_lines=1)
+        analysis_layout.addWidget(self.loading_animation, 0, 0, Qt.AlignCenter)
+        analysis_layout.addWidget(self.description, 1, 0, 1, 2)
+        # The detailed drive-buffer check lives in the visible bottom panel.
         outer.addWidget(header)
+        outer.addWidget(self.body_scroll, 1)
         from .widgets.live_activity import LiveSystemStatus
         self.live_system_status = LiveSystemStatus(self)
-        layout.addWidget(self.live_system_status)
+        self.live_system_status.note.hide()
+        analysis_layout.addWidget(self.live_system_status, 0, 1)
         self.space_guard_panel = QWidget()
         guard_row = QHBoxLayout(self.space_guard_panel)
         guard_row.setContentsMargins(0, 2, 0, 2)
@@ -2624,16 +2654,19 @@ class OptimizationProgressWindow(QDialog):
         self.space_guard_icon.setPixmap(self.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(22, 22))
         self.space_guard_icon.setAccessibleName('Drive-space warning')
         guard_row.addWidget(self.space_guard_icon, 0, Qt.AlignTop)
+        # Every reported volume keeps a wrapping row in the scroll body; the
+        # third or later drive must not disappear into an elided tooltip.
         self.space_guard_status = QLabel()
+        self.guard_summary = self.space_guard_status
         self.space_guard_status.setObjectName('DriveSpaceGuardStatus')
         self.space_guard_status.setTextFormat(Qt.PlainText)
         self.space_guard_status.setWordWrap(True)
         self.space_guard_status.setMinimumWidth(0)
         self.space_guard_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.space_guard_status.hide()
+        self.space_guard_status.setText('Drive-space buffer: awaiting a verified check; free space and shortfall are unknown.')
         guard_row.addWidget(self.space_guard_status, 1)
-        self.space_guard_panel.hide()
-        layout.addWidget(self.space_guard_panel)
+        self.space_guard_icon.hide()
+        analysis_layout.addWidget(self.space_guard_panel, 2, 0, 1, 2)
         self._live_metrics_service = None
         if getattr(owner, 'smoke_test', True) is False:
             from .live_metrics import LiveMetrics
@@ -2641,7 +2674,6 @@ class OptimizationProgressWindow(QDialog):
         from .widgets.worker_grid import WorkerGrid
         self.extra_worker_grid = WorkerGrid(WorkflowWorkerCard, content)
         self.extra_worker_grid.hide()
-        layout.addWidget(self.extra_worker_grid)
         self.worker_grid = WorkerGrid(WorkflowWorkerCard, self, pinned=True, extras=self.extra_worker_grid)
         self.worker_cards = self.worker_grid.cards
         for identity, title in (('maintenance', 'Maintenance'), ('software_updates', 'App updates'),
@@ -2649,12 +2681,12 @@ class OptimizationProgressWindow(QDialog):
             self.worker_grid.ensure(identity, title)
         self.worker_cards['security_scan'].update_state({'status': 'not_selected',
             'description': 'The virus, malware and spyware scan is disabled for this run.'})
-        outer.addWidget(self.worker_grid, 1)
+        body_layout.addWidget(self.worker_grid)
         self.worker_details = QPlainTextEdit()
         self.worker_details.setReadOnly(True)
-        self.worker_details.setMinimumHeight(100)
-        self.worker_details.setMaximumHeight(280)
-        layout.addWidget(self.worker_details)
+        # Full worker text is retained here for history/accessibility and on
+        # each card's tooltips; the concise live cards remain the primary view.
+        self.worker_details.hide()
         self.completion_review = QWidget(self)
         self.completion_review.setObjectName('CompletionReview')
         self.completion_review.setMinimumWidth(0)
@@ -2678,11 +2710,14 @@ class OptimizationProgressWindow(QDialog):
         scope_layout.setSpacing(2)
         review_columns.addWidget(self.action_scope, 1)
         self.completion_review.hide()
-        outer.addWidget(self.completion_review)
+        body_layout.addWidget(self.completion_review)
+        body_layout.addWidget(self.analysis_panel)
+        body_layout.addWidget(self.extra_worker_grid)
         self.background_status = WorkflowSummaryLabel()
         self.background_status.setObjectName('BackgroundStatus')
         self.background_status.hide()
-        layout.addWidget(self.background_status)
+        self.background_status.set_max_lines(1)
+        analysis_layout.addWidget(self.background_status, 1, 0, 1, 2)
         self.insights_summary = WorkflowSummaryLabel(max_lines=1)
         self.insights_summary.setObjectName('SectionTitle')
         self.insights_summary.setTextFormat(Qt.PlainText)
@@ -2723,8 +2758,8 @@ class OptimizationProgressWindow(QDialog):
         self.details_toggle.setAutoDefault(False)
         self.details_toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.details_toggle.toggled.connect(self._toggle_details)
-        outer.addWidget(self.details_toggle)
-        outer.addWidget(self.content_scroll)
+        body_layout.addWidget(self.content_scroll)
+        body_layout.addStretch()
         self.content_scroll.hide()
         self.auto_continue_button = QPushButton('Auto continue — apply available fixes')
         self.auto_continue_button.setAutoDefault(False)
@@ -2747,8 +2782,10 @@ class OptimizationProgressWindow(QDialog):
         self._completed_footer_layout.setContentsMargins(0, 0, 0, 0)
         self._completed_footer_layout.setSpacing(7)
         self._completed_footer_mode = False
+        self._completed_footer_layout.addWidget(self.details_toggle, 1)
+        self._completed_footer_layout.addWidget(self.cancel_button, 1)
         outer.addWidget(self._completed_footer)
-        self._completed_footer.hide()
+        self.setMinimumSize(320, 280)
         self._worker_elapsed_timer = QTimer(self)
         self._worker_elapsed_timer.setInterval(1000)
         self._worker_elapsed_timer.timeout.connect(self._refresh_worker_elapsed)
@@ -2759,6 +2796,10 @@ class OptimizationProgressWindow(QDialog):
         self._responsive_timer = QTimer(self)
         self._responsive_timer.setSingleShot(True)
         self._responsive_timer.timeout.connect(self._update_responsive_layout)
+        self._body_view_timer = QTimer(self)
+        self._body_view_timer.setSingleShot(True)
+        self._body_view_timer.timeout.connect(self._settle_body_view)
+        self._body_view_target = None
         self.worker_grid._reflow_timer.timeout.connect(self._update_responsive_layout)
         self.loading_animation.start()
         self._update_responsive_layout()
@@ -2770,32 +2811,34 @@ class OptimizationProgressWindow(QDialog):
         self.details_toggle.setText('Hide details and logs' if visible else 'Show details and logs')
         self._refresh_worker_details()
         self._update_responsive_layout()
+        if visible:
+            self._queue_body_view(self.content_scroll)
+        else:
+            self._queue_body_view(self.completion_review if self.completed else self.worker_grid)
+
+    def _queue_body_view(self, target):
+        self._body_view_target = target
+        self._body_view_timer.start(0)
+
+    def _settle_body_view(self):
+        target = self._body_view_target
+        self._body_view_target = None
+        if target is not None and target.isVisible():
+            self.body_scroll.ensureWidgetVisible(target, 0, 3)
 
     def _set_completed_footer(self, completed):
-        if completed == self._completed_footer_mode:
-            return
         self._completed_footer_mode = completed
-        if completed:
-            for button in (self.details_toggle, self.cancel_button):
-                self._outer_layout.removeWidget(button)
-                self._completed_footer_layout.addWidget(button, 1)
-                button.show()
-            self._completed_footer.show()
-        else:
-            for button in (self.details_toggle, self.cancel_button):
-                self._completed_footer_layout.removeWidget(button)
-                button.setParent(self)
-            self._outer_layout.insertWidget(self._outer_layout.indexOf(self.content_scroll), self.details_toggle)
-            self._outer_layout.insertWidget(self._outer_layout.indexOf(self._completed_footer), self.cancel_button)
-            self.details_toggle.show()
-            self.cancel_button.show()
-            self._completed_footer.hide()
+        # These controls remain in one reachable footer through completion and
+        # follow-up work. Their existing labels and safe-stop behavior change.
 
     def _refresh_worker_details(self):
         parts = [self.stage.text(), self.description.text()]
         for card in self.worker_cards.values():
-            parts.append('\n'.join(label.text() for label in (card.heading, card.status, card.completion,
-                card.details, card.totals, card.elapsed, card.activity_state, card.navigation_note) if label.text()))
+            detail = '\n'.join(label.text() for label in (card.heading, card.status, card.completion,
+                card.details, card.totals, card.elapsed, card.activity_state, card.navigation_note) if label.text())
+            parts.append(detail)
+            card.setToolTip(detail)
+            card.setAccessibleDescription(detail)
         text = '\n\n'.join(part for part in parts if part)
         if text != self.worker_details.toPlainText():
             position = self.worker_details.verticalScrollBar().value()
@@ -2812,21 +2855,15 @@ class OptimizationProgressWindow(QDialog):
                 self.completion_review.layout().activate()
                 self.completion_review.setMaximumHeight(max(150, self.completion_review.minimumSizeHint().height()))
             self._progress_header.layout().activate()
+            self._body_layout.activate()
             self._outer_layout.activate()
-            self._worker_minimum = QSize(max(480, self.worker_grid.minimumWidth() + 14),
-                max(450, self._outer_layout.minimumSize().height()))
-            if self.minimumSize() != self._worker_minimum:
-                super().setMinimumSize(self._worker_minimum)
+            summary = '\n'.join(part for part in (self.stage.text(), self.description.text(),
+                self.background_status.toolTip()) if part)
+            self.analysis_panel.setToolTip(summary)
+            self.analysis_panel.setAccessibleDescription(summary)
             self._refresh_worker_details()
         finally:
             self._fitting_workers = False
-
-    def setMinimumSize(self, *args):
-        # The general screen-fit coordinator may lower desktop minima. This
-        # pinned control surface must retain its measured usable bound instead
-        # of allowing an OS resize to obscure live worker controls.
-        requested = QSize(*args)
-        super().setMinimumSize(requested.expandedTo(getattr(self, '_worker_minimum', QSize())))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2862,10 +2899,12 @@ class OptimizationProgressWindow(QDialog):
         if not isinstance(payload, dict) or type(payload.get('enabled')) is not bool:
             return
         if payload['enabled'] is False:
-            self.space_guard_status.clear()
-            self.space_guard_status.hide()
-            self.space_guard_panel.hide()
-            self.guard_summary.hide()
+            self.space_guard_status.setText('Drive-space buffer check is disabled for this run. Free space and shortfall are unverified.')
+            self.space_guard_status.setStyleSheet('')
+            self.space_guard_status.setToolTip('The saved drive-space check is disabled; no passing measurement is implied.')
+            self.space_guard_icon.hide()
+            self.space_guard_status.show()
+            self.space_guard_panel.show()
             return
         def byte_text(value):
             return f'{value / 1073741824:.2f} GiB' if type(value) is int and 0 <= value <= 2 ** 63 - 1 else 'unknown'
@@ -2894,8 +2933,6 @@ class OptimizationProgressWindow(QDialog):
                 else 'Free-space verification is incomplete; unknown volumes are not confirmed healthy.')
         text = '\n'.join(lines)
         self.space_guard_status.setText(text)
-        self.guard_summary.set_summary(' · '.join(lines[:2]), text)
-        self.guard_summary.setVisible(bool(attention or payload.get('complete') is not True))
         self.space_guard_status.setToolTip(text + '\nRead-only observation; this does not reserve disk space or authorize extra deletion.')
         self.space_guard_status.setAccessibleDescription(self.space_guard_status.toolTip())
         self.space_guard_status.setStyleSheet('color:#e8b34b;' if attention or payload.get('complete') is not True else '')
@@ -3173,6 +3210,7 @@ class OptimizationProgressWindow(QDialog):
             self.background_status.set_summary('Background: ' + '; '.join(compact_descriptions),
                                                'Background: ' + '; '.join(descriptions))
             self.background_status.setVisible(bool(descriptions))
+            self.description.setVisible(not bool(descriptions))
         self._refresh_resource_comparison()
         log = field(state, 'log', default='')
         if log:
@@ -3192,6 +3230,9 @@ class OptimizationProgressWindow(QDialog):
         self.worker_navigation.refresh(enabled=False)
         self._worker_elapsed_timer.stop()
         self.loading_animation.stop()
+        # Keep the trusted local GIF's poster in the information panel after
+        # completion; it no longer animates or suggests that work is running.
+        self.loading_animation.setVisible(self.loading_animation.ready)
         self._waiting_for_updates = False
         self._title_before_update_wait = None
         self._waiting_update_kind = None
@@ -3200,6 +3241,7 @@ class OptimizationProgressWindow(QDialog):
         self.processes_label.hide()
         self.processes.hide()
         self.background_status.hide()
+        self.description.show()
         self.clear_auto_continue()
         self.insights_summary.clear()
         self.insights_summary.hide()
@@ -3290,7 +3332,14 @@ class OptimizationProgressWindow(QDialog):
         self._set_completed_footer(True)
         self.completion_review.show()
         self._update_responsive_layout()
+        self._reveal_completion_review()
         self._update_live_metrics()
+
+    def _reveal_completion_review(self):
+        # Completion evidence must be presented before any recommendation
+        # prompt. It remains in the ordinary body rather than the log toggle.
+        if self.completed:
+            self._queue_body_view(self.completion_review)
 
     def clear_auto_continue(self):
         self.auto_continue_button.setEnabled(False)
@@ -3327,6 +3376,8 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_button.setToolTip('Apply the listed automatic actions once.' if actions
             else 'No automatic fixes are available; use Continue for any remaining recommendations.')
         self._update_responsive_layout()
+        if self.completed:
+            self._reveal_completion_review()
 
     def begin_auto_continue(self, cancel, *, automatic=False):
         self.cancel = cancel
@@ -3363,6 +3414,7 @@ class OptimizationProgressWindow(QDialog):
         self.log.appendPlainText('\nAUTO CONTINUE — ' + ('SAVED AUTOMATIC FIX CHOICE' if automatic else 'USER APPROVED AVAILABLE FIXES'))
         self.cancel_button.setText('Cancel after current stage')
         self.cancel_button.setEnabled(True)
+        self._queue_body_view(self.worker_grid)
 
     def finish_auto_continue(self, result, error=None):
         self.finish(result, error=error)
@@ -3897,7 +3949,17 @@ class OptimusWindow(QMainWindow):
         self.landing_scroll.setFrameShape(QFrame.NoFrame)
         self.landing_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.landing_scroll.setWidget(self.canvas)
-        self.setCentralWidget(self.landing_scroll)
+        landing = QWidget(self)
+        landing_layout = QVBoxLayout(landing)
+        landing_layout.setContentsMargins(7, 7, 7, 7)
+        top_controls = QHBoxLayout()
+        top_controls.addStretch()
+        from .widgets.fullscreen import FullScreenControl
+        self.fullscreen = FullScreenControl(self)
+        top_controls.addWidget(self.fullscreen.button)
+        landing_layout.addLayout(top_controls)
+        landing_layout.addWidget(self.landing_scroll, 1)
+        self.setCentralWidget(landing)
         self._window_reveal = install_global_window_reveal(self, config=self.config)
         self._build_tray()
         QApplication.instance().setQuitOnLastWindowClosed(True)

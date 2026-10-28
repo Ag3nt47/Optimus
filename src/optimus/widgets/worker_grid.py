@@ -60,7 +60,8 @@ class WorkerGrid(QWidget):
         minimum = max((card.minimum_readable_width() if callable(getattr(card, 'minimum_readable_width', None))
             else 245 for card in cards), default=245)
         spacing = self.grid.horizontalSpacing()
-        columns = (2 if len(cards) == 4 else max(1, min(3, (self.width() + spacing) // (minimum + spacing)))) if self.pinned else max(1, min(3, (self.width() + spacing) // (minimum + spacing)))
+        columns = max(1, min(2 if self.pinned else 3,
+            (self.width() + spacing) // (minimum + spacing)))
         if len(cards) == 4 and columns == 3:
             columns = 2  # Four selected workers form two even rows.
         if columns != self._columns or force:
@@ -80,7 +81,7 @@ class WorkerGrid(QWidget):
         if self.minimumHeight() != minimum_height:
             self.setMinimumHeight(minimum_height)
         if self.pinned:
-            self.setMinimumWidth(columns * minimum + (columns - 1) * spacing)
+            self.setMinimumWidth(0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
