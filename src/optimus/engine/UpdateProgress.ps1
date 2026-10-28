@@ -54,7 +54,7 @@ function Invoke-SCMUpdateSearch {
     # https://learn.microsoft.com/windows/win32/api/wuapi/nf-wuapi-iupdatesearcher-beginsearch
     $job=$Owner.BeginSearch($Criteria,$callback,$null)
     if($null -eq $job){throw 'Windows Update did not return its asynchronous search job; no retry was attempted.'}
-    $abortRequested=$false
+    $abortRequested=$false;$abortIssued=$false
     while($true){
         $complete=$false
         try{$observed=$job.IsCompleted;$complete=$observed -is [bool] -and $observed -eq $true}catch{}
@@ -64,12 +64,48 @@ function Invoke-SCMUpdateSearch {
             # RequestAbort does not prove completion. Preserve job ownership
             # until IsCompleted and the one matching EndSearch below.
             # https://learn.microsoft.com/windows/win32/api/wuapi/nf-wuapi-isearchjob-requestabort
-            try{$null=$job.RequestAbort()}catch{}
+            try{$null=$job.RequestAbort();$abortIssued=$true}catch{}
         }
         Start-Sleep -Milliseconds 200
     }
     try{return $Owner.EndSearch($job)}
+    catch{
+        if(Test-SCMTerminalAbortError -Failure $_.Exception -AbortIssued $abortIssued -JobComplete $complete){
+            return New-SCMTerminalAbortResult -Phase Search
+        }
+        throw
+    }
     finally{[GC]::KeepAlive($callback);[GC]::KeepAlive($job)}
+}
+
+function Test-SCMTerminalAbortError {
+    param([Exception]$Failure,[bool]$AbortIssued,[bool]$JobComplete)
+    if(-not $AbortIssued -or -not $JobComplete){return $false}
+    # Only WU_E_CALL_CANCELLED (0x8024000B) after our successful abort request
+    # and the owned job's strict IsCompleted observation proves this refusal.
+    # https://learn.microsoft.com/windows/win32/wua_sdk/wua-success-and-error-codes-
+    for($depth=0;$null -ne $Failure -and $depth -lt 8;$depth++){
+        if($Failure.HResult -eq -2145124341){return $true}
+        $Failure=$Failure.InnerException
+    }
+    return $false
+}
+
+function New-SCMTerminalAbortResult {
+    param([ValidateSet('Search','Download')][string]$Phase)
+    $result=[pscustomobject]@{ResultCode=[int]5;HResult=[int]-2145124341;
+        native_cancelled=$true;abort_requested=$true;job_completed=$true;
+        cancelled=$true;installer_started=$false;outcomeKnown=$true;running=$false}
+    if($Phase -eq 'Search'){
+        $result|Add-Member -NotePropertyName Updates -NotePropertyValue @()
+        $result|Add-Member -NotePropertyName Warnings -NotePropertyValue @()
+    }else{
+        $result|Add-Member ScriptMethod GetUpdateResult {param($Index)
+            if($Index -ne 0){throw 'Only the caller-owned single update has a cancellation result.'}
+            return [pscustomobject]@{ResultCode=[int]5;HResult=[int]-2145124341}
+        }
+    }
+    return $result
 }
 
 function Test-SCMUpdateCancellation {
@@ -148,6 +184,7 @@ function Invoke-SCMUpdateProgress {
     $downloadedBytes = $null
     $downloadTotalBytes = $null
     $abortRequested = $false
+    $abortIssued = $false
     while ($true) {
         $complete = $false
         try {
@@ -163,7 +200,7 @@ function Invoke-SCMUpdateProgress {
             # https://learn.microsoft.com/windows/win32/api/wuapi/nf-wuapi-idownloadjob-requestabort
             # S_OK is not completion. Keep strong ownership and await the real
             # completed job plus EndDownload, even if abort itself fails.
-            try { $null=$job.RequestAbort() } catch { }
+            try { $null=$job.RequestAbort();$abortIssued=$true } catch { }
         }
         $percent = $null
         try {
@@ -192,7 +229,15 @@ function Invoke-SCMUpdateProgress {
         Start-Sleep -Milliseconds 200
     }
     try {
-        $result = if ($Phase -eq 'Download') { $Owner.EndDownload($job) } else { $Owner.EndInstall($job) }
+        try{
+            $result = if ($Phase -eq 'Download') { $Owner.EndDownload($job) } else { $Owner.EndInstall($job) }
+        }catch{
+            if($Phase -eq 'Download' -and
+                (Test-SCMTerminalAbortError -Failure $_.Exception -AbortIssued $abortIssued -JobComplete $complete)){
+                return New-SCMTerminalAbortResult -Phase Download
+            }
+            throw
+        }
         $verified = $false
         try {
             # The calling driver operation contains one exact approved update.
@@ -213,7 +258,8 @@ function Invoke-SCMUpdateProgress {
         return $result
     } finally {
         # WUA completion is established before releasing the managed references.
-        # End errors still propagate; this helper never manufactures a receipt.
+        # Unexpected End errors propagate. The sole translated outcome is the
+        # exact terminal pre-install cancellation; it never authorizes success.
         [GC]::KeepAlive($callbacks)
         [GC]::KeepAlive($job)
     }

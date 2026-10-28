@@ -441,6 +441,7 @@ function Get-SCMDriverUpdateScan {
     $started=[datetime]::UtcNow.ToString('o');$clock=[Diagnostics.Stopwatch]::StartNew()
     $criteria="IsInstalled=0 and Type='Driver' and IsHidden=0"
     $updates=@();$errors=@();$warnings=@();$code=4;$online=$false;$server=$null;$service=''
+    $asyncSearchStarted=$false;$asyncSearchReturned=$false;$asyncOutcomeUnknown=$false
     # ISearchJob exposes completion, not a numeric search-progress interface.
     # Keep the online WUA query unknown; never estimate it from elapsed time.
     # https://learn.microsoft.com/windows/win32/api/wuapi/nn-wuapi-isearchjob
@@ -454,7 +455,10 @@ function Get-SCMDriverUpdateScan {
         $server=Get-SCMWuaProperty $searcher 'ServerSelection'
         $service=[string](Get-SCMWuaProperty $searcher 'ServiceID' '')
         $result=if($null -ne $CancelRequested){
-            Invoke-SCMUpdateSearch -Owner $searcher -Criteria $criteria -CancelRequested $CancelRequested
+            $asyncSearchStarted=$true
+            $searchResult=Invoke-SCMUpdateSearch -Owner $searcher -Criteria $criteria -CancelRequested $CancelRequested
+            $asyncSearchReturned=$true
+            $searchResult
         }else{$searcher.Search($criteria)}
         if($null -ne $CancelRequested -and (& $CancelRequested)){throw 'Driver search finished after cancellation; its offers were discarded.'}
         if($null -eq $result -or $null -eq $result.Updates){throw 'Windows Update returned no usable driver offer collection.'}
@@ -470,6 +474,7 @@ function Get-SCMDriverUpdateScan {
             [pscustomobject]@{source='Windows Update';message=[string](Get-SCMWuaProperty $warning 'Message' 'Update search reported a warning.');hresult=(Get-SCMWuaProperty $warning 'HResult')}
         })
     } catch {
+        $asyncOutcomeUnknown=($asyncSearchStarted -and -not $asyncSearchReturned)
         $errors=@([pscustomobject]@{source='Windows Update';error=$_.Exception.Message})
     }
     $clock.Stop()
@@ -479,6 +484,7 @@ function Get-SCMDriverUpdateScan {
         started_utc=$started;completed_utc=[datetime]::UtcNow.ToString('o');duration_seconds=$clock.Elapsed.TotalSeconds
         online=$online;criteria=$criteria;server_selection=$server;service_id=$service
         returned_offer_count=$updates.Count;errors=@($errors);warnings=@($warnings)
+        installer_started=$false;outcomeKnown=(-not $asyncOutcomeUnknown);running=$asyncOutcomeUnknown;uncertain=$asyncOutcomeUnknown
         note='Online read-only search of applicable required and optional non-hidden drivers from the configured Windows Update service. No download or installation. OEM catalogs are not exhaustively searched. A hardware or compatible ID can cover multiple devices; matching rules are not a physical device instance identity.'
     }
 }
