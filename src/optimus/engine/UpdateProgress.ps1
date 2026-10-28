@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# Progress observation only. The caller owns approval, update identity, quiet
+# Progress and supported download cancellation. The caller owns approval, update identity, quiet
 # mode, backup, pending-restart checks and final native result validation.
 # SDK GUIDs/signatures: microsoft/win32metadata, um/wuapi.h.
 # https://learn.microsoft.com/windows/win32/wua_sdk/guidelines-for-asynchronous-wua-operations
@@ -25,6 +25,15 @@ namespace Optimus.UpdateProgress {
     public interface IInstallationCompletedCallback {
         [PreserveSig] int Invoke(IntPtr installationJob, IntPtr callbackArgs);
     }
+    // Microsoft win32metadata, RecompiledIdlHeaders/um/wuapi.h.
+    [ComVisible(true), Guid("88aee058-d4b0-4725-a2f1-814a67ae964c"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface ISearchCompletedCallback {
+        [PreserveSig] int Invoke(IntPtr searchJob, IntPtr callbackArgs);
+    }
+    [ComVisible(true), ClassInterface(ClassInterfaceType.None)]
+    public sealed class NoOpSearchCallback : ISearchCompletedCallback {
+        public int Invoke(IntPtr job, IntPtr callbackArgs) { return 0; }
+    }
     // WUA may call on a foreign thread. Never execute PowerShell, retain a job,
     // dereference the borrowed pointers, or depend on a caller apartment here.
     [ComVisible(true), ClassInterface(ClassInterfaceType.None)]
@@ -35,6 +44,39 @@ namespace Optimus.UpdateProgress {
     }
 }
 '@
+}
+
+function Invoke-SCMUpdateSearch {
+    param([Parameter(Mandatory=$true)]$Owner,[Parameter(Mandatory=$true)][string]$Criteria,
+        [Parameter(Mandatory=$true)][scriptblock]$CancelRequested)
+    Initialize-SCMUpdateProgressCallbacks
+    $callback=New-Object Optimus.UpdateProgress.NoOpSearchCallback
+    # https://learn.microsoft.com/windows/win32/api/wuapi/nf-wuapi-iupdatesearcher-beginsearch
+    $job=$Owner.BeginSearch($Criteria,$callback,$null)
+    if($null -eq $job){throw 'Windows Update did not return its asynchronous search job; no retry was attempted.'}
+    $abortRequested=$false
+    while($true){
+        $complete=$false
+        try{$observed=$job.IsCompleted;$complete=$observed -is [bool] -and $observed -eq $true}catch{}
+        if($complete){break}
+        if(-not $abortRequested -and (Test-SCMUpdateCancellation -CancelRequested $CancelRequested)){
+            $abortRequested=$true
+            # RequestAbort does not prove completion. Preserve job ownership
+            # until IsCompleted and the one matching EndSearch below.
+            # https://learn.microsoft.com/windows/win32/api/wuapi/nf-wuapi-isearchjob-requestabort
+            try{$null=$job.RequestAbort()}catch{}
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    try{return $Owner.EndSearch($job)}
+    finally{[GC]::KeepAlive($callback);[GC]::KeepAlive($job)}
+}
+
+function Test-SCMUpdateCancellation {
+    param([scriptblock]$CancelRequested)
+    if($null -eq $CancelRequested){return $false}
+    try{$requested=& $CancelRequested;return ($requested -is [bool] -and $requested -eq $true)}
+    catch{return $false} # A failed cancellation observer must not abandon a native job.
 }
 
 function ConvertTo-SCMProgressByteCount {
@@ -87,13 +129,15 @@ function Invoke-SCMUpdateProgress {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)]$Owner,
         [Parameter(Mandatory=$true)][ValidateSet('Download','Install')][string]$Phase,
-        [scriptblock]$ProgressCallback)
+        [scriptblock]$ProgressCallback,[scriptblock]$CancelRequested)
     Initialize-SCMUpdateProgressCallbacks
     $callbacks = New-Object Optimus.UpdateProgress.NoOpCallbacks
     $progressPhase = if ($Phase -eq 'Download') { 'downloading' } else { 'installing' }
     Publish-SCMUpdateProgress -ProgressCallback $ProgressCallback -Phase $progressPhase -Percent $null
     # There is exactly one Begin and one matching End. Never retry through the
-    # synchronous API, abort/kill the job, or infer success from a percentage.
+    # synchronous API or infer success from a percentage. Download cancellation
+    # uses documented IDownloadJob::RequestAbort once, then still awaits End.
+    # Installation is never interrupted or killed by navigation.
     $job = if ($Phase -eq 'Download') {
         $Owner.BeginDownload($callbacks, $callbacks, $null)
     } else {
@@ -103,6 +147,7 @@ function Invoke-SCMUpdateProgress {
     $reportedComplete = $false
     $downloadedBytes = $null
     $downloadTotalBytes = $null
+    $abortRequested = $false
     while ($true) {
         $complete = $false
         try {
@@ -111,6 +156,14 @@ function Invoke-SCMUpdateProgress {
         } catch {
             # Keep the strong job/callback references and await the real native
             # outcome. Caller timeouts retain the bridge request as in-flight.
+        }
+        if(-not $complete -and $Phase -eq 'Download' -and -not $abortRequested -and
+            (Test-SCMUpdateCancellation -CancelRequested $CancelRequested)){
+            $abortRequested=$true
+            # https://learn.microsoft.com/windows/win32/api/wuapi/nf-wuapi-idownloadjob-requestabort
+            # S_OK is not completion. Keep strong ownership and await the real
+            # completed job plus EndDownload, even if abort itself fails.
+            try { $null=$job.RequestAbort() } catch { }
         }
         $percent = $null
         try {
@@ -136,7 +189,7 @@ function Invoke-SCMUpdateProgress {
         }
         Publish-SCMUpdateProgress -ProgressCallback $ProgressCallback -Phase $progressPhase -Percent $percent -DownloadedBytes $downloadedBytes -DownloadTotalBytes $downloadTotalBytes
         if ($complete) { break }
-        Start-Sleep -Milliseconds 1000
+        Start-Sleep -Milliseconds 200
     }
     try {
         $result = if ($Phase -eq 'Download') { $Owner.EndDownload($job) } else { $Owner.EndInstall($job) }

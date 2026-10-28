@@ -78,7 +78,7 @@ Assert-Discovery (@($script:Events|Where-Object {$null -ne $_.percent}).Count -e
 $bridge=Join-Path $PSScriptRoot '..\src\optimus\engine\OptimusBridge.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bridge,[ref]$tokens,[ref]$errors)
 Assert-Discovery ($errors.Count -eq 0) 'real bridge parses'
-foreach($name in @('New-OptimusProgressCallback','Invoke-OptimusRequest')){
+foreach($name in @('New-OptimusProgressCallback','New-OptimusCancellationCallback','Invoke-OptimusRequest')){
     $function=$ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)[0]
     Invoke-Expression $function.Extent.Text
 }

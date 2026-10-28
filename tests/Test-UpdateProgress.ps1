@@ -9,7 +9,7 @@ function Assert-Fixture { param([bool]$Condition,[string]$Message)
     if (-not $Condition) { throw ('Fixture assertion failed: ' + $Message) }
 }
 function Start-Sleep { param([int]$Milliseconds)
-    Assert-Fixture ($Milliseconds -eq 1000) 'polling interval is bounded to one second'
+    Assert-Fixture ($Milliseconds -eq 200) 'polling interval is bounded to one fifth second'
     $script:Sleeps++
 }
 function New-Result { param([int]$Code=2)

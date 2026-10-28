@@ -435,7 +435,7 @@ function Test-SCMWuaRebootPending {
     return [bool]$system.RebootRequired
 }
 function Get-SCMDriverUpdateScan {
-    param([scriptblock]$ProgressCallback)
+    param([scriptblock]$ProgressCallback,[scriptblock]$CancelRequested)
     # Read-only search. Online explicitly requests the configured update service;
     # it never overrides organization policy or downloads/installs an update.
     $started=[datetime]::UtcNow.ToString('o');$clock=[Diagnostics.Stopwatch]::StartNew()
@@ -446,13 +446,17 @@ function Get-SCMDriverUpdateScan {
     # https://learn.microsoft.com/windows/win32/api/wuapi/nn-wuapi-isearchjob
     Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase scan
     try {
+        if($null -ne $CancelRequested -and (& $CancelRequested)){throw 'Driver search was cancelled before the native query started.'}
         $session=New-SCMWuaSession
         $searcher=$session.CreateUpdateSearcher()
         $searcher.Online=$true
         $online=[bool]$searcher.Online
         $server=Get-SCMWuaProperty $searcher 'ServerSelection'
         $service=[string](Get-SCMWuaProperty $searcher 'ServiceID' '')
-        $result=$searcher.Search($criteria)
+        $result=if($null -ne $CancelRequested){
+            Invoke-SCMUpdateSearch -Owner $searcher -Criteria $criteria -CancelRequested $CancelRequested
+        }else{$searcher.Search($criteria)}
+        if($null -ne $CancelRequested -and (& $CancelRequested)){throw 'Driver search finished after cancellation; its offers were discarded.'}
         if($null -eq $result -or $null -eq $result.Updates){throw 'Windows Update returned no usable driver offer collection.'}
         $code=[int]$result.ResultCode
         $offers=@($result.Updates);$offerDone=0;$offerPercent=-1
@@ -560,13 +564,19 @@ function New-SCMDriverPreflightRefusal {
     }
 }
 function Invoke-SCMDriverUpdateApplyCore {
-    param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false,[scriptblock]$ProgressCallback)
+    param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false,[scriptblock]$ProgressCallback,[scriptblock]$CancelRequested)
+    if($null -ne $CancelRequested -and (& $CancelRequested)){return New-SCMDriverNavigationCancellation -Record $Record}
     if(-not(Test-SCMAdministrator)){throw 'Administrator access is required; no automatic elevation was requested.'}
     if($Unattended -and -not $AcceptEula){throw 'Saved driver license agreement approval is required for unattended installation.'}
     $parsed=[guid]::Empty
     if(-not [guid]::TryParse([string]$Record.id,[ref]$parsed) -or $Record.revision -isnot [int] -or $Record.revision -lt 0){throw 'Invalid exact Windows Update driver identity or revision.'}
     $session=New-SCMWuaSession
-    $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+    $searcher=$session.CreateUpdateSearcher()
+    $criteria="IsInstalled=0 and Type='Driver' and IsHidden=0"
+    $result=if($null -ne $CancelRequested){
+        Invoke-SCMUpdateSearch -Owner $searcher -Criteria $criteria -CancelRequested $CancelRequested
+    }else{$searcher.Search($criteria)}
+    if($null -ne $CancelRequested -and (& $CancelRequested)){return New-SCMDriverNavigationCancellation -Record $Record}
     if([int]$result.ResultCode -ne 2){throw 'Windows Update did not return a complete successful applicability scan.'}
     $selected=@($result.Updates | Where-Object {$_.Identity.UpdateID -ieq $parsed.ToString() -and $_.Identity.RevisionNumber -eq $Record.revision})
     if($selected.Count -ne 1){
@@ -618,7 +628,8 @@ function Invoke-SCMDriverUpdateApplyCore {
         catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception) }
     }
     $downloadState = @{last=$null}
-    $download=if($null -ne $ProgressCallback){
+    if($null -ne $CancelRequested -and (& $CancelRequested)){return New-SCMDriverNavigationCancellation -Record $fresh}
+    $download=if($null -ne $ProgressCallback -or $null -ne $CancelRequested){
         $displayCallback = $ProgressCallback
         # Windows PowerShell 5.1 closures use a dynamic module: retain the
         # normalizer itself instead of relying on script-scope name lookup.
@@ -639,7 +650,7 @@ function Invoke-SCMDriverUpdateApplyCore {
             }
             try { $null = & $displayCallback $Progress } catch { }
         }.GetNewClosure()
-        Invoke-SCMUpdateProgress -Owner $downloader -Phase Download -ProgressCallback $downloadCallback
+        Invoke-SCMUpdateProgress -Owner $downloader -Phase Download -ProgressCallback $downloadCallback -CancelRequested $CancelRequested
     }else{$downloader.Download()}
     $downloadItem=$download.GetUpdateResult(0)
     # https://learn.microsoft.com/windows/win32/wua_sdk/idownloadresult-properties
@@ -651,6 +662,12 @@ function Invoke-SCMDriverUpdateApplyCore {
        $downloadItem.ResultCode -isnot [int] -or $downloadItem.ResultCode -notin @(2,3,4,5) -or
        $download.HResult -isnot [int] -or $downloadItem.HResult -isnot [int]){
         throw 'Windows Update returned an incomplete or nonterminal driver download result. No driver installation was started; verify Windows Update before continuing.'
+    }
+    # RequestAbort is only a request. The progress helper has awaited native
+    # IsCompleted and EndDownload, and the complete terminal receipt above is
+    # still required before treating this exact pre-install skip as quiescent.
+    if($null -ne $CancelRequested -and (& $CancelRequested)){
+        return New-SCMDriverNavigationCancellation -Record $fresh -RestartNeeded (Test-SCMWuaRebootPending)
     }
     if($download.ResultCode -ne 2 -or $downloadItem.ResultCode -ne 2 -or $downloadItem.HResult -ne 0 -or $download.HResult -ne 0){
         if($Unattended){
@@ -665,6 +682,9 @@ function Invoke-SCMDriverUpdateApplyCore {
     if($Unattended){
         try { Assert-SCMDriverQuietMode -Installer $installer }
         catch { return New-SCMDriverQuietRefusal -Record $fresh -HResult (Get-SCMDriverPreflightHResult $_.Exception) }
+    }
+    if($null -ne $CancelRequested -and (& $CancelRequested)){
+        return New-SCMDriverNavigationCancellation -Record $fresh -RestartNeeded (Test-SCMWuaRebootPending)
     }
     try {
         $installed=if($null -ne $ProgressCallback){
@@ -707,6 +727,14 @@ function Invoke-SCMDriverUpdateApplyCore {
     [pscustomobject]$receipt
 }
 
+function New-SCMDriverNavigationCancellation {
+    param($Record,[bool]$RestartNeeded=$false)
+    [pscustomobject]@{id=$Record.id;revision=$Record.revision;resultCode=5;aggregateResultCode=5
+        hresult=0;aggregateHresult=0;cancelled=$true;skipped=$true;navigation_cancelled=$true
+        installer_started=$false;outcomeKnown=$true;running=$false;restartNeeded=$RestartNeeded
+        note='You skipped this exact driver before installation. Any asynchronous download reached its terminal EndDownload result; no installer or service was force-stopped.'}
+}
+
 function Get-SCMDriverPayloadCleanupReport {
     param($Outcome,[bool]$RequestedEnabled=$true)
     # WUA downloads into its own cache; this provider never creates Optimus-
@@ -742,10 +770,10 @@ function Get-SCMDriverPayloadCleanupReport {
 
 function Invoke-SCMDriverUpdateApply {
     param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false,
-        [scriptblock]$ProgressCallback,[bool]$CleanupDownloads=$true)
+        [scriptblock]$ProgressCallback,[bool]$CleanupDownloads=$true,[scriptblock]$CancelRequested)
     # Preserve the installer's original exceptions and all restart/quiet-mode/
     # applicability checks. A failed or unknown operation authorizes no cleanup.
-    $outcome=Invoke-SCMDriverUpdateApplyCore -Record $Record -Unattended $Unattended -AcceptEula $AcceptEula -ProgressCallback $ProgressCallback
+    $outcome=Invoke-SCMDriverUpdateApplyCore -Record $Record -Unattended $Unattended -AcceptEula $AcceptEula -ProgressCallback $ProgressCallback -CancelRequested $CancelRequested
     if($null -ne $outcome){
         $outcome | Add-Member -NotePropertyName payload_cleanup -NotePropertyValue (Get-SCMDriverPayloadCleanupReport -Outcome $outcome -RequestedEnabled $CleanupDownloads)
     }

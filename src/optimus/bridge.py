@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from .item_progress import normalize_item_progress
+from .filesystem import _ordinary_data_path
 
 class PowerShellBridge:
     def __init__(self, data_dir: Path):
@@ -24,6 +25,7 @@ class PowerShellBridge:
         self._pending = {}
         self._progress_active = set()
         self._progress = {}
+        self._cancellation_paths = {}
         self._errors: list[str] = []
 
     def _start(self):
@@ -67,6 +69,7 @@ class PowerShellBridge:
                                 continue
                             if value.get('kind') not in (None, 'result') or type(value.get('ok')) is not bool:
                                 continue
+                            self._clear_cancellation_marker(identity)
                             with self._pending_lock:
                                 self._pending.pop(identity, None)
                             target_queue.put(value)
@@ -101,13 +104,30 @@ class PowerShellBridge:
         threading.Thread(target=read_output, daemon=True).start()
         threading.Thread(target=read_errors, daemon=True).start()
 
-    def request(self, operation: str, timeout: float = 180, *, progress_callback=None, **arguments):
+    def request(self, operation: str, timeout: float = 180, *, progress_callback=None, cancel_event=None, **arguments):
         if progress_callback is not None and not callable(progress_callback):
             raise ValueError('An optional progress callback must be callable.')
+        if cancel_event is not None and operation not in ('driver_updates_scan', 'driver_update_apply'):
+            raise ValueError('This native operation has no supported cooperative cancellation contract.')
         with self._lock:
             if self._process is None or self._process.poll() is not None:
                 self._start()
             request_id = uuid.uuid4().hex
+            cancel_directory = None
+            terminal = False
+            if cancel_event is not None:
+                # The native side derives this exact path from its request ID;
+                # callers cannot supply a file path or a different job identity.
+                cancel_directory = self.data_dir / 'request-cancellation' / request_id
+                _ordinary_data_path(cancel_directory)
+                cancel_directory.mkdir(parents=True, exist_ok=False)
+                _ordinary_data_path(cancel_directory)
+                info = cancel_directory.lstat()
+                with self._pending_lock:
+                    self._cancellation_paths[request_id] = {
+                        'directory': cancel_directory, 'identity': (info.st_dev, info.st_ino), 'marker_identity': None}
+                arguments = dict(arguments, cooperativeCancellation=True)
+            cancellation_sent = False
             self._busy = True
             with self._pending_lock:
                 self._pending[request_id] = (operation, self._process.pid)
@@ -121,24 +141,43 @@ class PowerShellBridge:
                         progress_callback(value)
                     except Exception:
                         pass  # Display failure cannot cancel or replay a native operation.
+            def request_cancellation():
+                nonlocal cancellation_sent
+                if cancel_directory is None or cancellation_sent or not cancel_event.is_set():
+                    return
+                try:
+                    self._check_cancellation_directory(request_id)
+                    with (cancel_directory / 'cancel.request').open('x', encoding='ascii') as marker:
+                        marker.write('cancel\n')
+                        info = os.fstat(marker.fileno())
+                        with self._pending_lock:
+                            self._cancellation_paths[request_id]['marker_identity'] = (info.st_dev, info.st_ino)
+                    cancellation_sent = True
+                except (OSError, ValueError, KeyError):
+                    # Failure to request abort never authorizes abandoning or
+                    # killing the still-owned native operation.
+                    pass
             try:
+                request_cancellation()  # An already-set local token precedes launch.
                 self._process.stdin.write(json.dumps({'id': request_id, 'operation': operation, 'arguments': arguments}, separators=(',', ':')) + '\n')
                 self._process.stdin.flush()
                 deadline = time.monotonic() + timeout
                 while True:
+                    request_cancellation()
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError('The operation is still running. Check its outcome before retrying; Optimus does not replay changes.')
                     emit_progress()
                     try:
-                        response = self._replies.get(timeout=min(remaining, 0.1) if progress_callback is not None else remaining)
+                        response = self._replies.get(timeout=min(remaining, 0.1) if progress_callback is not None or cancel_event is not None else remaining)
                     except queue.Empty as error:
-                        if progress_callback is not None:
+                        if progress_callback is not None or cancel_event is not None:
                             continue
                         raise TimeoutError('Operation timeout. Check the outcome before trying again.') from error
                     emit_progress()
                     if response.get('id') not in (None, request_id):
                         continue
+                    terminal = response.get('id') == request_id
                     if not response.get('ok'):
                         detail = response.get('error') or 'PowerShell operation failed.'
                         if response.get('id') is None and self._errors:
@@ -156,6 +195,38 @@ class PowerShellBridge:
                     self._progress_active.discard(request_id)
                     self._progress.pop(request_id, None)
                 self._busy = False
+                if cancel_directory is not None and (terminal or exited_pid is not None):
+                    # Never remove an in-flight request marker on a timeout:
+                    # its native worker still needs to observe the request.
+                    self._clear_cancellation_marker(request_id)
+
+    def _clear_cancellation_marker(self, request_id):
+        with self._pending_lock:
+            record = self._cancellation_paths.get(request_id)
+        if record is not None:
+            try:
+                self._check_cancellation_directory(request_id)
+                directory = record['directory']
+                marker = directory / 'cancel.request'
+                info = _ordinary_data_path(marker, file=True)
+                if info is not None:
+                    if (info.st_dev, info.st_ino) != record['marker_identity']:
+                        return  # A substituted marker is never deletion authority.
+                    marker.unlink()
+                directory.rmdir()
+                with self._pending_lock:
+                    self._cancellation_paths.pop(request_id, None)
+            except (OSError, ValueError, KeyError):
+                pass
+
+    def _check_cancellation_directory(self, request_id):
+        with self._pending_lock:
+            record = self._cancellation_paths[request_id]
+        directory = record['directory']
+        _ordinary_data_path(directory)
+        info = directory.lstat()
+        if (info.st_dev, info.st_ino) != record['identity']:
+            raise ValueError('The owned native cancellation directory changed.')
 
     def close(self):
         with self._pending_lock:

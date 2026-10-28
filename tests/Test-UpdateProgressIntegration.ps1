@@ -9,7 +9,7 @@ $engine=Join-Path (Split-Path $PSScriptRoot -Parent) 'src/optimus/engine'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $engine 'OptimusBridge.ps1'),[ref]$tokens,[ref]$errors)
 Assert-Test ($errors.Count -eq 0) 'production bridge parses in Windows PowerShell 5.1'
-foreach($name in @('New-OptimusProgressCallback','Invoke-OptimusRequest')) {
+foreach($name in @('New-OptimusProgressCallback','New-OptimusCancellationCallback','Invoke-OptimusRequest')) {
     $node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$false)
     Assert-Test ($null -ne $node) ('production function present: '+$name)
     . ([scriptblock]::Create($node.Extent.Text))

@@ -67,6 +67,13 @@ function New-OptimusProgressCallback {
         [Console]::WriteLine((ConvertTo-Json -InputObject $frame -Depth 6 -Compress))
     }.GetNewClosure()
 }
+function New-OptimusCancellationCallback {
+    param($Request)
+    if($Request.arguments.cooperativeCancellation -isnot [bool] -or -not $Request.arguments.cooperativeCancellation){return $null}
+    if([string]$Request.id -cnotmatch '^[a-f0-9]{32}$'){throw 'An exact native cancellation request identity is required.'}
+    $marker=Join-Path (Join-Path (Join-Path $DataRoot 'request-cancellation') ([string]$Request.id)) 'cancel.request'
+    return { Test-Path -LiteralPath $marker -PathType Leaf }.GetNewClosure()
+}
 function Invoke-OptimusRequest {
     param($Request)
     $arg=$Request.arguments
@@ -119,9 +126,10 @@ function Invoke-OptimusRequest {
         'set_power_plan' { Set-SCMPowerPlan -Guid ([string]$arg.guid);@(Get-SCMPowerPlans) }
         'registry_audit' { Get-OptimusRegistryIssues }
         'driver_updates_scan' {
+            $cancelRequested=New-OptimusCancellationCallback -Request $Request
             if($arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
-                Get-SCMDriverUpdateScan -ProgressCallback (New-OptimusProgressCallback -RequestId ([string]$Request.id))
-            }else{Get-SCMDriverUpdateScan}
+                Get-SCMDriverUpdateScan -ProgressCallback (New-OptimusProgressCallback -RequestId ([string]$Request.id)) -CancelRequested $cancelRequested
+            }else{Get-SCMDriverUpdateScan -CancelRequested $cancelRequested}
         }
         'driver_device_inventory' {
             if($arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
@@ -140,7 +148,7 @@ function Invoke-OptimusRequest {
             if($arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
                 $progressCallback=New-OptimusProgressCallback -RequestId ([string]$Request.id)
             }
-            Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true) -ProgressCallback $progressCallback -CleanupDownloads $cleanupDownloads
+            Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true) -ProgressCallback $progressCallback -CleanupDownloads $cleanupDownloads -CancelRequested (New-OptimusCancellationCallback -Request $Request)
         }
         default {
             $progressCallback=$null
