@@ -15,6 +15,7 @@ from .source_workspace import SourceWorkspace
 from .widgets.code_highlighter import PythonHighlighter
 from .widgets.theme import build_qss
 from .widgets.flow_layout import FlowLayout
+from .widgets.fullscreen import FullScreenControl
 
 class SandboxWindow(QMainWindow):
     def __init__(self, backend, parent=None):
@@ -40,6 +41,8 @@ class SandboxWindow(QMainWindow):
             button = QPushButton(label)
             button.clicked.connect(callback)
             toolbar.addWidget(button)
+        self.fullscreen = FullScreenControl(self)
+        toolbar.addWidget(self.fullscreen.button)
         layout.addLayout(toolbar)
         splitter = self.splitter = QSplitter()
         splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)

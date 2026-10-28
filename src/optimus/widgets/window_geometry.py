@@ -213,10 +213,13 @@ class WindowGeometryCoordinator(QObject):
             if isinstance(window, QDialog):
                 window.setSizeGripEnabled(True)
             remembered = self._session.get(owner, {}).get(self._key(window))
-            if remembered is not None:
-                window.setGeometry(remembered)
-            else:
-                self._initial_geometry(window)
+            # Full-screen Show may be the first presentation. Owner centering
+            # and remembered normal geometry must not resize that presentation.
+            if not window.isFullScreen():
+                if remembered is not None:
+                    window.setGeometry(remembered)
+                else:
+                    self._initial_geometry(window)
         fit_window_to_screen(window)
         handle = window.windowHandle()
         if handle is not None and handle not in self._handles:
