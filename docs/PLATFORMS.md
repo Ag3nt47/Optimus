@@ -1,16 +1,18 @@
 # Native platforms and downloads
 
-Optimus 0.12.8 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.12.9 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
 | Windows, Intel/AMD 64-bit | [Windows ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip) | Windows Server 2025 GitHub runner; Windows 10/11 desktop target |
-| macOS, Apple Silicon | [Apple Silicon app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip) | macOS 14, arm64 |
+| macOS, Apple Silicon | [Apple Silicon app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip) | macOS 15, arm64 |
 | macOS, Intel | [Intel app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip) | macOS 15, x86_64 |
 | Linux, Intel/AMD 64-bit | [Linux tar.gz](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz) | Ubuntu 22.04, x86_64; glibc 2.35 or newer |
 | Every platform | [Editable source ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip) | Source archive, not an executable |
 
 [SHA256SUMS.txt](https://github.com/Ag3nt47/Optimus/releases/latest/download/SHA256SUMS.txt) covers all five downloadable archives. The [release page](https://github.com/Ag3nt47/Optimus/releases/latest) also lists each file separately. Downloading starts with one click; extracting and the normal platform security review are still required.
+
+The macOS downloads are built and tested on macOS 15. Earlier macOS versions have not been runtime-validated for this release. The [0.12.7 Apple Silicon release](https://github.com/Ag3nt47/Optimus/releases/tag/v0.12.7) was built and tested on macOS 14. The editable source remains available for building and testing on another supported Python/Qt environment.
 
 ## Installation
 

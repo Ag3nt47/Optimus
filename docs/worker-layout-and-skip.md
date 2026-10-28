@@ -4,6 +4,8 @@ The maintenance, application-update, driver-update and virus/malware-scan cards 
 
 Only Current processes and Stage log collapse behind **Show/Hide details and logs**. The main body scrolls vertically when needed instead of forcing controls outside the screen. Primary actions remain reachable; full-screen buttons and F11 expand the window, and Escape returns from full screen without cancelling the current worker. Tooltips and accessible descriptions retain complete explanations when labels are shortened.
 
+Full-screen key handling stays shared across panels, including panels retained while hidden. Reopening panels does not add another application-wide handler for every window. The controls preserve each window's normal or maximized size without saving new settings.
+
 After completion, verification evidence and the exact available-fix scope stay in a bounded review area above the action buttons. Their read-only panes can scroll independently. Collapsing the logs does not hide these results or add another confirmation to the existing manual Apply action.
 
 ## Next / skip
