@@ -33,6 +33,10 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
+Version **0.12.7** keeps the four core workers in a responsive dashboard above a separate details/log area. Compact cards retain their progress, status and navigation while the window resizes; the minimum usable size follows the current font. Extra optional workers cannot push those four panels out of view. The Sandbox file tree and editor expand into the available window space, and buttons throughout the app have short hover descriptions.
+
+**Next now acknowledges a skip immediately**, with local cancellation for that worker. Cleanup stops between files and preserves remaining files. Windows Update searches/downloads use the supported abort request and wait for their terminal result. Active app/vendor and driver installers finish safely before the queue advances; Next does not forcibly kill installers or remove unknown-outcome records. The virus scan has its own navigation control. Cancelling its Optimus client can leave Defender scanning under Windows policy. [Worker layout and skip behavior](docs/worker-layout-and-skip.md).
+
 Version **0.12.6** adds a side-by-side **deleted versus downloaded** bar directly below overall progress. It shows confirmed deleted-file counts and sizes alongside reported download bytes, with percentages of their combined reported byte activity. Approximate and incomplete transfers are labelled; missing measurements stay unknown. Deleted logical file sizes are separate from observed free-space change and installed application size.
 
 **Installer-download cleanup starts on** and can be disabled in initial setup or Settings. Eligible Windows WinGet updates use a private per-attempt download workspace. After fresh installed-version verification, a known successful installer exit, verified descendant exit and no pending restart, Optimus removes only tracked disposable payloads. Generic/unknown installers retain their files. Personal Downloads, logs, rollback backups, failed/uncertain attempts and Windows-managed driver/update caches stay outside this cleanup. [Scope and limits](docs/update-payload-cleanup.md).

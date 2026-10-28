@@ -351,13 +351,13 @@ class Backend(ExtendedMaintenanceBackend):
     def cleanup_categories(self):
         return self.cleaner.categories()
 
-    def cleanup_scan(self, category_ids=None, min_age_days=7, *, progress_callback=None):
+    def cleanup_scan(self, category_ids=None, min_age_days=7, *, progress_callback=None, cancel_event=None):
         if category_ids is None:
             category_ids = ['user-temp']
-        return self.cleaner.scan(list(category_ids), int(min_age_days), progress_callback=progress_callback)
+        return self.cleaner.scan(list(category_ids), int(min_age_days), progress_callback=progress_callback, cancel_event=cancel_event)
 
-    def cleanup_apply(self, plan, *, progress_callback=None):
-        return self.cleaner.apply(plan, progress_callback=progress_callback)
+    def cleanup_apply(self, plan, *, progress_callback=None, cancel_event=None):
+        return self.cleaner.apply(plan, progress_callback=progress_callback, cancel_event=cancel_event)
 
     def storage_scan(self, root):
         return self.bridge.request('storage_scan', root=str(root), timeout=120)
@@ -489,23 +489,31 @@ class Backend(ExtendedMaintenanceBackend):
             except Exception:
                 pass  # A display observer cannot abandon or replay discovery.
 
-    def _driver_updates_scan_raw(self, *, progress_callback=None):
+    def _driver_updates_scan_raw(self, *, progress_callback=None, cancel_event=None):
         self._driver_discovery_progress(progress_callback, 'scan')
         options = ({'progress_callback': progress_callback, 'reportProgress': True}
                    if progress_callback is not None else {})
+        if cancel_event is not None:
+            options['cancel_event'] = cancel_event
         try:
             scan = self.bridge.request('driver_updates_scan', timeout=300, **options)
         except Exception as error:
-            return {'updates': [], 'resultCode': 4, 'source': 'Windows Update', 'error': str(error)}
+            return {'updates': [], 'resultCode': 4, 'source': 'Windows Update', 'error': str(error),
+                    'outcomeKnown': False, 'running': True}
         if not isinstance(scan, dict):
             return {'updates': [], 'resultCode': 4, 'source': 'Windows Update',
                     'error': 'Windows Update returned no usable scan report.'}
         return scan
 
-    def driver_updates_scan(self, *, progress_callback=None):
+    def driver_updates_scan(self, *, progress_callback=None, cancel_event=None):
         self._driver_discovery_progress(progress_callback, 'scan')
         options = {'progress_callback': progress_callback} if progress_callback is not None else {}
-        scan = dict(self._driver_updates_scan_raw(**options))
+        scan_options = dict(options)
+        if cancel_event is not None:
+            scan_options['cancel_event'] = cancel_event
+        scan = dict(self._driver_updates_scan_raw(**scan_options))
+        if cancel_event is not None and cancel_event.is_set():
+            return dict(scan, cancelled=True)
         scan['coverage'] = self.driver_coverage(scan, **options)
         from .driver_coverage import driver_scan_evidence
         evidence = driver_scan_evidence(scan)
@@ -550,10 +558,12 @@ class Backend(ExtendedMaintenanceBackend):
         from .driver_update_backup import DriverUpdateBackup
         return DriverUpdateBackup(self).backup(offers, cancel_event=cancel_event, item_callback=item_callback)
 
-    def driver_update_apply_unattended(self, record, accept_eula=False, *, progress_callback=None):
+    def driver_update_apply_unattended(self, record, accept_eula=False, *, progress_callback=None, cancel_event=None):
         if accept_eula is not True:
             raise ValueError('Saved driver agreement approval is required.')
         options = {}
+        if cancel_event is not None:
+            options['cancel_event'] = cancel_event
         if progress_callback is not None:
             if not callable(progress_callback):
                 raise ValueError('An optional driver progress callback must be callable.')
@@ -573,9 +583,10 @@ class Backend(ExtendedMaintenanceBackend):
                 result.pop('download_progress', None)
         return result
 
-    def driver_update_apply(self, record):
+    def driver_update_apply(self, record, *, cancel_event=None):
         return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
-                                   cleanupDownloads=self._driver_payload_cleanup_enabled(), timeout=900)
+                                   cleanupDownloads=self._driver_payload_cleanup_enabled(), timeout=900,
+                                   **({'cancel_event': cancel_event} if cancel_event is not None else {}))
 
     def _driver_payload_cleanup_enabled(self):
         enabled = self.preferences().get('update_payload_cleanup_enabled', True)

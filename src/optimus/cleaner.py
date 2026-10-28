@@ -290,9 +290,12 @@ class Cleaner:
                 continue
         return sorted(result)
 
-    def scan(self, category_ids: list[str], min_age_days: int = 7, max_files: int = 20000, max_seconds: int = 35, *, progress_callback=None) -> dict:
+    def scan(self, category_ids: list[str], min_age_days: int = 7, max_files: int = 20000, max_seconds: int = 35, *, progress_callback=None, cancel_event=None) -> dict:
         if type(min_age_days) is not int or not 0 <= min_age_days <= 3650:
             raise ValueError('Minimum age must be between 0 and 3650 whole days.')
+        if cancel_event is not None and not callable(getattr(cancel_event, 'is_set', None)):
+            raise ValueError('Use a cancellation event with an is_set method.')
+        cancelled = lambda: cancel_event is not None and cancel_event.is_set()
         choices = {item.id: item for item in self._definitions()}
         unknown = set(category_ids) - choices.keys()
         if unknown:
@@ -300,16 +303,19 @@ class Cleaner:
         now = time.time()
         deadline = time.monotonic() + max(1, min(int(max_seconds), 120))
         plan = {'id': uuid.uuid4().hex, 'created_at': now, 'min_age_days': int(min_age_days), 'categories': [], 'files': [],
-                'total_bytes': 0, 'total_mb': 0.0, 'complete': True, 'skipped': [], 'errors': []}
+                'total_bytes': 0, 'total_mb': 0.0, 'complete': True, 'skipped': [], 'errors': [], 'cancelled': False}
         emit = _cleanup_progress(progress_callback, plan['id'])
         emit('scan', None, 'Discovering eligible files; the total is not known yet.', force=True)
         seen = set()
         examined = 0
-        native_open, native_open_complete = self._open_files_snapshot() if os.name != 'nt' else (set(), True)
+        native_open, native_open_complete = self._open_files_snapshot() if os.name != 'nt' and not cancelled() else (set(), True)
         if _PLATFORM != 'win32':
             plan['native_temp_minimum_age_days'] = 7
             plan['safety_notes'] = ['Native private temporary folders keep a seven-day minimum age, including Full mode. Open-file checks are best effort; incomplete coverage skips broad temporary-folder cleanup.']
         for category_id in dict.fromkeys(category_ids):
+            if cancelled():
+                plan.update(cancelled=True, complete=False)
+                break
             category = choices[category_id]
             root = Path(os.path.abspath(category.path))
             busy = self._running(category.process_names)
@@ -327,6 +333,9 @@ class Cleaner:
                        'effective_min_age_days': effective_age}
             stack = [root]
             while stack:
+                if cancelled():
+                    plan.update(cancelled=True, complete=False)
+                    break
                 if examined >= max_files or time.monotonic() >= deadline:
                     plan['complete'] = False
                     break
@@ -348,6 +357,9 @@ class Cleaner:
                             break
                     with os.scandir(directory) as entries:
                         for entry in entries:
+                            if cancelled():
+                                plan.update(cancelled=True, complete=False)
+                                break
                             if examined >= max_files or time.monotonic() >= deadline:
                                 plan['complete'] = False
                                 break
@@ -402,11 +414,15 @@ class Cleaner:
         plan['files'].sort(key=lambda item: item['size'], reverse=True)
         plan['total_bytes'] = sum(item['size'] for item in plan['files'])
         plan['total_mb'] = round(plan['total_bytes'] / 1048576, 3)
+        if cancelled():
+            plan.update(cancelled=True, complete=False)
         with self._lock:
             # Isolate cached approval records from callers mutating a displayed preview.
-            self._plans[plan['id']] = json.loads(json.dumps(plan))
+            if not plan['cancelled']:
+                self._plans[plan['id']] = json.loads(json.dumps(plan))
         emit('scan', 100 if plan['complete'] is True else None,
-             f'Preview finished: {examined} files checked; {len(plan["files"])} eligible.'
+             ('Preview cancelled: ' if plan['cancelled'] else 'Preview finished: ')
+             + f'{examined} files checked; {len(plan["files"])} eligible.'
              + (' Some locations could not be fully checked.' if not plan['complete'] else ''), force=True)
         return plan
 
@@ -564,9 +580,12 @@ class Cleaner:
             if recovery_error is not None:
                 raise recovery_error
 
-    def apply(self, displayed_plan: dict, *, progress_callback=None) -> dict:
+    def apply(self, displayed_plan: dict, *, progress_callback=None, cancel_event=None) -> dict:
         if progress_callback is not None and not callable(progress_callback):
             raise ValueError('An optional progress callback must be callable.')
+        if cancel_event is not None and not callable(getattr(cancel_event, 'is_set', None)):
+            raise ValueError('Use a cancellation event with an is_set method.')
+        cancelled = lambda: cancel_event is not None and cancel_event.is_set()
         with self._lock:
             plan = self._plans.pop(str(displayed_plan.get('id', '')), None)
         if plan is None:
@@ -575,9 +594,10 @@ class Cleaner:
             raise ValueError('Preview is older than 15 minutes. Scan again.')
         emit = _cleanup_progress(progress_callback, plan['id'])
         choices = {item.id: item for item in self._definitions()}
-        result = {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0, 'errors': [], 'files': []}
+        result = {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0, 'errors': [], 'files': [],
+                  'cancelled': False, 'processed_count': 0, 'remaining_count': 0}
         native = os.name != 'nt'
-        opened, open_check_complete = self._open_files_snapshot() if native else (set(), True)
+        opened, open_check_complete = self._open_files_snapshot() if native and not cancelled() else (set(), True)
         open_checked_at = time.monotonic()
         if native:
             result['safety_notes'] = [
@@ -593,6 +613,9 @@ class Cleaner:
         emit('cleanup', 0, f'Checking {total} preview-approved files before removal.', force=True,
              deleted_bytes=0, deleted_count=0)
         for processed, record in enumerate(plan['files'], 1):
+            if cancelled():
+                result['cancelled'] = True
+                break
             try:
                 category = choices.get(record['category_id'])
                 if category is None or os.path.normcase(os.path.abspath(category.path)) != os.path.normcase(record['root']):
@@ -613,6 +636,9 @@ class Cleaner:
                         info = path.lstat()
                         if time.time() - max(info.st_mtime, info.st_ctime) < 7 * 86400:
                             raise ValueError('Native temporary files newer than seven days are preserved.')
+                if cancelled():
+                    result['cancelled'] = True
+                    break
                 self._delete_exact(record)
                 result['deleted_count'] += 1
                 result['deleted_bytes'] += record['size']
@@ -621,12 +647,20 @@ class Cleaner:
             except (OSError, ValueError) as error:
                 result['skipped_count'] += 1
                 result['errors'].append(f'{record["path"]}: {error}')
+            result['processed_count'] = processed
             emit('cleanup', min(99, processed * 100 / total),
                  f'{processed}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved.',
                  deleted_bytes=result['deleted_bytes'], deleted_count=result['deleted_count'])
         result['log_path'] = str(log_path)
-        log_path.write_text(json.dumps({'state': 'completed', 'plan_id': plan['id'], 'result': result}, indent=2), encoding='utf-8')
-        emit('cleanup', 100, f'{total}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved. Results saved.', force=True,
+        result['cancelled'] = result['cancelled'] or bool(cancelled())
+        result['remaining_count'] = total - result['processed_count']
+        if result['cancelled']:
+            result['skipped_count'] += result['remaining_count']
+        state = 'cancelled' if result['cancelled'] else 'completed'
+        log_path.write_text(json.dumps({'state': state, 'plan_id': plan['id'], 'result': result}, indent=2), encoding='utf-8')
+        emit('cleanup', None if result['cancelled'] else 100,
+             ('Cancelled safely. ' if result['cancelled'] else '')
+             + f'{result["processed_count"]}/{total} files checked; {result["deleted_count"]} removed, {result["skipped_count"]} preserved. Results saved.', force=True,
              deleted_bytes=result['deleted_bytes'], deleted_count=result['deleted_count'])
         return result
 

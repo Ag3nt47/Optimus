@@ -1,0 +1,24 @@
+# Worker dashboard and navigation
+
+The maintenance, application-update, driver-update and virus/malware-scan cards stay in the main dashboard. The window adapts their layout and uses a compact presentation when needed; secondary descriptions, histories, logs and optional workers live in a separate details area. Tooltips and accessible descriptions retain the complete explanations. The minimum usable window size follows the active font, so an impossibly small resize is clamped rather than clipping controls.
+
+## Next / skip
+
+Next is a request for the current item in that worker. The interface acknowledges it immediately and binds it to that exact live item, rather than retargeting an old click to a later operation. Other workers continue. Back only reviews saved item results and does not replay completed actions.
+
+| Current operation | Response to Next |
+| --- | --- |
+| Cleanup discovery | Stop at a checked boundary; a cancelled preview cannot authorize deletion |
+| Temporary-file removal | Finish the current file check, stop before another deletion, save actual counts and preserve remaining files |
+| App source/pin checks | Retire the owned read-only query and verify its exit before advancing |
+| Windows Update driver search/download | Request abort on the exact native job and wait for its matching terminal result |
+| App/vendor or driver installation already applying changes | Show the pending skip; wait for the actual installer result and required safety checks before advancing |
+| Defender quick scan | Stop Optimus's owned client/monitoring at the supported boundary; Windows may continue scanning under its own policy |
+
+Next cannot guarantee an immediate stop for a provider that has no safe cancellation API. Optimus does not kill Windows Installer, Defender, update services or arbitrary vendor processes. A timed-out or otherwise unknown native outcome stays visible and continues to block conflicting writes; a skip does not erase that evidence or silently retry an installer. Saved approvals and package/device identity checks still apply to the next item.
+
+## Sandbox and hover descriptions
+
+Sandbox exposes an editable copy of the full source. Its file tree and code pane grow with the window; Save, Revert, History, Original version, Export and Restart remain available above the editor. Existing saved source versions and unsaved-edit questions remain in effect. Restart uses the saved working copy rather than silently changing installed release files.
+
+Main actions, worker arrows, Sandbox controls and dynamically created buttons have short hover descriptions. Existing tool-specific safety and state explanations take precedence over generic descriptions.

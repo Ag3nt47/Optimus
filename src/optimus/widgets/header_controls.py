@@ -1100,6 +1100,8 @@ def install_global_window_reveal(
     modes. Installing the coordinator in each entry point keeps every
     Optimus-created dialog on the same open and reverse-close path.
     """
+    from .button_tooltips import install_button_descriptions
+    install_button_descriptions(owner)
     existing = getattr(owner, "_optimus_window_reveal", None)
     if isinstance(existing, PanelRevealOverlay):
         existing.set_motion_config(config)
