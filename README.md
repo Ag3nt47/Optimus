@@ -1,4 +1,4 @@
-# Optimus
+# Optimus: Computer optimization tool
 
 **Cleanup, privacy, updates and troubleshooting in one free, open-source desktop app.** Optimus puts local maintenance under your control on Windows, macOS and Linux: choose the scope, run your saved choices with one click, and inspect the results, without a subscription.
 
@@ -18,13 +18,29 @@
 
 ![Optimus sample-data demo: main menu, four worker cards, completion results and Sandbox](docs/media/optimus-demo.gif)
 
-**Sample data throughout.** These previews use the real Qt interface with an inert demo backend. Counts, progress, update offers and outcomes are illustrative; they are not a benchmark, a scan of your computer or evidence of a live installation. No host cleanup or system changes run during capture.
+These demos show the actual Qt interface with sample data. No host maintenance runs during capture.
 
 [![Watch the Optimus sample-data walkthrough; four worker cards with separate progress and status](docs/media/optimus-workers.png)](docs/media/optimus-walkthrough.mp4)
 
 [Watch/download the MP4 walkthrough](docs/media/optimus-walkthrough.mp4) · [Full screenshot gallery and capture details](docs/DEMOS.md)
 
 ## What Optimus can do
+
+- **Cleanup:** Preview selected temporary files, diagnostics and rebuildable app caches with age limits and local logs.
+- **Browsers:** Clean supported cache, history, cookies and download lists; preserve passwords, bookmarks and chosen cookie domains.
+- **Windows privacy/debloat:** Choose supported privacy settings and curated removals, including separate Microsoft 365, Outlook and Edge controls.
+- **Updates:** Manage supported app offers, package rules and Windows Update drivers with scoped approval and backup checks.
+- **Security:** Run Defender quick scans and review threats, supported corrections and eligible Windows Security/Critical updates.
+- **Processes/startup:** Inspect CPU/RAM/I/O and ownership; control eligible priorities, affinity, pause/resume, startup entries and Windows services.
+- **Storage:** Find large files, track folder growth, verify SHA256 duplicates and optimize eligible Windows SSDs/HDDs.
+- **Cloud:** Review personal OneDrive duplicates on Windows with your own connected account and approved folders.
+- **Automation:** Schedule maintenance while open; add Smart Cleaning, browser-exit, low-space, workload and retention options.
+- **Recovery:** Inspect verified outcomes, supported undo, browser backups, driver rollback and Windows restore-point tools.
+- **Advanced tools:** Use local diagnostics, encryption, split/join, selective registry repair, compatibility tools and command-line reports.
+- **Sandbox/platforms:** Edit source with history/restart, choose themes, check self-updates and use native Windows/macOS/Linux builds.
+
+<details>
+<summary>Detailed capabilities, provider coverage and platform limits</summary>
 
 - **Clean clutter and browser data.** Preview selected temporary files, error reports, crash dumps and graphics caches. Clean supported Chromium/Firefox cache, history, cookies and download-list records, with cookie exceptions and close-or-skip choices. Optional Discord, Spotify, Steam and Teams web-cache recipes have separate limits. Passwords, bookmarks and downloaded files are excluded. [Cleanup and privacy choices](docs/REMOVAL_OPTIONS.md)
 - **Choose Windows privacy and debloat actions.** Review supported advertising, optional diagnostics, suggestions and reinstall controls; select curated consumer apps, Microsoft 365 consumer packages, Outlook and eligible Edge removal separately. Desktop Office and arbitrary desktop-app removal use reviewed native uninstall routes. Build, edition and management limits apply. [Exact targets and irreversible effects](docs/REMOVAL_OPTIONS.md)
@@ -42,6 +58,8 @@ The [full feature matrix](docs/FEATURES.md) records implementation and recovery 
 | Shared native tools | Additional Windows integrations | Native platform limits |
 | --- | --- | --- |
 | Scoped cleanup, supported browser profiles, process analysis, disk/duplicate tools, file utilities, Sandbox and recorded recovery | Appx debloat, supported Windows privacy controls, WinGet presence rules, Windows Update drivers/security patches, Defender, driver backup/rollback, System Restore, selective registry review and personal OneDrive | macOS has no CPU-affinity control; Safari cleanup is unavailable. macOS/Linux do not implement automatic app-presence changes or Windows-specific tools. Cloud covers personal OneDrive on Windows only; business/shared drives, SharePoint, Google Drive and Dropbox are unsupported. See the [platform matrix](docs/PLATFORMS.md). |
+
+</details>
 
 The dark blue/orange presentation and reveal animations are adapted from MIT-licensed [AngeronaSuite](https://github.com/Ag3nt47/AngeronaSuite).
 
