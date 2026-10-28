@@ -250,6 +250,21 @@ try {
  $result=switch('__OPERATION__'){
  'context' {Context;break}
  'registry_read' {Read-Control ([string]$P.control);break}
+ 'privacy_snapshot' {
+  $ids=@($P.controls)
+  if($ids.Count -lt 1 -or $ids.Count -gt @($C.PSObject.Properties).Count){throw 'Invalid privacy snapshot controls.'}
+  $seen=@{};$values=@{}
+  foreach($id in $ids){
+   if($id -isnot [string] -or $null -eq $C.$id -or $seen.ContainsKey($id)){throw 'Invalid privacy snapshot control.'}
+   $seen[$id]=$true
+  }
+  $context=Context
+  foreach($id in $ids){
+   try{$values[$id]=@{ok=$true;current=(Read-Control $id)}}
+   catch{$values[$id]=@{ok=$false;error_type=$_.Exception.GetType().Name}}
+  }
+  @{ok=$true;schema=1;context=$context;controls=$values};break
+ }
  'registry_write' {
   $s=$C.([string]$P.control);if($null -eq $s){throw 'Unknown privacy control.'}
   if($s.scope -eq 'device' -and -not(Is-Admin)){throw [UnauthorizedAccessException]::new('Administrator access is required.')}
@@ -365,7 +380,7 @@ def _cancelled(event):
 
 
 def _script(operation, payload):
-    if operation not in {'context', 'registry_read', 'registry_write', 'security_status', 'quick_scan'} | _ACTIONS:
+    if operation not in {'context', 'registry_read', 'privacy_snapshot', 'registry_write', 'security_status', 'quick_scan'} | _ACTIONS:
         raise ValueError('Unknown native operation.')
     encode = lambda value: base64.b64encode(json.dumps(value, separators=(',', ':'), allow_nan=False).encode('utf-8')).decode('ascii')
     return _POWERSHELL.replace('__OPERATION__', operation).replace('__PAYLOAD__', encode(payload or {})).replace('__CONTROLS__', encode(_CONTROLS))
@@ -394,7 +409,7 @@ def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, p
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate(timeout=3)
-            return {'ok': False, 'cancelled': cancelled, 'timed_out': expired, 'may_continue': operation not in ('context', 'registry_read', 'security_status'),
+            return {'ok': False, 'cancelled': cancelled, 'timed_out': expired, 'may_continue': operation not in ('context', 'registry_read', 'privacy_snapshot', 'security_status'),
                     'error': 'The request stopped waiting. A Windows antivirus operation may continue under Windows control.'}
         try:
             output, _stderr = process.communicate(timeout=min(0.2, max(0.01, deadline - time.monotonic())))
@@ -491,6 +506,8 @@ class SystemPrivacy:
     def __init__(self, data_dir, runner=None):
         self.directory = Path(data_dir) / 'system-privacy'
         self.runner = runner or _native_request
+        # Existing injected runners retain their context/registry_read contract.
+        self._batch_privacy_reads = runner is None or runner is _native_request
         self.lock = threading.RLock()
 
     def _call(self, operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None):
@@ -505,6 +522,18 @@ class SystemPrivacy:
         if not isinstance(result, dict):
             raise ValueError('The Windows operation returned invalid metadata.')
         return result
+
+    def _privacy_snapshot(self, controls, cancel_event=None):
+        """Read only: writes still compare a fresh native value and read back."""
+        result = self._call('privacy_snapshot', {'controls': list(controls)}, cancel_event=cancel_event)
+        context, values = result.get('context'), result.get('controls')
+        if (result.get('ok') is not True or type(result.get('schema')) is not int or result['schema'] != 1
+                or not isinstance(context, dict) or context.get('platform') != 'Windows'
+                or type(context.get('build')) is not int or not isinstance(context.get('edition'), str)
+                or type(context.get('is_admin')) is not bool or not isinstance(values, dict)
+                or set(values) != set(controls)):
+            raise ValueError('Windows did not return a complete privacy snapshot.')
+        return context, values
 
     def _journal(self, report):
         _ordinary(self.directory)
@@ -592,7 +621,14 @@ class SystemPrivacy:
         with self.lock:
             _privacy_progress(progress_callback, 0, len(selected), unknown=True,
                 description='Reading Windows privacy eligibility; the native query has not reported a percentage.')
-            context = self._call('context', cancel_event=cancel_event)
+            snapshots, snapshot_error = None, None
+            if self._batch_privacy_reads:
+                try:
+                    context, snapshots = self._privacy_snapshot(selected, cancel_event=cancel_event)
+                except Exception as error:
+                    context, snapshots, snapshot_error = {}, {}, error
+            else:
+                context = self._call('context', cancel_event=cancel_event)
             self._journal(report)
             for key in selected:
                 if _cancelled(cancel_event):
@@ -610,6 +646,16 @@ class SystemPrivacy:
                     item['note'] = control['note']
                 report['items'].append(item)
                 try:
+                    if snapshot_error is not None:
+                        raise ValueError('The read-only privacy snapshot was unavailable.') from snapshot_error
+                    if snapshots is not None:
+                        snapshot = snapshots.get(key)
+                        if not isinstance(snapshot, dict) or snapshot.get('ok') is not True:
+                            native_error = snapshot.get('error_type') if isinstance(snapshot, dict) else None
+                            if isinstance(native_error, str) and re.fullmatch(r'[A-Za-z0-9_.]{1,80}', native_error):
+                                item['read_error_type'] = native_error
+                            raise ValueError('Windows could not read this selected privacy control.')
+                        before = _snapshot(snapshot.get('current'))
                     if context.get('platform') != 'Windows' or type(context.get('build')) is not int or context['build'] < control['minimum_build']:
                         item.update(status=_unavailable_status(context), reason='This Windows version does not expose the selected supported control. No policy value was written.')
                     elif control.get('minimum_revision') and context['build'] == control['minimum_build'] and (
@@ -622,7 +668,8 @@ class SystemPrivacy:
                     elif control['scope'] == 'device' and context.get('is_admin') is not True:
                         item.update(status='requires_admin', reason='This is a device-wide Windows policy and needs an administrator session. No elevation was requested.')
                     else:
-                        before = _snapshot(self._call('registry_read', {'control': key}, cancel_event=cancel_event))
+                        if snapshots is None:
+                            before = _snapshot(self._call('registry_read', {'control': key}, cancel_event=cancel_event))
                         allowed = {0, 1, 2, 3} if key == 'optional_diagnostics' else {0, 1, 2} if key == 'app_diagnostics' else {0, 1}
                         if before['exists'] and before['value'] not in allowed:
                             raise ValueError('The existing preference value is not a recognized setting.')

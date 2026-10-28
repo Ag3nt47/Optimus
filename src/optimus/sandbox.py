@@ -16,15 +16,18 @@ from .widgets.code_highlighter import PythonHighlighter
 from .widgets.theme import build_qss
 from .widgets.flow_layout import FlowLayout
 from .widgets.fullscreen import FullScreenControl
+from .widgets.responsive import ResponsiveWindowScale, apply_generated_style
 
 class SandboxWindow(QMainWindow):
     def __init__(self, backend, parent=None):
         super().__init__(parent)
         self.backend = backend
+        self._surface_scale = 1.0
         self.setWindowTitle('Optimus - Source Sandbox')
         self.resize(1280, 850)
         self.setMinimumSize(640, 480)
         self.setStyleSheet(build_qss('cyber'))
+        self.setProperty('_optimus_surface_style', self.styleSheet())
         source_root = backend.source_root()
         self.workspace = SourceWorkspace(source_root, backend.data_dir)
         self.current = None
@@ -50,7 +53,10 @@ class SandboxWindow(QMainWindow):
         self.tree.setHeaderLabel('Optimus source')
         self.tree.setMinimumWidth(160)
         self.editor = QPlainTextEdit()
-        self.editor.setFont(QFont('Cascadia Mono', 10))
+        self._editor_base_font = QFont('Cascadia Mono', 10)
+        self.editor.setFont(self._editor_base_font)
+        self.editor.setStyleSheet(self._editor_style(1.0))
+        self.editor.setProperty('_optimus_surface_style', self.editor.styleSheet())
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.editor.setMinimumWidth(180)
         self.editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -60,6 +66,8 @@ class SandboxWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         splitter.setSizes([240, 900])
         splitter.setStretchFactor(1, 1)
+        self._splitter_user_adjusted = False
+        splitter.splitterMoved.connect(self._remember_splitter_adjustment)
         layout.addWidget(splitter, 1)
         self.status = QLabel(str(self.workspace.root))
         self.status.setWordWrap(True)
@@ -72,6 +80,28 @@ class SandboxWindow(QMainWindow):
         QShortcut(QKeySequence.Save, self, activated=self.save)
         self.tree.itemClicked.connect(self.open_item)
         self._build_tree()
+        self._surface_scaling = ResponsiveWindowScale(self, self._apply_surface_scale, baseline=(1280, 850))
+
+    def _editor_style(self, scale):
+        # Keep the original ten-point monospace baseline; window growth is
+        # presentation only and never changes the working copy or its history.
+        points = self._editor_base_font.pointSizeF() * scale
+        return ("QPlainTextEdit {font-family:'Cascadia Mono','Consolas','Courier New',monospace;"
+                f"font-size:{points:.2f}pt;}}")
+
+    def _remember_splitter_adjustment(self, position, index):
+        self._splitter_user_adjusted = True
+
+    def _apply_surface_scale(self, scale):
+        self._surface_scale = scale
+        apply_generated_style(self, build_qss('cyber', scale=scale))
+        apply_generated_style(self.editor, self._editor_style(scale))
+        self.tree.setMinimumWidth(round(160 * scale))
+        self.editor.setMinimumWidth(round(180 * scale))
+        if not self._splitter_user_adjusted:
+            width = max(1, self.splitter.width())
+            tree_width = min(round(400 * scale), max(round(160 * scale), round(width * 0.22)))
+            self.splitter.setSizes([tree_width, max(1, width - tree_width)])
 
     def _build_tree(self):
         nodes = {}

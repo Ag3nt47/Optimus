@@ -26,6 +26,7 @@ from optimus.widgets.header_controls import HeaderActionButton, install_global_w
 from optimus.widgets.wrapping_checkbox import WrappingCheckBox
 from optimus.widgets.local_loading import LocalLoadingAnimation
 from optimus.widgets.navigation_scroll import NavigationScrollArea
+from optimus.widgets.responsive_text import scale_text, set_scaled_style
 
 
 def field(record, *names, default=""):
@@ -231,6 +232,7 @@ class DetailedSettingsWindow(QMainWindow):
 
     def __init__(self, backend, *, smoke_test=False):
         super().__init__()
+        self._surface_scale = 1.0
         self.backend, self.smoke_test = backend, smoke_test
         self.busy = False
         self._quitting = False
@@ -255,6 +257,7 @@ class DetailedSettingsWindow(QMainWindow):
         self.setMinimumSize(640, 480)
         self.setWindowIcon(self._icon())
         self.setStyleSheet(self._qss())
+        self.setProperty('_optimus_surface_style', self.styleSheet())
         self._build_shell()
         for builder in ("dashboard", "cleaner", "browser", "performance", "startup", "applications",
                         "updates", "drivers", "storage", "duplicates", "debloat", "cloud", "schedules", "registry", "history", "settings", "extended_tools"):
@@ -265,24 +268,48 @@ class DetailedSettingsWindow(QMainWindow):
         self.select_page("Dashboard", load=False)
         if not smoke_test:
             QTimer.singleShot(350, self.refresh_audit)
+        from .widgets.responsive import ResponsiveWindowScale
+        self._surface_scaling = ResponsiveWindowScale(self, self._apply_surface_scale, baseline=(1440, 920))
 
     def _qss(self):
         theme = self.preferences.get("theme", "cyber")
         if theme not in THEMES:
             theme = "cyber"
         p = THEMES[theme]
-        return build_qss(theme, scale=1.0) + f"""
+        scale = getattr(self, '_surface_scale', 1.0)
+        px = lambda value: round(value * scale)
+        return build_qss(theme, scale=scale) + f"""
         #Sidebar {{background:{p['panel']};border-right:1px solid {p['border']};}}
-        #NavButton {{text-align:left;border:none;padding:9px 15px;border-radius:7px;color:{p['dim']};background:transparent;}}
+        #NavButton {{text-align:left;border:none;padding:{px(9)}px {px(15)}px;border-radius:7px;color:{p['dim']};background:transparent;}}
         #NavButton:hover {{background:{p['panel2']};color:{p['text']};}}
         #NavButton:checked {{color:{p['accent']};background:{p['panel2']};border-left:3px solid {p['accent']};font-weight:700;}}
         #PageDescription, #StatusText {{color:{p['dim']};}}
-        #SidebarBrand {{color:{p['accent']};font-size:24px;font-weight:800;letter-spacing:4px;}}
+        #SidebarBrand {{color:{p['accent']};font-size:{px(24)}px;font-weight:800;letter-spacing:{px(4)}px;}}
         QProgressBar {{border:1px solid {p['border']};border-radius:4px;max-height:8px;background:{p['panel']};}}
         QProgressBar::chunk {{background:{p['accent']};}}
         QListWidget {{background:{p['panel']};border:1px solid {p['border']};border-radius:8px;padding:6px;}}
         QPlainTextEdit {{background:{p['panel']};color:{p['text']};border:1px solid {p['border']};border-radius:8px;padding:10px;}}
         """
+
+    @staticmethod
+    def _responsive_style(widget, style):
+        """Resize only an owned style; preserve styles supplied by the caller."""
+        from .widgets.responsive import apply_generated_style
+        return apply_generated_style(widget, style)
+
+    def _apply_surface_scale(self, scale):
+        self._surface_scale = scale
+        self._responsive_style(self, self._qss())
+        self._settings_sidebar.setFixedWidth(round(205 * scale))
+        self._responsive_style(self._sidebar_tag,
+            f'font-size:{round(9 * scale)}px;letter-spacing:1px;padding:0 2px {round(15 * scale)}px 2px;')
+        self._responsive_style(self._sidebar_foot,
+            f'padding:{round(10 * scale)}px 4px;font-size:{round(10 * scale)}px;')
+        self._fit_surface_tables(scale)
+
+    def _fit_surface_tables(self, scale):
+        for table in self.findChildren(DataTable):
+            table.verticalHeader().setDefaultSectionSize(max(round(29 * scale), table.fontMetrics().height() + 12))
 
     @staticmethod
     def _icon():
@@ -304,6 +331,7 @@ class DetailedSettingsWindow(QMainWindow):
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
         sidebar = QWidget()
+        self._settings_sidebar = sidebar
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(205)
         nav = QVBoxLayout(sidebar)
@@ -315,6 +343,8 @@ class DetailedSettingsWindow(QMainWindow):
         tag = QLabel("COMPUTER OPTIMIZATION")
         tag.setObjectName("Tagline")
         tag.setStyleSheet("font-size:9px;letter-spacing:1px;padding:0 2px 15px 2px;")
+        tag.setProperty('_optimus_surface_style', tag.styleSheet())
+        self._sidebar_tag = tag
         nav.addWidget(tag)
         navigation_scroll = NavigationScrollArea(sidebar)
         navigation_scroll.setWidgetResizable(True)
@@ -341,6 +371,8 @@ class DetailedSettingsWindow(QMainWindow):
         foot = QLabel("LOCAL TOOLS\nNo subscription required")
         foot.setObjectName("Tagline")
         foot.setStyleSheet("padding:10px 4px;font-size:10px;")
+        foot.setProperty('_optimus_surface_style', foot.styleSheet())
+        self._sidebar_foot = foot
         nav.addWidget(foot)
         content = QWidget()
         body = QVBoxLayout(content)
@@ -1572,6 +1604,7 @@ class DetailedSettingsWindow(QMainWindow):
             temporary.write_text(json.dumps(self.preferences, indent=2), encoding='utf-8')
             temporary.replace(self.settings_path)
             self.setStyleSheet(self._qss())
+            self.setProperty('_optimus_surface_style', self.styleSheet())
             self.appearanceChanged.emit(self.preferences)
             self.status.setText('Appearance saved.')
         except OSError as exc:
@@ -1993,6 +2026,8 @@ class WorkflowWorkerCard(QFrame):
         layout.setSpacing(5)
         layout.setAlignment(Qt.AlignTop)
         self._compact = False
+        self._spacious = False
+        self._presentation_scale = 1.0
         from .widgets.live_activity import WorkerActivityRing
         header = QHBoxLayout()
         heading_layout = QVBoxLayout()
@@ -2097,13 +2132,77 @@ class WorkflowWorkerCard(QFrame):
         self.completion.hide()
         from .widgets.compact_worker_ring import CompactWorkerHeader
         self._compact_header = CompactWorkerHeader(self.heading, self.status, self.activity_ring, self)
-        layout.addWidget(self._compact_header)
-        layout.addWidget(self.progress)
-        layout.addWidget(self.totals)
-        layout.addLayout(self._navigation_layout)
         for label in (self.details, self.elapsed, self.activity_state, self.navigation_note):
             label.hide()
+        self._rebuild_compact_layout()
         self._fit_status()
+
+    def _rebuild_compact_layout(self):
+        layout = self.layout()
+        while layout.count():
+            layout.takeAt(0)
+        layout.setAlignment(Qt.AlignmentFlag(0))
+        layout.setContentsMargins(*( (12, 9, 12, 9) if self._spacious else (7, 3, 7, 3)))
+        layout.setSpacing(5 if self._spacious else 1)
+        layout.addWidget(self._compact_header)
+        if self._spacious:
+            layout.addWidget(self.completion)
+            layout.addWidget(self.details)
+        layout.addWidget(self.progress)
+        layout.addWidget(self.totals)
+        if self._spacious:
+            layout.addWidget(self.elapsed)
+        layout.addStretch(1)
+        layout.addLayout(self._navigation_layout)
+        self.completion.setVisible(self._spacious)
+        self.details.setVisible(self._spacious)
+        self.elapsed.setVisible(self._spacious)
+        status_lines, detail_lines, total_lines = self._spacious_line_counts()
+        self.status.set_max_lines(status_lines if self._spacious else 1)
+        self.details.set_max_lines(detail_lines)
+        self.totals.set_max_lines(total_lines if self._spacious else 1)
+
+    def _spacious_line_counts(self):
+        # Wide cards need fewer reserved wrapping lines. This lets full-HD
+        # dashboards show useful details instead of stretching compact rows.
+        return (1, 1, 2) if self.width() >= 800 else (2, 2, 3)
+
+    def set_spacious(self, spacious):
+        """Use spare dashboard area without losing the compact small view."""
+        spacious = bool(spacious)
+        if not self._compact or self._spacious == spacious:
+            return
+        self._spacious = spacious
+        self._rebuild_compact_layout()
+        self.set_presentation_scale(self._presentation_scale)
+        if getattr(self, '_totals_presentation', 'resources') == 'resources':
+            self._set_resource_totals(self._resource_totals,
+                maintenance=self._maintenance or self.heading.text() == 'Maintenance')
+        self._fit_status()
+
+    def set_presentation_scale(self, scale, *, force=False):
+        if force or scale != self._presentation_scale:
+            for widget in (self.heading, self.completion, self.status, self.details,
+                    self.progress, self.totals, self.elapsed, self.activity_state,
+                    self.navigation_note, *self.navigation_buttons.values()):
+                scale_text(widget, scale, force=force)
+        self._presentation_scale = scale
+        resize_ring = getattr(self.activity_ring, 'set_presentation_scale', None)
+        if callable(resize_ring):
+            resize_ring(scale * (7 / 6 if self._spacious else 1))
+        for button in self.navigation_buttons.values():
+            button.setFixedHeight(max(round(30 * scale), button.fontMetrics().height() + 6))
+        self._fit_status()
+
+    def spacious_minimum_height(self):
+        """Measure a prospective roomy card without toggling its live layout."""
+        line = lambda label, count: label.fontMetrics().lineSpacing() * count + 4
+        status_lines, detail_lines, total_lines = self._spacious_line_counts()
+        ring = round(54 * min(1.6, self._presentation_scale * 7 / 6))
+        header = max(ring, line(self.heading, 1) + line(self.status, status_lines))
+        return (header + line(self.completion, 1) + line(self.details, detail_lines)
+            + self.progress.height() + line(self.totals, total_lines) + line(self.elapsed, 1)
+            + max(button.height() for button in self.navigation_buttons.values()) + 48)
 
     def _capture_navigation_press(self, action):
         import copy
@@ -2195,6 +2294,11 @@ class WorkflowWorkerCard(QFrame):
         self.status.setWhatsThis(summary)
 
     def _fit_status(self):
+        if self._spacious:
+            counts = self._spacious_line_counts()
+            for label, lines in zip((self.status, self.details, self.totals), counts):
+                if label._max_lines != lines:
+                    label.set_max_lines(lines)
         self.status._fit_summary()
         if self._compact:
             metrics = tuple((label.font().key(), label.fontMetrics().lineSpacing(), label._max_lines)
@@ -2244,6 +2348,7 @@ class WorkflowWorkerCard(QFrame):
         self._set_resource_totals({}, maintenance=self._maintenance or self.heading.text() == 'Maintenance')
 
     def _set_resource_totals(self, value, *, maintenance=False, scope=None):
+        self._totals_presentation = 'resources'
         if isinstance(value, dict):
             self._resource_totals = dict(value)
         if isinstance(scope, str):
@@ -2284,7 +2389,7 @@ class WorkflowWorkerCard(QFrame):
             lines.append('Latest smart check')
             details.append('These totals cover only the latest Smart Maintenance check; they are separate from this one-click run and lifetime totals.')
         summary = '\n'.join(lines[:3])
-        if self._compact:
+        if self._compact and not self._spacious:
             summary = ' · '.join(lines[:3]).replace('Completed installs:', 'Installs:').replace('Downloaded:', 'Down:')
         self.totals.set_summary(summary, '\n'.join(lines + details))
 
@@ -2369,7 +2474,7 @@ class WorkflowWorkerCard(QFrame):
                 self.status.setText(operation + ' · ' + percent_text)
         if self._finished_with_skips:
             self.status.setText('Finished with skips' + ('; scan incomplete' if state.get('scan_complete') is not True else ''))
-        self.status.setStyleSheet('color:#e8b34b;' if self._finished_with_skips else '')
+        set_scaled_style(self.status, 'color:#e8b34b;' if self._finished_with_skips else '', self._presentation_scale)
         if installation_blocked and raw_status in ('deferred', 'needs_review', 'completed', 'completed_with_errors', 'not_run', 'failed'):
             self.status.setText('Search not started; install blocked' if scan_not_started else
                 'Updates found; install blocked' if scan_complete and type(offers) is int and offers > 0 else
@@ -2493,7 +2598,7 @@ class WorkflowWorkerCard(QFrame):
         self.activity_ring.set_progress(percent, health, active=not terminal, description=detail,
             phase=observed_phase, estimated=estimated)
         self.activity_state.setText(label)
-        self.activity_state.setStyleSheet('color:' + self.activity_ring.COLORS[health] + ';')
+        set_scaled_style(self.activity_state, 'color:' + self.activity_ring.COLORS[health] + ';', self._presentation_scale)
         # CPU observations can explain activity or pressure, but cannot replace
         # the current operation's reported percentage inside the ring.
         activity_detail = str(metrics.get('reason') or metrics.get('scope') or
@@ -2535,6 +2640,8 @@ class OptimizationProgressWindow(QDialog):
         self._maintenance_clock.start()
         self._recommendations_ready = False
         self._results_dismissed = False
+        self._presentation_scale = 1.0
+        self._responsive_text_context = None
         self.setWindowTitle('Optimus - optimization progress')
         self.setWindowModality(Qt.WindowModal)
         self.resize(850, 650)
@@ -2681,7 +2788,7 @@ class OptimizationProgressWindow(QDialog):
             self.worker_grid.ensure(identity, title)
         self.worker_cards['security_scan'].update_state({'status': 'not_selected',
             'description': 'The virus, malware and spyware scan is disabled for this run.'})
-        body_layout.addWidget(self.worker_grid)
+        body_layout.addWidget(self.worker_grid, 1)
         self.worker_details = QPlainTextEdit()
         self.worker_details.setReadOnly(True)
         # Full worker text is retained here for history/accessibility and on
@@ -2759,7 +2866,6 @@ class OptimizationProgressWindow(QDialog):
         self.details_toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.details_toggle.toggled.connect(self._toggle_details)
         body_layout.addWidget(self.content_scroll)
-        body_layout.addStretch()
         self.content_scroll.hide()
         self.auto_continue_button = QPushButton('Auto continue — apply available fixes')
         self.auto_continue_button.setAutoDefault(False)
@@ -2802,6 +2908,34 @@ class OptimizationProgressWindow(QDialog):
         self._body_view_target = None
         self.worker_grid._reflow_timer.timeout.connect(self._update_responsive_layout)
         self.loading_animation.start()
+        from .widgets.responsive import ResponsiveWindowScale
+        self.responsive_scale = ResponsiveWindowScale(self, self._apply_window_scale)
+        self._update_responsive_layout()
+
+    def _apply_window_scale(self, scale):
+        inherited_styles = []
+        ancestor = self
+        while ancestor is not None:
+            inherited_styles.append(ancestor.styleSheet())
+            ancestor = ancestor.parentWidget()
+        app = QApplication.instance()
+        context = (scale, tuple(inherited_styles), app.styleSheet() if app else '')
+        if context != self._responsive_text_context:
+            self._responsive_text_context = context
+            self._presentation_scale = scale
+            for card in self.worker_cards.values():
+                card.set_presentation_scale(scale, force=True)
+            for widget in (self.title, self.spinner._label, self.progress,
+                    self.resource_comparison.removed, self.resource_comparison.downloaded,
+                    self.resource_comparison.note, self.stage, self.description,
+                    self.background_status, self.insights_summary, self.verification_summary,
+                    self.auto_continue_summary, self.live_system_status.computer,
+                    self.live_system_status.network, self.space_guard_status,
+                    self.details_toggle, self.cancel_button, self.auto_continue_button,
+                    self.processes, self.log):
+                scale_text(widget, scale, force=True)
+            self.auto_continue_button.setMinimumHeight(max(36, self.auto_continue_button.fontMetrics().height() + 16))
+            self.cancel_button.setMinimumHeight(max(36, self.cancel_button.fontMetrics().height() + 16))
         self._update_responsive_layout()
 
     def _toggle_details(self, visible):
@@ -2850,6 +2984,33 @@ class OptimizationProgressWindow(QDialog):
             return
         self._fitting_workers = True
         try:
+            # Let Qt assign spare height to the worker grid. Compact cards are
+            # retained whenever the measured full presentation would not fit.
+            self._progress_header.layout().activate()
+            self.analysis_panel.layout().activate()
+            self._outer_layout.activate()
+            self._body_layout.activate()
+            cards = [self.worker_cards[key] for key in self.worker_grid.CORE_WORKERS]
+            for card in self.worker_cards.values():
+                if card._presentation_scale != self._presentation_scale:
+                    card.set_presentation_scale(self._presentation_scale)
+            reserved = self._body_layout.contentsMargins().top() + self._body_layout.contentsMargins().bottom()
+            for index in range(self._body_layout.count()):
+                item = self._body_layout.itemAt(index)
+                widget = item.widget()
+                if (widget is not None and widget not in (self.worker_grid, self.extra_worker_grid)
+                        and not widget.isHidden()):
+                    height = (widget.heightForWidth(self.body_scroll.viewport().width())
+                        if widget.hasHeightForWidth() else widget.sizeHint().height())
+                    reserved += height + self._body_layout.spacing()
+            available = max(0, self.body_scroll.viewport().height() - reserved)
+            self.worker_grid.set_viewport_height(available)
+            rows = (len(cards) + max(1, self.worker_grid._columns) - 1) // max(1, self.worker_grid._columns)
+            spacious = (self.worker_grid._columns == 2 and self.body_scroll.viewport().width() >= 1000
+                and available >= rows * max(card.spacious_minimum_height() for card in cards)
+                    + self.worker_grid.grid.verticalSpacing() * (rows - 1))
+            for card in cards:
+                card.set_spacious(spacious)
             self.worker_grid.reflow()
             if self.completion_review.isVisible():
                 self.completion_review.layout().activate()
@@ -2900,7 +3061,7 @@ class OptimizationProgressWindow(QDialog):
             return
         if payload['enabled'] is False:
             self.space_guard_status.setText('Drive-space buffer check is disabled for this run. Free space and shortfall are unverified.')
-            self.space_guard_status.setStyleSheet('')
+            set_scaled_style(self.space_guard_status, '', self._presentation_scale)
             self.space_guard_status.setToolTip('The saved drive-space check is disabled; no passing measurement is implied.')
             self.space_guard_icon.hide()
             self.space_guard_status.show()
@@ -2935,7 +3096,8 @@ class OptimizationProgressWindow(QDialog):
         self.space_guard_status.setText(text)
         self.space_guard_status.setToolTip(text + '\nRead-only observation; this does not reserve disk space or authorize extra deletion.')
         self.space_guard_status.setAccessibleDescription(self.space_guard_status.toolTip())
-        self.space_guard_status.setStyleSheet('color:#e8b34b;' if attention or payload.get('complete') is not True else '')
+        set_scaled_style(self.space_guard_status,
+            'color:#e8b34b;' if attention or payload.get('complete') is not True else '', self._presentation_scale)
         self.space_guard_icon.setVisible(bool(attention or payload.get('complete') is not True))
         self.space_guard_status.show()
         self.space_guard_panel.show()
@@ -3040,6 +3202,7 @@ class OptimizationProgressWindow(QDialog):
         threat_text = f'Active threats: {count}' if type(count) is int and 0 <= count <= 1000000 else 'Threat results: not yet verified'
         if verified and type(count) is not int:
             threat_text = 'Scan completed; review threat results'
+        card._totals_presentation = 'threats'
         card.totals.set_summary(threat_text + '\nQuarantine: Defender policy',
             threat_text + '\nDefender controls automatic protection and quarantine. Optimus requests removal only after explicit approval.')
 
@@ -3852,6 +4015,7 @@ class SecurityReviewDialog(QDialog):
 class OptimusWindow(QMainWindow):
     def __init__(self, backend, *, smoke_test=False, defer_activation=False, require_launch_review=False):
         super().__init__()
+        self._surface_scale = 1.0
         self.backend, self.smoke_test = backend, smoke_test
         self._defer_activation = defer_activation
         from .launch_review import LaunchConsent
@@ -3897,22 +4061,28 @@ class OptimusWindow(QMainWindow):
         self.resize(1280, 820)
         self.setMinimumSize(640, 480)
         self.setStyleSheet(self._qss())
+        self.setProperty('_optimus_surface_style', self.styleSheet())
         self.canvas = StarfieldCanvas(motion_allowed(self.config))
         layout = QVBoxLayout(self.canvas)
         layout.setContentsMargins(22, 22, 22, 22)
         layout.addStretch(3)
         brand = QLabel('OPTIMUS')
+        self._brand_label = brand
         brand.setAlignment(Qt.AlignCenter)
         brand.setMinimumWidth(0)
         brand.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        brand.setStyleSheet('font-size:52px;font-weight:800;letter-spacing:11px;color:#1f9cff;background:transparent;')
+        brand.setStyleSheet(self._menu_brand_style(1.0))
+        brand.setProperty('_optimus_surface_style', brand.styleSheet())
         layout.addWidget(brand)
         subtitle = QLabel('COMPUTER OPTIMIZATION TOOL')
+        self._subtitle_label = subtitle
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet('font-size:12px;letter-spacing:4px;color:#94a3b8;background:transparent;')
+        subtitle.setStyleSheet(self._menu_subtitle_style(1.0))
+        subtitle.setProperty('_optimus_surface_style', subtitle.styleSheet())
         layout.addWidget(subtitle)
         layout.addSpacing(10)
         self.main_buttons = []
+        self._main_button_roles = []
         for label, callback, role in (
             ('1 click Optimize and debloat', self.start_optimization, 'primary'),
             ('Settings', self.open_settings, 'secondary'), ('Sandbox', self.open_sandbox, 'secondary'),
@@ -3924,19 +4094,15 @@ class OptimusWindow(QMainWindow):
             button.setMaximumWidth(430)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet('QPushButton {font-size:16px;font-weight:700;border-radius:10px;padding:10px;'+
-                ('background:#1f9cff;color:#07111f;border:1px solid #6ac0ff;' if role == 'primary' else
-                 'background:#a42b3e;color:#fff;border:1px solid #f07788;' if role == 'danger' else
-                 'background:#101925;color:#d6e2f0;border:1px solid #33455d;')+
-                '} QPushButton:hover {background:' + ('#54b4ff' if role == 'primary' else '#c83950' if role == 'danger' else '#192b40')
-                + ';} QPushButton:pressed {padding-top:12px;} QPushButton:focus {border:2px solid #d5eaff;}'
-                + ' QPushButton:disabled {background:#152333;color:#8394aa;border:1px solid #283a50;}')
+            button.setStyleSheet(self._menu_action_style(role, 1.0))
+            button.setProperty('_optimus_surface_style', button.styleSheet())
             button.clicked.connect(callback)
             row.addWidget(button, 4)
             row.addStretch()
             layout.addLayout(row)
             layout.addSpacing(6)
             self.main_buttons.append(button)
+            self._main_button_roles.append(role)
         layout.addSpacing(8)
         self.status = QLabel('Your configured tools. One local workspace.')
         self.status.setAlignment(Qt.AlignCenter)
@@ -3964,10 +4130,43 @@ class OptimusWindow(QMainWindow):
         self._build_tray()
         QApplication.instance().setQuitOnLastWindowClosed(True)
         QApplication.instance().aboutToQuit.connect(self.shutdown)
+        from .widgets.responsive import ResponsiveWindowScale
+        self._surface_scaling = ResponsiveWindowScale(self, self._apply_surface_scale, baseline=(1280, 820))
+
+    @staticmethod
+    def _menu_brand_style(scale):
+        return (f'font-size:{round(52 * scale)}px;font-weight:800;letter-spacing:{round(11 * scale)}px;'
+                'color:#1f9cff;background:transparent;')
+
+    @staticmethod
+    def _menu_subtitle_style(scale):
+        return f'font-size:{round(12 * scale)}px;letter-spacing:{round(4 * scale)}px;color:#94a3b8;background:transparent;'
+
+    @staticmethod
+    def _menu_action_style(role, scale):
+        return (f'QPushButton {{font-size:{round(16 * scale)}px;font-weight:700;border-radius:10px;padding:{round(10 * scale)}px;'
+            + ('background:#1f9cff;color:#07111f;border:1px solid #6ac0ff;' if role == 'primary' else
+               'background:#a42b3e;color:#fff;border:1px solid #f07788;' if role == 'danger' else
+               'background:#101925;color:#d6e2f0;border:1px solid #33455d;')
+            + '} QPushButton:hover {background:' + ('#54b4ff' if role == 'primary' else '#c83950' if role == 'danger' else '#192b40')
+            + f';}} QPushButton:pressed {{padding-top:{round(12 * scale)}px;}} QPushButton:focus {{border:2px solid #d5eaff;}}'
+            + ' QPushButton:disabled {background:#152333;color:#8394aa;border:1px solid #283a50;}')
+
+    def _apply_surface_scale(self, scale):
+        self._surface_scale = scale
+        apply_style = DetailedSettingsWindow._responsive_style
+        apply_style(self, self._qss())
+        apply_style(self._brand_label, self._menu_brand_style(scale))
+        apply_style(self._subtitle_label, self._menu_subtitle_style(scale))
+        width = min(760, max(360, round(430 * self.width() / 1280)))
+        for button, role in zip(self.main_buttons, self._main_button_roles):
+            button.setMinimumHeight(round(52 * scale))
+            button.setMaximumWidth(width)
+            apply_style(button, self._menu_action_style(role, scale))
 
     def _qss(self):
         theme = self.appearance.get('theme', 'cyber')
-        return build_qss(theme if theme in THEMES else 'cyber')
+        return build_qss(theme if theme in THEMES else 'cyber', scale=getattr(self, '_surface_scale', 1.0))
 
     def select_page(self, name):
         self.open_settings(page=name)
@@ -4570,6 +4769,7 @@ class OptimusWindow(QMainWindow):
         self.canvas.motion = motion_allowed(self.config)
         self.canvas.sync_motion()
         self.setStyleSheet(self._qss())
+        self.setProperty('_optimus_surface_style', self.styleSheet())
 
     def open_revert(self, checked=False):
         if self._startup_update_pending:

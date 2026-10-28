@@ -543,6 +543,7 @@ class NativeSettingsWindow(DetailedSettingsWindow):
     """Native operations use the existing worker/confirmation/table contracts."""
     def __init__(self, backend, owner, *, smoke_test=False):
         QMainWindow.__init__(self)
+        self._surface_scale = 1.0
         self.backend, self.owner, self.smoke_test = backend, owner, smoke_test
         self.busy = False
         self._workers = set()
@@ -553,6 +554,7 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         self.setWindowTitle('Optimus — native settings and tools')
         self.resize(1160, 800)
         self.setStyleSheet(build_qss('cyber'))
+        self.setProperty('_optimus_surface_style', self.styleSheet())
         central = QWidget()
         body = QVBoxLayout(central)
         self.tabs = QTabWidget()
@@ -576,6 +578,14 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         for name in ('Smart cleaning', 'Maintenance toolkit', 'Workers', 'File utilities', 'Recovery'):
             self.page(name)
         self._build_extended_tools()
+        from .widgets.responsive import ResponsiveWindowScale
+        self._surface_scaling = ResponsiveWindowScale(self, self._apply_surface_scale, baseline=(1160, 800))
+
+    def _apply_surface_scale(self, scale):
+        self._surface_scale = scale
+        theme = self.owner.appearance.get('theme', 'cyber')
+        self._responsive_style(self, build_qss(theme if theme in THEMES else 'cyber', scale=scale))
+        self._fit_surface_tables(scale)
 
     def page(self, name, *, scroll=True):
         content = QWidget()
@@ -640,7 +650,8 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         try:
             atomic_json(self.owner.preferences_path, value)
             self.owner.apply_appearance(value)
-            self.setStyleSheet(build_qss(value['theme']))
+            self.setStyleSheet(build_qss(value['theme'], scale=self._surface_scale))
+            self.setProperty('_optimus_surface_style', self.styleSheet())
             self.status.setText('Appearance saved. The reduced-motion setup choice still takes precedence.')
         except (OSError, ValueError, RuntimeError) as error:
             self._error(str(error))

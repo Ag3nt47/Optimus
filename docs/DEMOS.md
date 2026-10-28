@@ -1,6 +1,6 @@
 # Optimus demo gallery
 
-See the main controls, live worker layout, bottom resource/disk panel, full-screen controls, completion review and editable Sandbox in Optimus 0.12.9.
+See the main controls, live worker layout, bottom resource/disk panel, full-screen controls, completion review and editable Sandbox in Optimus 0.12.10.
 
 **These are sample-data previews.** They render the real Qt interface against an inert fixture backend. Every frame is labelled **SAMPLE DATA DEMO**. Progress, file counts, download sizes, update offers and outcomes are simulated; they do not describe the capture computer or establish a performance gain, successful live update, driver installation or recovery.
 

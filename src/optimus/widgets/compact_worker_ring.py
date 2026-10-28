@@ -33,11 +33,21 @@ class CompactWorkerHeader(QWidget):
 class CompactWorkerActivityRing(WorkerActivityRing):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._presentation_scale = 1.0
         self.setFixedSize(48, 54)
+
+    def set_presentation_scale(self, scale):
+        scale = max(1.0, min(1.6, float(scale)))
+        if self._presentation_scale == scale:
+            return
+        self._presentation_scale = scale
+        self.setFixedSize(round(48 * scale), round(54 * scale))
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.scale(self._presentation_scale, self._presentation_scale)
         ellipse = QRectF(3, 2, 42, 42)
         pen = QPen(QColor('#263b4d'), 3)
         painter.setPen(pen)
@@ -60,5 +70,5 @@ class CompactWorkerActivityRing(WorkerActivityRing):
         font.setPixelSize(9)
         font.setBold(False)
         painter.setFont(font)
-        caption = painter.fontMetrics().elidedText(self.phase_caption, Qt.ElideRight, self.width())
-        painter.drawText(QRectF(0, 44, self.width(), 10), Qt.AlignCenter, caption)
+        caption = painter.fontMetrics().elidedText(self.phase_caption, Qt.ElideRight, 48)
+        painter.drawText(QRectF(0, 44, 48, 10), Qt.AlignCenter, caption)
