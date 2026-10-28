@@ -472,6 +472,26 @@ def _bounded_disk_readiness(value):
     return saved
 
 
+def _bounded_payload_cleanup(value):
+    if not isinstance(value, dict):
+        return {}
+    saved = {}
+    if type(value.get('schema')) is int and value['schema'] == 1:
+        saved['schema'] = 1
+    for key in ('kind', 'provider', 'ownership', 'status', 'workspace_id', 'package_id', 'reason', 'note'):
+        if isinstance(value.get(key), str):
+            saved[key] = value[key][:1000 if key in ('reason', 'note') else 280]
+    for key in ('workspace_owned', 'supported', 'requested_enabled', 'complete'):
+        if type(value.get(key)) is bool:
+            saved[key] = value[key]
+    for key in ('removed_files', 'removed_bytes', 'removed_directories', 'retained_entries', 'inspected_entries'):
+        if type(value.get(key)) is int and 0 <= value[key] <= 2**63 - 1:
+            saved[key] = value[key]
+    if isinstance(value.get('errors'), list):
+        saved['errors'] = [item[:400] for item in value['errors'][:8] if isinstance(item, str)]
+    return saved
+
+
 def _journal_result(result):
     saved = {key: result[key] for key in ('failed_items', 'cancelled', 'restartNeeded', 'uncertain', 'policy', 'review_only',
              'stop_reason', 'reason', 'installer_started', 'outcomeKnown', 'running', 'blocked_by_prior_installer',
@@ -483,6 +503,8 @@ def _journal_result(result):
         saved['deferred_ids'] = [value[:280] for value in result['deferred_ids'][:1000] if isinstance(value, str)]
     if _bounded_disk_readiness(result.get('disk_readiness')):
         saved['disk_readiness'] = _bounded_disk_readiness(result['disk_readiness'])
+    if _bounded_payload_cleanup(result.get('payload_cleanup')):
+        saved['payload_cleanup'] = _bounded_payload_cleanup(result['payload_cleanup'])
     totals = normalize_resource_totals(result.get('resource_totals'))
     if totals is not None:
         saved['resource_totals'] = totals
@@ -522,6 +544,8 @@ def _journal_result(result):
             compact['result']['automatic_recheck'] = _bounded_automatic_recheck(outcome['automatic_recheck'])
         if _bounded_disk_readiness(outcome.get('disk_readiness')):
             compact['result']['disk_readiness'] = _bounded_disk_readiness(outcome['disk_readiness'])
+        if _bounded_payload_cleanup(outcome.get('payload_cleanup')):
+            compact['result']['payload_cleanup'] = _bounded_payload_cleanup(outcome['payload_cleanup'])
     rechecks = result.get('automatic_update_rechecks')
     if isinstance(rechecks, dict):
         saved['automatic_update_rechecks'] = {key: rechecks[key]

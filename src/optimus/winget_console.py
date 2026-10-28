@@ -30,6 +30,25 @@ _RETAINED_LOCK = threading.RLock()
 _MAX_RECEIPT = 8192
 
 
+def _environment_block(overrides):
+    """Pass private temp overrides to this supervisor only; never mutate GUI env."""
+    if overrides is None:
+        return None
+    if (not isinstance(overrides, dict) or not overrides
+            or set(overrides) - {'TEMP', 'TMP', 'TMPDIR'}):
+        raise ValueError('Only private per-attempt temporary directories may be overridden.')
+    if any(not isinstance(value, str) or not value or '\0' in value
+           or not ntpath.isabs(value) or len(value) > 1024 for value in overrides.values()):
+        raise ValueError('Private update temporary paths must be absolute and bounded.')
+    environment = {key: value for key, value in os.environ.items()
+                   if key.upper() not in overrides}
+    environment.update(overrides)
+    text = '\0'.join(key + '=' + value for key, value in sorted(environment.items(), key=lambda pair: pair[0].casefold())) + '\0\0'
+    if len(text) > 32767:
+        raise ValueError('The private update environment exceeds the Windows bound.')
+    return ctypes.create_unicode_buffer(text)
+
+
 class ConsolePreflightError(RuntimeError):
     """Verified failure before any supervisor or target process was created."""
     installer_started = False
@@ -350,8 +369,11 @@ class _ConsoleProcess:
             startup.lpAttributeList = ctypes.cast(attributes, ctypes.c_void_p)
             information = _ProcessInfo()
             line = ctypes.create_unicode_buffer(command)
-            if not self.kernel.CreateProcessW(helper[0], line, None, None, True, 0x00080000,
-                    None, None, ctypes.byref(startup), ctypes.byref(information)):
+            environment = getattr(self, 'environment_block', None)
+            flags = 0x00080000 | (0x00000400 if environment is not None else 0)
+            if not self.kernel.CreateProcessW(helper[0], line, None, None, True, flags,
+                    ctypes.cast(environment, ctypes.c_void_p) if environment is not None else None,
+                    None, ctypes.byref(startup), ctypes.byref(information)):
                 raise ctypes.WinError(ctypes.get_last_error())
             self.started = True
             self.pid, self.process = information.dwProcessId, information.hProcess
@@ -631,7 +653,7 @@ class _Session:
         self.ready.set()
 
 
-def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_handoff=False):
+def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_handoff=False, environment=None):
     """Run once in a hidden console; a timeout retains every live native handle.
 
     stdout and stderr share the pseudoconsole's ordered output stream. Callback
@@ -645,6 +667,7 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
         raise ValueError('Console progress needs a callable reporter.')
     if type(allow_resident_handoff) is not bool:
         raise ValueError('Resident handoff needs an explicit Boolean choice.')
+    environment = _environment_block(environment)
     started = time.monotonic()
     native = None
     try:
@@ -654,6 +677,7 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
             _source_console_executable()  # Reject a missing helper before preparation.
         native = _ConsoleProcess()
         native.allow_resident_handoff = allow_resident_handoff
+        native.environment_block = environment
         session = _Session(native, arguments, progress_callback)
         session.start()
     except Exception as error:

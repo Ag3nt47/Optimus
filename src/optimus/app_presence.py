@@ -172,10 +172,12 @@ class WindowsAppPresence:
         self.backend = backend
         self.maintenance = backend.maintenance
 
-    def _run(self, arguments, timeout=90, *, progress_callback=None):
+    def _run(self, arguments, timeout=90, *, progress_callback=None, environment=None):
         options = {'timeout': timeout}
         if progress_callback is not None and accepts_progress_callback(self.maintenance._run):
             options['progress_callback'] = progress_callback
+        if environment is not None:
+            options['environment'] = environment
         return self.maintenance._run([self.maintenance._winget(), *arguments], **options)
 
     def _source(self):
@@ -288,27 +290,49 @@ class WindowsAppPresence:
                              message='The quiet application operation must return before this worker continues.')
         if cancel_event is not None and cancel_event.is_set():
             return _known('Cancelled before the application installer started.', cancelled=True, skipped=True)
+        from .update_payload_lifecycle import PayloadAttempt, console_quiescent, accepts_child_environment
+        attempt = PayloadAttempt(self.backend.data_dir, 'winget', fresh['id'],
+            environment_supported=accepts_child_environment(self.maintenance._run)) if action == 'install' else None
+        result = None
+        def with_payload(value):
+            if attempt is not None:
+                verified = value.get('verified') is True
+                quiescent = console_quiescent(result)
+                pending = True
+                if verified and quiescent and value.get('restartNeeded') is not True:
+                    try:
+                        status = self.backend.security_status()
+                        pending = not (isinstance(status, dict) and status.get('reboot_required') is False)
+                    except Exception:
+                        pass
+                value['payload_cleanup'] = attempt.finish(value, verified=verified,
+                    quiescent=quiescent, restart_pending=pending,
+                    download_hashes=(fresh['catalog']['installer_sha256'],))
+            return value
         try:
-            result = self._run(arguments, timeout=1800, progress_callback=progress_callback)
+            options = {'environment': attempt.environment} if attempt is not None and attempt.environment else {}
+            result = self._run(arguments, timeout=1800, progress_callback=progress_callback, **options)
         except (FileNotFoundError, PermissionError) as error:
+            if attempt is not None:
+                attempt.finish({'installer_started': False, 'outcomeKnown': True, 'running': False})
             raise PresencePreflightError('WinGet could not be started; no application installer was launched.') from error
         except Exception as error:
             if (getattr(error, 'installer_started', None) is False
                     and getattr(error, 'outcomeKnown', None) is True
                     and getattr(error, 'running', None) is False):
                 raise PresencePreflightError('The native progress console could not be prepared; no installer was launched.') from error
-            return {'installer_started': True, 'outcomeKnown': False, 'running': True,
+            return with_payload({'installer_started': True, 'outcomeKnown': False, 'running': True,
                 'uncertain': True, 'requiresReview': True, 'error': str(error)[:2000],
-                'note': 'Application installer outcome is unknown; no automatic retry is allowed.'}
+                'note': 'Application installer outcome is unknown; no automatic retry is allowed.'})
         try:
             _require(getattr(result, 'capture_complete', True) is True,
                      'The package-manager transcript was incomplete; its native outcome needs review.')
             text = _text(result)
             code = result.returncode & 0xffffffff
         except Exception as error:
-            return {'installer_started': True, 'outcomeKnown': False, 'running': False,
+            return with_payload({'installer_started': True, 'outcomeKnown': False, 'running': False,
                 'uncertain': True, 'requiresReview': True, 'error': str(error)[:2000],
-                'note': 'The launched package manager returned invalid completion metadata; automatic retry is blocked.'}
+                'note': 'The launched package manager returned invalid completion metadata; automatic retry is blocked.'})
         restart = code in (3010, 1641, 0x8A150109, 0x8A15010A, 0x8A15010B) or any(message in text.casefold()
             for message in ('restart your pc to finish installation.', 'your pc will restart to finish installation.'))
         running = code in (1618, 0x8A150102)
@@ -318,7 +342,7 @@ class WindowsAppPresence:
         if running:
             value.update(uncertain=True, requiresReview=True,
                          note='Another installer is still running; no retry or later conflicting action was started.')
-            return value
+            return with_payload(value)
         if progress_callback is not None:
             try:
                 progress_callback({'phase': 'verify', 'percent': None})
@@ -328,8 +352,8 @@ class WindowsAppPresence:
             self._source()
             after = self.installed(fresh['id'])
         except Exception as error:
-            return dict(value, outcomeKnown=False, uncertain=True, requiresReview=True,
-                        note='The application postcondition could not be verified; automatic retry is blocked.', error=str(error)[:2000])
+            return with_payload(dict(value, outcomeKnown=False, uncertain=True, requiresReview=True,
+                        note='The application postcondition could not be verified; automatic retry is blocked.', error=str(error)[:2000]))
         verified = (after is None if action == 'uninstall' else after is not None and
                     after['version'] == fresh['catalog']['version'])
         value.update(verified=verified and code in (0, 3010, 1641), after=after,
@@ -340,7 +364,7 @@ class WindowsAppPresence:
                 progress_callback({'phase': action, 'percent': 100.0, 'item_terminal': True})
             except Exception:
                 pass
-        return value
+        return with_payload(value)
 
 
 def _known(note, **fields):

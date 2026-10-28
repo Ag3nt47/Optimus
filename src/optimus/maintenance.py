@@ -68,7 +68,7 @@ class Maintenance:
     Caller-supplied command strings, target payloads and action changes are ignored.
     """
 
-    def __init__(self, bridge: Any, data_dir: str | Path):
+    def __init__(self, bridge: Any, data_dir: str | Path, *, restart_reader=None):
         self.bridge = bridge
         self.data_dir = Path(data_dir)
         self.plan_dir = self.data_dir / "MaintenancePlans"
@@ -76,6 +76,7 @@ class Maintenance:
         self._last_update_ids: set[str] = set()
         self._last_update_packages: dict[str, dict[str, str]] = {}
         self._last_update_scan = 0.0
+        self._payload_restart_reader = restart_reader
 
     @staticmethod
     def debloat_actions() -> list[dict[str, Any]]:
@@ -245,15 +246,25 @@ class Maintenance:
 
     @staticmethod
     def _run(arguments: list[str], *, timeout: float = 120, progress_callback=None,
-             allow_resident_handoff=False) -> subprocess.CompletedProcess[str]:
-        if progress_callback is not None:
+             allow_resident_handoff=False, environment=None) -> subprocess.CompletedProcess[str]:
+        if progress_callback is not None or environment is not None and os.name == 'nt':
             if os.name == 'nt':
                 from .winget_console import run_winget_console
-                return run_winget_console(arguments, timeout=timeout, progress_callback=progress_callback,
-                    allow_resident_handoff=allow_resident_handoff)
+                options = {'environment': environment} if environment is not None else {}
+                return run_winget_console(arguments, timeout=timeout, progress_callback=progress_callback or (lambda value: None),
+                    allow_resident_handoff=allow_resident_handoff, **options)
             from .winget_progress import run_winget_with_progress
-            return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback)
-        return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            options = {'environment': environment} if environment is not None else {}
+            return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback, **options)
+        options = {'env': dict(os.environ, **environment)} if environment is not None else {}
+        return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options)
+
+    def _payload_restart_pending(self):
+        try:
+            status = self._payload_restart_reader() if callable(self._payload_restart_reader) else None
+            return not (isinstance(status, dict) and status.get('reboot_required') is False)
+        except Exception:
+            return True
 
     @staticmethod
     def _winget() -> str:
@@ -542,12 +553,17 @@ class Maintenance:
             arguments += ["--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
         else:
             arguments += ["--disable-interactivity"]
+        attempt = None
         try:
             if (interrupted := cancelled_result()) is not None:
                 return interrupted
             if (held := held_result()) is not None:
                 return held
+            from .update_payload_lifecycle import PayloadAttempt
+            attempt = PayloadAttempt(self.data_dir, 'winget', package_id)
             run_options = {'timeout': 1800}
+            if attempt.environment:
+                run_options['environment'] = attempt.environment
             if progress_callback is not None:
                 run_options['progress_callback'] = progress_callback
                 # Explicit experimental opt-in. The retained safe console owner
@@ -560,15 +576,22 @@ class Maintenance:
                     run_options['allow_resident_handoff'] = True
             result = self._run(arguments, **run_options)
         except subprocess.TimeoutExpired:
+            if attempt is not None:
+                attempt.finish({'installer_started': True, 'outcomeKnown': False, 'running': True})
             # The vendor child can outlive WinGet. Never retry or replay here.
             raise UpdateOutcomeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
         except (FileNotFoundError, PermissionError) as error:
+            if attempt is not None:
+                attempt.finish({'installer_started': False, 'outcomeKnown': True, 'running': False})
             # These launch errors occur before CreateProcess starts WinGet;
             # a missing/replaced executable is not a detached installer.
             raise UpdatePreflightError("WinGet could not be started; no installer was launched.",
                 failure_scope='shared' if isinstance(error, PermissionError) else 'app_batch',
                 failureKind='authorization' if isinstance(error, PermissionError) else 'manager_unavailable') from error
         except Exception as error:
+            if attempt is not None:
+                attempt.finish({'installer_started': getattr(error, 'installer_started', None),
+                    'outcomeKnown': False, 'running': getattr(error, 'running', None)})
             if (getattr(error, 'installer_started', None) is False and getattr(error, 'outcomeKnown', None) is True
                     and getattr(error, 'running', None) is False):
                 raise UpdatePreflightError('The progress console could not be prepared; no application installer was launched.',
@@ -577,6 +600,8 @@ class Maintenance:
         from .resident_update_completion import verified_resident_handoff
         resident_handoff = verified_resident_handoff(result, arguments)
         if getattr(result, 'capture_complete', True) is not True and not resident_handoff:
+            if attempt is not None:
+                attempt.finish({'installer_started': True, 'outcomeKnown': False, 'running': True})
             raise UpdateOutcomeError('The WinGet transcript was incomplete or exceeded its bound. Restart and installer state could not be verified; no automatic retry is authorized.')
         output = _ANSI.sub("", result.stdout or "")
         stderr = _ANSI.sub("", result.stderr or "")
@@ -616,6 +641,36 @@ class Maintenance:
                 key='software:update:' + package_id, label=package_id))
             if observed is not None and 'downloaded_bytes' in observed:
                 receipt['download_progress'] = observed
+        from .update_payload_lifecycle import console_quiescent
+        quiescent = console_quiescent(result)
+        verified, pending_restart, download_hashes = False, True, ()
+        if attempt is not None and attempt.enabled and quiescent and not restart and not installer_running:
+            try:
+                from .app_presence import parse_installed, parse_catalog
+                after = parse_installed(self._run([executable, 'list', '--id', package_id, '--exact',
+                    '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']), package_id)
+                verified = after is not None and after['version'] == current['available']
+                receipt['installed_version'] = after['version'] if after else None
+                receipt['verified'] = verified
+                if not verified:
+                    receipt['requiresReview'] = True
+                if verified:
+                    catalog = parse_catalog(self._run([executable, 'show', '--id', package_id, '--exact',
+                        '--source', 'winget', '--version', current['available'], '--accept-source-agreements',
+                        '--disable-interactivity']), package_id)
+                    verified = catalog['version'] == current['available']
+                    receipt['payload_installer_type'] = catalog['installer_type']
+                    if verified:
+                        download_hashes = (catalog['installer_sha256'],)
+                pending_restart = self._payload_restart_pending() if verified else True
+            except Exception:
+                verified = False
+                receipt['payload_verification_note'] = 'Fresh exact version and supported installer-handler readback could not both be verified; owned payloads are preserved.'
+        if attempt is not None:
+            cleanup_outcome = (dict(receipt, restartNeeded=False) if verified and quiescent
+                and restart is False and pending_restart is False else receipt)
+            receipt['payload_cleanup'] = attempt.finish(cleanup_outcome, verified=verified,
+                quiescent=quiescent, restart_pending=pending_restart, download_hashes=download_hashes)
         return receipt
 
     @staticmethod

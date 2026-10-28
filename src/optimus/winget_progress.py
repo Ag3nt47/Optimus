@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import codecs
 from decimal import Decimal
+import os
 import re
 import subprocess
 import threading
@@ -124,7 +125,7 @@ class _Capture:
             return self.size <= self.maximum
 
 
-def run_winget_with_progress(arguments, *, timeout, progress_callback):
+def run_winget_with_progress(arguments, *, timeout, progress_callback, environment=None):
     """Keep the same native arguments and capture result; never kill on a tick.
 
     At timeout, the caller retains its unknown-installer barrier. Reader threads
@@ -132,9 +133,10 @@ def run_winget_with_progress(arguments, *, timeout, progress_callback):
     attempted and inherited vendor stdout handles must also reach EOF before a
     normal completion receipt is returned.
     """
+    options = {'env': dict(os.environ, **environment)} if environment is not None else {}
     child = subprocess.Popen(arguments, shell=False, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **options)
     output, errors, reporting = _Capture(), _Capture(), threading.Event()
     read_fault, ready, progress_lock, latest = threading.Event(), threading.Event(), threading.Lock(), []
     reporting.set()

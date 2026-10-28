@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 import copy
 import ctypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,26 @@ def _identity(info):
 def _ordinary(info, *, directory=False):
     return (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode) and info.st_nlink == 1) and not (
         getattr(info, 'st_file_attributes', 0) & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY))
+
+
+def _windows_readonly(path):
+    """Open a leaf itself, denying write/delete sharing while its hash is read."""
+    import msvcrt
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateFileW(str(path), 0x80000080, 1, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        _ordinary_data_path(path, file=True)
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
 
 
 def _windows_directory(path, info, removable=False):
@@ -127,6 +148,8 @@ class _Directories(AbstractContextManager):
         path = Path(path)
         self.add(path.parent)
         if os.name == 'nt':
+            if not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC):
+                return _windows_readonly(path)
             return os.open(path, flags, mode)
         return os.open(path.name, flags | os.O_NOFOLLOW, mode, dir_fd=self.entries[path.parent][1])
 
@@ -258,13 +281,14 @@ class PayloadWorkspace:
                     or raw != self._manifest or _identity(os.fstat(stream.fileno())) != self._manifest_identity):
                 raise ValueError('Workspace evidence changed; payloads were preserved.')
 
-    def finish(self, outcome, *, verified=False, quiescent=False, restart_pending=False):
+    def finish(self, outcome, *, verified=False, quiescent=False, restart_pending=False, download_hashes=()):
         with self._lock:
             if self._finished:
                 return copy.deepcopy(self._receipt)
             self._finished = True
             report = dict(schema=1, kind='update_payload_cleanup', workspace_id=self._id, provider=self._provider,
                 package_id=self._package_id, status='preserved', removed_files=0, removed_bytes=0,
+                requested_enabled=self._enabled, supported=True,
                 ownership='none', workspace_owned=False,
                 removed_directories=0, retained_entries=0, inspected_entries=0, complete=True, errors=[],
                 note='Payloads are preserved unless installation, verification and process quiescence are explicit.')
@@ -272,17 +296,21 @@ class PayloadWorkspace:
                 report.update(status='disabled', note='Installer-payload cleanup is disabled.')
             elif not _successful(outcome, verified, quiescent, restart_pending):
                 report['note'] = 'Unverified, active, failed or restart-pending update: payloads and evidence were preserved.'
+            elif (not isinstance(download_hashes, (tuple, list, set, frozenset)) or not 1 <= len(download_hashes) <= 32
+                    or any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value) for value in download_hashes)):
+                report['note'] = 'No exact verified catalog download hashes were supplied; all payloads and evidence were preserved.'
             else:
                 try:
-                    self._clean(report)
+                    self._clean(report, frozenset(download_hashes))
                 except Exception as failure:
                     report.update(status='partial' if report['removed_files'] else 'preserved', complete=False)
                     report['errors'] = (report['errors'] + [type(failure).__name__ + ': payload cleanup stopped safely.'])[:8]
             self._receipt = copy.deepcopy(report)
             return copy.deepcopy(report)
 
-    def _clean(self, report):
+    def _clean(self, report, download_hashes):
         deadline, records, directories = time.monotonic() + _MAX_SECONDS, [], []
+        hashed_bytes = 0
         def error(message):
             report['complete'] = False
             if len(report['errors']) < 8:
@@ -292,7 +320,8 @@ class PayloadWorkspace:
                 self._validate(pins)
                 report.update(ownership='optimus_private_update_workspace', workspace_owned=True)
                 _write_new(pins, self._workspace / 'cleanup-intent.json',
-                    dict(schema=1, workspace_id=self._id, verified=True, quiescent=True, restart_pending=False))
+                    dict(schema=1, workspace_id=self._id, verified=True, quiescent=True, restart_pending=False,
+                         download_sha256=sorted(download_hashes)))
                 stack = [(self._payload, 0)]
                 while stack:
                     directory, depth = stack.pop()
@@ -318,8 +347,35 @@ class PayloadWorkspace:
                                 directories.append(path)
                                 stack.append((path, depth + 1))
                             elif path.suffix.casefold() in _SUFFIXES or re.fullmatch(r'[a-fA-F0-9]{64}', path.name):
-                                records.append(dict(path=str(path), root=str(self._payload), size=info.st_size,
-                                    modified_ns=info.st_mtime_ns, inode=info.st_ino, device=info.st_dev))
+                                if info.st_size > _MAX_BYTES - hashed_bytes:
+                                    raise TimeoutError('The bounded payload hash budget was reached.')
+                                digest = hashlib.sha256()
+                                with os.fdopen(pins.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0)), 'rb') as stream:
+                                    opened = os.fstat(stream.fileno())
+                                    expected = info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+                                    if (not _ordinary(opened) or
+                                            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != expected):
+                                        raise ValueError('The downloaded payload changed before hashing.')
+                                    while True:
+                                        if time.monotonic() >= deadline:
+                                            raise TimeoutError('The bounded payload hashing stopped.')
+                                        block = stream.read(1024**2)
+                                        if not block:
+                                            break
+                                        hashed_bytes += len(block)
+                                        if hashed_bytes > _MAX_BYTES:
+                                            raise TimeoutError('The bounded payload hash budget was reached.')
+                                        digest.update(block)
+                                    after = os.fstat(stream.fileno())
+                                    if (not _ordinary(after) or
+                                            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != expected):
+                                        raise ValueError('The downloaded payload changed while hashing.')
+                                if digest.hexdigest() in download_hashes:
+                                    records.append(dict(path=str(path), root=str(self._payload), size=info.st_size,
+                                        modified_ns=info.st_mtime_ns, inode=info.st_ino, device=info.st_dev,
+                                        expected_sha256=digest.hexdigest(), hash_deadline=deadline))
+                                else:
+                                    report['retained_entries'] += 1
                             else:
                                 report['retained_entries'] += 1
                 for record in records:
@@ -350,7 +406,7 @@ class PayloadWorkspace:
                     except (OSError, ValueError) as failure:
                         error(type(failure).__name__ + ': ' + str(failure))
                 report['status'] = 'completed' if report['complete'] else 'partial'
-                report['note'] = ('Only recognized payload files in this update workspace were considered. Evidence, protected files and workspace roots were retained. '
+                report['note'] = ('Only installer downloads matching exact verified catalog hashes in this update workspace were considered. Evidence, unmatched files and workspace roots were retained. '
                     'Empty child directories are removed only with pinned Windows handles; other folders are retained.')
                 _write_new(pins, self._workspace / 'cleanup-result.json', report)
         except (OSError, ValueError) as failure:

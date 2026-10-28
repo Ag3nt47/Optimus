@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
@@ -417,6 +418,30 @@ class Cleaner:
             return self._plans.pop(identity, None) is not None
 
     @staticmethod
+    def _verify_download_hash(record, read):
+        """Optional payload-only digest check on the exact leaf about to delete."""
+        expected = record.get('expected_sha256')
+        if expected is None:
+            return
+        deadline = record.get('hash_deadline')
+        if (not isinstance(expected, str) or len(expected) != 64 or any(char not in '0123456789abcdef' for char in expected)
+                or type(deadline) not in (int, float) or not math.isfinite(deadline)):
+            raise ValueError('Exact bounded installer-download hash proof is required.')
+        digest, total = hashlib.sha256(), 0
+        while True:
+            if time.monotonic() >= deadline:
+                raise ValueError('The bounded installer-download hash verification expired.')
+            block = read(1024**2)
+            if not block:
+                break
+            total += len(block)
+            if total > record['size']:
+                raise ValueError('The installer download grew during verification.')
+            digest.update(block)
+        if total != record['size'] or digest.hexdigest() != expected:
+            raise ValueError('The exact file no longer matches its verified catalog download hash.')
+
+    @staticmethod
     def _delete_exact(record: dict) -> None:
         path = Path(record['path'])
         info = path.lstat()
@@ -440,7 +465,7 @@ class Cleaner:
         kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(FileInformation)]
         kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.CreateFileW(str(path), 0x10000 | 0x80, 0, None, 3, 0x00200000, None)
+        handle = kernel.CreateFileW(str(path), 0x10000 | 0x80 | (0x80000000 if 'expected_sha256' in record else 0), 0, None, 3, 0x00200000, None)
         if handle == ctypes.c_void_p(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
@@ -466,6 +491,15 @@ class Cleaner:
                 raise ValueError('Open file identity no longer matches the preview.')
             if identity.attrs & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY):
                 raise ValueError('Protected file excluded.')
+            if 'expected_sha256' in record:
+                kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                           ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+                def read(count):
+                    block, received = ctypes.create_string_buffer(count), wintypes.DWORD()
+                    if not kernel.ReadFile(handle, block, count, ctypes.byref(received), None):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    return block.raw[:received.value]
+                Cleaner._verify_download_hash(record, read)
             delete_flag = wintypes.BOOLEAN(1)
             if not kernel.SetFileInformationByHandle(handle, 4, ctypes.byref(delete_flag), ctypes.sizeof(delete_flag)):
                 raise ctypes.WinError(ctypes.get_last_error())
@@ -504,6 +538,15 @@ class Cleaner:
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
                     or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != expected):
                 raise ValueError('File changed during cleanup; its bytes were preserved.')
+            if 'expected_sha256' in record:
+                with os.fdopen(os.open(staged, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd), 'rb') as stream:
+                    opened = os.fstat(stream.fileno())
+                    if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != expected:
+                        raise ValueError('The staged installer download identity changed.')
+                    Cleaner._verify_download_hash(record, stream.read)
+                    after = os.fstat(stream.fileno())
+                    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != expected:
+                        raise ValueError('The staged installer download changed while hashing.')
             os.unlink(staged, dir_fd=parent_fd)
             staged = None
         finally:

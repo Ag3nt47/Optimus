@@ -386,6 +386,11 @@ class NativePackages:
                 target = name + '-' + item['available'] + '.' + arch
                 result = self.runner.privileged([self.executable, '--assumeyes', 'upgrade', target], timeout=900, cancel_event=cancel_event)
             result.update(id=identity, from_version=item['version'], offered_version=item['available'])
+            from .update_payload_lifecycle import cleanup_enabled, retained_receipt
+            payload_cleanup_enabled = cleanup_enabled(self.data_dir)
+            result['payload_cleanup'] = retained_receipt(self.manager, payload_cleanup_enabled,
+                'This native adapter has no Optimus-owned download workspace with verified descendant quiescence; native package caches are preserved.',
+                status='provider_managed' if payload_cleanup_enabled else 'disabled')
             if result.get('cancelled'):
                 return dict(result, **no_install)
             result.update(installer_started=True, outcomeKnown=True, running=False)

@@ -1,5 +1,6 @@
 """Payload cleanup mutates only freshly created per-test workspaces."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import pickle
@@ -22,6 +23,9 @@ def workspace(tmp_path):
 
 
 def finish(service, **options):
+    options.setdefault('download_hashes', tuple(hashlib.sha256(raw).hexdigest() for raw in (
+        b'exe', b'msi', b'zip', b'hash', b'first', b'original', b'linked', b'preserve',
+        b'nested', b'open payload', b'owned', b'not removed', b'preserve reparse candidate')))
     return service.finish(dict(SUCCESS), verified=True, quiescent=True, **options)
 
 
@@ -49,6 +53,35 @@ def test_verified_success_deletes_only_recognized_private_payloads(workspace):
     manifest = root.parent / 'manifest.json'
     assert manifest.exists() and manifest.parent != root
     assert json.loads((root.parent / 'cleanup-result.json').read_text()) == result
+
+
+def test_verified_quiescent_success_requires_exact_download_hash(workspace):
+    service, root, _ = workspace
+    installer = root / 'download.msi'
+    installer.write_bytes(b'known publisher download')
+    uninstaller = root / 'unins000.exe'
+    uninstaller.write_bytes(b'required future uninstaller')
+    repair = root / 'renamed-repair.exe'
+    repair.write_bytes(b'required repair runtime')
+    result = finish(service, download_hashes=(hashlib.sha256(installer.read_bytes()).hexdigest(),))
+    assert result['removed_files'] == 1 and result['removed_bytes'] == len(b'known publisher download')
+    assert not installer.exists() and uninstaller.is_file() and repair.is_file()
+
+
+def test_same_inode_size_and_timestamp_content_swap_cannot_pass_download_hash(workspace, monkeypatch):
+    service, root, _ = workspace
+    path = root / 'setup.exe'
+    path.write_bytes(b'original')
+    delete = module.Cleaner._delete_exact
+    def change_content(record):
+        before = path.stat()
+        path.write_bytes(b'runtime!')
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        delete(record)
+    monkeypatch.setattr(module.Cleaner, '_delete_exact', change_content)
+    result = finish(service)
+    assert result['removed_files'] == result['removed_bytes'] == 0
+    assert path.read_bytes() == b'runtime!'
 
 
 @pytest.mark.parametrize('changes', [
