@@ -18,7 +18,7 @@ def test_offline_native_startup_safety_never_registers_host_tasks(tmp_path):
         capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(result.stdout)
-    assert report['Result'] == 'PASS' and report['Assertions'] == 56
+    assert report['Result'] == 'PASS' and report['Assertions'] == 77
     assert report['RealTaskRegistrations'] == report['RealTaskRemovals'] == 0
     assert report['RealExternalProgramsLaunched'] == 0
     assert report['FixtureTaskFilesOnly'] is True

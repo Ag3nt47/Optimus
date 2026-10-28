@@ -20,6 +20,24 @@ function ConvertTo-OptimusCanonicalTaskXml([string]$Text) {
     $reader=[Xml.XmlReader]::Create([IO.StringReader]::new($Text),$settings)
     try{$document=[Xml.XmlDocument]::new();$document.PreserveWhitespace=$false;$document.XmlResolver=$null;$document.Load($reader)}finally{$reader.Dispose()}
     if($document.DocumentElement.LocalName -cne 'Task' -or $document.DocumentElement.NamespaceURI -cne 'http://schemas.microsoft.com/windows/2004/02/mit/task'){throw 'Persisted task XML has an unexpected root.'}
+    # The principalType xs:all permits Windows to reorder these singleton children.
+    # https://learn.microsoft.com/windows/win32/taskschd/taskschedulerschema-principaltype-complextype
+    # Keep every value/attribute and all other XML order, including Actions/Triggers.
+    $namespace=[Xml.XmlNamespaceManager]::new($document.NameTable)
+    $namespace.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+    $principalOrder=@('UserId','LogonType','GroupId','DisplayName','RunLevel','ProcessTokenSidType','RequiredPrivileges')
+    foreach($principal in $document.SelectNodes('/t:Task/t:Principals/t:Principal',$namespace)){
+        $singletons=@{}
+        foreach($child in @($principal.ChildNodes)){
+            if($child.NodeType -ne [Xml.XmlNodeType]::Element -or $child.NamespaceURI -cne $document.DocumentElement.NamespaceURI -or $child.LocalName -cnotin $principalOrder -or $singletons.ContainsKey($child.LocalName)){
+                throw 'Persisted task Principal has an unknown, indirect or duplicate child.'
+            }
+            $singletons[$child.LocalName]=$child
+        }
+        foreach($name in $principalOrder){
+            if($singletons.ContainsKey($name)){[void]$principal.AppendChild($singletons[$name])}
+        }
+    }
     Add-Type -AssemblyName System.Security
     $canonical=[Security.Cryptography.Xml.XmlDsigC14NTransform]::new();$canonical.LoadInput($document)
     $stream=$canonical.GetOutput([IO.Stream]);$hash=[Security.Cryptography.SHA256]::Create()

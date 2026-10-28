@@ -70,6 +70,40 @@ $utf16=Read-OptimusPersistedTask $name $xml
 Assert-Fixture ($utf16.verified -eq $true) 'UTF-16 BOM storage is decoded independently'
 Assert-Fixture ($utf16.canonical_sha256 -ceq $verified.canonical_sha256) 'UTF-8 and UTF-16 storage preserve the same canonical XML'
 
+$principal='<Principals><Principal id="Fixture"><UserId>S-1-5-21-111-222-333-1001</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>'
+$principalReordered='<Principals><Principal id="Fixture"><RunLevel>HighestAvailable</RunLevel><UserId>S-1-5-21-111-222-333-1001</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals>'
+$principalXml=$xml.Replace('<Actions',$principal+'<Actions')
+$principalDisk=$xml.Replace('<Actions',$principalReordered+'<Actions')
+Write-FixtureTask $principalDisk
+$principalProof=Read-OptimusPersistedTask $name $principalXml
+Assert-Fixture ($principalProof.verified -eq $true) 'schema-unordered Principal children survive actual disk readback'
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml $principalDisk) -ceq (ConvertTo-OptimusCanonicalTaskXml $principalXml)) 'only Principal xs:all order is normalized'
+foreach($badPrincipal in @(
+    $principalReordered.Replace('333-1001','333-1002'),
+    $principalReordered.Replace('HighestAvailable','LeastPrivilege'),
+    $principalReordered.Replace('<LogonType>InteractiveToken</LogonType>',''),
+    $principalReordered.Replace('</Principal>','<UserId>S-1-5-21-111-222-333-1001</UserId></Principal>'),
+    $principalReordered.Replace('</Principal>','<Unknown>unchanged</Unknown></Principal>'),
+    $principalReordered.Replace('<RunLevel>','<RunLevel xmlns="urn:foreign">'),
+    $principalReordered.Replace('id="Fixture"','id="Changed"')
+)){
+    Write-FixtureTask ($xml.Replace('<Actions',$badPrincipal+'<Actions'))
+    $null=Expect-FixtureFailure {Read-OptimusPersistedTask $name $principalXml} 'persisted_task_unverified'
+}
+$extended=$principal.Replace('</Principal>','<DisplayName>Fixture display</DisplayName><ProcessTokenSidType>Unrestricted</ProcessTokenSidType><RequiredPrivileges><Privilege>SeChangeNotifyPrivilege</Privilege><Privilege>SeBackupPrivilege</Privilege></RequiredPrivileges></Principal>')
+$extendedReordered=$extended.Replace('<UserId>S-1-5-21-111-222-333-1001</UserId>','').Replace('</Principal>','<UserId>S-1-5-21-111-222-333-1001</UserId></Principal>')
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml ($xml.Replace('<Actions',$extended+'<Actions'))) -ceq (ConvertTo-OptimusCanonicalTaskXml ($xml.Replace('<Actions',$extendedReordered+'<Actions')))) 'all seven documented Principal singletons retain their values while reordered'
+$group=$principal.Replace('<UserId>S-1-5-21-111-222-333-1001</UserId>','<GroupId>S-1-5-32-545</GroupId>')
+$groupReordered=$group.Replace('<RunLevel>HighestAvailable</RunLevel>','').Replace('<Principal id="Fixture">','<Principal id="Fixture"><RunLevel>HighestAvailable</RunLevel>')
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml ($xml.Replace('<Actions',$group+'<Actions'))) -ceq (ConvertTo-OptimusCanonicalTaskXml ($xml.Replace('<Actions',$groupReordered+'<Actions')))) 'documented GroupId singleton can change order without changing identity'
+$orderedXml=$principalXml.Replace('</Actions>','<Exec><Command>D:\fixture\Second.exe</Command></Exec></Actions>').Replace('<Principals>','<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger><TimeTrigger><Enabled>false</Enabled></TimeTrigger></Triggers><Principals>')
+$actionReordered=$orderedXml.Replace('<Exec><Command>D:\fixture\Optimus.exe</Command></Exec><Exec><Command>D:\fixture\Second.exe</Command></Exec>','<Exec><Command>D:\fixture\Second.exe</Command></Exec><Exec><Command>D:\fixture\Optimus.exe</Command></Exec>')
+$triggerReordered=$orderedXml.Replace('<LogonTrigger><Enabled>true</Enabled></LogonTrigger><TimeTrigger><Enabled>false</Enabled></TimeTrigger>','<TimeTrigger><Enabled>false</Enabled></TimeTrigger><LogonTrigger><Enabled>true</Enabled></LogonTrigger>')
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml $orderedXml) -cne (ConvertTo-OptimusCanonicalTaskXml $actionReordered)) 'action order remains significant'
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml $orderedXml) -cne (ConvertTo-OptimusCanonicalTaskXml $triggerReordered)) 'trigger order remains significant'
+$privilegeOrder=$extended.Replace('<Privilege>SeChangeNotifyPrivilege</Privilege><Privilege>SeBackupPrivilege</Privilege>','<Privilege>SeBackupPrivilege</Privilege><Privilege>SeChangeNotifyPrivilege</Privilege>')
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml ($xml.Replace('<Actions',$extended+'<Actions'))) -cne (ConvertTo-OptimusCanonicalTaskXml ($xml.Replace('<Actions',$privilegeOrder+'<Actions')))) 'nested RequiredPrivileges order is never normalized'
+
 [IO.File]::WriteAllBytes($path,[byte[]]@())
 $null=Expect-FixtureFailure {Read-OptimusPersistedTask $name $xml} 'persisted_task_unverified'
 foreach($bad in @('<Task','<Task xmlns="urn:wrong"/>','<NotTask xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"/>',($xml.Replace('Fixture</Description>','Changed</Description>')))){
