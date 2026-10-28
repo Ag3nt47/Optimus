@@ -34,13 +34,14 @@ def plan():
             'reason': 'A restart requires your manual decision.'}], 'summary': 'Review the listed scope.'}
 
 
-def wait_until(app, predicate):
+def wait_until(app, predicate, *, diagnostics=None):
     deadline = time.monotonic() + 5
     while not predicate() and time.monotonic() < deadline:
         app.processEvents()
         QTest.qWait(5)
     app.processEvents()
-    assert predicate(), 'Fixture UI did not reach the expected state.'
+    assert predicate(), ('Fixture UI did not reach the expected state.'
+        + (' ' + diagnostics() if diagnostics is not None else ''))
 
 
 @pytest.fixture(scope='module')
@@ -49,7 +50,10 @@ def app():
 
 
 @pytest.fixture(params=[OptimusWindow, NativeOptimusWindow], ids=['windows', 'native'])
-def window(request, tmp_path, app):
+def window(request, tmp_path, app, monkeypatch):
+    # Action approval and layout tests need the settled content, not a frame
+    # partway through a reveal. Set this before either top-level window exists.
+    monkeypatch.setenv('OPTIMUS_REDUCE_MOTION', '1')
     settings = dict(copy.deepcopy(DEFAULTS), setup_version=CURRENT_SETUP_VERSION,
         browser_cache_enabled=False, browser_history_enabled=False, browser_cookies_enabled=False,
         browser_download_history_enabled=False, post_process_review_enabled=True)
@@ -287,8 +291,25 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
     window.backend.available_fixes.return_value = value
     progress = complete_initial(window, app)
     progress.resize(850, 650)
-    for _ in range(4):
-        app.processEvents()
+    def viewport_state():
+        mask = progress.mask()
+        ready = mask.isEmpty()
+        panes = []
+        for pane in (progress.verification_details, progress.auto_continue_details):
+            viewport = pane.viewport()
+            point = viewport.mapTo(progress, viewport.rect().center())
+            hit = progress.childAt(point)
+            fits = pane.contentsRect().contains(viewport.rect().translated(viewport.mapTo(pane, QPoint())))
+            reached = hit is viewport or hit is not None and viewport.isAncestorOf(hit)
+            ready = ready and pane.isVisibleTo(progress) and fits and viewport.height() >= 45 and reached
+            panes.append({'pane': pane.geometry().getRect(), 'viewport': viewport.geometry().getRect(),
+                'center': (point.x(), point.y()), 'fits': fits,
+                'mask_contains_center': mask.isEmpty() or mask.contains(point),
+                'hit': None if hit is None else (type(hit).__name__, hit.objectName())})
+        return ready, {'window': progress.rect().getRect(), 'mask_empty': mask.isEmpty(),
+            'mask_bounds': mask.boundingRect().getRect(), 'panes': panes}
+    wait_until(app, lambda: viewport_state()[0], diagnostics=lambda: repr(viewport_state()[1]))
+    assert progress.mask().isEmpty()
     assert progress.height() == 650
     assert progress.auto_continue_details.isVisible()
     assert progress.auto_continue_summary.isVisible()
