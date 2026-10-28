@@ -198,6 +198,8 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
     assert report['host_maintenance_applied'] is False and report['coverage_complete'] is False
     assert report['status'] in ('failed', 'passed_with_manual_review')
     by_id = {item['id']: item for item in report['checks']}
+    for suffix in ('one-application-filter', 'constant-unrelated-dispatch', 'targeted-keys', 'weak-lifetime', 'fixture-only'):
+        assert by_id['fullscreen-router.' + suffix]['status'] == 'passed'
     for dimensions in bot.VIEWPORTS:
         prefix = f'{dimensions[0]}x{dimensions[1]}'
         for suffix in ('main.four-actions', 'setup.no-implicit-save', 'speed.no-implicit-actions',
@@ -441,6 +443,49 @@ def test_completion_review_detects_action_scope_hidden_before_auto_continue(revi
         assert by_id['completion-defect.workflow.explicit-auto-continue']['status'] == 'passed'
     finally:
         reviewer.dispose(window)
+
+
+def test_fullscreen_routing_counts_actual_events_without_timing_thresholds(reviewer):
+    reviewer.review_fullscreen_router()
+    findings = [row for row in reviewer.report['checks'] if row['id'].startswith('fullscreen-router.')]
+    assert len(findings) == 5 and all(row['status'] == 'passed' for row in findings)
+    samples = findings[0]['evidence']['samples']
+    assert [sample['hidden_windows'] for sample in samples] == [1, 16, 64]
+    assert all(sum(sample['unrelated_callbacks']) == 0 for sample in samples)
+    assert all(sample['retained_wrappers_after_destruction_and_gc'] == 0 for sample in samples)
+
+
+def test_router_review_rejects_per_window_global_filters_by_actual_callback_counts(reviewer, monkeypatch):
+    from optimus.widgets import fullscreen
+    original = fullscreen.FullScreenControl
+    class PerWindowFilter(original):
+        def __init__(self, window):
+            super().__init__(window)
+            QApplication.instance().installEventFilter(self)
+    monkeypatch.setattr(fullscreen, 'FullScreenControl', PerWindowFilter)
+    reviewer.review_fullscreen_router()
+    by_id = {row['id']: row for row in reviewer.report['checks']}
+    finding = by_id['fullscreen-router.constant-unrelated-dispatch']
+    assert finding['status'] == 'failed'
+    assert [sum(row['unrelated_callbacks']) for row in finding['evidence']['samples']] == [100, 1600, 6400]
+
+
+def test_router_review_detects_retained_control_wrappers(reviewer, monkeypatch):
+    from optimus.widgets import fullscreen
+    original = fullscreen.FullScreenControl
+    retained = []
+    class RetainedControl(original):
+        def __init__(self, window):
+            super().__init__(window)
+            retained.append(self)
+    monkeypatch.setattr(fullscreen, 'FullScreenControl', RetainedControl)
+    try:
+        reviewer.review_fullscreen_router()
+        finding = next(row for row in reviewer.report['checks'] if row['id'] == 'fullscreen-router.weak-lifetime')
+        assert finding['status'] == 'failed'
+        assert all(row['retained_wrappers_after_destruction_and_gc'] > 0 for row in finding['evidence']['samples'])
+    finally:
+        retained.clear()
 
 
 def test_sandbox_review_uses_mock_workspace_and_detects_missing_description(reviewer, monkeypatch):

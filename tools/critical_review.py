@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import os
 from pathlib import Path
 import sys
 import threading
 import time
+import weakref
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -22,10 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QKeyEvent, QMovie, QRegion
 from PySide6.QtWidgets import (QApplication, QAbstractButton, QMessageBox, QScrollArea,
-    QCheckBox, QDialog, QPlainTextEdit, QPushButton, QStyle, QStyleOptionTab, QTabWidget, QToolButton, QWizard)
+    QCheckBox, QDialog, QPlainTextEdit, QPushButton, QStyle, QStyleOptionTab, QTabWidget, QToolButton, QWidget, QWizard)
 
 from optimus.automation import CURRENT_SETUP_VERSION
 from optimus.filesystem import _ordinary_data_path
@@ -350,6 +352,74 @@ def documentation_comparison(root=ROOT):
             'sections': headings, 'capabilities': capabilities,
             'reason': 'Documentation inventory only. Compare native limits with the exercised fixture paths and manual-review gaps; prose matching is not proof of support.'})
     return result
+
+
+def measure_fullscreen_routing(app, *, window_counts=(1, 16, 64), events=100):
+    """Count actual Qt callbacks on inert hidden windows, never wall-clock speed."""
+    from optimus.widgets.fullscreen import FullScreenControl
+    class CountingControl(FullScreenControl):
+        def __init__(self, window):
+            self.callback_types = []
+            super().__init__(window)
+        def eventFilter(self, watched, event):
+            self.callback_types.append(event.type())
+            return super().eventFilter(watched, event)
+    samples = []
+    unrelated = QWidget()
+    unrelated.setAttribute(Qt.WA_DontShowOnScreen, True)
+    try:
+        for count in window_counts:
+            windows, controls = [], []
+            try:
+                for _ in range(count):
+                    window = QWidget()
+                    window.setAttribute(Qt.WA_DontShowOnScreen, True)
+                    windows.append(window)
+                    controls.append(CountingControl(window))
+                del window
+                drain(app)
+                for control in controls:
+                    control.callback_types.clear()
+                del control
+                for _ in range(events):
+                    app.sendEvent(unrelated, QEvent(QEvent.User))
+                unrelated_calls = [len(control.callback_types) for control in controls]
+                for control in controls:
+                    control.callback_types.clear()
+                del control
+                app.sendEvent(windows[0], QKeyEvent(QEvent.ShortcutOverride, Qt.Key_A, Qt.NoModifier))
+                ordinary_key_calls = [len(control.callback_types) for control in controls]
+                for control in controls:
+                    control.callback_types.clear()
+                del control
+                # ShortcutOverride reaches the target handler without changing
+                # a window state or starting any workflow.
+                app.sendEvent(windows[0], QKeyEvent(QEvent.ShortcutOverride, Qt.Key_F11, Qt.NoModifier))
+                routed_key_calls = [len(control.callback_types) for control in controls]
+                router = getattr(app, '_optimus_fullscreen_router', None)
+                one_router = (router is not None and router.parent() is app
+                    and app.findChildren(QObject, 'OptimusFullScreenRouter') == [router])
+                refs = [(weakref.ref(window), weakref.ref(control)) for window, control in zip(windows, controls)]
+                samples.append({'hidden_windows': count, 'unrelated_events': events,
+                    'unrelated_callbacks': unrelated_calls, 'ordinary_key_callbacks': ordinary_key_calls,
+                    'routed_key_callbacks': routed_key_calls, 'one_application_router': one_router})
+            finally:
+                for window in windows:
+                    window.deleteLater()
+                if windows:
+                    del window
+                windows.clear()
+                controls.clear()
+                app.sendPostedEvents(None, QEvent.DeferredDelete)
+                drain(app)
+                gc.collect()
+            samples[-1]['retained_wrappers_after_destruction_and_gc'] = sum(
+                reference() is not None for pair in refs for reference in pair)
+        return {'samples': samples, 'fixture_windows_only': True, 'timing_thresholds_used': False}
+    finally:
+        unrelated.deleteLater()
+        app.sendPostedEvents(None, QEvent.DeferredDelete)
+        drain(app)
 
 
 class CriticalReview:
@@ -1807,6 +1877,26 @@ class CriticalReview:
             progress.deleteLater()
             drain(self.app)
 
+    def review_fullscreen_router(self):
+        measured = measure_fullscreen_routing(self.app)
+        samples = measured['samples']
+        self.check('fullscreen-router.one-application-filter', all(row['one_application_router'] for row in samples),
+            'All hidden windows share one application-owned fullscreen router.', evidence=measured)
+        self.check('fullscreen-router.constant-unrelated-dispatch', all(
+            not any(row['unrelated_callbacks']) and not any(row['ordinary_key_callbacks']) for row in samples),
+            'Unrelated events and ordinary keys invoke zero per-window handlers at 1/16/64 retained hidden windows; callback counts, not timing, establish constant dispatch.',
+            evidence=measured)
+        self.check('fullscreen-router.targeted-keys', all(
+            row['routed_key_callbacks'] == [1] + [0] * (row['hidden_windows'] - 1) for row in samples),
+            'A fullscreen shortcut override reaches exactly the handler for its own window.', evidence=measured)
+        self.check('fullscreen-router.weak-lifetime', all(
+            row['retained_wrappers_after_destruction_and_gc'] == 0 for row in samples),
+            'Destroying fixture windows and collecting them leaves no window/control Python wrappers retained by routing.',
+            evidence=measured)
+        self.check('fullscreen-router.fixture-only', measured['fixture_windows_only']
+            and measured['timing_thresholds_used'] is False,
+            'Routing checks use inert QWidget instances and actual Qt events; no backend, machine benchmark or maintenance runs.')
+
     def review_fullscreen(self, window, dimensions, prefix):
         """Use actual UI events on an inert window; Escape must never cancel work."""
         button = window.fullscreen.button
@@ -2035,6 +2125,7 @@ class CriticalReview:
                           'accessible_description': button.accessibleDescription()})
 
     def run(self):
+        self.review_fullscreen_router()
         for dimensions in VIEWPORTS:
             prefix = f'{dimensions[0]}x{dimensions[1]}'
             backend = FixtureBackend(self.output / 'fixture-state' / prefix, self.system)
