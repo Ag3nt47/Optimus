@@ -2,9 +2,10 @@
 from __future__ import annotations
 from types import SimpleNamespace
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QPushButton
 from optimus.ui import DetailedSettingsWindow, OptimusWindow
+from test_native_auto_continue_ui import wait_until
 
 
 @pytest.fixture(scope='module')
@@ -106,10 +107,30 @@ def test_cloud_page_constructs_without_connecting(window):
     assert window.cloud_panel._plan is None
 
 
-def test_primary_window_has_four_requested_buttons(qapp, tmp_path):
+def test_primary_window_has_four_requested_buttons(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv('OPTIMUS_REDUCE_MOTION', '1')
     value = OptimusWindow(SimpleNamespace(data_dir=tmp_path, preferences=lambda: {}), smoke_test=True)
     try:
-        assert [button.text() for button in value.findChildren(QPushButton)] == ['1 click Optimize and debloat','Settings','Sandbox','Revert']
+        assert [button.text() for button in value.main_buttons] == ['1 click Optimize and debloat','Settings','Sandbox','Revert']
+        fullscreen = value.fullscreen.button
+        assert fullscreen not in value.main_buttons
+        assert set(value.findChildren(QPushButton)) == set(value.main_buttons) | {fullscreen}
+        assert not value.landing_scroll.isAncestorOf(fullscreen)
+        value.show()
+        def reachable():
+            if not fullscreen.isVisibleTo(value) or not fullscreen.isEnabled():
+                return False
+            ancestor = fullscreen.parentWidget()
+            while ancestor is not None:
+                if not ancestor.contentsRect().contains(fullscreen.rect().translated(fullscreen.mapTo(ancestor, QPoint()))):
+                    return False
+                if ancestor is value:
+                    hit = value.childAt(fullscreen.mapTo(value, fullscreen.rect().center()))
+                    return hit is fullscreen or hit is not None and fullscreen.isAncestorOf(hit)
+                ancestor = ancestor.parentWidget()
+            return False
+        wait_until(qapp, reachable)
+        assert fullscreen.accessibleName() == 'Full screen'
         assert value.windowTitle() == 'Optimus: Computer optimization tool'
     finally:
         value.shutdown()

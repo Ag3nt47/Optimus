@@ -40,6 +40,7 @@ class Backend:
         self.bridge = SimpleNamespace(_process=None)
         self.calls = []
         self.started, self.release, self.independent = (threading.Event() for _ in range(3))
+        self.driver_metadata_started = threading.Event()
         self.native = native
         self.system = 'linux' if native else 'win32'
         self.preference_store = SimpleNamespace(validate=Preferences.validate)
@@ -87,6 +88,7 @@ class Backend:
 
     def driver_updates_scan(self):
         self.calls.append('drivers')
+        self.driver_metadata_started.set()
         return {'resultCode': 2, 'updates': []}
 
     def windows_security_updates(self, *args, **kwargs):
@@ -131,6 +133,10 @@ def test_independent_stage_overlaps_but_queued_stages_and_final_readback_wait(tm
     try:
         assert service.independent.wait(15)
         assert waiting.wait(15)
+        # Read-only discovery is a separate scheduled worker. Its own latch
+        # proves overlap without assuming another worker's callback orders it.
+        assert service.driver_metadata_started.wait(15)
+        assert not service.release.is_set()
         assert any(event.get('maintenance_wait_reason', '').startswith('Waiting for application updates:')
                    for event in events)
         assert thread.is_alive()
