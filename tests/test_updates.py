@@ -394,6 +394,12 @@ def test_cancellation_during_native_probes_cannot_start_an_installer(updater, bo
         operations.append('INSTALLER')
         return subprocess.CompletedProcess([],0,'fixture installer','')
     updater._run = Mock(side_effect=fake_run)
+    # Cancellable discovery uses the owned read-only client, separately from
+    # the non-abortable installer launcher. Keep both fixture seams inert.
+    def fake_query(arguments, cancel_event):
+        assert cancel_event is stop
+        return fake_run(arguments)
+    updater._read_only_winget = Mock(side_effect=fake_query)
     if boundary == 'before_probes':
         stop.set()
     if boundary == 'before_install':
@@ -408,6 +414,7 @@ def test_cancellation_during_native_probes_cannot_start_an_installer(updater, bo
     result = updater.updates_apply('Vendor.App', confirmed=True, unattended=True, cancel_event=stop)
     assert result['cancelled'] and result['skipped'] and result['status'] == 'cancelled'
     assert 'INSTALLER' not in operations
+    updater._run.assert_not_called()
     if boundary == 'before_probes':
         assert operations == []
     if boundary == 'during_revalidation':
