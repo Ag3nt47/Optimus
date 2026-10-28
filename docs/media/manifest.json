@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "version": "0.12.7",
-  "source_commit": "f23962099f3849290f01dc75b9658f6d5d2c98af",
+  "version": "0.12.8",
+  "source_commit": "988129ec6f6b1d467d2b2a00ccc5faa1922c1be8",
   "capture": "Actual QWidget.grab() renders with labelled surrounding title/footer",
   "fixture_scope": "In-memory backend, navigation and mock Sandbox; all metrics and outcomes are simulated. No measured cleanup, performance or native-operation proof.",
   "primary_button": "Connected only to fixture progress-window handoff",
   "source_excerpt": "Sandbox shows an excerpt of public src/optimus/ui.py, never saved or executed",
-  "raccoon": "Bundled decorative asset is visible in its production Details section during seconds 5-8; see src/optimus/assets/RACCOON-NOTICE.txt.",
+  "raccoon": "Bundled decorative GIF is visible in the production bottom analysis panel during sample work and remains a stopped poster after completion; see src/optimus/assets/RACCOON-NOTICE.txt.",
   "safety": {
     "real_backend_constructed": false,
     "host_maintenance_applied": false,
@@ -16,7 +16,8 @@
     "sandbox_workspace_mocked": true,
     "worker_layout": {
       "all_visible": true,
-      "outside_scroll": true,
+      "body_scroll": true,
+      "all_reachable": true,
       "essentials": true,
       "labels": true,
       "navigation_hitboxes": true,
@@ -25,47 +26,56 @@
       "no_overlap": true,
       "two_by_two": true,
       "footer_clear": true,
+      "no_horizontal_scroll": true,
       "cards": [
         {
-          "x": 7,
-          "y": 155,
+          "x": 0,
+          "y": 0,
           "width": 530,
-          "height": 165
+          "height": 141
         },
         {
-          "x": 544,
-          "y": 155,
+          "x": 537,
+          "y": 0,
           "width": 529,
-          "height": 165
+          "height": 141
         },
         {
-          "x": 7,
-          "y": 327,
+          "x": 0,
+          "y": 148,
           "width": 530,
-          "height": 164
+          "height": 141
         },
         {
-          "x": 544,
-          "y": 327,
+          "x": 537,
+          "y": 148,
           "width": 529,
-          "height": 164
+          "height": 141
         }
       ]
-    }
+    },
+    "bottom_analysis_visible": {
+      "panel": true,
+      "decorative_gif": true,
+      "computer": true,
+      "network": true,
+      "drive_buffer": true
+    },
+    "fullscreen_escape_restored_geometry": true
   },
   "assets": [
     {
       "file": "optimus-completed.png",
-      "bytes": 89377,
-      "sha256": "b1e304220082356f0eddad94c34bba29ff511a81db28ce8d406f3080ccf567ef",
+      "bytes": 110934,
+      "sha256": "7b82064a2590e6d3ca9dd3b01d9a1e3488649085c692a633e5a8152a2710fb2c",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
     },
     {
       "file": "optimus-demo.gif",
-      "bytes": 845398,
-      "sha256": "a3758ccfa8941a9f289d1dd09a730a78718a65036470f3c8e91ca73ac7ecd0d9",
+      "bytes": 1235638,
+      "sha256": "0394a9010972b42dc6fc1bb04ae266b520370480411558af7b8794c074eddfe7",
       "width": 1120,
       "height": 900,
       "codec": "GIF89a",
@@ -77,44 +87,43 @@
     },
     {
       "file": "optimus-main.png",
-      "bytes": 138881,
-      "sha256": "cfb5a10105945eb8e7b2a983ce85ba2354b17f6d653c4c2b9cff33af3d9615a3",
+      "bytes": 133812,
+      "sha256": "4ef88c7a6517cb5edbea8cab8a1fd046faa726db5dddfddce10c3fd1b3047eeb",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
     },
     {
       "file": "optimus-sandbox.png",
-      "bytes": 159260,
-      "sha256": "926f8dc0f488019308374c5b6751db798aeca88c181c35b5ae026c391035326b",
+      "bytes": 160010,
+      "sha256": "b5e6f57fc7a146f4cef7b2e56f4ffec44ab39119704faf8cdedd084450f85309",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
     },
     {
       "file": "optimus-walkthrough.mp4",
-      "bytes": 541569,
-      "sha256": "936709e9639a700e8695a076a0e62a222d714d7e8220aa471c8c8882584a7545",
+      "bytes": 747351,
+      "sha256": "132582e83d1a4b03c5f6975aacf9b904e859aac0472f76bd308e0653fb0a0eb4",
       "width": 1120,
       "height": 900,
       "codec": "H.264 / AVC",
       "pixel_format": "yuv420p",
       "fps": 12,
-      "duration_seconds": 20,
+      "duration_seconds": 20.0,
       "frames": 240,
       "audio": false
     },
     {
       "file": "optimus-workers.png",
-      "bytes": 95710,
-      "sha256": "c43bfab8c8917b88b80cb50e67ef4599b2ea293fdfbb9fb2ef01ae1f993dfcbd",
+      "bytes": 106745,
+      "sha256": "ab3cfb03d4357d8166672095cd91e26d6ae5ff69a91b2c7375f22e6004f0a7ad",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
     }
   ],
   "encoder": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
-  "validation": "All PNGs decoded through Qt; both animations fully decoded through FFmpeg with actual codec/duration/frame checks. Screenshots and the five-chapter encoded contact sheet were visually inspected.",
   "decoder_verification": {
     "optimus-walkthrough.mp4": {
       "decoded_frames": 240,
@@ -128,5 +137,6 @@
       "codec": "gif",
       "audio_stream": false
     }
-  }
+  },
+  "validation": "All PNGs decoded through Qt; both animations fully decoded through FFmpeg with codec, duration and frame-count checks. All four screenshots and both eight-state decoded contact sheets were visually inspected."
 }
