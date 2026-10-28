@@ -489,12 +489,25 @@ class SelfUpdater:
                 'revoked_at':self.clock(),'cleanup_approved':False,'reason':'The user cancelled self-update or cleanup resume.'})
         return {'status':'cancelled','revoked':True,'cleanup_approved':False}
 
+    def _check_workspace_access(self):
+        """Read-only UX preflight; staging still verifies every write and key."""
+        try:
+            _ordinary_data_path(self.directory)
+            try: self.directory.lstat()
+            except FileNotFoundError: return
+            with os.scandir(self.directory) as entries:
+                next(entries, None)
+        except PermissionError as error:
+            raise PermissionError('The current Windows privilege context cannot read the existing private update folder. '
+                'Use the same administrator level as the earlier update, or the verified manual download. '
+                'Existing update records are preserved.') from error
+
     def check(self, *, cancel_event=None):
         try:
             name = asset_name(self.system,self.machine)
             value = release_offer(self._transport().get_json(API + '/releases/latest',cancel_event=cancel_event), self.current_version,name)
             if value is None: return {'status':'up_to_date','current_version':self.current_version,'offer':None}
-            try: self._binding(); automatic = True; reason = ''
+            try: self._binding(); self._check_workspace_access(); automatic = True; reason = ''
             except (ValueError,OSError) as error: automatic = False; reason = str(error)
             return {'status':'available','offer':value,'automatic_install_supported':automatic,'reason':reason,
                     'current_version':self.current_version,'target_version':value['version'],'release_url':value['release_url']}
