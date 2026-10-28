@@ -6,6 +6,12 @@ from PySide6.QtCore import QPoint, QRect
 from PySide6.QtGui import QFont
 
 from test_native_worker_cards import app, fonts, progress
+from test_native_auto_continue_ui import wait_until
+
+
+@pytest.fixture(autouse=True)
+def reduced_motion(monkeypatch):
+    monkeypatch.setenv('OPTIMUS_REDUCE_MOTION', '1')
 
 
 JOURNAL = r'D:\FixtureUser\Optimus\Data\parallel-updates\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
@@ -40,6 +46,26 @@ def assert_compact_fields_fit(card, window):
     assert all(label.isHidden() for label in (card.details, card.elapsed, card.activity_state, card.navigation_note))
 
 
+def assert_body_reachable(widget, window, app):
+    window.body_scroll.ensureWidgetVisible(widget, 0, 2)
+    def ready():
+        if not widget.isVisibleTo(window):
+            return False
+        ancestor = widget.parentWidget()
+        while ancestor is not None:
+            if not ancestor.contentsRect().contains(QRect(widget.mapTo(ancestor, QPoint()), widget.size())):
+                return False
+            if ancestor is window:
+                hit = window.childAt(widget.mapTo(window, widget.rect().center()))
+                return hit is widget or hit is not None and widget.isAncestorOf(hit)
+            ancestor = ancestor.parentWidget()
+        return False
+    wait_until(app, ready, diagnostics=lambda: repr({
+        'widget': widget.objectName(), 'geometry': widget.geometry().getRect(),
+        'body_viewport': window.body_scroll.viewport().geometry().getRect(),
+        'scroll': window.body_scroll.verticalScrollBar().value()}))
+
+
 @pytest.mark.parametrize('width', [850, 1024])
 def test_deferred_cards_keep_primary_fields_visible_and_full_warning_in_details(progress, app, width):
     progress.resize(width, 650)
@@ -58,15 +84,21 @@ def test_deferred_cards_keep_primary_fields_visible_and_full_warning_in_details(
         assert card.elapsed.text() == 'Elapsed: —'
     assert progress.worker_cards['maintenance'].status.text() == 'Running'
     assert progress.progress.value() == 40 and progress.cancel_button.isEnabled()
-    assert not progress.details_toggle.isChecked() and not progress.background_status.isVisible()
+    assert not progress.details_toggle.isChecked() and progress.background_status.isVisibleTo(progress)
+    assert progress.analysis_panel.isAncestorOf(progress.background_status)
+    assert not progress.content_scroll.isAncestorOf(progress.background_status)
+    assert_body_reachable(progress.background_status, progress, app)
+    assert not progress.log.isVisible() and not progress.processes.isVisible()
     assert JOURNAL in progress.background_status.text()
     progress.details_toggle.click()
     app.processEvents()
-    progress.content_scroll.ensureWidgetVisible(progress.background_status)
-    app.processEvents()
+    assert progress.log.isVisibleTo(progress) and progress.processes.isVisibleTo(progress)
+    assert_body_reachable(progress.processes.viewport(), progress, app)
+    assert_body_reachable(progress.log.viewport(), progress, app)
+    assert_body_reachable(progress.background_status, progress, app)
     assert progress.background_status.isVisible() and not progress.background_status.visibleRegion().isEmpty()
     assert_fitting_summary(progress.background_status)
-    assert progress.cancel_button.geometry().bottom() <= progress.height()
+    assert progress.rect().contains(QRect(progress.cancel_button.mapTo(progress, QPoint()), progress.cancel_button.size()))
 
 
 def test_shared_warning_preserves_complete_evidence_once_across_heartbeats(progress):
@@ -123,14 +155,14 @@ def test_expanded_secondary_summary_reflows_on_resize_and_for_larger_fonts(progr
     for width in (850, 1024, 850):
         progress.resize(width, 650)
         app.processEvents()
-        progress.content_scroll.ensureWidgetVisible(label)
-        app.processEvents()
+        assert_body_reachable(label, progress, app)
         assert label.isVisible() and not label.visibleRegion().isEmpty()
         assert_fitting_summary(label)
     enlarged = QFont(label.font())
     enlarged.setPixelSize(18)
     label.setFont(enlarged)
     app.processEvents()
+    assert_body_reachable(label, progress, app)
     assert_fitting_summary(label)
     label.clear()
     assert label.visible_text == '' and label.text() == '' and label.toolTip() == ''
