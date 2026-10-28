@@ -1,11 +1,12 @@
 """Cached worker navigation wiring; the workflow owns cancellation and receipts."""
 from __future__ import annotations
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Signal
 
 
 class WorkerNavigationController(QObject):
     """Connect cards to one live backend without starting or inspecting host work."""
+    stateChanged = Signal()
 
     def __init__(self, backend, cards, parent=None):
         super().__init__(parent)
@@ -43,6 +44,7 @@ class WorkerNavigationController(QObject):
                 card.set_navigation(dict(row, session_id=session), enabled=True)
             else:
                 card.set_navigation({}, enabled=False)
+        self.stateChanged.emit()
 
     def request(self, identity, action, state):
         card = self.cards.get(identity)
@@ -69,3 +71,4 @@ class WorkerNavigationController(QObject):
         if not (isinstance(result, dict) and result.get('accepted') is True
                 and card._navigation_state.get('viewing_history') is True):
             card.set_navigation_message(message)
+        self.stateChanged.emit()

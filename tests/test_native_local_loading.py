@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
 from PySide6.QtGui import QMovie
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
@@ -121,11 +121,14 @@ def test_invalid_decorations_fail_quietly_without_disrupting_progress(progress, 
     assert not widget.ready and not widget.isVisible() and widget.error_message
     progress.update_progress({'stage': 'Fixture resource review', 'percentage': 35})
     assert progress.spinner.isVisible() and progress.progress.value() == 35
-    assert len(progress.worker_cards) == 3
+    assert set(progress.worker_cards) == {'maintenance', 'software_updates', 'driver_updates', 'security_scan'}
+    assert all(card.isVisibleTo(progress) for card in progress.worker_cards.values())
 
 
 def test_progress_completion_stops_icon_and_followup_can_restart_it(progress, app, monkeypatch):
     monkeypatch.setattr('optimus.widgets.local_loading.motion_allowed', lambda *args: True)
+    progress.details_toggle.setChecked(True)
+    app.processEvents()
     progress.loading_animation.sync_playback()
     assert progress.loading_animation._movie.state() == QMovie.Running
     progress.finish({'status': 'completed', 'stages': []})
@@ -151,34 +154,36 @@ def test_large_loading_icon_does_not_push_worker_panels_or_controls_out_of_compa
     app.processEvents()
     icon = progress.loading_animation
     assert (icon.width(), icon.height()) == (128, 117)
-    header = icon.parentWidget()
+    header = progress._progress_header
+    assert progress.content_scroll.widget().isAncestorOf(icon)
+    assert not header.isAncestorOf(icon)
     assert all(widget.parentWidget() is header for widget in (progress.title, progress.spinner,
-        progress.progress, progress.resource_comparison, progress.stage, progress.description))
+        progress.progress, progress.resource_comparison))
     comparison = progress.resource_comparison
     assert progress.height() == 650
     assert header.height() - comparison.height() - header.layout().verticalSpacing() < 170
     assert progress.progress.geometry().bottom() < comparison.geometry().top()
-    assert comparison.geometry().bottom() < progress.stage.geometry().top()
-    assert progress.title.geometry().right() < icon.geometry().left()
+    assert comparison.mapTo(progress, comparison.rect().bottomLeft()).y() < progress.worker_grid.mapTo(progress, QPoint()).y()
     cards = list(progress.worker_cards.values())
     assert max(card.width() for card in cards) - min(card.width() for card in cards) <= 1
     header_bottom = header.mapTo(progress, header.rect().bottomLeft()).y()
     cancel_top = progress.cancel_button.mapTo(progress, progress.cancel_button.rect().topLeft()).y()
     assert all(card.mapTo(progress, card.rect().topLeft()).y() > header_bottom for card in cards)
-    # Added byte-comparison rows use vertical scrolling at compact sizes. Every
-    # card control must remain reachable above the fixed footer, with no
-    # horizontal scrolling or a loading animation forcing a larger window.
-    viewport = progress.content_scroll.viewport()
-    assert viewport.mapTo(progress, viewport.rect().bottomLeft()).y() < cancel_top
+    # The animation belongs to expandable details. All four core panels and
+    # every live control fit directly in the window without scrolling a grid.
+    assert set(progress.worker_cards) == {'maintenance', 'software_updates', 'driver_updates', 'security_scan'}
     assert progress.content_scroll.horizontalScrollBar().maximum() == 0
     for card in cards:
-        button = card.navigation_buttons['cancel']
-        progress.content_scroll.ensureWidgetVisible(button, 4, 4)
+        assert card.isVisibleTo(progress)
+        assert progress.rect().contains(card.rect().translated(card.mapTo(progress, QPoint())))
+        for button in card.navigation_buttons.values():
+            assert progress.rect().contains(button.rect().translated(button.mapTo(progress, QPoint())))
+            assert button.mapTo(progress, button.rect().bottomLeft()).y() < cancel_top
+    progress.details_toggle.setChecked(True)
+    for _ in range(3):
         app.processEvents()
-        assert card.isVisible()
-        assert viewport.rect().contains(button.mapTo(viewport, button.rect().topLeft()))
-        assert viewport.rect().contains(button.mapTo(viewport, button.rect().bottomRight()))
-    assert progress.log.height() >= 45 and progress.processes.height() >= 45
+    assert icon.isVisibleTo(progress) and icon.ready
+    assert all(progress.rect().contains(card.rect().translated(card.mapTo(progress, QPoint()))) for card in cards)
     assert progress.cancel_button.geometry().bottom() <= 650 and progress.cancel_button.isEnabled()
 
 

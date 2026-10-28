@@ -5,6 +5,7 @@ import threading
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QWidget
 
 from optimus.ui import OptimizationProgressWindow
@@ -83,7 +84,8 @@ def test_comparison_fits_below_global_progress_and_refreshes_without_accumulatio
         assert '75.0%' in comparison.removed.text() and '25.0%' in comparison.downloaded.text()
         assert dialog.content_scroll.horizontalScrollBar().maximum() == 0
         assert dialog.progress.geometry().bottom() < comparison.geometry().top()
-        assert comparison.geometry().bottom() < dialog.stage.geometry().top()
+        assert comparison.mapTo(dialog, comparison.rect().bottomLeft()).y() < dialog.worker_grid.mapTo(dialog, QPoint()).y()
+        assert dialog.content_scroll.widget().isAncestorOf(dialog.stage)
         assert comparison.removed.geometry().right() < comparison.downloaded.geometry().left()
         dialog.configure_workers({})
         assert comparison.snapshot['removed_known'] is False

@@ -18,7 +18,9 @@ def snapshot(maintenance='scanning', apps='scanning', drivers='scanning', **chan
 
 def test_three_discovery_workers_are_visible_and_active_together_without_installer_claim(progress):
     progress.update_progress(snapshot())
-    assert [card.status.text() for card in progress.worker_cards.values()] == ['Scanning', 'Scanning', 'Scanning']
+    assert [progress.worker_cards[key].status.text()
+        for key in ('maintenance', 'software_updates', 'driver_updates')] == ['Scanning', 'Scanning', 'Scanning']
+    assert progress.worker_cards['security_scan'].status.text() == 'Not selected'
     assert all(card.isVisible() for card in progress.worker_cards.values())
     assert all(card.progress.maximum() > 0 for card in progress.worker_cards.values())
     assert all('Installing' not in card.status.text() for card in progress.worker_cards.values())

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, Slot, QUrl, QElapsedTimer, QEvent
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, Slot, QUrl, QElapsedTimer, QEvent, QSize
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog,
@@ -1853,6 +1853,11 @@ class WorkflowSummaryLabel(QLabel):
     def setText(self, text):
         self.set_summary(text, text)
 
+    def set_max_lines(self, lines):
+        self._max_lines = max(1, min(3, int(lines)))
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * self._max_lines + 4)
+        self._fit_summary()
+
     def clear(self):
         self.setText('')
 
@@ -1916,7 +1921,7 @@ class WorkflowSummaryLabel(QLabel):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.drawText(self.contentsRect(), Qt.AlignLeft | Qt.AlignVCenter, self.visible_text)
+        painter.drawText(self.contentsRect(), (self.alignment() & Qt.AlignHorizontal_Mask) | Qt.AlignVCenter, self.visible_text)
 
 
 class WorkflowProgressBar(QProgressBar):
@@ -1987,9 +1992,11 @@ class WorkflowWorkerCard(QFrame):
         layout.setContentsMargins(9, 7, 9, 7)
         layout.setSpacing(5)
         layout.setAlignment(Qt.AlignTop)
+        self._compact = False
         from .widgets.live_activity import WorkerActivityRing
         header = QHBoxLayout()
         heading_layout = QVBoxLayout()
+        self._header_layout, self._heading_layout = header, heading_layout
         heading_layout.setSpacing(2)
         self.heading = WorkflowSummaryLabel(title)
         self.heading.setMinimumWidth(0)
@@ -1998,6 +2005,11 @@ class WorkflowWorkerCard(QFrame):
         self.completion = WorkflowSummaryLabel('Overall: —', max_lines=1)
         heading_layout.addWidget(self.completion)
         self.activity_ring = WorkerActivityRing(self)
+        if getattr(parent, 'pinned', False):
+            self.activity_ring.hide()
+            self.activity_ring.deleteLater()
+            from .widgets.compact_worker_ring import CompactWorkerActivityRing
+            self.activity_ring = CompactWorkerActivityRing(self)
         header.addLayout(heading_layout, 1)
         header.addWidget(self.activity_ring, 0, Qt.AlignRight)
         layout.addLayout(header)
@@ -2009,6 +2021,8 @@ class WorkflowWorkerCard(QFrame):
         self._live_computer_metrics = {}
         self._progress_activity = QElapsedTimer()
         self.status = WorkflowSummaryLabel('Not started')
+        self._status_text = 'Not started'
+        self._current_item_label = ''
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.details = WorkflowSummaryLabel('Waiting for this run to start.')
@@ -2037,6 +2051,7 @@ class WorkflowWorkerCard(QFrame):
         self.navigation_buttons = {}
         self._navigation_presses = {}
         navigation = QHBoxLayout()
+        self._navigation_layout = navigation
         navigation.setSpacing(5)
         for action, text, name in (('back', '←', 'Previous item'),
                                    ('next', '→', 'Skip to next item'),
@@ -2045,7 +2060,7 @@ class WorkflowWorkerCard(QFrame):
             button.setObjectName('WorkerNavigation_' + action)
             button.setAutoDefault(False)
             button.setDefault(False)
-            button.setMinimumHeight(28)
+            button.setFixedHeight(30)
             button.setMinimumWidth(30)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.setStyleSheet('padding:3px 5px;font-size:18px;font-weight:700;min-width:24px;')
@@ -2061,6 +2076,34 @@ class WorkflowWorkerCard(QFrame):
         self.navigation_note = WorkflowSummaryLabel()
         layout.addWidget(self.navigation_note)
         self.set_navigation({}, enabled=False)
+
+    def set_compact(self, compact=True):
+        """Keep the live controls visible; full secondary text stays in Details."""
+        if not compact or self._compact:
+            return
+        self._compact = True
+        layout = self.layout()
+        while layout.count():
+            layout.takeAt(0)
+        while self._header_layout.count():
+            self._header_layout.takeAt(0)
+        while self._heading_layout.count():
+            self._heading_layout.takeAt(0)
+        layout.setContentsMargins(7, 3, 7, 3)
+        layout.setSpacing(1)
+        self.heading.set_max_lines(1)
+        self.status.set_max_lines(1)
+        self.totals.set_max_lines(1)
+        self.completion.hide()
+        from .widgets.compact_worker_ring import CompactWorkerHeader
+        self._compact_header = CompactWorkerHeader(self.heading, self.status, self.activity_ring, self)
+        layout.addWidget(self._compact_header)
+        layout.addWidget(self.progress)
+        layout.addWidget(self.totals)
+        layout.addLayout(self._navigation_layout)
+        for label in (self.details, self.elapsed, self.activity_state, self.navigation_note):
+            label.hide()
+        self._fit_status()
 
     def _capture_navigation_press(self, action):
         import copy
@@ -2091,6 +2134,8 @@ class WorkflowWorkerCard(QFrame):
         if revision != self._navigation_revision:
             self.navigation_note.clear()
             self._navigation_revision = revision
+            if self._compact:
+                self._show_live_status()
         self._navigation_state = dict(state)
         valid = (enabled is True and isinstance(state.get('session_id'), str)
                  and bool(state['session_id']) and type(state.get('revision')) is int
@@ -2102,6 +2147,8 @@ class WorkflowWorkerCard(QFrame):
             allowed = valid and state.get('can_' + action) is True
             button.setEnabled(allowed)
             reason = state.get(action + '_reason')
+            if not allowed and state.get('pending') and isinstance(state.get('message'), str):
+                reason = state['message']
             if not isinstance(reason, str) or not reason.strip():
                 reason = captions[action] if allowed else 'No live eligible item. Completed changes remain in results; supported undo is in Revert.'
             button.setToolTip(reason[:1500])
@@ -2116,19 +2163,58 @@ class WorkflowWorkerCard(QFrame):
             if item.get('message'):
                 message += '\n' + str(item['message'])[:800]
         if isinstance(message, str) and message.strip():
-            self.set_navigation_message(message)
+            self.set_navigation_message(message, prominent=bool(state.get('pending')))
         else:
-            self.navigation_note.setVisible(bool(self.navigation_note.text()))
+            self.navigation_note.setVisible(not self._compact and bool(self.navigation_note.text()))
+            if self._compact and not self.navigation_note.text():
+                self._show_live_status()
         self._fit_status()
 
-    def set_navigation_message(self, message):
+    def set_navigation_message(self, message, *, prominent=True):
         message = str(message)[:1500]
         self.navigation_note.setText(message)
-        self.navigation_note.setVisible(bool(message))
+        self.navigation_note.setVisible(not self._compact and bool(message))
+        if self._compact:
+            # A click must acknowledge immediately without increasing the card
+            # height or requiring the user to open the log.
+            if prominent:
+                self.status.setText(message)
+            else:
+                self._show_live_status()
         self._fit_status()
+
+    def _show_live_status(self):
+        summary = self._status_text
+        if self._compact and self._current_item_label:
+            summary += ' · ' + self._current_item_label
+        # Keep raw worker status separate from its bounded presentation. The
+        # complete current item is still available to hover and screen readers.
+        self.status.set_summary(summary, self._status_text)
+        self.status.setToolTip(summary)
+        self.status.setAccessibleDescription(summary)
+        self.status.setWhatsThis(summary)
 
     def _fit_status(self):
         self.status._fit_summary()
+        if self._compact:
+            metrics = tuple((label.font().key(), label.fontMetrics().lineSpacing(), label._max_lines)
+                for label in (self.heading, self.status, self.totals))
+            changed = metrics != getattr(self, '_compact_layout_metrics', None)
+            self._compact_layout_metrics = metrics
+            for label in (self.heading, self.status, self.totals):
+                height = label.fontMetrics().lineSpacing() * label._max_lines + 4
+                if label.height() != height:
+                    label.setFixedHeight(height)
+                    changed = True
+                label._fit_summary()
+            height = max(self.activity_ring.height(), self.heading.height() + self.status.height())
+            if self._compact_header.height() != height:
+                self._compact_header.setFixedHeight(height)
+                changed = True
+            if changed:
+                self.layout().invalidate()
+                self.layout().activate()
+            self._compact_header.fit()
         margins = self.contentsMargins()
         height = self.layout().minimumSize().height() + margins.top() + margins.bottom()
         if self.minimumHeight() != height:
@@ -2145,6 +2231,9 @@ class WorkflowWorkerCard(QFrame):
         # unchanged. Full long captions remain available through accessibility.
         metrics = self.completion.fontMetrics()
         margins = self.layout().contentsMargins()
+        if self._compact:
+            return max(190, metrics.horizontalAdvance('Overall: 100%') + self.activity_ring.width()
+                + margins.left() + margins.right() + 8)
         return max(245, metrics.horizontalAdvance('Overall: blocked') + self.activity_ring.width()
             + margins.left() + margins.right() + 12,
             metrics.horizontalAdvance('Downloaded: size not reported') + margins.left() + margins.right(),
@@ -2194,7 +2283,10 @@ class WorkflowWorkerCard(QFrame):
         if self._resource_scope == 'last_check':
             lines.append('Latest smart check')
             details.append('These totals cover only the latest Smart Maintenance check; they are separate from this one-click run and lifetime totals.')
-        self.totals.set_summary('\n'.join(lines[:3]), '\n'.join(lines + details))
+        summary = '\n'.join(lines[:3])
+        if self._compact:
+            summary = ' · '.join(lines[:3]).replace('Completed installs:', 'Installs:').replace('Downloaded:', 'Down:')
+        self.totals.set_summary(summary, '\n'.join(lines + details))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2282,6 +2374,13 @@ class WorkflowWorkerCard(QFrame):
             self.status.setText('Search not started; install blocked' if scan_not_started else
                 'Updates found; install blocked' if scan_complete and type(offers) is int and offers > 0 else
                 'Search complete; install blocked' if scan_complete else 'Search needs review; install blocked')
+        self._status_text = self.status.text()
+        label = self._item_progress.get('label') if self._item_progress else state.get('current_package')
+        self._current_item_label = (' '.join(label.split())[:300] if isinstance(label, str)
+            and raw_status not in ('not_started', 'not_selected', 'not_run', 'completed', 'failed',
+                'cancelled', 'stopped', 'deferred', 'needs_review', 'completed_with_errors') else '')
+        if self._compact:
+            self._show_live_status()
         self._fit_status()
         description = display(state.get('description') or 'Waiting for this run to start.')
         reason = state.get('wait_reason')
@@ -2318,7 +2417,7 @@ class WorkflowWorkerCard(QFrame):
               and 0 <= current <= total):
             self.progress.setRange(0, total)
             self.progress.setValue(current)
-            self.progress.setFormat('%v / %m processed' + (' · ' + scan_label
+            self.progress.setFormat('%p% overall · %v / %m processed' + (' · ' + scan_label
                 if self._finished_with_skips and not scan_complete and isinstance(scan_label, str) and scan_label else ''))
         else:
             self.progress.setRange(0, 1)
@@ -2440,33 +2539,45 @@ class OptimizationProgressWindow(QDialog):
         self.setWindowModality(Qt.WindowModal)
         self.resize(850, 650)
         outer = QVBoxLayout(self)
+        self._outer_layout = outer
+        outer.setContentsMargins(7, 7, 7, 7)
+        outer.setSpacing(3)
         self.content_scroll = QScrollArea(self)
         self.content_scroll.setWidgetResizable(True)
         self.content_scroll.setFrameShape(QFrame.NoFrame)
         self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         content = QWidget()
+        content.setMinimumWidth(0)
+        content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         self.content_scroll.setWidget(content)
-        outer.addWidget(self.content_scroll, 1)
+        self.content_scroll.setMinimumHeight(0)
         header = QWidget(self)
+        self._progress_header = header
         header_layout = QGridLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setVerticalSpacing(3)
         header_layout.setColumnStretch(0, 1)
-        self.title = QLabel('OPTIMIZATION IN PROGRESS')
+        self.title = WorkflowSummaryLabel('OPTIMIZATION IN PROGRESS', max_lines=1)
         self.title.setObjectName('PageTitle')
         self.title.setWordWrap(True)
         self.title.setMinimumWidth(0)
         self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         header_layout.addWidget(self.title, 0, 0)
         self.spinner = RunSpinner(self)
-        self.spinner._label.setWordWrap(True)
+        old_spinner_label = self.spinner._label
+        self.spinner._label = WorkflowSummaryLabel(max_lines=1)
+        self.spinner.layout().replaceWidget(old_spinner_label, self.spinner._label)
+        old_spinner_label.hide()
+        old_spinner_label.deleteLater()
+        self.spinner._label.setWordWrap(False)
         self.spinner._label.setMinimumWidth(0)
         self.spinner._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.spinner.start('Preparing')
         header_layout.addWidget(self.spinner, 1, 0)
         self.loading_animation = LocalLoadingAnimation(self, extent=128)
-        self.progress = QProgressBar()
+        self.progress = WorkflowProgressBar()
         self.progress.setObjectName('WorkflowProgress')
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -2474,17 +2585,33 @@ class OptimizationProgressWindow(QDialog):
         header_layout.addWidget(self.progress, 2, 0)
         from .widgets.resource_comparison import ResourceComparison
         self.resource_comparison = ResourceComparison(self)
+        self.resource_comparison.layout().setVerticalSpacing(2)
+        # Preserve the comparison values, colours and explanation while fitting
+        # one bounded line per label. Complete text remains available on hover.
+        for name in ('removed', 'downloaded', 'note'):
+            previous = getattr(self.resource_comparison, name)
+            bounded = WorkflowSummaryLabel(previous.text(), max_lines=1)
+            bounded.setStyleSheet(previous.styleSheet())
+            bounded.setAlignment(previous.alignment())
+            self.resource_comparison.layout().replaceWidget(previous, bounded)
+            setattr(self.resource_comparison, name, bounded)
+            previous.hide()
+            previous.deleteLater()
         header_layout.addWidget(self.resource_comparison, 3, 0)
         self.stage = QLabel('Waiting for workflow preparation')
         self.stage.setObjectName('SectionTitle')
         self.stage.setWordWrap(True)
         self.stage.setMinimumWidth(0)
         self.stage.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        header_layout.addWidget(self.stage, 4, 0)
+        layout.addWidget(self.stage)
         self.description = WorkflowSummaryLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
-        header_layout.addWidget(self.description, 5, 0)
-        header_layout.addWidget(self.loading_animation, 0, 1, 6, 1, Qt.AlignRight | Qt.AlignVCenter)
-        layout.addWidget(header)
+        layout.addWidget(self.description)
+        layout.addWidget(self.loading_animation, 0, Qt.AlignRight)
+        self.guard_summary = WorkflowSummaryLabel(max_lines=1)
+        self.guard_summary.setStyleSheet('color:#e8b34b;')
+        self.guard_summary.hide()
+        header_layout.addWidget(self.guard_summary, 4, 0)
+        outer.addWidget(header)
         from .widgets.live_activity import LiveSystemStatus
         self.live_system_status = LiveSystemStatus(self)
         layout.addWidget(self.live_system_status)
@@ -2512,12 +2639,22 @@ class OptimizationProgressWindow(QDialog):
             from .live_metrics import LiveMetrics
             self._live_metrics_service = LiveMetrics(getattr(owner, 'backend', None))
         from .widgets.worker_grid import WorkerGrid
-        self.worker_grid = WorkerGrid(WorkflowWorkerCard, self)
+        self.extra_worker_grid = WorkerGrid(WorkflowWorkerCard, content)
+        self.extra_worker_grid.hide()
+        layout.addWidget(self.extra_worker_grid)
+        self.worker_grid = WorkerGrid(WorkflowWorkerCard, self, pinned=True, extras=self.extra_worker_grid)
         self.worker_cards = self.worker_grid.cards
         for identity, title in (('maintenance', 'Maintenance'), ('software_updates', 'App updates'),
-                                ('driver_updates', 'Driver updates')):
+                                ('driver_updates', 'Driver updates'), ('security_scan', 'Virus & malware scan')):
             self.worker_grid.ensure(identity, title)
-        layout.addWidget(self.worker_grid)
+        self.worker_cards['security_scan'].update_state({'status': 'not_selected',
+            'description': 'The virus, malware and spyware scan is disabled for this run.'})
+        outer.addWidget(self.worker_grid, 1)
+        self.worker_details = QPlainTextEdit()
+        self.worker_details.setReadOnly(True)
+        self.worker_details.setMinimumHeight(100)
+        self.worker_details.setMaximumHeight(280)
+        layout.addWidget(self.worker_details)
         self.background_status = WorkflowSummaryLabel()
         self.background_status.setObjectName('BackgroundStatus')
         self.background_status.hide()
@@ -2555,16 +2692,28 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_details.setReadOnly(True)
         self.auto_continue_details.setMaximumHeight(140)
         layout.addWidget(self.auto_continue_details)
+        self.details_toggle = QPushButton('Show details and logs')
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setAutoDefault(False)
+        self.details_toggle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.details_toggle.toggled.connect(self._toggle_details)
+        outer.addWidget(self.details_toggle)
+        outer.addWidget(self.content_scroll)
+        self.content_scroll.hide()
         self.auto_continue_button = QPushButton('Auto continue — apply available fixes')
         self.auto_continue_button.setAutoDefault(False)
         self.auto_continue_button.setDefault(False)
         self.auto_continue_button.setObjectName('Primary')
         self.auto_continue_button.setMinimumHeight(36)
+        self.auto_continue_button.setMinimumWidth(0)
+        self.auto_continue_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.auto_continue_button.clicked.connect(self.autoContinueRequested.emit)
         outer.addWidget(self.auto_continue_button)
         self.clear_auto_continue()
         self.cancel_button = QPushButton('Cancel after current stage')
         self.cancel_button.setMinimumHeight(36)
+        self.cancel_button.setMinimumWidth(0)
+        self.cancel_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.cancel_button.clicked.connect(self.request_close)
         outer.addWidget(self.cancel_button)
         self._worker_elapsed_timer = QTimer(self)
@@ -2572,8 +2721,68 @@ class OptimizationProgressWindow(QDialog):
         self._worker_elapsed_timer.timeout.connect(self._refresh_worker_elapsed)
         from .widgets.worker_navigation import WorkerNavigationController
         self.worker_navigation = WorkerNavigationController(getattr(owner, 'backend', None), self.worker_cards, self)
+        self.worker_navigation.stateChanged.connect(self._refresh_worker_details)
         self.worker_navigation.refresh(enabled=True)
+        self._responsive_timer = QTimer(self)
+        self._responsive_timer.setSingleShot(True)
+        self._responsive_timer.timeout.connect(self._update_responsive_layout)
+        self.worker_grid._reflow_timer.timeout.connect(self._update_responsive_layout)
         self.loading_animation.start()
+        self._update_responsive_layout()
+
+    def _toggle_details(self, visible):
+        self.content_scroll.setVisible(visible)
+        self.content_scroll.setMinimumHeight(88 if visible else 0)
+        self.content_scroll.setMaximumHeight(180 if visible else 0)
+        self.details_toggle.setText('Hide details and logs' if visible else 'Show details and logs')
+        self._refresh_worker_details()
+        self._update_responsive_layout()
+
+    def _refresh_worker_details(self):
+        parts = [self.stage.text(), self.description.text()]
+        for card in self.worker_cards.values():
+            parts.append('\n'.join(label.text() for label in (card.heading, card.status, card.completion,
+                card.details, card.totals, card.elapsed, card.activity_state, card.navigation_note) if label.text()))
+        text = '\n\n'.join(part for part in parts if part)
+        if text != self.worker_details.toPlainText():
+            position = self.worker_details.verticalScrollBar().value()
+            self.worker_details.setPlainText(text)
+            self.worker_details.verticalScrollBar().setValue(position)
+
+    def _update_responsive_layout(self):
+        if not hasattr(self, 'details_toggle') or getattr(self, '_fitting_workers', False):
+            return
+        self._fitting_workers = True
+        try:
+            self.worker_grid.reflow()
+            self._progress_header.layout().activate()
+            self._outer_layout.activate()
+            self._worker_minimum = QSize(max(480, self.worker_grid.minimumWidth() + 14),
+                max(450, self._outer_layout.minimumSize().height()))
+            if self.minimumSize() != self._worker_minimum:
+                super().setMinimumSize(self._worker_minimum)
+            self._refresh_worker_details()
+        finally:
+            self._fitting_workers = False
+
+    def setMinimumSize(self, *args):
+        # The general screen-fit coordinator may lower desktop minima. This
+        # pinned control surface must retain its measured usable bound instead
+        # of allowing an OS resize to obscure live worker controls.
+        requested = QSize(*args)
+        super().setMinimumSize(requested.expandedTo(getattr(self, '_worker_minimum', QSize())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_responsive_timer') and not self._responsive_timer.isActive():
+            self._responsive_timer.start(0)
+
+    def event(self, event):
+        result = super().event(event)
+        if (event.type() == QEvent.LayoutRequest and hasattr(self, '_responsive_timer')
+                and not self._responsive_timer.isActive() and not getattr(self, '_fitting_workers', False)):
+            self._responsive_timer.start(0)
+        return result
 
     def _refresh_worker_elapsed(self):
         status = getattr(getattr(self.owner, 'backend', None), 'worker_status', None)
@@ -2584,6 +2793,7 @@ class OptimizationProgressWindow(QDialog):
         self._refresh_resource_comparison()
         self.worker_navigation.refresh(enabled=not self.completed and not self.cancel.is_set())
         self._update_live_metrics()
+        self._refresh_worker_details()
 
     def _refresh_resource_comparison(self):
         # Smart Maintenance's last check is a different scope from this run.
@@ -2599,6 +2809,7 @@ class OptimizationProgressWindow(QDialog):
             self.space_guard_status.clear()
             self.space_guard_status.hide()
             self.space_guard_panel.hide()
+            self.guard_summary.hide()
             return
         def byte_text(value):
             return f'{value / 1073741824:.2f} GiB' if type(value) is int and 0 <= value <= 2 ** 63 - 1 else 'unknown'
@@ -2627,6 +2838,8 @@ class OptimizationProgressWindow(QDialog):
                 else 'Free-space verification is incomplete; unknown volumes are not confirmed healthy.')
         text = '\n'.join(lines)
         self.space_guard_status.setText(text)
+        self.guard_summary.set_summary(' · '.join(lines[:2]), text)
+        self.guard_summary.setVisible(bool(attention or payload.get('complete') is not True))
         self.space_guard_status.setToolTip(text + '\nRead-only observation; this does not reserve disk space or authorize extra deletion.')
         self.space_guard_status.setAccessibleDescription(self.space_guard_status.toolTip())
         self.space_guard_status.setStyleSheet('color:#e8b34b;' if attention or payload.get('complete') is not True else '')
@@ -2909,6 +3122,7 @@ class OptimizationProgressWindow(QDialog):
         if log:
             self.log.appendPlainText(display(log))
         self.worker_navigation.refresh(enabled=not self.completed and not self.cancel.is_set())
+        self._refresh_worker_details()
 
     def _update_cancellation_message(self):
         kind = ('application' if self._waiting_update_kind == 'software_updates' else

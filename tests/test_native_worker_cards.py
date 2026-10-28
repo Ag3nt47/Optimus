@@ -69,11 +69,13 @@ def jobs(app_status='running', driver_status='pending'):
              'current_package': 'Fixture GPU driver', 'current': 0, 'total': 2, 'elapsed_seconds': 0}]
 
 
-def test_three_worker_cards_exist_before_any_job_and_disabled_modules_are_honest(progress):
-    assert set(progress.worker_cards) == {'maintenance', 'software_updates', 'driver_updates'}
-    assert [card.heading.text() for card in progress.worker_cards.values()] == ['Maintenance', 'App updates', 'Driver updates']
+def test_four_worker_cards_exist_before_any_job_and_disabled_modules_are_honest(progress):
+    assert set(progress.worker_cards) == {'maintenance', 'software_updates', 'driver_updates', 'security_scan'}
+    assert [card.heading.text() for card in progress.worker_cards.values()] == ['Maintenance', 'App updates', 'Driver updates', 'Virus & malware scan']
     assert all(card.isVisible() for card in progress.worker_cards.values())
-    assert all(card.status.text() == 'Not started' for card in progress.worker_cards.values())
+    assert all(progress.worker_cards[key].status.text() == 'Not started'
+        for key in ('maintenance', 'software_updates', 'driver_updates'))
+    assert progress.worker_cards['security_scan'].status.text() == 'Not selected'
     settings = {'software_updates_enabled': True, 'driver_updates_enabled': False}
     progress.configure_workers(settings)
     assert progress.worker_cards['software_updates'].status.text() == 'Not started'

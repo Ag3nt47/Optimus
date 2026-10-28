@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from optimus.ui import OptimizationProgressWindow, WorkflowWorkerCard
 from optimus.widgets.worker_navigation import WorkerNavigationController
+from optimus.navigation import NavigationHub
 
 
 @pytest.fixture(scope='module')
@@ -79,6 +80,60 @@ def test_each_button_submits_the_exact_visible_session_job_and_revision(progress
     assert all(not item.isEnabled() for item in card.navigation_buttons.values())
     assert 'Waiting for current installer' in card.navigation_note.text()
     assert not window.cancel.is_set()  # Per-item navigation is not whole-run cancellation.
+
+
+@pytest.mark.parametrize('identity', ('maintenance', 'software_updates', 'driver_updates', 'security_scan'))
+def test_next_click_reaches_each_real_local_cursor_and_acknowledges_immediately(app, identity):
+    global_stop = threading.Event()
+    hub = NavigationHub()
+    hub.begin('e' * 32, cancel_event=global_stop)
+    tokens = {}
+    for key in ('maintenance', 'software_updates', 'driver_updates', 'security_scan'):
+        cursor = hub.cursor(key)
+        assert cursor.begin_item('fixture:' + key, 'Disposable ' + key, kind='mutation' if key in ('software_updates', 'driver_updates') else 'scan')
+        if key in ('software_updates', 'driver_updates'):
+            cursor.phase('installing', mutation_started=True)
+        tokens[key] = cursor.cancellation()
+    owner = QWidget()
+    owner.smoke_test = True
+    owner.backend = SimpleNamespace(workflow_navigation_status=hub.snapshot,
+        request_workflow_navigation=hub.request)
+    window = OptimizationProgressWindow(owner, global_stop)
+    window._optimus_no_reveal = True
+    try:
+        window.configure_workers({'spyware_scan_enabled': True})
+        window.resize(850, 650)
+        window.show()
+        for _ in range(3):
+            app.processEvents()
+        card = window.worker_cards[identity]
+        button = card.navigation_buttons['next']
+        assert button.isEnabled() and button.isVisibleTo(window)
+        QTest.mouseClick(button, Qt.LeftButton)
+        # No timer tick, backend refresh loop or GUI event turn is necessary to
+        # acknowledge the accepted command in the actual visible worker card.
+        assert tokens[identity].is_set()
+        assert all(not token.is_set() for key, token in tokens.items() if key != identity)
+        assert not global_stop.is_set()
+        assert 'Skip requested' in card.status.text()
+        assert card.status.visible_text.startswith('Skip requested')
+        expected = 'finishing_current_installer' if identity in ('software_updates', 'driver_updates') else 'waiting_for_safe_stop'
+        assert card._navigation_state['control_status'] == expected
+        assert card._navigation_state['pending_action'] == 'next'
+        assert all(not item.isEnabled() for item in card.navigation_buttons.values())
+        assert 'Skip requested' in button.toolTip()
+        assert 'Skip requested' in window.worker_details.toPlainText()
+        assert all(window.worker_cards[key].navigation_buttons['next'].isEnabled()
+            for key in tokens if key != identity)
+        assert all(cursor.current is not None for cursor in hub.jobs.values())
+    finally:
+        window.completed = True
+        window.close()
+        owner.close()
+        window.deleteLater()
+        owner.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.processEvents()
 
 
 def test_stale_click_is_not_retargeted_to_a_new_revision(progress):

@@ -2,18 +2,22 @@
 from __future__ import annotations
 import re
 from PySide6.QtCore import QEvent, QTimer
-from PySide6.QtWidgets import QGridLayout, QLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 
 class WorkerGrid(QWidget):
-    def __init__(self, factory, parent=None):
+    CORE_WORKERS = ('maintenance', 'software_updates', 'driver_updates', 'security_scan')
+
+    def __init__(self, factory, parent=None, *, pinned=False, extras=None):
         super().__init__(parent)
         self.factory, self.cards, self._columns = factory, {}, 0
+        self.pinned, self.extras = pinned, extras
         self.grid = QGridLayout(self)
         self.grid.setSizeConstraint(QLayout.SetNoConstraint)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(7)
         self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding if pinned else QSizePolicy.Preferred)
         self._reflow_timer = QTimer(self)
         self._reflow_timer.setSingleShot(True)
         self._reflow_timer.timeout.connect(self._reflow_after_style)
@@ -23,7 +27,17 @@ class WorkerGrid(QWidget):
             return self.cards[identity]
         if not isinstance(identity, str) or not re.fullmatch(r'[a-z][a-z0-9_.-]{0,63}', identity) or len(self.cards) >= 12:
             return None
+        if self.pinned and identity not in self.CORE_WORKERS:
+            if self.extras is None:
+                return None
+            card = self.extras.ensure(identity, title)
+            if card is not None:
+                self.cards[identity] = card
+                self.extras.show()
+            return card
         self.cards[identity] = self.factory(str(title)[:100], self)
+        if self.pinned:
+            self.cards[identity].set_compact(True)
         self.cards[identity].installEventFilter(self)
         self.reflow(force=True)
         return self.cards[identity]
@@ -38,26 +52,35 @@ class WorkerGrid(QWidget):
                     card.update_state(job)
 
     def reflow(self, *, force=False):
+        cards = [card for identity, card in self.cards.items()
+                 if not self.pinned or identity in self.CORE_WORKERS]
+        if self.pinned:
+            for card in cards:
+                card._fit_status()
         minimum = max((card.minimum_readable_width() if callable(getattr(card, 'minimum_readable_width', None))
-            else 245 for card in self.cards.values()), default=245)
+            else 245 for card in cards), default=245)
         spacing = self.grid.horizontalSpacing()
-        columns = max(1, min(3, (self.width() + spacing) // (minimum + spacing)))
-        if len(self.cards) == 4 and columns == 3:
+        columns = (2 if len(cards) == 4 else max(1, min(3, (self.width() + spacing) // (minimum + spacing)))) if self.pinned else max(1, min(3, (self.width() + spacing) // (minimum + spacing)))
+        if len(cards) == 4 and columns == 3:
             columns = 2  # Four selected workers form two even rows.
         if columns != self._columns or force:
             self._columns = columns
             while self.grid.count():
                 self.grid.takeAt(0)
-            for index, card in enumerate(self.cards.values()):
+            for index, card in enumerate(cards):
                 self.grid.addWidget(card, index // columns, index % columns)
             for index in range(3):
                 self.grid.setColumnStretch(index, 1 if index < columns else 0)
+            for index in range(12):
+                self.grid.setRowStretch(index, 1 if self.pinned and index < (len(cards) + columns - 1) // columns else 0)
         # SetNoConstraint keeps the width responsive, but also prevents Qt from
         # propagating taller card minima to the scroll content. Synchronize
         # height even when a font or navigation note leaves columns unchanged.
         minimum_height = self.grid.minimumSize().height()
         if self.minimumHeight() != minimum_height:
             self.setMinimumHeight(minimum_height)
+        if self.pinned:
+            self.setMinimumWidth(columns * minimum + (columns - 1) * spacing)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
