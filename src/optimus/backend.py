@@ -557,6 +557,7 @@ class Backend(ExtendedMaintenanceBackend):
             if not callable(progress_callback):
                 raise ValueError('An optional driver progress callback must be callable.')
             options.update(progress_callback=progress_callback, reportProgress=True)
+        options['cleanupDownloads'] = self._driver_payload_cleanup_enabled()
         result = self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
                                      unattended=True, acceptEula=True, record=record, timeout=900, **options)
         if isinstance(result, dict) and isinstance(result.get('download_progress'), dict):
@@ -572,7 +573,14 @@ class Backend(ExtendedMaintenanceBackend):
         return result
 
     def driver_update_apply(self, record):
-        return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'], timeout=900)
+        return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
+                                   cleanupDownloads=self._driver_payload_cleanup_enabled(), timeout=900)
+
+    def _driver_payload_cleanup_enabled(self):
+        enabled = self.preferences().get('update_payload_cleanup_enabled', True)
+        if type(enabled) is not bool:
+            raise ValueError('Automatic update-download cleanup must be on or off.')
+        return enabled
 
     def backup_drivers(self, destination):
         destination = Path(destination)

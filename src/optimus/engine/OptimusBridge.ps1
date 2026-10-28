@@ -130,11 +130,17 @@ function Invoke-OptimusRequest {
         }
         'driver_update_apply' {
             $record=if($arg.record){$arg.record}else{[pscustomobject]@{id=[string]$arg.id;revision=[int]$arg.revision}}
+            $cleanupDownloads=$true
+            if(($arg.PSObject.Properties.Name -contains 'cleanupDownloads') -or
+               ($arg -is [Collections.IDictionary] -and $arg.Contains('cleanupDownloads'))){
+                if($arg.cleanupDownloads -isnot [bool]){throw 'Driver download cleanup must be on or off.'}
+                $cleanupDownloads=$arg.cleanupDownloads
+            }
             $progressCallback=$null
             if($arg.reportProgress -is [bool] -and $arg.reportProgress -eq $true){
                 $progressCallback=New-OptimusProgressCallback -RequestId ([string]$Request.id)
             }
-            Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true) -ProgressCallback $progressCallback
+            Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true) -ProgressCallback $progressCallback -CleanupDownloads $cleanupDownloads
         }
         default {
             $progressCallback=$null

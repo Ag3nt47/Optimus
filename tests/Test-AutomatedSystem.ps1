@@ -126,4 +126,40 @@ Reset-Fixture;$record=Record-Fixture;$record|Add-Member NoteProperty approvalMod
 Assert-Test ($script:Installs -eq 1) 'verified newer matching driver installs quietly'
 Assert-Test ([bool](Get-SCMStartupProtection -Name 'Bing Wallpaper' -Command 'C:\Fixture\app.exe')) 'Bing name startup protected'
 Assert-Test ([bool](Get-SCMStartupProtection -Name 'Generic' -Command 'C:\Microsoft\Bing-Wallpaper\app.exe')) 'Bing command startup protected'
+
+# WUA owns its cache. These fixtures forbid every cleanup/deletion/service
+# command, including for a completely successful native installation receipt.
+function Remove-Item { throw 'Driver payload reporting must never delete a pathname.' }
+function Delete-DeliveryOptimizationCache { throw 'No proven per-update DO ownership.' }
+function Stop-Service { throw 'Driver payload reporting must never stop services.' }
+function Start-Service { throw 'Driver payload reporting must never reset services.' }
+Reset-Fixture
+$result=Invoke-SCMDriverUpdateApply -Record (Record-Fixture) -Unattended $true -AcceptEula $true
+$cleanup=$result.payload_cleanup
+Assert-Test ($cleanup.requested_enabled -eq $true -and $cleanup.status -eq 'os_managed' -and $cleanup.supported -eq $false) 'default-on driver cleanup honestly reports Windows-managed provider limitation'
+Assert-Test ($cleanup.provider -eq 'windows_update_agent' -and $cleanup.ownership -eq 'operating_system' -and $cleanup.removed_files -eq 0 -and $cleanup.removed_bytes -eq 0) 'WUA success never claims ownership or deleted driver bytes'
+Reset-Fixture
+$result=Invoke-SCMDriverUpdateApply -Record (Record-Fixture) -Unattended $true -AcceptEula $true -CleanupDownloads $false
+Assert-Test ($result.payload_cleanup.status -eq 'disabled' -and $result.payload_cleanup.requested_enabled -eq $false -and $script:Installs -eq 1) 'saved cleanup opt-out leaves the approved install unchanged'
+Reset-Fixture;$script:InstallItem.RebootRequired=$true
+$result=Invoke-SCMDriverUpdateApply -Record (Record-Fixture) -Unattended $true -AcceptEula $true
+Assert-Test ($result.restartNeeded -eq $true -and $result.payload_cleanup.status -eq 'retained_pending_restart' -and $result.payload_cleanup.removed_bytes -eq 0) 'pending-restart update downloads retained'
+Reset-Fixture;$script:InstallItem.ResultCode=3;$script:InstallResult.ResultCode=3
+$result=Invoke-SCMDriverUpdateApply -Record (Record-Fixture) -Unattended $true -AcceptEula $true
+Assert-Test ($result.payload_cleanup.status -eq 'retained_unverified' -and $result.payload_cleanup.removed_files -eq 0) 'partial native success never treated as cleanup eligibility'
+Reset-Fixture;$script:DownloadItem.ResultCode=4
+$result=Invoke-SCMDriverUpdateApply -Record (Record-Fixture) -Unattended $true -AcceptEula $true
+Assert-Test ($result.installer_started -eq $false -and $result.payload_cleanup.status -eq 'retained_unverified') 'terminal download refusal retains all provider-managed files'
+foreach($uncertain in @('running','missing-restart','missing-hresult','unknown-outcome','string-result-code')){
+ $receipt=[pscustomobject]@{resultCode=[int]2;aggregateResultCode=[int]2;hresult=[int]0;aggregateHresult=[int]0;restartNeeded=$false;installer_started=$true;outcomeKnown=$true;running=$false}
+ switch($uncertain){
+  'running' {$receipt.running=$true}
+  'missing-restart' {$receipt.restartNeeded=$null}
+  'missing-hresult' {$receipt.hresult=$null}
+  'unknown-outcome' {$receipt.outcomeKnown=$false}
+  'string-result-code' {$receipt.resultCode='2'}
+ }
+ $cleanup=Get-SCMDriverPayloadCleanupReport -Outcome $receipt
+ Assert-Test ($cleanup.status -eq 'retained_unverified' -and $cleanup.removed_files -eq 0 -and $cleanup.removed_bytes -eq 0) ('uncertain download retained: '+$uncertain)
+}
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealScans=0;RealDownloads=0;RealInstalls=0;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress

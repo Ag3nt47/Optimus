@@ -133,5 +133,24 @@ try {[Console]::SetOut($writer);& $first ([pscustomobject]@{phase='downloading';
 finally {[Console]::SetOut($original)}
 $values=@($writer.ToString() -split '\r?\n'|Where-Object {$_}|ForEach-Object {ConvertFrom-Json -InputObject $_})
 Assert-Test ($values[0].id -ceq ('b'*32) -and $values[1].id -ceq ('c'*32)) 'closures bind separate immutable request identities'
+
+foreach($asJsonObject in @($false,$true)){
+ foreach($cleanupEnabled in @($false,$true)){
+  Reset-Fixture
+  $arguments=@{record=(Record-Fixture);unattended=$true;acceptEula=$true;cleanupDownloads=$cleanupEnabled}
+  if($asJsonObject){$arguments=[pscustomobject]$arguments}
+  $request=[pscustomobject]@{id=('d'*32);operation='driver_update_apply';arguments=$arguments}
+  $result=Invoke-OptimusRequest -Request $request
+  Assert-Test ($result.payload_cleanup.requested_enabled -eq $cleanupEnabled -and $script:Installs -eq 1) 'cleanup choice survives native dispatcher for dictionary and JSON requests'
+ }
+ foreach($invalid in @('false',1,$null)){
+  Reset-Fixture
+  $arguments=@{record=(Record-Fixture);unattended=$true;acceptEula=$true;cleanupDownloads=$invalid}
+  if($asJsonObject){$arguments=[pscustomobject]$arguments}
+  $request=[pscustomobject]@{id=('e'*32);operation='driver_update_apply';arguments=$arguments}
+  $caught=$false;try{Invoke-OptimusRequest -Request $request|Out-Null}catch{$caught=$true}
+  Assert-Test ($caught -and $script:Downloads -eq 0 -and $script:Installs -eq 0) 'invalid cleanup choice refused before driver download/install'
+ }
+}
 [pscustomobject]@{Result='PASS';Assertions=($script:Assertions-$baseAssertions);BaseAssertions=$baseAssertions;
     RealScans=0;RealDownloads=0;RealInstalls=0;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress

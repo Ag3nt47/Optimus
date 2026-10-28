@@ -76,6 +76,7 @@ def test_cached_or_percent_only_progress_does_not_invent_transfer_bytes():
 def test_driver_terminal_download_receipt_is_bound_to_exact_offer():
     from optimus.backend import Backend
     backend=Backend.__new__(Backend);backend.bridge=Mock()
+    backend.preferences=Mock(return_value={})
     payload={'phase':'downloading','percent':99,'downloaded_bytes':200,
              'download_total_bytes':200,'bytes_source':'windows_update','bytes_estimated':False}
     backend.bridge.request.return_value={'resultCode':2,'download_progress':payload}

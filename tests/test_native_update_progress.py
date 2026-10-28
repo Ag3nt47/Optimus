@@ -41,13 +41,14 @@ def test_driver_backend_progress_is_opt_in_and_never_serializes_callable():
     from optimus.backend import Backend
     backend = Backend.__new__(Backend)
     backend.bridge = Mock()
+    backend.preferences = Mock(return_value={})
     record = {'id': '00000000-0000-0000-0000-000000000001', 'revision': 1}
     callback = Mock()
     result = backend.driver_update_apply_unattended(record, accept_eula=True, progress_callback=callback)
     assert result is backend.bridge.request.return_value
     backend.bridge.request.assert_called_once_with('driver_update_apply', id=record['id'],
         revision=1, unattended=True, acceptEula=True, record=record, timeout=900,
-        progress_callback=callback, reportProgress=True)
+        progress_callback=callback, reportProgress=True, cleanupDownloads=True)
     backend.bridge.reset_mock()
     backend.driver_update_apply_unattended(record, accept_eula=True)
     assert 'progress_callback' not in backend.bridge.request.call_args.kwargs

@@ -559,7 +559,7 @@ function New-SCMDriverPreflightRefusal {
         note=$Note.Substring(0,[Math]::Min(2000,$Note.Length))
     }
 }
-function Invoke-SCMDriverUpdateApply {
+function Invoke-SCMDriverUpdateApplyCore {
     param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false,[scriptblock]$ProgressCallback)
     if(-not(Test-SCMAdministrator)){throw 'Administrator access is required; no automatic elevation was requested.'}
     if($Unattended -and -not $AcceptEula){throw 'Saved driver license agreement approval is required for unattended installation.'}
@@ -705,5 +705,50 @@ function Invoke-SCMDriverUpdateApply {
     }
     if ($null -ne $downloadState.last) { $receipt.download_progress = $downloadState.last }
     [pscustomobject]$receipt
+}
+
+function Get-SCMDriverPayloadCleanupReport {
+    param($Outcome,[bool]$RequestedEnabled=$true)
+    # WUA downloads into its own cache; this provider never creates Optimus-
+    # owned driver installers. IUpdate has no scoped cache-delete method:
+    # https://learn.microsoft.com/windows/win32/api/wuapi/nn-wuapi-iupdate
+    # Delivery Optimization supports -FileId, but this WUA flow supplies no
+    # proven binding to an exclusively owned DO file. Do not infer ownership
+    # from update GUIDs, URLs, timestamps or a before/after cache inventory.
+    # https://learn.microsoft.com/windows/deployment/do/waas-delivery-optimization-monitor
+    $status='retained_unverified'
+    $reason='Driver download cleanup was not attempted: installation completion is unverified; Windows retains its update files.'
+    if(-not $RequestedEnabled){
+        $status='disabled';$reason='Automatic update-download cleanup is off in Settings. Windows manages its driver download cache.'
+    }elseif($null -ne $Outcome -and $Outcome.restartNeeded -is [bool] -and $Outcome.restartNeeded){
+        $status='retained_pending_restart';$reason='Windows reports a restart is needed. Driver download files remain managed by Windows.'
+    }elseif($null -ne $Outcome -and $Outcome.outcomeKnown -is [bool] -and $Outcome.outcomeKnown -and
+        $Outcome.running -is [bool] -and -not $Outcome.running -and
+        $Outcome.installer_started -is [bool] -and $Outcome.installer_started -and
+        $Outcome.resultCode -is [int] -and $Outcome.resultCode -eq 2 -and
+        $Outcome.aggregateResultCode -is [int] -and $Outcome.aggregateResultCode -eq 2 -and
+        $Outcome.hresult -is [int] -and $Outcome.hresult -eq 0 -and
+        $Outcome.aggregateHresult -is [int] -and $Outcome.aggregateHresult -eq 0 -and
+        $Outcome.restartNeeded -is [bool] -and -not $Outcome.restartNeeded){
+        $status='os_managed'
+        $reason='The driver installation returned success. Windows manages these download files; Optimus cannot safely remove files for only this update. No driver payload was deleted.'
+    }
+    [pscustomobject]@{
+        provider='windows_update_agent';ownership='operating_system';supported=$false
+        requested_enabled=$RequestedEnabled;status=$status;removed_files=0;removed_bytes=0
+        reason=$reason
+    }
+}
+
+function Invoke-SCMDriverUpdateApply {
+    param([Parameter(Mandatory=$true)]$Record,[bool]$Unattended=$false,[bool]$AcceptEula=$false,
+        [scriptblock]$ProgressCallback,[bool]$CleanupDownloads=$true)
+    # Preserve the installer's original exceptions and all restart/quiet-mode/
+    # applicability checks. A failed or unknown operation authorizes no cleanup.
+    $outcome=Invoke-SCMDriverUpdateApplyCore -Record $Record -Unattended $Unattended -AcceptEula $AcceptEula -ProgressCallback $ProgressCallback
+    if($null -ne $outcome){
+        $outcome | Add-Member -NotePropertyName payload_cleanup -NotePropertyValue (Get-SCMDriverPayloadCleanupReport -Outcome $outcome -RequestedEnabled $CleanupDownloads)
+    }
+    return $outcome
 }
 
