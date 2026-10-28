@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1836,10 +1837,10 @@ def _compact_worker_reason(text):
 
 
 class WorkflowSummaryLabel(QLabel):
-    """Paint at most two fitting lines while retaining complete accessible text."""
+    """Paint bounded fitting lines while retaining complete accessible text."""
     def __init__(self, text='', parent=None, *, max_lines=2):
         super().__init__(parent)
-        self._max_lines = 1 if max_lines == 1 else 2
+        self._max_lines = max_lines if max_lines in (1, 2, 3) else 2
         self._summary = ''
         self.visible_text = ''
         self.setTextFormat(Qt.PlainText)
@@ -1866,6 +1867,13 @@ class WorkflowSummaryLabel(QLabel):
 
     def _fit_summary(self):
         text, metrics, width = self._summary, self.fontMetrics(), max(1, self.contentsRect().width())
+        if self._max_lines == 3:
+            parts = text.splitlines()
+            if len(parts) > 3:
+                parts = parts[:2] + [' '.join(parts[2:])]
+            self.visible_text = '\n'.join(metrics.elidedText(part, Qt.ElideRight, width) for part in parts)
+            self.update()
+            return
         if self._max_lines == 1:
             self.visible_text = metrics.elidedText(' '.join(text.split()), Qt.ElideRight, width)
             self.update()
@@ -1994,6 +2002,7 @@ class WorkflowWorkerCard(QFrame):
         header.addWidget(self.activity_ring, 0, Qt.AlignRight)
         layout.addLayout(header)
         self._raw_status = 'not_started'
+        self._scan_completion_verified = False
         self._last_progress = None
         self._item_progress = None
         self._live_worker_metrics = {}
@@ -2009,7 +2018,7 @@ class WorkflowWorkerCard(QFrame):
         self.progress.setValue(0)
         self.progress.setFormat('No item count yet')
         layout.addWidget(self.progress)
-        self.totals = WorkflowSummaryLabel()
+        self.totals = WorkflowSummaryLabel(max_lines=3)
         self.totals.setObjectName('WorkerResourceTotals')
         self._resource_totals = {}
         self._resource_scope = ''
@@ -2172,7 +2181,7 @@ class WorkflowWorkerCard(QFrame):
             download = ('Downloaded: ' + ('~' if values.get('downloaded_estimated') is True else '')
                 + _worker_bytes(values['downloaded_bytes'])
                 + (' observed' if values.get('downloaded_partial') is True else '')) if downloaded_known else 'Downloaded: size not reported'
-            # Update cards reserve two aligned rows. Maintenance can include
+            # Update cards reserve three aligned rows. Maintenance can include
             # installations without treating their download size as disk usage.
             if maintenance and len(lines) == 2:
                 details.append(download)
@@ -2185,7 +2194,7 @@ class WorkflowWorkerCard(QFrame):
         if self._resource_scope == 'last_check':
             lines.append('Latest smart check')
             details.append('These totals cover only the latest Smart Maintenance check; they are separate from this one-click run and lifetime totals.')
-        self.totals.set_summary('\n'.join(lines[:2]), '\n'.join(lines + details))
+        self.totals.set_summary('\n'.join(lines[:3]), '\n'.join(lines + details))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2203,6 +2212,8 @@ class WorkflowWorkerCard(QFrame):
             scope=state.get('resource_totals_scope'))
         raw_status = str(state.get('status', 'not_started'))
         self._raw_status = raw_status
+        scan_worker = state.get('operation_kind') == 'antivirus_scan'
+        self._scan_completion_verified = scan_worker and state.get('completion_verified') is True
         from .item_progress import normalize_item_progress
         # Every snapshot supplies its own item. Missing/unknown progress must
         # clear the old phase rather than inheriting the last package's value.
@@ -2210,7 +2221,7 @@ class WorkflowWorkerCard(QFrame):
         self._finished_with_skips = (not maintenance and state.get('presentation_status') == 'finished_with_skips'
             and state.get('worker_finished') is True and state.get('continuation_blocked') is False
             and raw_status in ('needs_review', 'completed', 'completed_with_errors'))
-        percentage = state.get('percentage') if maintenance else None
+        percentage = state.get('percentage') if maintenance or scan_worker else None
         current, total = state.get('current'), state.get('total')
         if not maintenance and type(current) is int and type(total) is int and 0 <= current <= total and total > 0:
             percentage = current / total * 100
@@ -2290,7 +2301,16 @@ class WorkflowWorkerCard(QFrame):
                 'Installation blocked. Review the saved reason.')
         self.details.set_summary(summary, description)
         current, total = state.get('current'), state.get('total')
-        if maintenance:
+        if scan_worker and type(percentage) in (int, float) and math.isfinite(percentage) and 0 <= percentage <= 100:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(int(percentage))
+            self.progress.setFormat(('~' if self._item_progress and self._item_progress.get('estimated') else '') + '%p% scan progress')
+        elif scan_worker:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self.progress.setFormat('Percentage unavailable' if raw_status in ('running', 'scanning') else
+                'Not started' if raw_status == 'not_started' else 'Scan completion unverified')
+        elif maintenance:
             self.progress.setRange(0, 100)
             self.progress.setValue(max(0, min(100, int(state.get('percentage') or 0))))
             self.progress.setFormat('%p% of workflow stages')
@@ -2352,12 +2372,18 @@ class WorkflowWorkerCard(QFrame):
             health, label = ('working', 'Activity observed') if observed else ('waiting', 'Waiting / external work')
         else:
             health, label = 'unverified', 'Activity not yet measurable'
-        item = self._item_progress if not terminal else None
+        verified_scan = (self._scan_completion_verified and isinstance(self._item_progress, dict)
+            and self._item_progress.get('phase') == 'scan' and self._item_progress.get('percent') == 100)
+        item = self._item_progress if not terminal or verified_scan else None
         percent = item.get('percent') if item is not None else None
         estimated = item.get('estimated') is True if item is not None else False
         phase = item.get('phase', '').replace('_', ' ') if item is not None else ''
         detail = ((item['label'] + ' · ' + phase.capitalize() + '. ') if item is not None else '')
-        detail += (('Approximate current operation: ' + str(int(percent)) + '% from native byte counters.' if estimated else
+        estimate_source = ('% reported by Defender.' if item and item.get('progress_source') == 'defender_mpclient' else
+            '% estimated by the Defender scan provider; not whole-disk coverage.' if item and item.get('progress_source') == 'defender_cim_progress' else
+            '% from native byte counters.')
+        detail += (('Approximate current operation: ' + str(int(percent))
+                    + estimate_source if estimated else
                     'Current operation: ' + str(int(percent)) + '% reported.') if percent is not None else
                    'This operation has not reported a percentage; the ring is indeterminate while running.')
         detail += ' Queue and workflow totals are shown separately in the bars.'
@@ -2446,15 +2472,18 @@ class OptimizationProgressWindow(QDialog):
         self.progress.setValue(0)
         self.progress.setFormat('%p%')
         header_layout.addWidget(self.progress, 2, 0)
+        from .widgets.resource_comparison import ResourceComparison
+        self.resource_comparison = ResourceComparison(self)
+        header_layout.addWidget(self.resource_comparison, 3, 0)
         self.stage = QLabel('Waiting for workflow preparation')
         self.stage.setObjectName('SectionTitle')
         self.stage.setWordWrap(True)
         self.stage.setMinimumWidth(0)
         self.stage.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        header_layout.addWidget(self.stage, 3, 0)
+        header_layout.addWidget(self.stage, 4, 0)
         self.description = WorkflowSummaryLabel('Progress reflects completed workflow stages. No estimated completion is fabricated.')
-        header_layout.addWidget(self.description, 4, 0)
-        header_layout.addWidget(self.loading_animation, 0, 1, 5, 1, Qt.AlignRight | Qt.AlignVCenter)
+        header_layout.addWidget(self.description, 5, 0)
+        header_layout.addWidget(self.loading_animation, 0, 1, 6, 1, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(header)
         from .widgets.live_activity import LiveSystemStatus
         self.live_system_status = LiveSystemStatus(self)
@@ -2552,8 +2581,16 @@ class OptimizationProgressWindow(QDialog):
             self.worker_grid.update_jobs(status())
         for card in self.worker_cards.values():
             card.refresh_elapsed()
+        self._refresh_resource_comparison()
         self.worker_navigation.refresh(enabled=not self.completed and not self.cancel.is_set())
         self._update_live_metrics()
+
+    def _refresh_resource_comparison(self):
+        # Smart Maintenance's last check is a different scope from this run.
+        self.resource_comparison.update_totals({identity: card._resource_totals
+            for identity, card in self.worker_cards.items()
+            if identity in ('maintenance', 'software_updates', 'driver_updates')
+            and card._resource_scope != 'last_check'})
 
     def _update_space_guard(self, payload):
         if not isinstance(payload, dict) or type(payload.get('enabled')) is not bool:
@@ -2642,12 +2679,63 @@ class OptimizationProgressWindow(QDialog):
         self._worker_selection = dict(settings) if isinstance(settings, dict) else {}
         for card in self.worker_cards.values():
             card.reset_resource_totals()
+        self._refresh_resource_comparison()
         for identity, key in (('software_updates', 'software_updates_enabled'),
                               ('driver_updates', 'driver_updates_enabled')):
             selected = self._worker_selection.get(key) is not False
             self.worker_cards[identity].update_state({'status': 'not_started' if selected else 'not_selected',
                 'description': ('Waiting for the saved update scope to be checked.' if selected else
                                 'This update module is disabled for this run.')})
+        if self._worker_selection.get('spyware_scan_enabled') is True or 'security_scan' in self.worker_cards:
+            selected = self._worker_selection.get('spyware_scan_enabled') is True
+            self._update_scan_card({'stage_status': 'not_started' if selected else 'not_selected',
+                'description': 'Waiting for the saved virus, malware and spyware scan.' if selected else
+                    'The virus, malware and spyware scan is disabled for this run.'})
+
+    def _update_scan_card(self, state):
+        card = self.worker_grid.ensure('security_scan', 'Virus & malware scan')
+        clock = self._foreground_update_clocks.get('security_scan')
+        status = state.get('scan_status') or state.get('stage_status') or 'scanning'
+        if status not in ('not_started', 'not_selected') and clock is None:
+            clock = self._foreground_update_clocks['security_scan'] = QElapsedTimer()
+            clock.start()
+        verified = state.get('completion_verified') is True
+        count = state.get('active_threat_count')
+        if status == 'completed' and not verified:
+            status = 'needs_review'
+        elif status == 'completed' and (type(count) is not int or count > 0):
+            status = 'needs_review'
+        elif status in ('blocked', 'incomplete'):
+            status = 'needs_review'
+        elif status == 'preparing':
+            status = 'running'
+        elif status in ('provider_scan_progress', 'waiting_for_defender'):
+            status = 'scanning'
+        item = state.get('item_progress')
+        from .item_progress import normalize_item_progress
+        item = normalize_item_progress(item)
+        if item is not None and item['key'] != 'security:defender:quick_scan':
+            item = None
+        if verified:
+            item = dict(key='security:defender:quick_scan', label='Virus, malware and spyware scan',
+                phase='scan', percent=100)
+        percentage = item.get('percent') if item is not None else None
+        elapsed = state.get('scan_elapsed_seconds', state.get('elapsed_seconds'))
+        if type(elapsed) not in (int, float):
+            elapsed = clock.elapsed() / 1000 if clock is not None else None
+        description = display(state.get('description') or state.get('reason'))
+        if verified and type(count) is int and count > 0:
+            description += ' Active threats found; review removal before Optimus requests remediation.'
+        elif verified and type(count) is not int:
+            description += ' Scan completed; threat results need review.'
+        card.update_state({'status': status, 'description': description,
+            'operation_kind': 'antivirus_scan', 'completion_verified': verified,
+            'percentage': percentage, 'item_progress': item, 'elapsed_seconds': elapsed})
+        threat_text = f'Active threats: {count}' if type(count) is int and 0 <= count <= 1000000 else 'Threat results: not yet verified'
+        if verified and type(count) is not int:
+            threat_text = 'Scan completed; review threat results'
+        card.totals.set_summary(threat_text + '\nQuarantine: Defender policy',
+            threat_text + '\nDefender controls automatic protection and quarantine. Optimus requests removal only after explicit approval.')
 
     @staticmethod
     def _update_stage_worker(stage):
@@ -2664,6 +2752,8 @@ class OptimizationProgressWindow(QDialog):
             self.log.appendPlainText(display(state))
             return
         stage = display(field(state, 'stage', default='Working'))
+        if stage == 'Scan for spyware and malware':
+            self._update_scan_card(state)
         waiting_kind = state.get('waiting_for')
         if waiting_kind not in ('software_updates', 'driver_updates', 'installer_updates'):
             waiting_kind = {'Waiting for background application updates': 'software_updates',
@@ -2689,8 +2779,9 @@ class OptimizationProgressWindow(QDialog):
         percentage = max(0, min(99 if waiting_for_updates else 100, float(percentage or 0)))
         self.progress.setValue(int(percentage))
         self.spinner.set_pct(percentage)
-        self.stage.setText(stage)
-        self.spinner.set_text(stage)
+        visible_stage = 'Scan for viruses, malware and spyware' if stage == 'Scan for spyware and malware' else stage
+        self.stage.setText(visible_stage)
+        self.spinner.set_text(visible_stage)
         description = display(field(state, 'description'))
         if waiting_for_updates and not description:
             description = ('Independent work has finished. Waiting for background updates before '
@@ -2813,6 +2904,7 @@ class OptimizationProgressWindow(QDialog):
             self.background_status.set_summary('Background: ' + '; '.join(compact_descriptions),
                                                'Background: ' + '; '.join(descriptions))
             self.background_status.setVisible(bool(descriptions))
+        self._refresh_resource_comparison()
         log = field(state, 'log', default='')
         if log:
             self.log.appendPlainText(display(log))
@@ -2884,6 +2976,11 @@ class OptimizationProgressWindow(QDialog):
         for item in rows(field(result, 'stages', default=[]))[:256]:
             if not isinstance(item, dict):
                 continue
+            if display(field(item, 'title', 'name')) == 'Scan for spyware and malware':
+                outcome = item.get('result') if isinstance(item.get('result'), dict) else {}
+                self._update_scan_card(dict(outcome, scan_status=outcome.get('status', item.get('status')),
+                    description=outcome.get('note') or outcome.get('reason') or item.get('error') or
+                        'Scan returned; review its recorded result.'))
             worker = self._update_stage_worker(display(field(item, 'title', 'name')))
             if worker:
                 outcome = item.get('result') if isinstance(item.get('result'), dict) else {}
@@ -2913,6 +3010,7 @@ class OptimizationProgressWindow(QDialog):
                 card = self.worker_cards.get(identity)
                 if card is not None and isinstance(totals, dict):
                     card._set_resource_totals(totals, maintenance=identity == 'maintenance')
+        self._refresh_resource_comparison()
         self.cancel_button.setText('Close results')
         self.cancel_button.setEnabled(True)
         self._update_live_metrics()
@@ -3159,6 +3257,7 @@ class SecurityReviewDialog(QDialog):
         self._active = None
         self._results = []
         self._review_data = dict(report) if isinstance(report, dict) else {}
+        self._remediation_approvals = {}
         self._recommendations = {}
         self._selection_controls = {}
         self._selection_fit_timer = QTimer(self)
@@ -3289,15 +3388,39 @@ class SecurityReviewDialog(QDialog):
     def _ask_recommendation(self, recommendation):
         text = str(recommendation.get('title') or recommendation['id']) + '\n\n' + str(recommendation.get('reason') or '')
         text += '\n\nAction: ' + str(recommendation.get('action') or 'Apply this supported Windows security recommendation.')
+        if recommendation['id'] == 'remediate_defender_threats':
+            consent = self._remediation_scope()
+            if consent is None:
+                return False
+            text += ('\n\nThis requests Defender remediation of ALL currently active threats shown in this review: '
+                + ', '.join(str(identity) for identity in consent['threat_ids'])
+                + '. Defender chooses its supported remediation under your existing Windows policy. '
+                  'A changed active-threat list requires a new review. Quarantined items are reviewed in Windows Security.')
         if recommendation.get('requires_admin'):
             text += '\nAdministrator access may be required; a refused or policy-blocked change is reported.'
         text += '\n\nApply this recommendation now? No leaves this item unchanged.'
         return ask_yes_no(self, 'Approve one security recommendation', text)
 
+    def _remediation_scope(self):
+        threats = self._review_data.get('threats')
+        if not isinstance(threats, dict) or threats.get('active_ids_complete') is not True:
+            return None
+        identities = threats.get('active_ids')
+        fingerprint = threats.get('active_fingerprint')
+        if (not isinstance(identities, list) or not 0 < len(identities) <= 1000
+                or any(type(identity) is not int or not 0 <= identity <= 2 ** 63 - 1 for identity in identities)
+                or len(set(identities)) != len(identities)
+                or threats.get('active_fingerprint_complete') is not True
+                or not isinstance(fingerprint, str) or re.fullmatch('[0-9a-f]{64}', fingerprint) is None):
+            return None
+        return {'confirmed': True, 'scope': 'all_current_active_defender_threats',
+                'threat_ids': sorted(identities), 'resource_fingerprint': fingerprint}
+
     def apply_selected(self):
         if self._worker is not None:
             return
         self._queue = []
+        self._remediation_approvals.clear()
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             choice = self.selection_control(row)
@@ -3305,9 +3428,15 @@ class SecurityReviewDialog(QDialog):
                 continue
             identifier = item.data(Qt.UserRole)
             recommendation = self._recommendations[identifier]
+            if identifier == 'remediate_defender_threats' and self._remediation_scope() is None:
+                self._set_result(identifier, 'Fresh active-threat list required; no removal requested')
+                choice.setChecked(False)
+                continue
             self._set_result(identifier, 'Approved for this attempt' if self._ask_recommendation(recommendation) else 'Declined; unchanged')
             if self.table.item(row, 3).text() == 'Approved for this attempt':
                 self._queue.append(identifier)
+                if identifier == 'remediate_defender_threats':
+                    self._remediation_approvals[identifier] = self._remediation_scope()
             choice.setChecked(False)
         if not self._queue:
             self.status.setText('No recommendation was approved. You can close this review and continue to process suggestions.')
@@ -3332,7 +3461,10 @@ class SecurityReviewDialog(QDialog):
         self.apply_button.setEnabled(False)
         self.status.setText('Working on: ' + str(self._recommendations[self._active].get('title') or self._active))
         self._set_result(self._active, 'Running')
-        worker = BackendWorker(self.backend.apply_security_recommendation, (self._active,), {'cancel_event': self._cancel})
+        arguments = {'cancel_event': self._cancel}
+        if self._active == 'remediate_defender_threats':
+            arguments['remediation_consent'] = self._remediation_approvals.pop(self._active, None)
+        worker = BackendWorker(self.backend.apply_security_recommendation, (self._active,), arguments)
         self._worker = worker
         worker.signals.result.connect(self._item_result)
         worker.signals.error.connect(self._item_error)
@@ -3804,6 +3936,7 @@ class OptimusWindow(QMainWindow):
             ('consumer_debloat_enabled','Remove selected consumer bloatware'),('m365_debloat_enabled','Run Microsoft 365 debloat'),
             ('outlook_debloat_enabled','Run Outlook debloat'),('edge_debloat_enabled','Run Edge debloat'),
             ('software_updates_enabled','Check/apply supported software updates under saved approval'),
+            ('update_payload_cleanup_enabled','Automatically delete tracked installer downloads after verified updates\n(keeps personal Downloads, Windows caches, logs and rollback backups)'),
             ('legacy_patch_review_enabled','Review known legacy/unofficial support provider paths (no automatic replacement installs)'),
             ('windows_security_updates_enabled','Check Windows Security/Critical patches'),
             ('windows_security_updates_install_approved','Approve automatic eligible Windows Security/Critical patch installation'),
@@ -3814,7 +3947,7 @@ class OptimusWindow(QMainWindow):
             ('auto_continue_fixes_enabled','Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)'),
             ('post_process_review_enabled','Offer process/program review after completion'),
             ('security_review_enabled','Check Windows security and offer reviewed fixes'),
-            ('spyware_scan_enabled','Run Microsoft Defender quick scan'),
+            ('spyware_scan_enabled','Run a quick virus, malware and spyware scan with Microsoft Defender'),
             ('privacy_advertising_enabled','Apply selected Windows advertising/suggestion privacy preferences'),
             ('privacy_diagnostics_enabled','Apply selected optional Windows diagnostic preferences'),
             ('codex_priority_enabled','Apply optional Codex priority profile'),('background_analysis_enabled','Enable background resource analysis'),

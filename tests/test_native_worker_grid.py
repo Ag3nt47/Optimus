@@ -43,8 +43,8 @@ def test_additional_actual_workers_reflow_and_keep_explicit_unknown_counts(app):
         grid.resize(3 * readable + 2 * spacing + 60, 800)
         for _ in range(3):
             app.processEvents()
-        assert len(grid.cards) == 4 and grid._columns == 3
-        assert grid.grid.getItemPosition(3)[:2] == (1, 0)
+        assert len(grid.cards) == 4 and grid._columns == 2
+        assert grid.grid.getItemPosition(3)[:2] == (1, 1)
         assert all(card.width() >= readable for card in grid.cards.values())
         assert 'No item count' in grid.cards['driver_backup'].progress.format()
         grid.resize(2 * readable + spacing + 20, 800)

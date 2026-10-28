@@ -54,6 +54,7 @@ DEFAULTS = {
     'software_update_policy': 'review', 'software_update_ids': [],
     'software_update_all_approved': False, 'software_update_exclude_ids': [],
     'software_update_agreements_accepted': False, 'driver_updates_enabled': False,
+    'update_payload_cleanup_enabled': True,
     'cleanup_category_ids': [],
     'codex_archives_cleanup_enabled': False, 'codex_archives_retention_days': 7,
     'angerona_logs_cleanup_enabled': False, 'angerona_logs_retention_days': 7,
@@ -160,6 +161,7 @@ class Preferences:
     def safe_defaults():
         value = copy.deepcopy(DEFAULTS)
         value.update({'cleanup_enabled': False, 'browser_cache_enabled': False,
+                      'update_payload_cleanup_enabled': False,
                       'automation_mode': 'manual', 'optimization_mode': 'custom'})
         return value
 
@@ -390,6 +392,9 @@ class Workflow:
                         current_progress = normalize_item_progress({'key': 'maintenance:' + title,
                             'label': description, 'phase': str(state.get('phase') or 'working'), 'percent': None})
                     progress_callback({'item_progress': current_progress,
+                                       'scan_status': state.get('scan_status'),
+                                       'completion_verified': state.get('completion_verified'),
+                                       'scan_elapsed_seconds': state.get('elapsed_seconds'),
                                        'deleted_bytes': state.get('deleted_bytes'),
                                        'deleted_count': state.get('deleted_count'),
                                        'percentage': min(99, int((completed + fraction) * 100 / total_stages)),
@@ -581,9 +586,16 @@ class Workflow:
                 stages.append(('Check or install Windows security updates',
                                'Checking applicable Security/Critical patches through the configured Windows Update service; installation uses saved scope and agreement approvals, without an automatic reboot.', security_updates))
             if configuration['spyware_scan_enabled']:
+                def scan_threats():
+                    operation = self.backend.scan_spyware
+                    from .item_progress import accepts_progress_callback
+                    kwargs = {'cancel_event': cancel_event}
+                    if accepts_progress_callback(operation):
+                        kwargs['progress_callback'] = item_progress('Scan for spyware and malware')
+                    return operation(**kwargs)
                 stages.append(('Scan for spyware and malware',
-                               'Running a Microsoft Defender quick scan using its detection and remediation policy; no arbitrary process or application is classified as spyware.',
-                               lambda: self.backend.scan_spyware(cancel_event=cancel_event)))
+                               'Running a Microsoft Defender quick scan for viruses, malware and spyware using its existing protection and quarantine policy.',
+                               scan_threats))
             if configuration['security_review_enabled']:
                 def security_review():
                     result = self.backend.security_status()
@@ -851,9 +863,16 @@ class Workflow:
                     description = str(stage['result'].get('summary') or 'Final verification: ' + str(stage['result'].get('status', 'unverified')).replace('_', ' ') + '. Review the outcome details before recommendations.')
                 if title in ('Check drive space buffers', 'Recheck drive space buffers') and isinstance(stage.get('result'), dict):
                     description = str(stage['result'].get('summary') or description)
+                scan_fields = {}
+                if title == 'Scan for spyware and malware':
+                    outcome = stage.get('result') if isinstance(stage.get('result'), dict) else {}
+                    scan_fields = {'scan_status': outcome.get('status', stage['status']),
+                        'completion_verified': outcome.get('completion_verified') is True,
+                        'scan_elapsed_seconds': outcome.get('elapsed_seconds'),
+                        'active_threat_count': outcome.get('active_threat_count')}
                 progress_callback({'percentage': percentage, 'stage': title, 'description': description,
                                    'stage_status': stage['status'],
-                                   'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': total_stages})
+                                   'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': total_stages, **scan_fields})
             join_updates()
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(item['status'] == 'failed' for item in report['stages'])

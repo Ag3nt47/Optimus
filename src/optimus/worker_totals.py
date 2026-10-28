@@ -8,6 +8,7 @@ not enter this ledger.
 from __future__ import annotations
 
 import hashlib
+import re
 
 MAX_BYTES = 1 << 50
 MAX_ITEMS = 1000000
@@ -154,6 +155,17 @@ class WorkerResourceTotals:
         if key is None or len(self._receipts) >= 10000 and key not in self._receipts:
             return
         outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+        cleanup = outcome.get('payload_cleanup')
+        if (isinstance(cleanup, dict) and type(cleanup.get('schema')) is int and cleanup['schema'] == 1
+                and cleanup.get('kind') == 'update_payload_cleanup'
+                and cleanup.get('ownership') == 'optimus_private_update_workspace'
+                and cleanup.get('workspace_owned') is True
+                and cleanup.get('status') in ('completed', 'partial')
+                and isinstance(cleanup.get('workspace_id'), str)
+                and re.fullmatch(r'[0-9a-f]{32}', cleanup['workspace_id'])):
+            self.removal_receipt('cleanup:payload:' + cleanup['workspace_id'], {
+                'deleted_bytes': cleanup.get('removed_bytes'),
+                'deleted_count': cleanup.get('removed_files')})
         observed = outcome.get('download_progress')
         if isinstance(observed, dict):
             # A receipt's caller-bound identity must match its current item.

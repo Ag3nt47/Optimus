@@ -145,6 +145,8 @@ def launch_warning(settings):
             actions.append('Install applicable Windows driver updates within saved exact update/device approvals, after backup and native safety checks. A needed restart is reported.')
         else:
             checks.append('Driver update discovery only; automatic installation is not approved.')
+    if settings.get('update_payload_cleanup_enabled', True) is True:
+        actions.append('After verified updates, permanently delete eligible tracked Optimus-owned installer downloads. Personal Downloads, logs, rollback backups, uncertain/restart-pending payloads and Windows-managed update caches are retained.')
     if settings.get('windows_security_updates_enabled') is True:
         if settings.get('windows_security_updates_install_approved') is True and settings.get('windows_security_update_agreements_accepted') is True:
             actions.append('Install eligible Windows Security/Critical updates under saved approval; a needed restart is reported.')

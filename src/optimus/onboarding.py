@@ -341,7 +341,7 @@ class InitialSetupWizard(QWizard):
         body.addWidget(_label('Results are measured observations. A high memory reading does not establish that every background program is unnecessary, and no speedup is guaranteed.'))
         self._check(body, 'post_process_review_enabled', 'After completion, offer process/startup and installed-application review')
         self._check(body, 'security_review_enabled', 'Check Windows security and offer individually reviewed fixes after completion')
-        self._check(body, 'spyware_scan_enabled', 'Run a Microsoft Defender quick scan for malware and spyware')
+        self._check(body, 'spyware_scan_enabled', 'Run a Microsoft Defender quick scan for viruses, malware and spyware')
         self._check(body, 'privacy_advertising_enabled', 'Apply my selected Windows advertising and suggestion privacy preferences')
         self._check(body, 'privacy_diagnostics_enabled', 'Apply my selected optional Windows diagnostic-data preferences')
         self._check(body, 'privacy_block_silent_consumer_apps_enabled',
@@ -588,9 +588,11 @@ class InitialSetupWizard(QWizard):
         body = self._page('software', '9. Software Updater',
             'Choose global update scope and exact per-app rules. Global review only checks updates; explicit per-app rules can authorize updates, installation or removal. All-supported approval also covers future matching installed applications.')
         self._check(body, 'software_updates_enabled', 'Include the Software Updater stage')
+        self._check(body, 'update_payload_cleanup_enabled', 'Automatically delete Optimus-owned installer downloads after a verified update', default=True)
+        body.addWidget(_label('Only tracked temporary payloads from this update attempt are eligible. Failed or uncertain installers, pending-restart files, logs and rollback backups are retained. Personal Downloads and Windows-managed driver/update caches are excluded.'))
         self._check(body, 'parallel_app_updates_enabled', 'Update apps and Windows drivers in background while independent steps continue')
         self._check(body, 'auto_continue_fixes_enabled', 'Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)')
-        body.addWidget(_label('Saving automatic continuation approves supported Defender/firewall fixes and already-approved updates after a completed scan, without another per-run prompt. Process choices, removals outside saved app rules and restarts remain manual. App and Windows driver updates share one background installer lane while independent steps continue.'))
+        body.addWidget(_label('Saving automatic continuation approves supported Defender/firewall fixes and already-approved updates after a completed scan, without another per-run prompt. Threat removal requires a separate explicit review. Process choices, removals outside saved app rules and restarts remain manual. App and Windows driver updates share one background installer lane while independent steps continue.'))
         self._check(body, 'legacy_patch_review_enabled', 'Review known legacy/unofficial support provider paths (information only; no unverified replacement installation)')
         self._check(body, 'windows_security_updates_enabled', 'Check available Windows Security and Critical updates')
         self._check(body, 'windows_security_updates_install_approved', 'Approve automatic installation of eligible Windows Security/Critical updates, including later matching offers')
@@ -1322,6 +1324,8 @@ class InitialSetupWizard(QWizard):
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'selected':
             actions.append('Install only listed WinGet IDs: ' + (', '.join(settings['software_update_ids']) or '[no IDs entered]'))
             actions.append('Package/source agreements: ' + ('explicitly accepted' if settings['software_update_agreements_accepted'] else 'NOT accepted; Save will be refused'))
+        if settings.get('update_payload_cleanup_enabled', True):
+            actions.append('Delete tracked Optimus-owned installer downloads only after verified completion and installer exit. Keep personal Downloads, Windows-managed caches, backups and uncertain/restart-pending payloads.')
         if settings.get('software_updates_enabled') and settings['software_update_policy']=='all_supported':
             actions.append('Update all supported installed WinGet applications, including future matching applications. Exclusions: '+(', '.join(settings['software_update_exclude_ids']) or 'none'))
             actions.append('All-supported scope: '+('approved' if settings['software_update_all_approved'] else 'approval required')+'; package/source agreements: '+('accepted' if settings['software_update_agreements_accepted'] else 'not accepted'))

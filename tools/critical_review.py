@@ -1581,6 +1581,71 @@ class CriticalReview:
             progress.deleteLater()
             drain(self.app)
 
+    def review_transfer_comparison_and_scan(self, window, dimensions, prefix):
+        from optimus.worker_totals import WorkerResourceTotals
+        progress = OptimizationProgressWindow(window, threading.Event())
+        try:
+            self.viewport(progress, dimensions, prefix + '.resource-comparison')
+            progress.configure_workers({'spyware_scan_enabled': True})
+            removed = WorkerResourceTotals()
+            removed.removal_receipt('cleanup:fixture-comparison', {'deleted_bytes': 314572800, 'deleted_count': 137})
+            downloaded = WorkerResourceTotals('software_updates')
+            downloaded.observe({'item_progress': {'key': 'software:update:Fixture.App', 'phase': 'download',
+                'downloaded_bytes': 104857600, 'download_total_bytes': 104857600,
+                'bytes_source': 'winget_native', 'bytes_estimated': True}})
+            event = {'stage': 'Scan for spyware and malware', 'percentage': 74,
+                'description': 'Virus, malware and spyware scan; in-memory fixture only.',
+                'scan_status': 'scanning', 'scan_elapsed_seconds': 23,
+                'resource_totals': removed.snapshot(),
+                'item_progress': {'key': 'security:defender:quick_scan', 'label': 'Defender quick scan',
+                    'phase': 'scan', 'percent': None},
+                'jobs': [{'id': 'software_updates', 'status': 'completed', 'current': 1, 'total': 1,
+                    'resource_totals': downloaded.snapshot()}]}
+            progress.update_progress(event)
+            progress.update_progress(copy.deepcopy(event))
+            drain(self.app)
+            comparison = progress.resource_comparison
+            card = progress.worker_cards['security_scan']
+            self.check(prefix + '.resource-comparison.measured-shares',
+                comparison.snapshot['removed_percent'] == 75
+                and comparison.snapshot['downloaded_percent'] == 25
+                and comparison.snapshot['removed_files'] == 137
+                and '75.0%' in comparison.removed.text() and '25.0%' in comparison.downloaded.text(),
+                'Repeated snapshots must show one measured cleanup/download ratio, not sum repeated ticks or imply installed footprint.')
+            self.check(prefix + '.resource-comparison.placement-and-fit',
+                progress.progress.geometry().bottom() < comparison.geometry().top()
+                and comparison.geometry().bottom() < progress.stage.geometry().top()
+                and progress.content_scroll.horizontalScrollBar().maximum() == 0
+                and comparison.removed.geometry().right() < comparison.downloaded.geometry().left(),
+                'The two labelled byte shares must fit below overall progress without horizontal overflow.')
+            self.check(prefix + '.antimalware.unknown-is-indeterminate',
+                card.activity_ring.value_percent is None and card.activity_ring.active
+                and card.progress.text() == 'Percentage unavailable'
+                and card.completion.text() == 'Overall: —' and card.elapsed.text() == 'Elapsed: 23s',
+                'An opaque Defender scan must show live elapsed time, not a time-derived or maintenance-stage percentage.')
+            self.screenshot(progress, prefix + '-resource-comparison')
+            progress.update_progress(dict(event, scan_status='completed', completion_verified=True,
+                active_threat_count=1, scan_elapsed_seconds=25))
+            drain(self.app)
+            self.check(prefix + '.antimalware.completed-needs-review',
+                card.activity_ring.value_text() == '100%' and card._raw_status == 'needs_review'
+                and 'Active threats: 1' in card.totals.text(),
+                'Verified scan completion with an active threat must keep 100% scan progress and request review, not claim a clean machine.')
+            progress.content_scroll.ensureWidgetVisible(card)
+            drain(self.app)
+            self.screenshot(progress, prefix + '-antimalware-review')
+            progress.configure_workers({})
+            self.check(prefix + '.resource-comparison.reset',
+                not comparison.snapshot['removed_known'] and not comparison.snapshot['downloaded_known']
+                and comparison.snapshot['removed_percent'] is None,
+                'A fresh run clears byte totals; missing sizes do not become a fabricated 100% share.')
+        finally:
+            progress.completed = True
+            progress._worker_elapsed_timer.stop()
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
     def run(self):
         for dimensions in VIEWPORTS:
             prefix = f'{dimensions[0]}x{dimensions[1]}'
@@ -1603,6 +1668,7 @@ class CriticalReview:
                 self.review_toolkit(window, backend, dimensions, prefix)
                 self.review_additional_workers(window, backend, dimensions, prefix)
                 self.review_worker_controls_and_metrics(window, backend, dimensions, prefix)
+                self.review_transfer_comparison_and_scan(window, dimensions, prefix)
                 self.review_maintenance_progress(window, backend, dimensions, prefix)
                 self.review_app_rules(backend, dimensions, prefix)
                 self.review_revert(window, backend, dimensions, prefix)

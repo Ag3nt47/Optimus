@@ -42,6 +42,8 @@ class WorkerGrid(QWidget):
             else 245 for card in self.cards.values()), default=245)
         spacing = self.grid.horizontalSpacing()
         columns = max(1, min(3, (self.width() + spacing) // (minimum + spacing)))
+        if len(self.cards) == 4 and columns == 3:
+            columns = 2  # Four selected workers form two even rows.
         if columns != self._columns or force:
             self._columns = columns
             while self.grid.count():

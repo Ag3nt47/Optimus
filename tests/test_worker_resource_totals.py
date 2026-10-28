@@ -32,6 +32,37 @@ def test_unknown_is_distinct_from_measured_zero():
     assert ledger.snapshot()['removed_known'] is True
 
 
+def test_update_payload_removals_are_actual_and_deduplicated_by_attempt():
+    ledger = WorkerResourceTotals('software_updates')
+    cleaned = {'schema': 1, 'kind': 'update_payload_cleanup',
+        'workspace_id': 'a' * 32, 'ownership': 'optimus_private_update_workspace',
+        'workspace_owned': True, 'status': 'partial', 'removed_files': 2, 'removed_bytes': 300}
+    row = receipt(payload_cleanup=cleaned)
+    ledger.receipt(row)
+    ledger.receipt(copy.deepcopy(row))
+    ledger.result({'items': [row]})
+    assert ledger.snapshot()['removed_bytes'] == 300
+    assert ledger.snapshot()['removed_files'] == 2
+    assert ledger.snapshot()['removed_known'] is True
+    row['result']['payload_cleanup'] = dict(cleaned, workspace_id='b' * 32, status='completed',
+        removed_bytes=100, removed_files=1)
+    ledger.receipt(row)
+    assert ledger.snapshot()['removed_bytes'] == 400
+
+
+@pytest.mark.parametrize('patch', [dict(workspace_owned=False), dict(status='preserved'),
+    dict(ownership='operating_system'), dict(workspace_id='../personal'),
+    dict(removed_bytes=True), dict(removed_files=-1), dict(kind='preview')])
+def test_unsupported_or_unverified_payload_receipts_never_count_as_removed(patch):
+    ledger = WorkerResourceTotals('driver_updates')
+    cleaned = dict(schema=1, kind='update_payload_cleanup', workspace_id='a' * 32,
+        ownership='optimus_private_update_workspace', workspace_owned=True,
+        status='completed', removed_bytes=300, removed_files=2)
+    cleaned.update(patch)
+    ledger.receipt(receipt(payload_cleanup=cleaned))
+    assert ledger.snapshot()['removed_known'] is False
+
+
 def test_live_and_terminal_cleanup_counts_merge_once_per_plan():
     ledger = WorkerResourceTotals()
     event = {'item_progress': {'key': 'cleanup:first', 'phase': 'cleanup'},
