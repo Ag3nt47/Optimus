@@ -11,7 +11,6 @@ class WorkerGrid(QWidget):
     def __init__(self, factory, parent=None, *, pinned=False, extras=None):
         super().__init__(parent)
         self.factory, self.cards, self._columns = factory, {}, 0
-        self._viewport_height = 0
         self.pinned, self.extras = pinned, extras
         self.grid = QGridLayout(self)
         self.grid.setSizeConstraint(QLayout.SetNoConstraint)
@@ -78,16 +77,11 @@ class WorkerGrid(QWidget):
         # SetNoConstraint keeps the width responsive, but also prevents Qt from
         # propagating taller card minima to the scroll content. Synchronize
         # height even when a font or navigation note leaves columns unchanged.
-        minimum_height = max(self.grid.minimumSize().height(), self._viewport_height)
+        minimum_height = self.grid.minimumSize().height()
         if self.minimumHeight() != minimum_height:
             self.setMinimumHeight(minimum_height)
         if self.pinned:
             self.setMinimumWidth(0)
-
-    def set_viewport_height(self, height):
-        """Keep the core dashboard's share when optional rows need scrolling."""
-        self._viewport_height = max(0, int(height)) if self.pinned else 0
-        self.reflow()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

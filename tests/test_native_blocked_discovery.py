@@ -109,7 +109,16 @@ def test_long_blocked_status_reflows_without_overlapping_the_count(progress, app
                       *card.navigation_buttons.values()):
             assert field.isVisible()
             assert card.rect().contains(QRect(field.mapTo(card, QPoint()), field.size()))
+            # Small windows deliberately scroll the real body instead of
+            # reducing the font or letting the fixed footer cover a control.
+            progress.body_scroll.ensureWidgetVisible(field, 0, 2)
+            for _ in range(5):
+                app.processEvents()
+            assert progress.body_scroll.viewport().rect().contains(
+                QRect(field.mapTo(progress.body_scroll.viewport(), QPoint()), field.size()))
             assert progress.rect().contains(QRect(field.mapTo(progress, QPoint()), field.size()))
+            hit = progress.childAt(field.mapTo(progress, field.rect().center()))
+            assert hit is field or hit is not None and field.isAncestorOf(hit)
         assert card.details.isHidden() and card.elapsed.isHidden()
         assert REASON in card.details.text()
         assert card.details.text() == card.details.toolTip() == card.details.accessibleDescription()

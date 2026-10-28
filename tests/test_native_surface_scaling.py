@@ -1,13 +1,15 @@
 """Resize real Qt surfaces with disposable data and no maintenance actions."""
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from PySide6.QtCore import QPoint, QRect
+from PySide6.QtGui import QFontInfo
 from PySide6.QtWidgets import QPushButton
 
 from optimus.sandbox import SandboxWindow
-from optimus.ui import DetailedSettingsWindow, OptimusWindow
+from optimus.ui import DetailedSettingsWindow, OptimizationProgressWindow, OptimusWindow
 from optimus.workflow import DEFAULTS
 from test_native_worker_cards import app, fonts
 
@@ -107,6 +109,9 @@ def test_settings_typography_sidebar_and_table_rows_grow_without_changing_choice
     try:
         window.show()
         settle(app)
+        window.resize(1440, 920)
+        settle(app)
+        assert window._surface_scale == 1.0
         before = snapshot(tmp_path)
         original = window.page_description.fontMetrics().height()
         original_sidebar = window._settings_sidebar.width()
@@ -280,4 +285,70 @@ def test_native_explicit_theme_save_keeps_both_windows_responsive(app, tmp_path)
         assert snapshot(tmp_path) == before
     finally:
         dispose(window, app)
+        dispose(owner, app)
+
+
+def test_generated_main_scaling_does_not_multiply_child_progress_typography(app, tmp_path):
+    owner = OptimusWindow(SimpleNamespace(data_dir=tmp_path,
+        preferences=lambda: dict(DEFAULTS, reduce_motion=True)), smoke_test=True)
+    measured = []
+    try:
+        owner.show()
+        settle(app)
+        before = snapshot(tmp_path)
+        for owner_size in ((1280, 820), (2560, 1440)):
+            owner.resize(*owner_size)
+            settle(app)
+            progress = OptimizationProgressWindow(owner, threading.Event())
+            try:
+                progress.show()
+                settle(app)
+                readings = []
+                for size, expected_heading, expected_title in (((850, 650), 13, 20), ((1920, 1080), 18, 27)):
+                    progress.resize(*size)
+                    settle(app)
+                    card = progress.worker_cards['software_updates']
+                    reading = (QFontInfo(card.heading.font()).pixelSize(), QFontInfo(progress.title.font()).pixelSize(),
+                               progress.body_scroll.verticalScrollBar().maximum())
+                    assert reading == (expected_heading, expected_title, 0)
+                    if size == (1920, 1080):
+                        assert all(card._spacious for card in progress.worker_cards.values())
+                    readings.append(reading)
+                measured.append(readings)
+            finally:
+                progress.completed = True
+                dispose(progress, app)
+        assert measured[0] == measured[1]
+        assert snapshot(tmp_path) == before
+    finally:
+        dispose(owner, app)
+
+
+def test_external_main_accessibility_font_remains_authoritative_for_child_progress(app, tmp_path):
+    owner = OptimusWindow(SimpleNamespace(data_dir=tmp_path,
+        preferences=lambda: dict(DEFAULTS, reduce_motion=True)), smoke_test=True)
+    progress = None
+    try:
+        owner.show()
+        settle(app)
+        owner.resize(2560, 1440)
+        settle(app)
+        external = owner.styleSheet() + '\nQWidget {font-size:26px;}'
+        owner.setStyleSheet(external)
+        settle(app)
+        assert owner.styleSheet() == external
+        assert owner.canvas.styleSheet() == ''
+        assert QFontInfo(owner.status.font()).pixelSize() == 26
+        progress = OptimizationProgressWindow(owner, threading.Event())
+        progress.show()
+        settle(app)
+        for size, expected in (((850, 650), 26), ((1920, 1080), 35)):
+            progress.resize(*size)
+            settle(app)
+            assert QFontInfo(progress.worker_cards['software_updates'].heading.font()).pixelSize() == expected
+        assert owner.styleSheet() == external
+    finally:
+        if progress is not None:
+            progress.completed = True
+            dispose(progress, app)
         dispose(owner, app)

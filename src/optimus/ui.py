@@ -3004,7 +3004,21 @@ class OptimizationProgressWindow(QDialog):
                         if widget.hasHeightForWidth() else widget.sizeHint().height())
                     reserved += height + self._body_layout.spacing()
             available = max(0, self.body_scroll.viewport().height() - reserved)
-            self.worker_grid.set_viewport_height(available)
+            # The grid's minimum describes readable content, not spare window
+            # height. Optional rows reserve space on their shared scroll body
+            # so they appear below the core dashboard instead of shrinking it.
+            # Ordinary views keep no viewport floor: their minimum can shrink
+            # immediately after a font or wrapping change.
+            extra_height = 0
+            if not self.extra_worker_grid.isHidden():
+                extra_item = self._body_layout.itemAt(self._body_layout.indexOf(self.extra_worker_grid))
+                extra_height = max(extra_item.minimumSize().height(),
+                    extra_item.heightForWidth(self.body_scroll.viewport().width())
+                        if extra_item.hasHeightForWidth() else extra_item.sizeHint().height())
+            body_floor = self.body_scroll.viewport().height() + extra_height + self._body_layout.spacing() if extra_height else 0
+            body = self.body_scroll.widget()
+            if body.minimumHeight() != body_floor:
+                body.setMinimumHeight(body_floor)
             rows = (len(cards) + max(1, self.worker_grid._columns) - 1) // max(1, self.worker_grid._columns)
             spacious = (self.worker_grid._columns == 2 and self.body_scroll.viewport().width() >= 1000
                 and available >= rows * max(card.spacious_minimum_height() for card in cards)
@@ -4063,6 +4077,10 @@ class OptimusWindow(QMainWindow):
         self.setStyleSheet(self._qss())
         self.setProperty('_optimus_surface_style', self.styleSheet())
         self.canvas = StarfieldCanvas(motion_allowed(self.config))
+        # Generated menu growth belongs to this surface. Top-level dialogs
+        # parented to the main window must inherit its unscaled theme instead.
+        self.canvas.setStyleSheet(self._canvas_qss())
+        self.canvas.setProperty('_optimus_surface_style', self.canvas.styleSheet())
         layout = QVBoxLayout(self.canvas)
         layout.setContentsMargins(22, 22, 22, 22)
         layout.addStretch(3)
@@ -4083,6 +4101,7 @@ class OptimusWindow(QMainWindow):
         layout.addSpacing(10)
         self.main_buttons = []
         self._main_button_roles = []
+        self._main_button_rows = []
         for label, callback, role in (
             ('1 click Optimize and debloat', self.start_optimization, 'primary'),
             ('Settings', self.open_settings, 'secondary'), ('Sandbox', self.open_sandbox, 'secondary'),
@@ -4103,6 +4122,7 @@ class OptimusWindow(QMainWindow):
             layout.addSpacing(6)
             self.main_buttons.append(button)
             self._main_button_roles.append(role)
+            self._main_button_rows.append(row)
         layout.addSpacing(8)
         self.status = QLabel('Your configured tools. One local workspace.')
         self.status.setAlignment(Qt.AlignCenter)
@@ -4155,7 +4175,12 @@ class OptimusWindow(QMainWindow):
     def _apply_surface_scale(self, scale):
         self._surface_scale = scale
         apply_style = DetailedSettingsWindow._responsive_style
-        apply_style(self, self._qss())
+        if apply_style(self, self._qss()):
+            apply_style(self.canvas, self._canvas_qss())
+        else:
+            # A caller-supplied root style remains authoritative. Remove our
+            # generated overlay only; a custom canvas style is never replaced.
+            apply_style(self.canvas, '')
         apply_style(self._brand_label, self._menu_brand_style(scale))
         apply_style(self._subtitle_label, self._menu_subtitle_style(scale))
         width = min(760, max(360, round(430 * self.width() / 1280)))
@@ -4163,10 +4188,21 @@ class OptimusWindow(QMainWindow):
             button.setMinimumHeight(round(52 * scale))
             button.setMaximumWidth(width)
             apply_style(button, self._menu_action_style(role, scale))
+        # Qt can resize a capped button immediately while leaving its old row
+        # position until another event turn. Settle those same row geometries
+        # now so first-show and resize frames keep every action centered.
+        for row in self._main_button_rows:
+            row.invalidate()
+        self.canvas.layout().invalidate()
+        self.canvas.layout().activate()
+
+    def _canvas_qss(self):
+        theme = self.appearance.get('theme', 'cyber')
+        return build_qss(theme if theme in THEMES else 'cyber', scale=self._surface_scale)
 
     def _qss(self):
         theme = self.appearance.get('theme', 'cyber')
-        return build_qss(theme if theme in THEMES else 'cyber', scale=getattr(self, '_surface_scale', 1.0))
+        return build_qss(theme if theme in THEMES else 'cyber')
 
     def select_page(self, name):
         self.open_settings(page=name)
@@ -4770,6 +4806,7 @@ class OptimusWindow(QMainWindow):
         self.canvas.sync_motion()
         self.setStyleSheet(self._qss())
         self.setProperty('_optimus_surface_style', self.styleSheet())
+        self._apply_surface_scale(self._surface_scale)
 
     def open_revert(self, checked=False):
         if self._startup_update_pending:
