@@ -1,17 +1,20 @@
 """Full-screen fixtures never run maintenance, save source, or restart Optimus."""
+import gc
 import json
 import os
 import threading
+import weakref
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QRect, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMainWindow, QMessageBox, QVBoxLayout, QWidget
+from shiboken6 import isValid
 
 from optimus.native_ui import NativeOptimusWindow
 from optimus.sandbox import SandboxWindow
@@ -38,6 +41,96 @@ def reachable(window, button):
     assert window.mask().isEmpty() or window.mask().contains(center)
     hit = window.childAt(center)
     assert hit is button or button.isAncestorOf(hit)
+
+
+class CountingControl(FullScreenControl):
+    def __init__(self, *args, **kwargs):
+        self.callback_count = 0
+        super().__init__(*args, **kwargs)
+
+    def eventFilter(self, watched, event):
+        self.callback_count += 1
+        return super().eventFilter(watched, event)
+
+
+@pytest.mark.parametrize('count', [100, 1000])
+@pytest.mark.parametrize('window_count', [1, 16, 64])
+def test_unrelated_events_use_one_router_and_no_per_window_handlers(app, window_count, count):
+    windows = [QWidget() for _ in range(window_count)]
+    controls = [CountingControl(window) for window in windows]
+    router = app._optimus_fullscreen_router
+    try:
+        for control in controls:
+            control.callback_count = 0
+        event = QEvent(QEvent.User)
+        for _ in range(count):
+            app.sendEvent(windows[0], event)
+        assert all(control.callback_count == 0 for control in controls)
+        assert router.parent() is app
+        assert app.findChildren(QObject, 'OptimusFullScreenRouter') == [router]
+    finally:
+        for window in windows:
+            window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert app._optimus_fullscreen_router is router
+    assert isValid(router)
+
+
+def test_focused_hotkeys_route_only_to_their_window_and_ordinary_keys_stay_local(app):
+    windows = [QWidget() for _ in range(16)]
+    controls = [CountingControl(window) for window in windows]
+    child = QLineEdit(windows[0])
+    try:
+        windows[0].setProperty('_optimus_no_reveal', True)
+        windows[0].show()
+        child.setFocus()
+        settle(app)
+        for control in controls:
+            control.callback_count = 0
+        QTest.keyClick(child, Qt.Key_A)
+        assert child.text() == 'a'
+        assert all(control.callback_count == 0 for control in controls)
+        QTest.keyClick(child, Qt.Key_F11)
+        settle(app)
+        assert windows[0].isFullScreen() and controls[0].callback_count > 0
+        assert all(control.callback_count == 0 for control in controls[1:])
+        QTest.keyClick(child, Qt.Key_Escape)
+        settle(app)
+        assert windows[0].isVisible() and not windows[0].isFullScreen()
+        assert all(control.callback_count == 0 for control in controls[1:])
+    finally:
+        for window in windows:
+            window.hide()
+            window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+@pytest.mark.parametrize('delete_window', [True, False], ids=['window-destroyed', 'control-destroyed'])
+def test_cpp_destruction_and_gc_remove_weak_registration_without_retaining_wrappers(app, delete_window):
+    window = QWidget()
+    control = FullScreenControl(window)
+    window_ref, control_ref = weakref.ref(window), weakref.ref(control)
+    router = app._optimus_fullscreen_router
+    key = id(window)
+    assert key in router._controls
+    if delete_window:
+        window.deleteLater()
+    else:
+        control.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not isValid(control)
+    assert key not in router._controls
+    if not delete_window:
+        QTest.keyClick(window, Qt.Key_F11)  # No invalid C++ handler is dispatched.
+        assert not window.isFullScreen()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert not isValid(window)
+    del control, window
+    gc.collect()
+    assert window_ref() is None and control_ref() is None
+    assert app._optimus_fullscreen_router is router and isValid(router)
+    assert app.findChildren(QObject, 'OptimusFullScreenRouter') == [router]
 
 
 @pytest.fixture

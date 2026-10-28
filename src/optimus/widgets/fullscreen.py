@@ -1,9 +1,65 @@
 """Session-only full-screen controls that leave each window's close guards intact."""
 from __future__ import annotations
 
+import weakref
+
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QPushButton, QSizePolicy, QWidget
+
+
+_ROUTED_EVENTS = frozenset((QEvent.WindowStateChange, QEvent.ShortcutOverride,
+                            QEvent.KeyPress, QEvent.KeyRelease))
+_FULLSCREEN_KEYS = frozenset((Qt.Key_F11, Qt.Key_Escape))
+
+
+class _FullScreenRouter(QObject):
+    """One application filter; hidden windows never multiply event dispatch."""
+    def __init__(self, app):
+        super().__init__(app)
+        self.setObjectName('OptimusFullScreenRouter')
+        # Neither registered windows nor their controls are owned by the router.
+        # Integer keys also allow cleanup after Qt deletes a C++ widget while
+        # another caller still holds its now-invalid Python wrapper.
+        self._controls = {}
+        app.installEventFilter(self)
+
+    def register(self, control):
+        key = id(control.window)
+        router_ref = weakref.ref(self)
+
+        def discard(*_):
+            router = router_ref()
+            if router is not None and router._controls.get(key) is entry:
+                router._controls.pop(key, None)
+
+        entry = (weakref.ref(control.window, discard), weakref.ref(control, discard))
+        self._controls[key] = entry
+        control.window.destroyed.connect(discard)
+        control.destroyed.connect(discard)
+
+    def eventFilter(self, watched, event):
+        kind = event.type()
+        if kind not in _ROUTED_EVENTS or not isinstance(watched, QWidget):
+            return False
+        if kind != QEvent.WindowStateChange and event.key() not in _FULLSCREEN_KEYS:
+            return False
+        window = watched.window()
+        if kind == QEvent.WindowStateChange and watched is not window:
+            return False
+        entry = self._controls.get(id(window))
+        if entry is None or entry[0]() is not window:
+            return False
+        control = entry[1]()
+        return control.eventFilter(watched, event) if control is not None else False
+
+
+def _application_router(app):
+    router = getattr(app, '_optimus_fullscreen_router', None)
+    if router is None:
+        router = _FullScreenRouter(app)
+        app._optimus_fullscreen_router = router
+    return router
 
 
 def _fullscreen_icon(exiting):
@@ -31,7 +87,7 @@ def _fullscreen_icon(exiting):
 class FullScreenControl(QObject):
     """Expose an icon button plus F11/Esc for one top-level content window.
 
-    Add ``button`` to a fixed header or toolbar. The application event filter
+    Add ``button`` to a fixed header or toolbar. The shared application router
     handles focused child editors too, but never intercepts a separate dialog's
     keys. Escape is consumed only while exiting full screen; the next press
     follows the window's existing rejection/cancellation rules.
@@ -58,7 +114,7 @@ class FullScreenControl(QObject):
         self._sync_button()
         # Reserve the longer label so entering full screen never shifts a row.
         self.button.setMinimumWidth(self.button.fontMetrics().horizontalAdvance('Exit full screen') + 58)
-        QApplication.instance().installEventFilter(self)
+        _application_router(QApplication.instance()).register(self)
 
     def _remember(self, state=None):
         state = self.window.windowState() if state is None else state
@@ -109,8 +165,7 @@ class FullScreenControl(QObject):
 
     def eventFilter(self, watched, event):
         kind = event.type()
-        if kind not in (QEvent.WindowStateChange, QEvent.ShortcutOverride,
-                        QEvent.KeyPress, QEvent.KeyRelease):
+        if kind not in _ROUTED_EVENTS:
             return False
         if not isinstance(watched, QWidget) or watched.window() is not self.window:
             return False
@@ -125,7 +180,7 @@ class FullScreenControl(QObject):
         if kind not in (QEvent.ShortcutOverride, QEvent.KeyPress, QEvent.KeyRelease):
             return False
         key = event.key()
-        if key not in (Qt.Key_F11, Qt.Key_Escape):
+        if key not in _FULLSCREEN_KEYS:
             return False
         if kind == QEvent.KeyRelease:
             if key in self._swallowed_keys:
