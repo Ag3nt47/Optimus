@@ -10,6 +10,9 @@ def test_low_space_defers_before_vendor_installer():
         result = backend.update_app_unattended('Fixture.Package')
     assert result['skipped'] and result['requiresReview']
     assert result['disk_readiness']['ready'] is False
+    assert result['disk_readiness']['shortfall_bytes'] == 2 * 1024 ** 3 - 256 * 1024 ** 2
+    assert '0.25 GiB free' in result['note'] and '1.75 GiB' in result['note']
+    assert '1,879,048,192 more bytes' in result['note']
     assert result['installer_started'] is False and result['outcomeKnown'] is True
     backend.maintenance.updates_apply.assert_not_called()
 

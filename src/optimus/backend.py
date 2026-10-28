@@ -465,8 +465,13 @@ class Backend(ExtendedMaintenanceBackend):
         try:
             drive = os.environ.get('SystemDrive', 'C:') + os.sep
             free = shutil.disk_usage(drive).free
+            shortfall = max(0, minimum - free)
             return {'ready': free >= minimum, 'free_bytes': free, 'minimum_free_bytes': minimum,
-                    'reason': 'System-drive free space is below the 2 GiB installation floor. Free space before retrying updates.' if free < minimum else 'System-drive installation-space floor passed; individual installers can require more.'}
+                    'shortfall_bytes': shortfall, 'system_drive': drive,
+                    'reason': (f'{drive.rstrip(os.sep)} updates deferred: {free / 1024 ** 3:.2f} GiB free; '
+                               f'free {shortfall:,} more bytes (~{shortfall / 1024 ** 3:.2f} GiB) to reach the 2 GiB installation floor. '
+                               'Individual installers can require more.') if shortfall else
+                              'System-drive installation-space floor passed; individual installers can require more.'}
         except (OSError, ValueError):
             return {'ready': False, 'reason': 'System-drive free space could not be verified; update installation was deferred.'}
 
