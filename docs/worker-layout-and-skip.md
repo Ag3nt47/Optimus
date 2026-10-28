@@ -2,6 +2,8 @@
 
 The maintenance, application-update, driver-update and virus/malware-scan cards stay in the main dashboard. The window adapts their layout and uses a compact presentation when needed; secondary descriptions, histories, logs and optional workers live in a separate details area. Tooltips and accessible descriptions retain the complete explanations. The minimum usable window size follows the active font, so an impossibly small resize is clamped rather than clipping controls.
 
+After completion, verification evidence and the exact available-fix scope stay in a bounded review area above the action buttons. Their read-only panes can scroll independently. Collapsing the logs does not hide these results or add another confirmation to the existing manual Apply action.
+
 ## Next / skip
 
 Next is a request for the current item in that worker. The interface acknowledges it immediately and binds it to that exact live item, rather than retargeting an old click to a later operation. Other workers continue. Back only reviews saved item results and does not replay completed actions.
