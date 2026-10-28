@@ -9,7 +9,7 @@ from unittest.mock import Mock
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -287,16 +287,51 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
     window.backend.available_fixes.return_value = value
     progress = complete_initial(window, app)
     progress.resize(850, 650)
-    app.processEvents()
+    for _ in range(4):
+        app.processEvents()
     assert progress.height() == 650
     assert progress.auto_continue_details.isVisible()
     assert progress.auto_continue_summary.isVisible()
     assert progress.auto_continue_button.geometry().bottom() < 650
     assert progress.cancel_button.geometry().bottom() < 650
     assert progress.processes.isHidden()
-    assert progress.log.isVisible() and progress.verification_details.isVisible()
+    assert not progress.log.isVisible()  # Logs remain optional; approval scope does not.
+    assert progress.verification_details.isVisible() and progress.verification_details.isReadOnly()
+    assert progress.auto_continue_details.isReadOnly()
+    for widget in (progress.verification_summary, progress.verification_details,
+            progress.auto_continue_summary, progress.auto_continue_details,
+            progress.auto_continue_button, progress.cancel_button, *progress.worker_cards.values()):
+        assert widget.isVisibleTo(progress)
+        assert progress.rect().contains(widget.rect().translated(widget.mapTo(progress, QPoint())))
+        assert not progress.content_scroll.isAncestorOf(widget)
+        ancestor = widget.parentWidget()
+        while ancestor is not None:
+            assert ancestor.contentsRect().contains(widget.rect().translated(widget.mapTo(ancestor, QPoint())))
+            if ancestor is progress:
+                break
+            ancestor = ancestor.parentWidget()
+        assert ancestor is progress
+    assert progress.worker_grid.mapTo(progress, progress.worker_grid.rect().bottomLeft()).y() < progress.completion_review.mapTo(progress, QPoint()).y()
+    assert progress.verification_details.mapTo(progress, progress.verification_details.rect().topRight()).x() < progress.auto_continue_details.mapTo(progress, QPoint()).x()
+    assert progress.completion_review.mapTo(progress, progress.completion_review.rect().bottomLeft()).y() < progress.auto_continue_button.mapTo(progress, QPoint()).y()
+    assert progress.auto_continue_details.viewport().height() >= 45
+    for pane in (progress.verification_details, progress.auto_continue_details):
+        viewport = pane.viewport()
+        assert pane.contentsRect().contains(viewport.rect().translated(viewport.mapTo(pane, QPoint())))
+        hit = progress.childAt(viewport.mapTo(progress, viewport.rect().center()))
+        assert hit is viewport or hit is not None and viewport.isAncestorOf(hit)
     for action in value['actions']:
         assert action['title'] in progress.auto_continue_details.toPlainText()
+    scope_scroll = progress.auto_continue_details.verticalScrollBar()
+    assert scope_scroll.maximum() > 0
+    scope_scroll.setValue(scope_scroll.maximum())
+    assert scope_scroll.value() == scope_scroll.maximum()
+    window.backend.apply_available_fixes.assert_not_called()
+    progress.details_toggle.setChecked(True)
+    app.processEvents()
+    assert progress.log.isVisible() and progress.verification_details.isVisible()
+    assert all(progress.rect().contains(card.rect().translated(card.mapTo(progress, QPoint())))
+        for card in progress.worker_cards.values())
 
 
 def test_saved_automatic_choice_continues_once_without_a_second_click(window, app):

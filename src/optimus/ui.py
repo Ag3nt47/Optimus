@@ -1938,7 +1938,7 @@ class WorkflowProgressBar(QProgressBar):
         self.visible_text = self.fontMetrics().elidedText(text, Qt.ElideRight, max(1, self.width() - 12))
         self.setToolTip(text)
         self.setAccessibleDescription(text)
-        self.setFixedHeight(max(18, self.fontMetrics().height() + 8))
+        self.setFixedHeight(max(24, self.fontMetrics().height() + 8))
         self.update()
 
     def setFormat(self, text):
@@ -2655,25 +2655,50 @@ class OptimizationProgressWindow(QDialog):
         self.worker_details.setMinimumHeight(100)
         self.worker_details.setMaximumHeight(280)
         layout.addWidget(self.worker_details)
+        self.completion_review = QWidget(self)
+        self.completion_review.setObjectName('CompletionReview')
+        self.completion_review.setMinimumWidth(0)
+        self.completion_review.setMaximumHeight(150)
+        self.completion_review.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        review_columns = QHBoxLayout(self.completion_review)
+        review_columns.setContentsMargins(0, 0, 0, 0)
+        review_columns.setSpacing(7)
+        self.completion_evidence = QWidget(self.completion_review)
+        self.completion_evidence.setMinimumWidth(0)
+        self.completion_evidence.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        evidence_layout = QVBoxLayout(self.completion_evidence)
+        evidence_layout.setContentsMargins(0, 0, 0, 0)
+        evidence_layout.setSpacing(2)
+        review_columns.addWidget(self.completion_evidence, 1)
+        self.action_scope = QWidget(self.completion_review)
+        self.action_scope.setMinimumWidth(0)
+        self.action_scope.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        scope_layout = QVBoxLayout(self.action_scope)
+        scope_layout.setContentsMargins(0, 0, 0, 0)
+        scope_layout.setSpacing(2)
+        review_columns.addWidget(self.action_scope, 1)
+        self.completion_review.hide()
+        outer.addWidget(self.completion_review)
         self.background_status = WorkflowSummaryLabel()
         self.background_status.setObjectName('BackgroundStatus')
         self.background_status.hide()
         layout.addWidget(self.background_status)
-        self.insights_summary = QLabel()
+        self.insights_summary = WorkflowSummaryLabel(max_lines=1)
         self.insights_summary.setObjectName('SectionTitle')
         self.insights_summary.setTextFormat(Qt.PlainText)
         self.insights_summary.setWordWrap(True)
         self.insights_summary.hide()
-        layout.addWidget(self.insights_summary)
-        self.verification_summary = QLabel()
+        evidence_layout.addWidget(self.insights_summary)
+        self.verification_summary = WorkflowSummaryLabel(max_lines=2)
         self.verification_summary.setWordWrap(True)
         self.verification_summary.hide()
-        layout.addWidget(self.verification_summary)
+        evidence_layout.addWidget(self.verification_summary)
         self.verification_details = QPlainTextEdit()
         self.verification_details.setReadOnly(True)
-        self.verification_details.setMaximumHeight(160)
+        self.verification_details.setMinimumHeight(60)
+        self.verification_details.setMaximumHeight(96)
         self.verification_details.hide()
-        layout.addWidget(self.verification_details)
+        evidence_layout.addWidget(self.verification_details)
         self.processes_label = QLabel('CURRENT PROCESSES / ITEMS')
         layout.addWidget(self.processes_label)
         self.processes = QPlainTextEdit()
@@ -2684,14 +2709,15 @@ class OptimizationProgressWindow(QDialog):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         layout.addWidget(self.log, 1)
-        self.auto_continue_summary = QLabel()
+        self.auto_continue_summary = WorkflowSummaryLabel(max_lines=2)
         self.auto_continue_summary.setTextFormat(Qt.PlainText)
         self.auto_continue_summary.setWordWrap(True)
-        layout.addWidget(self.auto_continue_summary)
+        scope_layout.addWidget(self.auto_continue_summary)
         self.auto_continue_details = QPlainTextEdit()
         self.auto_continue_details.setReadOnly(True)
-        self.auto_continue_details.setMaximumHeight(140)
-        layout.addWidget(self.auto_continue_details)
+        self.auto_continue_details.setMinimumHeight(60)
+        self.auto_continue_details.setMaximumHeight(96)
+        scope_layout.addWidget(self.auto_continue_details)
         self.details_toggle = QPushButton('Show details and logs')
         self.details_toggle.setCheckable(True)
         self.details_toggle.setAutoDefault(False)
@@ -2716,6 +2742,13 @@ class OptimizationProgressWindow(QDialog):
         self.cancel_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.cancel_button.clicked.connect(self.request_close)
         outer.addWidget(self.cancel_button)
+        self._completed_footer = QWidget(self)
+        self._completed_footer_layout = QHBoxLayout(self._completed_footer)
+        self._completed_footer_layout.setContentsMargins(0, 0, 0, 0)
+        self._completed_footer_layout.setSpacing(7)
+        self._completed_footer_mode = False
+        outer.addWidget(self._completed_footer)
+        self._completed_footer.hide()
         self._worker_elapsed_timer = QTimer(self)
         self._worker_elapsed_timer.setInterval(1000)
         self._worker_elapsed_timer.timeout.connect(self._refresh_worker_elapsed)
@@ -2738,6 +2771,26 @@ class OptimizationProgressWindow(QDialog):
         self._refresh_worker_details()
         self._update_responsive_layout()
 
+    def _set_completed_footer(self, completed):
+        if completed == self._completed_footer_mode:
+            return
+        self._completed_footer_mode = completed
+        if completed:
+            for button in (self.details_toggle, self.cancel_button):
+                self._outer_layout.removeWidget(button)
+                self._completed_footer_layout.addWidget(button, 1)
+                button.show()
+            self._completed_footer.show()
+        else:
+            for button in (self.details_toggle, self.cancel_button):
+                self._completed_footer_layout.removeWidget(button)
+                button.setParent(self)
+            self._outer_layout.insertWidget(self._outer_layout.indexOf(self.content_scroll), self.details_toggle)
+            self._outer_layout.insertWidget(self._outer_layout.indexOf(self._completed_footer), self.cancel_button)
+            self.details_toggle.show()
+            self.cancel_button.show()
+            self._completed_footer.hide()
+
     def _refresh_worker_details(self):
         parts = [self.stage.text(), self.description.text()]
         for card in self.worker_cards.values():
@@ -2755,6 +2808,9 @@ class OptimizationProgressWindow(QDialog):
         self._fitting_workers = True
         try:
             self.worker_grid.reflow()
+            if self.completion_review.isVisible():
+                self.completion_review.layout().activate()
+                self.completion_review.setMaximumHeight(max(150, self.completion_review.minimumSizeHint().height()))
             self._progress_header.layout().activate()
             self._outer_layout.activate()
             self._worker_minimum = QSize(max(480, self.worker_grid.minimumWidth() + 14),
@@ -3151,6 +3207,10 @@ class OptimizationProgressWindow(QDialog):
             self.stage.setText('WORKFLOW STOPPED')
             self.description.setText(str(error))
             self.log.appendPlainText('Error: ' + str(error))
+            self.verification_summary.setText('Workflow stopped; final outcomes need review.')
+            self.verification_details.setPlainText(str(error))
+            self.verification_summary.show()
+            self.verification_details.show()
         else:
             cancelled = bool(field(result, 'cancelled', 'canceled', default=False))
             if field(result, 'status') in ('completed', 'completed_with_errors') and not cancelled:
@@ -3227,6 +3287,9 @@ class OptimizationProgressWindow(QDialog):
         self._refresh_resource_comparison()
         self.cancel_button.setText('Close results')
         self.cancel_button.setEnabled(True)
+        self._set_completed_footer(True)
+        self.completion_review.show()
+        self._update_responsive_layout()
         self._update_live_metrics()
 
     def clear_auto_continue(self):
@@ -3234,6 +3297,7 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_button.hide()
         self.auto_continue_summary.hide()
         self.auto_continue_details.hide()
+        self.action_scope.hide()
 
     def set_auto_continue_plan(self, plan, *, ready=False):
         actions = rows(field(plan, 'actions', default=[]))
@@ -3255,14 +3319,20 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_details.setPlainText('\n'.join(details))
         self.auto_continue_summary.show()
         self.auto_continue_details.show()
+        self.action_scope.show()
+        if self.completed:
+            self.completion_review.show()
         self.auto_continue_button.show()
         self.auto_continue_button.setEnabled(bool(actions) and ready and self.completed)
         self.auto_continue_button.setToolTip('Apply the listed automatic actions once.' if actions
             else 'No automatic fixes are available; use Continue for any remaining recommendations.')
+        self._update_responsive_layout()
 
     def begin_auto_continue(self, cancel, *, automatic=False):
         self.cancel = cancel
         self.completed = False
+        self.completion_review.hide()
+        self._set_completed_footer(False)
         self._waiting_for_updates = False
         self._title_before_update_wait = None
         self._waiting_update_kind = None
@@ -3305,6 +3375,8 @@ class OptimizationProgressWindow(QDialog):
                 + ('\nRecorded action/check outcomes: ' + outcomes if outcomes else '')
                 + '\nThis batch has been attempted. Review the verification and remaining recommendations.')
             self.auto_continue_summary.show()
+            self.action_scope.show()
+            self._update_responsive_layout()
 
     def set_recommendations_available(self, available):
         self._recommendations_ready = bool(available)

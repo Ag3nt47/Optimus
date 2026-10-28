@@ -3,6 +3,7 @@ import copy
 from unittest.mock import Mock
 
 import pytest
+from PySide6.QtCore import QPoint, QRect
 
 from test_native_worker_cards import app, fonts, progress
 from optimus.parallel_updates import ProgressMux, update_completion_state, update_completion_status
@@ -101,9 +102,22 @@ def test_long_blocked_status_reflows_without_overlapping_the_count(progress, app
     app.processEvents()
     for identity in ('software_updates', 'driver_updates'):
         card = progress.worker_cards[identity]
-        assert card.status.wordWrap() and card.status.geometry().bottom() < card.details.geometry().top()
-        assert card.details.geometry().bottom() < card.progress.geometry().top()
-        assert card.progress.geometry().bottom() < card.elapsed.geometry().top()
+        status = QRect(card.status.mapTo(card, QPoint()), card.status.size())
+        count = QRect(card.progress.mapTo(card, QPoint()), card.progress.size())
+        assert card.status.wordWrap() and status.bottom() < count.top()
+        for field in (card.heading, card.status, card.activity_ring, card.progress, card.totals,
+                      *card.navigation_buttons.values()):
+            assert field.isVisible()
+            assert card.rect().contains(QRect(field.mapTo(card, QPoint()), field.size()))
+            assert progress.rect().contains(QRect(field.mapTo(progress, QPoint()), field.size()))
+        assert card.details.isHidden() and card.elapsed.isHidden()
+        assert REASON in card.details.text()
+        assert card.details.text() == card.details.toolTip() == card.details.accessibleDescription()
+        assert REASON in progress.worker_details.toPlainText()
+    assert progress.worker_cards['software_updates'].status.text() == 'Search needs review; install blocked'
+    assert progress.worker_cards['software_updates'].progress.format() == '3 recognized; incomplete'
+    assert progress.worker_cards['driver_updates'].status.text() == 'Updates found; install blocked'
+    assert progress.worker_cards['driver_updates'].progress.format() == '5 driver updates found'
     assert len({card.width() for card in progress.worker_cards.values()}) <= 2
     assert progress.rect().contains(progress.cancel_button.geometry())
 

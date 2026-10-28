@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
 
 from optimus.ui import OptimizationProgressWindow, OptimusWindow
@@ -55,10 +56,27 @@ def dispose(value, qapp):
     qapp.processEvents()
 
 
+def assert_pinned_report_visible(progress):
+    for widget in (progress.verification_summary, progress.verification_details):
+        assert widget.isVisibleTo(progress)
+        assert not progress.content_scroll.isAncestorOf(widget)
+        assert progress.rect().contains(widget.rect().translated(widget.mapTo(progress, QPoint())))
+        ancestor = widget.parentWidget()
+        while ancestor is not None:
+            assert ancestor.contentsRect().contains(widget.rect().translated(widget.mapTo(ancestor, QPoint())))
+            if ancestor is progress:
+                break
+            ancestor = ancestor.parentWidget()
+        assert ancestor is progress
+    assert progress.verification_details.viewport().height() >= 45
+    assert progress.worker_grid.mapTo(progress, progress.worker_grid.rect().bottomLeft()).y() < progress.completion_review.mapTo(progress, QPoint()).y()
+
+
 def test_completed_report_is_visible_before_user_continues_to_prompts(qapp, tmp_path):
     main, progress = window(qapp, tmp_path)
     observed = []
     def offer(actual, settings):
+        assert_pinned_report_visible(progress)
         assert progress.verification_summary.isVisible()
         assert 'Needs review' in progress.verification_summary.text()
         assert 'could not be verified' in progress.verification_details.toPlainText()
@@ -76,6 +94,7 @@ def test_completed_report_is_visible_before_user_continues_to_prompts(qapp, tmp_
         assert len(main.main_buttons) == 4
         assert '1 unverified' in progress.verification_summary.text()
         assert '"needs_review"' in progress.verification_details.toPlainText()
+        assert_pinned_report_visible(progress)
         observed.append('report-visible')
         progress.cancel_button.click()
         qapp.processEvents()
@@ -155,6 +174,9 @@ def test_read_only_observed_changes_are_prominent_with_expanded_evidence(qapp, t
         assert '"new_count": 1' in progress.verification_details.toPlainText()
         assert progress.verification_details.isReadOnly()
         assert progress.verification_summary.isVisible()
+        assert_pinned_report_visible(progress)
+        assert progress.rect().contains(progress.insights_summary.rect().translated(progress.insights_summary.mapTo(progress, QPoint())))
+        assert insights['summary'] in progress.insights_summary.toolTip()
         assert len(main.main_buttons) == 4
     finally:
         dispose(main, qapp)

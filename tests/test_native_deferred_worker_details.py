@@ -2,6 +2,7 @@
 import copy
 
 import pytest
+from PySide6.QtCore import QPoint, QRect
 from PySide6.QtGui import QFont
 
 from test_native_worker_cards import app, fonts, progress
@@ -27,8 +28,20 @@ def assert_fitting_summary(label):
     assert label.height() >= len(lines) * label.fontMetrics().lineSpacing()
 
 
+def assert_compact_fields_fit(card, window):
+    for field in (card.heading, card.status, card.activity_ring, card.progress, card.totals,
+                  *card.navigation_buttons.values()):
+        assert field.isVisible()
+        assert card.rect().contains(QRect(field.mapTo(card, QPoint()), field.size()))
+        assert window.rect().contains(QRect(field.mapTo(window, QPoint()), field.size()))
+    status = QRect(card.status.mapTo(card, QPoint()), card.status.size())
+    count = QRect(card.progress.mapTo(card, QPoint()), card.progress.size())
+    assert status.bottom() < count.top()
+    assert all(label.isHidden() for label in (card.details, card.elapsed, card.activity_state, card.navigation_note))
+
+
 @pytest.mark.parametrize('width', [850, 1024])
-def test_deferred_cards_show_two_fitting_lines_without_overlapping_counts(progress, app, width):
+def test_deferred_cards_keep_primary_fields_visible_and_full_warning_in_details(progress, app, width):
     progress.resize(width, 650)
     progress.update_progress(deferred_snapshot())
     app.processEvents()
@@ -37,14 +50,21 @@ def test_deferred_cards_show_two_fitting_lines_without_overlapping_counts(progre
         assert card.status.text() == 'Deferred' and not card._elapsed_active
         assert 'Previous installer needs review.' in card.details.visible_text
         assert 'No automatic retry started.' in card.details.visible_text
-        assert card.details.geometry().bottom() < card.progress.geometry().top()
-        assert card.progress.geometry().bottom() < card.elapsed.geometry().top()
+        assert_compact_fields_fit(card, progress)
+        assert card.details.text() == REASON == card.details.toolTip() == card.details.accessibleDescription()
+        assert REASON in progress.worker_details.toPlainText()
         assert card.progress.value() == 0 and card.progress.maximum() > 0
         assert card.progress.format() == 'Search not started'
         assert card.elapsed.text() == 'Elapsed: —'
-        assert_fitting_summary(card.details)
     assert progress.worker_cards['maintenance'].status.text() == 'Running'
     assert progress.progress.value() == 40 and progress.cancel_button.isEnabled()
+    assert not progress.details_toggle.isChecked() and not progress.background_status.isVisible()
+    assert JOURNAL in progress.background_status.text()
+    progress.details_toggle.click()
+    app.processEvents()
+    progress.content_scroll.ensureWidgetVisible(progress.background_status)
+    app.processEvents()
+    assert progress.background_status.isVisible() and not progress.background_status.visibleRegion().isEmpty()
     assert_fitting_summary(progress.background_status)
     assert progress.cancel_button.geometry().bottom() <= progress.height()
 
@@ -91,17 +111,21 @@ def test_other_long_waits_are_elided_without_fabricating_an_installer_warning(pr
     assert card.status.text() == 'Waiting for maintenance' and card._elapsed_active
     assert '…' in card.details.visible_text and 'Previous installer' not in card.details.visible_text
     assert card.details.toolTip() == reason and card.details.accessibleDescription() == reason
+    assert card.details.text() == reason and reason in progress.worker_details.toPlainText()
     assert card.progress.value() == 3 and card.progress.maximum() == 7
-    assert card.details.geometry().bottom() < card.progress.geometry().top()
-    assert_fitting_summary(card.details)
+    assert_compact_fields_fit(card, progress)
 
 
-def test_summary_reflows_on_resize_and_updates_its_height_for_larger_fonts(progress, app):
+def test_expanded_secondary_summary_reflows_on_resize_and_for_larger_fonts(progress, app):
     progress.update_progress(deferred_snapshot())
-    label = progress.worker_cards['software_updates'].details
+    progress.details_toggle.click()
+    label = progress.background_status
     for width in (850, 1024, 850):
         progress.resize(width, 650)
         app.processEvents()
+        progress.content_scroll.ensureWidgetVisible(label)
+        app.processEvents()
+        assert label.isVisible() and not label.visibleRegion().isEmpty()
         assert_fitting_summary(label)
     enlarged = QFont(label.font())
     enlarged.setPixelSize(18)
