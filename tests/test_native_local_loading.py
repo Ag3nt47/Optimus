@@ -153,15 +153,31 @@ def test_large_loading_icon_does_not_push_worker_panels_or_controls_out_of_compa
     assert (icon.width(), icon.height()) == (128, 117)
     header = icon.parentWidget()
     assert all(widget.parentWidget() is header for widget in (progress.title, progress.spinner,
-        progress.progress, progress.stage, progress.description))
-    assert progress.height() == 650 and header.height() < 170
+        progress.progress, progress.resource_comparison, progress.stage, progress.description))
+    comparison = progress.resource_comparison
+    assert progress.height() == 650
+    assert header.height() - comparison.height() - header.layout().verticalSpacing() < 170
+    assert progress.progress.geometry().bottom() < comparison.geometry().top()
+    assert comparison.geometry().bottom() < progress.stage.geometry().top()
     assert progress.title.geometry().right() < icon.geometry().left()
     cards = list(progress.worker_cards.values())
     assert max(card.width() for card in cards) - min(card.width() for card in cards) <= 1
     header_bottom = header.mapTo(progress, header.rect().bottomLeft()).y()
     cancel_top = progress.cancel_button.mapTo(progress, progress.cancel_button.rect().topLeft()).y()
     assert all(card.mapTo(progress, card.rect().topLeft()).y() > header_bottom for card in cards)
-    assert all(card.isVisible() and card.mapTo(progress, card.rect().bottomLeft()).y() < cancel_top for card in cards)
+    # Added byte-comparison rows use vertical scrolling at compact sizes. Every
+    # card control must remain reachable above the fixed footer, with no
+    # horizontal scrolling or a loading animation forcing a larger window.
+    viewport = progress.content_scroll.viewport()
+    assert viewport.mapTo(progress, viewport.rect().bottomLeft()).y() < cancel_top
+    assert progress.content_scroll.horizontalScrollBar().maximum() == 0
+    for card in cards:
+        button = card.navigation_buttons['cancel']
+        progress.content_scroll.ensureWidgetVisible(button, 4, 4)
+        app.processEvents()
+        assert card.isVisible()
+        assert viewport.rect().contains(button.mapTo(viewport, button.rect().topLeft()))
+        assert viewport.rect().contains(button.mapTo(viewport, button.rect().bottomRight()))
     assert progress.log.height() >= 45 and progress.processes.height() >= 45
     assert progress.cancel_button.geometry().bottom() <= 650 and progress.cancel_button.isEnabled()
 

@@ -33,7 +33,7 @@ See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** befo
 
 ## Download and run
 
-Version **0.12.5** adds a side-by-side **deleted versus downloaded** bar directly below overall progress. It shows confirmed deleted-file counts and sizes alongside reported download bytes, with percentages of their combined reported byte activity. Approximate and incomplete transfers are labelled; missing measurements stay unknown. Deleted logical file sizes are separate from observed free-space change and installed application size.
+Version **0.12.6** adds a side-by-side **deleted versus downloaded** bar directly below overall progress. It shows confirmed deleted-file counts and sizes alongside reported download bytes, with percentages of their combined reported byte activity. Approximate and incomplete transfers are labelled; missing measurements stay unknown. Deleted logical file sizes are separate from observed free-space change and installed application size.
 
 **Installer-download cleanup starts on** and can be disabled in initial setup or Settings. Eligible Windows WinGet updates use a private per-attempt download workspace. After fresh installed-version verification, a known successful installer exit, verified descendant exit and no pending restart, Optimus removes only tracked disposable payloads. Generic/unknown installers retain their files. Personal Downloads, logs, rollback backups, failed/uncertain attempts and Windows-managed driver/update caches stay outside this cleanup. [Scope and limits](docs/update-payload-cleanup.md).
 

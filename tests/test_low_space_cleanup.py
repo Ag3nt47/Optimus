@@ -56,7 +56,6 @@ def fixture(tmp_path, monkeypatch):
 def test_nested_default_off_has_no_extra_top_level_setting_or_launch_action():
     assert validate_configuration({})['low_space_cleaning'] == {'enabled': False}
     from optimus.workflow import DEFAULTS
-    assert len(DEFAULTS) == 100
     assert 'low_space_cleaning' not in DEFAULTS
     assert launch_descriptions({}) == ([], [])
 

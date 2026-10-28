@@ -92,7 +92,7 @@ def test_explicit_settings_save_stamps_normalized_complete_scope_only(windows, p
     args, kwargs = captured[0]
     assert args[0] == 'save_preferences'
     payload = args[1]
-    assert len(payload) == len(DEFAULTS) == 100
+    assert set(payload) == set(DEFAULTS)
     assert payload['toolkit_settings'] == DEFAULTS['toolkit_settings']
     assert all(section['enabled'] is False for section in payload['toolkit_settings'].values())
     assert payload['software_app_rules'] == []
@@ -166,7 +166,7 @@ def test_retention_and_drive_settings_save_only_the_explicit_scopes_and_fraction
     save.click()
     assert len(captured) == 1
     payload = captured[0][0][1]
-    assert len(payload) == len(DEFAULTS) == 100
+    assert set(payload) == set(DEFAULTS)
     assert payload['toolkit_settings'] == DEFAULTS['toolkit_settings']
     assert all(section['enabled'] is False for section in payload['toolkit_settings'].values())
     assert payload['codex_archives_cleanup_enabled'] is True and payload['codex_archives_retention_days'] == 30
