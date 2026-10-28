@@ -192,7 +192,21 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'maintenance-progress.cleanup-phase-reset', 'maintenance-progress.cleanup-file-fraction',
             'maintenance-progress.fixture-only',
             'app-rules.exact-choices', 'app-rules.master-off-draft', 'app-rules.presence-warning',
-            'revert.explicit-selection', 'revert.supported-only', 'revert.no-constructor-actions'):
+            'revert.explicit-selection', 'revert.supported-only', 'revert.no-constructor-actions',
+            'dashboard.standard.viewport', 'dashboard.font25.viewport',
+            'dashboard.standard.all-visible', 'dashboard.standard.outside-scroll',
+            'dashboard.standard.essentials', 'dashboard.standard.labels',
+            'dashboard.standard.navigation-hitboxes', 'dashboard.standard.equal-cards',
+            'dashboard.standard.no-overlap', 'dashboard.standard.no-internal-overlap',
+            'dashboard.standard.two-by-two', 'dashboard.standard.footer-clear',
+            'dashboard.font25.all-visible', 'dashboard.font25.outside-scroll',
+            'dashboard.font25.essentials', 'dashboard.font25.labels',
+            'dashboard.font25.navigation-hitboxes', 'dashboard.font25.equal-cards',
+            'dashboard.font25.no-overlap', 'dashboard.font25.no-internal-overlap',
+            'dashboard.font25.two-by-two', 'dashboard.font25.footer-clear',
+            'dashboard.fixture-only', 'sandbox.editor-layout', 'sandbox.fixture-only',
+            *(f'main.hover-description-{index}' for index in range(4)),
+            *(f'sandbox.hover-description-{index}' for index in range(6))):
             assert by_id[prefix + '.' + suffix]['status'] == 'passed', prefix + '.' + suffix
     assert by_id['confirmation.negative-default']['status'] == 'passed'
     assert report['screenshots'] and all((reviewer.output / item['file']).is_file() for item in report['screenshots'])
@@ -203,7 +217,8 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
         f'{width}x{height}-{state}' for width, height in bot.VIEWPORTS
         for state in ('worker-item-progress', 'worker-item-progress-reset', 'worker-item-progress-unknown',
                       'worker-history', 'worker-skip-pending', 'app-policy-choices',
-                      'maintenance-privacy-progress', 'maintenance-cleanup-discovery')}
+                      'maintenance-privacy-progress', 'maintenance-cleanup-discovery',
+                      'dashboard-standard', 'dashboard-font25', 'sandbox')}
     assert {item['area'] for item in report['manual_review']} >= {'GPU', 'CPU and RAM', 'Updates and security'}
     assert all(item['status'] == 'not_exercised' for item in report['skipped_checks'])
     assert {item['source'] for item in report['documentation_comparison']} == {'docs/FEATURES.md', 'docs/PLATFORMS.md'}
@@ -228,6 +243,57 @@ def test_launch_warning_review_detects_a_missing_irreversible_recall_disclosure(
         assert by_id['warning-defect.launch-review.no-implicit-actions']['status'] == 'passed'
     finally:
         reviewer.dispose(window)
+
+
+@pytest.mark.parametrize('defect,failed_check', (
+    ('offscreen', 'all_visible'), ('unequal', 'equal_cards'),
+    ('overlay', 'navigation_hitboxes'), ('hidden-label', 'essentials')))
+def test_dashboard_measurement_detects_clipping_unequal_cards_and_overlay(reviewer, app, defect, failed_check):
+    import threading
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    owner = bot.OptimusWindow(backend, smoke_test=True)
+    progress = bot.OptimizationProgressWindow(owner, threading.Event())
+    try:
+        reviewer.viewport(progress, (850, 650), 'dashboard-defect')
+        assert all(value for key, value in bot.measure_dashboard(progress).items() if key != 'cards')
+        card = progress.worker_cards['security_scan']
+        if defect == 'offscreen':
+            card.move(progress.width(), card.y())
+        elif defect == 'unequal':
+            card.resize(card.width() - 20, card.height())
+        elif defect == 'hidden-label':
+            card.status.hide()
+        else:
+            button = card.navigation_buttons['next']
+            overlay = QWidget(progress)
+            overlay.setGeometry(bot.window_rect(button, progress))
+            overlay.show()
+            overlay.raise_()
+        assert bot.measure_dashboard(progress)[failed_check] is False
+    finally:
+        progress.completed = True
+        progress.close()
+        progress.deleteLater()
+        reviewer.dispose(owner)
+
+
+def test_sandbox_review_uses_mock_workspace_and_detects_missing_description(reviewer, monkeypatch):
+    from optimus import sandbox
+    original = sandbox.SandboxWindow.__init__
+    def incomplete(window, *args, **kwargs):
+        original(window, *args, **kwargs)
+        button = next(button for button in window.findChildren(QPushButton) if button.text() == 'Restart Optimus')
+        button.setToolTip('')
+        button.setAccessibleDescription('')
+        button.setProperty('_optimus_auto_tooltip', 'kept fixture defect')
+    monkeypatch.setattr(sandbox.SandboxWindow, '__init__', incomplete)
+    # A broken event filter must be caught; the review cannot fill descriptions itself.
+    from optimus.widgets.button_tooltips import ButtonDescriptions
+    monkeypatch.setattr(ButtonDescriptions, 'describe', lambda *args: None)
+    reviewer.review_sandbox((850, 650), 'sandbox-defect')
+    by_id = {row['id']:row for row in reviewer.report['checks']}
+    assert by_id['sandbox-defect.sandbox.hover-description-4']['status'] == 'failed'
+    assert by_id['sandbox-defect.sandbox.fixture-only']['status'] == 'passed'
 
 
 def test_additional_worker_review_detects_a_grid_that_refuses_narrow_reflow(reviewer, monkeypatch):
@@ -322,12 +388,14 @@ def test_progress_review_detects_missing_uninstall_percent_or_action_explanation
         if item.get('phase') != 'uninstall':
             return
         if defect == 'status':
+            card._status_text = 'Running'
             card.status.setText('Running')
         elif defect == 'caption':
             card.activity_ring.phase_caption = 'Current item'
         elif defect == 'accessibility':
             card.activity_ring.setAccessibleDescription('Current item')
         elif item.get('percent') is None:
+            card._status_text = 'Uninstalling'
             card.status.setText('Uninstalling')
 
     monkeypatch.setattr(WorkflowWorkerCard, 'set_live_metrics', broken)
@@ -451,6 +519,7 @@ def test_held_app_review_distinguishes_finished_queue_from_active_driver(reviewe
         original = bot.OptimizationProgressWindow.update_progress
         def broken(progress, state):
             original(progress, state)
+            progress.worker_cards['software_updates']._status_text = 'Needs review'
             progress.worker_cards['software_updates'].status.setText('Needs review')
         monkeypatch.setattr(bot.OptimizationProgressWindow, 'update_progress', broken)
     owner = QWidget()
@@ -598,6 +667,12 @@ def test_maintenance_progress_review_detects_missing_or_fabricated_progress(revi
         card.activity_ring.value_percent = replacement
         if card._item_progress is not None:
             card._item_progress = dict(card._item_progress, percent=replacement)
+        elif defect == 'driver-scan':
+            # Compact layout refreshes cached metrics after revealing Details.
+            # Inject the regression into durable item state, rather than a
+            # transient paint value that the correct refresh would clear.
+            card._item_progress = {'key': 'fixture:incorrect-driver-percentage',
+                'label': 'Driver search', 'phase': 'scan', 'percent': replacement}
     monkeypatch.setattr(WorkflowWorkerCard, 'update_state', broken)
     backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
     window = bot.OptimusWindow(backend, smoke_test=True)

@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QRegion
 from PySide6.QtWidgets import (QApplication, QAbstractButton, QMessageBox, QScrollArea,
     QCheckBox, QDialog, QPlainTextEdit, QPushButton, QStyle, QStyleOptionTab, QTabWidget, QToolButton, QWizard)
@@ -149,6 +149,61 @@ def drain(app, predicate=lambda: True, *, timeout=5):
 
 def _rect(rect):
     return {'x': rect.x(), 'y': rect.y(), 'width': rect.width(), 'height': rect.height()}
+
+
+CORE_WORKERS = ('maintenance', 'software_updates', 'driver_updates', 'security_scan')
+
+
+def window_rect(control, window):
+    """Compare widgets in one coordinate system, even across layout parents."""
+    return control.rect().translated(control.mapTo(window, QPoint()))
+
+
+def measure_dashboard(progress):
+    """Measure the four live cards without revealing or scrolling any control."""
+    cards = [progress.worker_cards[identity] for identity in CORE_WORKERS]
+    rectangles = [window_rect(card, progress) for card in cards]
+    essentials, hits, labels, outside_scroll, internal_overlap = [], [], [], [], []
+    for card in cards:
+        parent, scroll_parent = card.parentWidget(), False
+        while parent is not None and parent is not progress:
+            scroll_parent |= isinstance(parent, QScrollArea)
+            parent = parent.parentWidget()
+        outside_scroll.append(not scroll_parent)
+        controls = [card.heading, card.status, card.progress, card.totals, card.activity_ring,
+                    *card.navigation_buttons.values()]
+        essentials.append(all(control.isVisibleTo(progress) and control.width() > 0 and control.height() > 0
+            and card.contentsRect().contains(window_rect(control, card))
+            and progress.rect().contains(window_rect(control, progress))
+            and control.visibleRegion().boundingRect().width() >= control.width() - 2
+            and control.visibleRegion().boundingRect().height() >= control.height() - 2
+            for control in controls))
+        field_rectangles = [window_rect(control, card) for control in controls]
+        internal_overlap.append(any(rect.intersects(other) for index, rect in enumerate(field_rectangles)
+                                    for other in field_rectangles[index + 1:]))
+        labels.append(all(label.toolTip().strip() and label.accessibleDescription().strip()
+            and all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
+                    for line in label.visible_text.splitlines())
+            for label in (card.heading, card.status, card.totals)))
+        for button in card.navigation_buttons.values():
+            hit = progress.childAt(button.mapTo(progress, button.rect().center()))
+            hits.append(hit is button or hit is not None and button.isAncestorOf(hit))
+    return {'all_visible': all(card.isVisibleTo(progress) and progress.rect().contains(rectangle)
+                              for card, rectangle in zip(cards, rectangles)),
+        'outside_scroll': all(outside_scroll), 'essentials': all(essentials), 'labels': all(labels),
+        'navigation_hitboxes': all(hits),
+        'no_internal_overlap': not any(internal_overlap),
+        'equal_cards': max(rect.width() for rect in rectangles) - min(rect.width() for rect in rectangles) <= 1
+            and max(rect.height() for rect in rectangles) - min(rect.height() for rect in rectangles) <= 1,
+        'no_overlap': all(not rect.intersects(other) for index, rect in enumerate(rectangles)
+                          for other in rectangles[index + 1:]),
+        'two_by_two': progress.worker_grid._columns == 2
+            and [progress.worker_grid.grid.getItemPosition(index)[:2] for index in range(4)]
+                == [(0, 0), (0, 1), (1, 0), (1, 1)],
+        'footer_clear': window_rect(progress.worker_grid, progress).bottom()
+            < window_rect(progress.details_toggle, progress).top()
+            and progress.rect().contains(window_rect(progress.cancel_button, progress)),
+        'cards': [_rect(rect) for rect in rectangles]}
 
 
 def reveal_control(control, window, app):
@@ -792,25 +847,28 @@ class CriticalReview:
             progress._refresh_worker_elapsed()
             self.viewport(progress, dimensions, prefix + '.additional-workers')
             cards = progress.worker_cards
-            self.check(prefix + '.additional-workers.actual-poll', len(cards) == 6
+            self.check(prefix + '.additional-workers.actual-poll', len(cards) == 7
                 and all(identity in cards for identity in ('driver_backup', 'system_restore', 'file_tools'))
                 and backend.worker_status.called,
-                'The real progress-window status poll must add actual named optional workers to its three maintenance/update cards.')
+                'The real status poll must add named optional workers without replacing the four pinned core cards.')
             self.check(prefix + '.additional-workers.count-honesty',
                 'No item count' in cards['driver_backup'].progress.format()
                 and 'No item count' in cards['system_restore'].progress.format()
                 and cards['system_restore'].status.text() == 'Needs review'
                 and cards['file_tools'].progress.maximum() == 2 and cards['file_tools'].progress.value() == 2,
                 'Unknown item counts and unavailable recovery remain explicit; only the fixture with a real count shows 2/2.')
-            grid = progress.worker_grid
+            progress.details_toggle.setChecked(True)
+            drain(self.app)
+            grid = progress.extra_worker_grid
             for width, expected in ((440, 1), (1000, 3)):
                 grid.resize(width, grid.height())
                 grid.reflow(force=True)
                 self.check(prefix + f'.additional-workers.reflow-{expected}', grid._columns == expected
-                    and grid.grid.getItemPosition(3)[:2] == (3 // expected, 3 % expected),
+                    and grid.grid.getItemPosition(2)[:2] == (2 // expected, 2 % expected)
+                    and progress.worker_grid._columns == 2,
                     'Additional worker cards must reflow through the production grid, without opening another window.',
                     evidence={'requested_grid_width': width, 'columns': grid._columns,
-                              'fourth_card_position': list(grid.grid.getItemPosition(3))})
+                              'third_optional_card_position': list(grid.grid.getItemPosition(2))})
             drain(self.app)
 
             self.screenshot(progress, prefix + '-additional-workers')
@@ -903,11 +961,11 @@ class CriticalReview:
                 and cards['maintenance'].completion.text() == 'Overall: 37%',
                 'The named consumer-app uninstall must show its reported 52% in status, ring and accessibility, independently of the maintenance workflow 37%.')
             self.check(prefix + '.worker-totals.confirmed-amounts',
-                'Removed: 150.0 MiB' in cards['maintenance'].totals.text()
-                and '137 files' in cards['maintenance'].totals.text()
-                and 'Completed installs: 1 app' in cards['software_updates'].totals.text()
-                and 'Downloaded: 80.0 MiB observed' in cards['software_updates'].totals.text()
-                and 'Installs: not reported' in cards['driver_updates'].totals.text()
+                'Removed: 150.0 MiB' in cards['maintenance'].totals.toolTip()
+                and '137 files' in cards['maintenance'].totals.toolTip()
+                and 'Completed installs: 1 app' in cards['software_updates'].totals.toolTip()
+                and 'Downloaded: 80.0 MiB observed' in cards['software_updates'].totals.toolTip()
+                and 'Installs: not reported' in cards['driver_updates'].totals.toolTip()
                 and cards['software_updates'].status.text() == 'Downloading'
                 and '— downloading' in progress.background_status.text(),
                 'Worker totals must show confirmed removed-file lengths, successful installed items and observed transfer bytes separately; unknown drivers cannot acquire a fabricated zero or installed size.')
@@ -1044,15 +1102,21 @@ class CriticalReview:
                 and maintenance.details.text() == description,
                 'Privacy progress must report durably checked selected-policy decisions; unavailable controls are not presented as applied, and the whole workflow retains its own percentage.')
             drain(self.app)
-            labels = (progress.description, maintenance.details)
+            progress.details_toggle.setChecked(True)
+            progress.content_scroll.ensureWidgetVisible(progress.description)
+            drain(self.app)
+            labels = (progress.description,)
             self.check(prefix + '.maintenance-progress.description-fit',
                 all(label.text() == description and label.toolTip() == description
                     and label.accessibleDescription() == description
                     and len(label.visible_text.splitlines()) <= 2
                     and label.height() >= label.fontMetrics().lineSpacing() * 2
                     and all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
-                        for line in label.visible_text.splitlines()) for label in labels),
-                'Long current-operation descriptions must fit two visible lines while retaining the complete tooltip and accessible text, in the header and maintenance card.')
+                        for line in label.visible_text.splitlines()) for label in labels)
+                and maintenance.details.isHidden() and maintenance.details.toolTip() == description
+                and maintenance.details.accessibleDescription() == description
+                and description in progress.worker_details.toPlainText(),
+                'Long operation descriptions must fit the Details pane and remain complete in its worker transcript and accessible tooltip, without expanding the pinned card.')
             self.check(prefix + '.maintenance-progress.driver-scan-unknown',
                 driver.activity_ring.value_text() == '—' and driver.activity_ring.active
                 and driver.activity_ring.phase_caption == 'Scan'
@@ -1294,11 +1358,14 @@ class CriticalReview:
             self.viewport(progress, dimensions, prefix + '.updates-concurrent')
             self.buttons(progress, dimensions, prefix + '.updates-concurrent', [progress.cancel_button])
             self.check(prefix + '.updates-concurrent.discovery',
-                all(card.status.text() == 'Scanning' and card.isVisible()
-                    for card in progress.worker_cards.values()) and progress.progress.value() == 8
+                all(progress.worker_cards[identity].status.text() == 'Scanning'
+                    and progress.worker_cards[identity].isVisible()
+                    for identity in CORE_WORKERS[:3]) and progress.progress.value() == 8
+                and progress.worker_cards['security_scan']._raw_status == 'not_selected'
+                and progress.worker_cards['security_scan'].isVisible()
                 and 'application update scan' in progress.processes.toPlainText()
                 and 'driver update scan' in progress.processes.toPlainText(),
-                'All three worker cards must show concurrent discovery without claiming that installers have started.')
+                'Maintenance and both updater cards must show concurrent discovery; the disabled scan stays visible without claiming an active scan.')
             self.screenshot(progress, prefix + '-concurrent-workers')
             maintenance_gate = dict(discovery, maintenance_status='waiting_for_preparation',
                 maintenance_wait_reason='Waiting for driver preparation before temporary cleanup.',
@@ -1351,13 +1418,10 @@ class CriticalReview:
                 and progress.log.toPlainText().count(unresolved) == 1,
                 'Shared unresolved-installer warnings must have short readable captions and preserve one full saved-record reason in the log.')
             self.check(prefix + '.updates-deferred.layout',
-                all(card.details.geometry().bottom() < card.progress.geometry().top()
-                    and card.progress.geometry().bottom() < card.elapsed.geometry().top()
-                    and len(card.details.visible_text.splitlines()) <= 2
-                    and all(card.details.fontMetrics().horizontalAdvance(line) <= card.details.contentsRect().width()
-                            for line in card.details.visible_text.splitlines())
-                    for card in cards.values()),
-                'Long worker descriptions must stay within two lines and never overlap item counts or elapsed time.')
+                measure_dashboard(progress)['essentials']
+                and all(card.details.isHidden() and card.elapsed.isHidden() for card in cards.values())
+                and unresolved in progress.worker_details.toPlainText(),
+                'Long descriptions and elapsed details must remain in Details while the pinned essential fields and navigation stay unobscured.')
             self.check(prefix + '.updates-deferred.honest-state',
                 all(cards[identity].status.text() == 'Deferred' and cards[identity].progress.value() == 0
                     for identity in ('software_updates', 'driver_updates'))
@@ -1379,7 +1443,7 @@ class CriticalReview:
                           'description': progress.description.text()})
             job_text = progress.background_status.text()
             self.check(prefix + '.updates-waiting.current-worker',
-                progress.background_status.isVisible() and 'Fixture.App' in job_text
+                not progress.background_status.isHidden() and 'Fixture.App' in job_text
                 and '2/7' in job_text and '1/7 packages processed' in job_text
                 and 'elapsed 2m 05s' in job_text
                 and 'Fixture.App' in progress.processes.toPlainText(),
@@ -1397,11 +1461,12 @@ class CriticalReview:
                 'Replacing a completed stage caption must preserve its failure evidence in the stage log.')
             cards = progress.worker_cards
             self.check(prefix + '.updates-waiting.three-worker-cards',
-                [card.heading.text() for card in cards.values()] == ['Maintenance', 'App updates', 'Driver updates']
-                and all(card.isVisible() and not card.visibleRegion().isEmpty() for card in cards.values())
+                [cards[key].heading.text() for key in CORE_WORKERS]
+                    == ['Maintenance', 'App updates', 'Driver updates', 'Virus & malware scan']
+                and measure_dashboard(progress)['all_visible']
                 and cards['software_updates'].status.text().startswith('Running')
                 and cards['driver_updates'].status.text() == 'Queued',
-                'All three worker panels must remain visible and distinguish the running app installer from queued drivers.')
+                'The maintenance/update panels and pinned scan card must stay visible and distinguish the running app installer from queued drivers.')
             self.screenshot(progress, prefix + '-updates-waiting')
             driver_wait = dict(waiting, stage='Waiting for background updates', waiting_for='installer_updates',
                 active_job_id='driver_updates', next_stage='Check Windows security updates', percentage=57,
@@ -1613,10 +1678,12 @@ class CriticalReview:
                 and '75.0%' in comparison.removed.text() and '25.0%' in comparison.downloaded.text(),
                 'Repeated snapshots must show one measured cleanup/download ratio, not sum repeated ticks or imply installed footprint.')
             self.check(prefix + '.resource-comparison.placement-and-fit',
-                progress.progress.geometry().bottom() < comparison.geometry().top()
-                and comparison.geometry().bottom() < progress.stage.geometry().top()
+                window_rect(progress.progress, progress).bottom() < window_rect(comparison, progress).top()
+                and window_rect(comparison, progress).bottom() < window_rect(progress.worker_grid, progress).top()
                 and progress.content_scroll.horizontalScrollBar().maximum() == 0
-                and comparison.removed.geometry().right() < comparison.downloaded.geometry().left(),
+                and window_rect(comparison.removed, comparison).right()
+                    < window_rect(comparison.downloaded, comparison).left()
+                and progress.rect().contains(window_rect(comparison, progress)),
                 'The two labelled byte shares must fit below overall progress without horizontal overflow.')
             self.check(prefix + '.antimalware.unknown-is-indeterminate',
                 card.activity_ring.value_percent is None and card.activity_ring.active
@@ -1646,6 +1713,97 @@ class CriticalReview:
             progress.deleteLater()
             drain(self.app)
 
+    def review_dashboard(self, window, backend, dimensions, prefix):
+        """All four live workers must be usable without scrolling the dashboard."""
+        progress = OptimizationProgressWindow(window, threading.Event())
+        try:
+            progress.configure_workers({'software_updates_enabled': True,
+                'driver_updates_enabled': True, 'spyware_scan_enabled': True})
+            progress.update_progress({'stage': 'Clean temporary files', 'percentage': 44,
+                'description': 'A long fixture-only cleanup detail. ' * 20,
+                'resource_totals': {'removed_known': True, 'removed_bytes': 314572800, 'removed_files': 137},
+                'item_progress': {'key': 'fixture:cleanup', 'label': 'Checked approved files',
+                    'phase': 'cleanup', 'percent': 62},
+                'jobs': [{'id': 'software_updates', 'status': 'installing', 'current': 1, 'total': 3,
+                    'description': 'A long approved fixture application update. ' * 20,
+                    'item_progress': {'key': 'fixture:app', 'label': 'Fixture.App', 'phase': 'download', 'percent': 81}},
+                    {'id': 'driver_updates', 'status': 'waiting_for_installer', 'current': 0, 'total': 2,
+                     'description': 'Waiting for the approved fixture installer.'}]})
+            for card in progress.worker_cards.values():
+                card.set_navigation({'session_id': 'f' * 32, 'revision': 1,
+                    'can_back': True, 'can_next': True, 'can_cancel': True,
+                    'message': 'Navigation detail must not expand the pinned cards. ' * 15})
+            for pixels in (None, 25):
+                label = 'standard' if pixels is None else 'font25'
+                if pixels is not None:
+                    progress.setStyleSheet(window.styleSheet() + '\nQFrame#WorkflowWorkerCard QLabel, '
+                        f'QFrame#WorkflowWorkerCard QProgressBar {{font-size:{pixels}px;}}')
+                self.viewport(progress, dimensions, prefix + '.dashboard.' + label)
+                measured = measure_dashboard(progress)
+                for name in ('all_visible', 'outside_scroll', 'essentials', 'labels', 'navigation_hitboxes',
+                             'equal_cards', 'no_overlap', 'no_internal_overlap', 'two_by_two', 'footer_clear'):
+                    self.check(prefix + '.dashboard.' + label + '.' + name.replace('_', '-'), measured[name],
+                        'Four equal core cards, essential labels and navigation hitboxes must remain inside the window without scrolling the grid.',
+                        evidence=measured)
+                self.screenshot(progress, prefix + '-dashboard-' + label)
+            self.check(prefix + '.dashboard.fixture-only', progress._live_metrics_service is None
+                and not backend.optimize.called and not backend.apply_available_fixes.called,
+                'Dashboard resize and font fixtures must start no host operations or live sampler.')
+        finally:
+            progress.completed = True
+            progress._worker_elapsed_timer.stop()
+            progress.close()
+            progress.deleteLater()
+            drain(self.app)
+
+    def review_sandbox(self, dimensions, prefix):
+        """Render real Sandbox controls against a mock workspace only."""
+        from optimus import sandbox
+        root = self.output / 'fixture-project' / prefix
+        workspace = SimpleNamespace(root=root, source_root=root,
+            files=Mock(return_value=['src/optimus/ui.py']),
+            read=Mock(return_value='# Disposable source fixture\nprint("Optimus fixture")\n'),
+            save=Mock(), revert=Mock(), restore_original=Mock(), versions=Mock(return_value=[]),
+            export=Mock(), validate_all=Mock(return_value=[]))
+        backend = SimpleNamespace(data_dir=self.output / 'fixture-sandbox-state', source_root=Mock(return_value=root))
+        forbidden = Mock(side_effect=AssertionError('Sandbox review must never spawn or restart a process.'))
+        with patch.object(sandbox, 'SourceWorkspace', return_value=workspace) as factory, \
+             patch.object(sandbox.subprocess, 'Popen', forbidden):
+            editor = sandbox.SandboxWindow(backend)
+            try:
+                self.viewport(editor, dimensions, prefix + '.sandbox')
+                buttons = editor.findChildren(QPushButton)
+                self.buttons(editor, dimensions, prefix + '.sandbox', buttons)
+                self.check(prefix + '.sandbox.editor-layout',
+                    editor.splitter.isVisibleTo(editor) and editor.tree.isVisibleTo(editor)
+                    and editor.editor.isVisibleTo(editor) and editor.editor.width() >= 180
+                    and editor.rect().contains(window_rect(editor.splitter, editor))
+                    and not window_rect(editor.tree, editor).intersects(window_rect(editor.editor, editor))
+                    and editor.editor.toPlainText() == workspace.read.return_value,
+                    'Sandbox source tree and editor must fit side by side in the requested window.')
+                self.hover_descriptions(editor, buttons, prefix + '.sandbox')
+                self.screenshot(editor, prefix + '-sandbox')
+                self.check(prefix + '.sandbox.fixture-only', factory.call_args.args == (root, backend.data_dir)
+                    and not forbidden.called and not any(getattr(workspace, name).called
+                        for name in ('save', 'revert', 'restore_original', 'export', 'validate_all')),
+                    'Sandbox rendering uses a mock source workspace; it never writes real Sandbox data or restarts Optimus.')
+            finally:
+                editor.editor.document().setModified(False)
+                editor.close()
+                editor.deleteLater()
+                drain(self.app)
+
+    def hover_descriptions(self, window, controls, prefix):
+        for index, button in enumerate(controls):
+            # Exercise the real application event filter used on hover. Do not
+            # synthesize a click or open a native tooltip window offscreen.
+            self.app.sendEvent(button, QEvent(QEvent.Enter))
+            self.check(prefix + f'.hover-description-{index}', bool(button.toolTip().strip())
+                and bool(button.accessibleDescription().strip()),
+                'Every action must expose a hover description and an accessible description.',
+                evidence={'label': button.text(), 'tooltip': button.toolTip(),
+                          'accessible_description': button.accessibleDescription()})
+
     def run(self):
         for dimensions in VIEWPORTS:
             prefix = f'{dimensions[0]}x{dimensions[1]}'
@@ -1659,7 +1817,10 @@ class CriticalReview:
                     and window.main_buttons[-1].text() == 'Revert',
                     'The home screen must offer Optimize, Settings, Sandbox and the requested Revert action.')
                 self.buttons(window, dimensions, prefix + '.main', window.main_buttons)
+                self.hover_descriptions(window, window.main_buttons, prefix + '.main')
                 self.screenshot(window, prefix + '-main')
+                self.review_dashboard(window, backend, dimensions, prefix)
+                self.review_sandbox(dimensions, prefix)
                 self.review_launch(window, backend, dimensions, prefix)
                 self.review_startup_update(window, backend, dimensions, prefix)
                 self.review_setup(backend, dimensions, prefix)
