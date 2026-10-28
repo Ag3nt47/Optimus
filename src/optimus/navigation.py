@@ -210,11 +210,17 @@ class WorkerCursor:
         can_back = ready and previous >= 0
         back_mode = 'history'
         label = self.current['label'] if live else 'the current item'
-        critical = live and self.current['mutation_started']
+        critical = live and self.current['mutation_started'] and self.current['phase'] == 'installing'
+        control_status = ('review_required' if self._unknown else
+                          'finishing_current_installer' if self.pending and critical else
+                          'waiting_for_safe_stop' if self.pending else
+                          'running' if live and not stopped else 'idle' if not stopped else 'completed')
         wait = ('The live installer must finish and save its outcome; no installer process is force-stopped.' if critical
                 else 'The item is asked to stop cooperatively. If its native API cannot abort safely, Optimus waits for it to return.')
         return {'id': self.id, 'title': self.title, 'revision': self.revision,
                 'active': self.active and not stopped, 'pending': copy.deepcopy(self.pending),
+                'pending_action': self.pending.get('action') if self.pending else None,
+                'control_status': control_status,
                 'current': copy.deepcopy(self.current), 'phase': self.current['phase'] if live else 'idle',
                 'viewing_history': viewing,
                 'view_item': copy.deepcopy(self.history[self.view_index]) if viewing else None,
@@ -248,16 +254,31 @@ class WorkerCursor:
             self.pending = {'action': action,
                             'item_key': self.current['key'] if self.current else None}
             self._item_stop.set()
-            self.message = ('Cancellation requested for the live item.' if action == 'cancel' else
-                            'Next requested: stop or skip this live item at a safe boundary.') + ' ' + state['cancel_reason']
+            self.message = (('Cancel requested' if action == 'cancel' else 'Skip requested') +
+                            (': finishing current installer and verifying its exit before advancing.'
+                             if self.current and self.current['mutation_started'] and self.current['phase'] == 'installing' else
+                             ': stopping the current item at a safe checkpoint before advancing.') +
+                            ' Other workers continue. ' + state['cancel_reason'])
         self.revision += 1
         return {'accepted': True, 'message': self.message, 'revision': self.revision,
-                'pending': copy.deepcopy(self.pending), 'viewing_history': self.view_index is not None}
+                'pending': copy.deepcopy(self.pending), 'control_status': self._snapshot()['control_status'],
+                'viewing_history': self.view_index is not None}
 
 
 def cursor_for(backend, job_id, title=None):
     navigation = getattr(getattr(backend, 'workflow', None), 'navigation', None)
     return navigation.cursor(job_id, title) if isinstance(navigation, NavigationHub) else None
+
+
+def accepts_cancel_event(operation):
+    """Forward a local token only through an explicit, compatible provider API."""
+    import inspect
+    try:
+        parameter = inspect.signature(operation).parameters.get('cancel_event')
+        return parameter is not None and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    except (TypeError, ValueError):
+        return False
 
 
 class WorkItem:

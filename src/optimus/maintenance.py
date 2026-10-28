@@ -340,6 +340,15 @@ class Maintenance:
         apply commands continue using the non-interruptible installer runner.
         """
         arguments = [self._winget(), 'upgrade', '--source', 'winget', '--disable-interactivity']
+        return self._read_only_winget(arguments, cancel_event)
+
+    @staticmethod
+    def _read_only_winget(arguments, cancel_event):
+        """Retire only an explicitly read-only child, then prove its exit."""
+        if (not isinstance(arguments, list) or len(arguments) < 2 or arguments[1:] not in (
+                ['upgrade', '--source', 'winget', '--disable-interactivity'],
+                ['pin', 'list', '--disable-interactivity'])):
+            raise ValueError('Only exact read-only WinGet queries support process cancellation.')
         if cancel_event.is_set():
             return subprocess.CompletedProcess(arguments, 130, '', 'Read-only update search cancelled.')
         child = subprocess.Popen(arguments, shell=False, stdin=subprocess.DEVNULL,
@@ -448,10 +457,12 @@ class Maintenance:
         # proves there were no configured pins.
         return rows, bool(rows)
 
-    def _pin_status(self, package: dict[str, str]) -> tuple[bool, str, bool]:
+    def _pin_status(self, package: dict[str, str], *, cancel_event=None) -> tuple[bool, str, bool]:
         """A fresh check covers ordinary pins exact WinGet upgrades can bypass."""
         try:
-            result = self._run([self._winget(), 'pin', 'list', '--disable-interactivity'])
+            arguments = [self._winget(), 'pin', 'list', '--disable-interactivity']
+            result = (self._read_only_winget(arguments, cancel_event) if cancel_event is not None
+                      else self._run(arguments))
         except (OSError, subprocess.TimeoutExpired):
             return False, 'The current WinGet pin inventory could not be read; no installer was started.', True
         if result.returncode != 0:
@@ -516,9 +527,14 @@ class Maintenance:
         # Revalidate both manual and unattended updates. An external updater may
         # have already installed the offered version since the preview.
         try:
-            fresh = self.updates_scan()
+            from .navigation import accepts_cancel_event
+            options = ({'cancel_event': cancel_event} if cancel_event is not None
+                       and accepts_cancel_event(self.updates_scan) else {})
+            fresh = self.updates_scan(**options)
         except Exception as error:
             raise UpdatePreflightError("The update revalidation failed before any installer started (" + type(error).__name__ + ").", failure_scope='app_batch', failureKind='source_revalidation') from error
+        if (interrupted := cancelled_result()) is not None:
+            return interrupted
         if not isinstance(fresh, dict) or fresh.get('structured') is not True or type(fresh.get('exitCode')) is not int or fresh['exitCode'] != 0:
             raise UpdatePreflightError("The update revalidation was incomplete; no installer was started.", failure_scope='app_batch', failureKind='source_revalidation')
         current = self._last_update_packages.get(package_id)
@@ -531,7 +547,9 @@ class Maintenance:
                     "from_version": (current or expected).get("version"), "to_version": (current or expected).get("available"),
                     "note": "The installed or available version changed during revalidation; no installer was started."}
         try:
-            unpinned, reason, needs_review = self._pin_status(current)
+            options = ({'cancel_event': cancel_event} if cancel_event is not None
+                       and accepts_cancel_event(self._pin_status) else {})
+            unpinned, reason, needs_review = self._pin_status(current, **options)
         except Exception as error:
             raise UpdatePreflightError("The pin safety check failed before any installer started (" + type(error).__name__ + ").", failure_scope='shared', failureKind='pin_inventory_untrusted') from error
         if (interrupted := cancelled_result()) is not None:
@@ -574,6 +592,12 @@ class Maintenance:
                 if (package_id == 'Ollama.Ollama' and isinstance(resume, dict)
                         and resume.get('resident_handoff_enabled') is True):
                     run_options['allow_resident_handoff'] = True
+            # Configuration/owned staging setup is still prelaunch work. A
+            # local Next received here must not launch a fresh installer.
+            if (interrupted := cancelled_result()) is not None:
+                if attempt is not None:
+                    attempt.finish(interrupted)
+                return interrupted
             result = self._run(arguments, **run_options)
         except subprocess.TimeoutExpired:
             if attempt is not None:

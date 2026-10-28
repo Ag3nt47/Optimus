@@ -12,7 +12,7 @@ from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
 from .workflow import atomic_json, _space_guard_result
 from .native_operations import sha256_file
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
-from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal
+from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal, accepts_cancel_event
 
 
 def _cancelled(event):
@@ -341,7 +341,12 @@ class NativeWorkflow:
                 from .item_progress import accepts_progress_callback
                 scan_options = ({'progress_callback': serial_item_progress}
                                 if accepts_progress_callback(self.backend.cleanup_scan) else {})
+                if accepts_cancel_event(self.backend.cleanup_scan):
+                    scan_options['cancel_event'] = cancel_event
                 plan = self.backend.cleanup_scan(categories, configuration.get('cleanup_age_days', 7), **scan_options)
+                if _cancelled(cancel_event) or plan.get('cancelled') is True:
+                    return {'cancelled': True, 'failed_items': 0,
+                            'note': 'Cleanup preview stopped; no files were deleted.'}
                 if plan.get('complete') is not True:
                     return {'preview_summary': {'complete': False, 'total_bytes': plan.get('total_bytes', 0)},
                             'failed_items': 1, 'note': 'Incomplete cleanup preview; no files were deleted.'}
@@ -349,10 +354,13 @@ class NativeWorkflow:
                     return {'cancelled': True, 'failed_items': 0}
                 apply_options = ({'progress_callback': serial_item_progress}
                                  if accepts_progress_callback(self.backend.cleanup_apply) else {})
+                if accepts_cancel_event(self.backend.cleanup_apply):
+                    apply_options['cancel_event'] = cancel_event
                 applied = self.backend.cleanup_apply(plan, **apply_options)
                 if isinstance(plan.get('id'), str):
                     progress_callback.removal_receipt('cleanup:' + plan['id'], applied)
-                return {'result': applied, 'failed_items': len(applied.get('errors', []))}
+                return {'result': applied, 'cancelled': applied.get('cancelled') is True,
+                        'failed_items': len(applied.get('errors', []))}
 
             serial_job = None
             def serial_item_progress(state):

@@ -340,6 +340,8 @@ class Workflow:
             run_id = uuid.uuid4().hex
             self.navigation.begin(run_id, cancel_event=global_cancel_event)
             maintenance_navigation = self.navigation.cursor('maintenance', 'Maintenance')
+            security_navigation = (self.navigation.cursor('security_scan', 'Virus & malware scan')
+                                   if configuration['spyware_scan_enabled'] else None)
             cancel_event = maintenance_navigation.cancellation(global_cancel_event)
             log_path = self.backend.data_dir / 'runs' / (run_id + '.json')
             report = {'id': run_id, 'started_at': time.time(), 'settings': configuration, 'stages': [], 'cancelled': False,
@@ -459,8 +461,11 @@ class Workflow:
 
             def progress_operation(operation, *args, title, **kwargs):
                 from .item_progress import accepts_progress_callback
+                from .navigation import accepts_cancel_event
                 if accepts_progress_callback(operation):
                     kwargs['progress_callback'] = item_progress(title)
+                if accepts_cancel_event(operation):
+                    kwargs['cancel_event'] = cancel_event
                 return operation(*args, **kwargs)
 
             age = max(30, configuration['cleanup_age_days']) if configuration['intensity'] == 'Low' else configuration['cleanup_age_days']
@@ -469,7 +474,7 @@ class Workflow:
                          'Clean selected browser data' if any(':' in value for value in category_ids) else
                          'Clean selected additional categories')
                 plan = progress_operation(self.backend.cleanup_scan, category_ids, age, title=title)
-                if cancelled():
+                if cancelled() or plan.get('cancelled') is True:
                     return {'cancelled': True, 'reason': 'Cancelled after preview; no files were deleted.'}
                 outcome = progress_operation(self.backend.cleanup_apply, plan, title=title) if plan.get('files') else {'deleted_count': 0, 'deleted_bytes': 0, 'skipped_count': 0}
                 if isinstance(plan.get('id'), str):
@@ -483,7 +488,8 @@ class Workflow:
                         'The preview and selected apply operations completed; review any category-level skip notes.')
                 return {'preview_summary': {'files': len(plan.get('files', [])), 'bytes': plan.get('total_bytes', 0),
                                             'complete': plan.get('complete'), 'skipped': plan.get('skipped'), 'errors': errors},
-                        'result': outcome, 'partial': partial, 'failed_items': (max(1, len(errors)) if preview_partial else 0) + refusals,
+                        'result': outcome, 'cancelled': outcome.get('cancelled') is True,
+                        'partial': partial, 'failed_items': (max(1, len(errors)) if preview_partial else 0) + refusals,
                         'note': note}
             if configuration['cleanup_enabled']:
                 stages.append(('Clean temporary files',
@@ -728,10 +734,14 @@ class Workflow:
                     report['cancelled'] = True
                     break
                 navigation_item = title not in (WINDOWS_SOFTWARE, WINDOWS_DRIVERS, WINDOWS_DRIVER_REVIEW, 'Check or install Windows security updates')
+                stage_navigation = (security_navigation if title == 'Scan for spyware and malware'
+                                    else maintenance_navigation)
+                cancel_event = (stage_navigation.cancellation(global_cancel_event)
+                                if navigation_item else global_cancel_event)
                 mutation_item = title.startswith(('Apply ', 'Prepare approved ', 'Disable ', 'Recycle ', 'Clean ', 'Optimize ', 'Remove ', 'Uninstall ', 'Enable '))
                 navigation_available = True
                 if navigation_item:
-                    navigation_available = maintenance_navigation.begin_item('stage:' + str(completed) + ':' + title, title,
+                    navigation_available = stage_navigation.begin_item('stage:' + str(completed) + ':' + title, title,
                         kind='mutation' if mutation_item else 'scan')
                 process_lines = ['Optimus workflow worker']
                 process = getattr(self.backend.bridge, '_process', None)
@@ -748,7 +758,7 @@ class Workflow:
                     if not navigation_available:
                         result = {'skipped': True, 'navigation_blocked': True, 'requiresReview': True, 'failed_items': 0,
                                   'note': 'The preceding maintenance item has an unresolved outcome; this stage was not started.'}
-                    elif navigation_item and maintenance_navigation.local_requested():
+                    elif navigation_item and stage_navigation.local_requested():
                         result = {'skipped': True, 'cancelled': True, 'navigation_cancelled': True, 'navigation_not_started': True,
                                   'failed_items': 0, 'installer_started': False, 'outcomeKnown': True,
                                   'note': 'You skipped this exact maintenance stage before it started.'}
@@ -798,9 +808,9 @@ class Workflow:
                         result = serial_job.result
                     else:
                         if navigation_item:
-                            maintenance_navigation.phase('applying' if mutation_item else 'scanning', mutation_started=mutation_item)
+                            stage_navigation.phase('applying' if mutation_item else 'scanning', mutation_started=mutation_item)
                         result = operation()
-                    local_navigation_cancel = navigation_item and maintenance_navigation.local_requested()
+                    local_navigation_cancel = navigation_item and stage_navigation.local_requested()
                     if local_navigation_cancel and isinstance(result, dict) and result.get('cancelled') is True:
                         result = dict(result, navigation_cancelled=True,
                                       navigation_cancelled_items=max(1, result.get('navigation_cancelled_items', 0)))
@@ -837,11 +847,13 @@ class Workflow:
                 report['worker_resource_totals'] = progress_callback.worker_resource_snapshots()
                 atomic_json(log_path, report)
                 if navigation_item:
-                    maintenance_navigation.finish(stage['status'],
+                    stage_navigation.finish(stage['status'],
                         message=stage.get('error') or (stage.get('result') or {}).get('note') if isinstance(stage.get('result'), dict) else stage.get('error'),
                         mutation_started=False if isinstance(stage.get('result'), dict) and stage['result'].get('navigation_not_started') is True else mutation_item,
                         outcome_known=not (mutation_item and stage.get('error') and 'result' not in stage
                             or isinstance(stage.get('result'), dict) and stage['result'].get('outcomeKnown') is False))
+                    if stage_navigation is security_navigation:
+                        security_navigation.end(stage['status'])
                 if parallel_job is not None and title == parallel_launch_after:
                     checkpoint_open = True
                     prior_barrier = unresolved_apps or cleanup_barrier

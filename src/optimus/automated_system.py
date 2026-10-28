@@ -12,7 +12,7 @@ import time
 import uuid
 from .automation import CURRENT_SETUP_VERSION
 from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
-from .navigation import WorkItem, cursor_for, navigation_skip, local_skip, can_fail_forward, shared_update_refusal
+from .navigation import WorkItem, cursor_for, navigation_skip, local_skip, can_fail_forward, shared_update_refusal, accepts_cancel_event
 
 _HEX64 = re.compile(r'^[0-9a-fA-F]{64}$')
 _STARTUP_ID = re.compile(r'^(Registry|Shortcut)-[0-9a-fA-F]{64}$')
@@ -249,6 +249,8 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     discovery_reporter=BoundItemProgress(item_callback,'driver:discovery','Driver discovery',discovery_state)
     try:
         options={}
+        if accepts_cancel_event(backend.driver_updates_scan):
+            options['cancel_event']=discovery.cancel_event
         if callable(item_callback) and accepts_progress_callback(backend.driver_updates_scan):
             options['progress_callback']=discovery_reporter
         scan=backend.driver_updates_scan(**options)
@@ -438,9 +440,15 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             else:
                 work.installing()
                 options={'accept_eula':True}
+                if accepts_cancel_event(backend.driver_update_apply_unattended):
+                    options['cancel_event']=work.cancel_event
                 if callable(item_callback) and accepts_progress_callback(backend.driver_update_apply_unattended):
                     options['progress_callback']=reporter
                 outcome=backend.driver_update_apply_unattended(value,**options)
+                if (work.requested() and isinstance(outcome,dict) and outcome.get('cancelled') is True
+                        and outcome.get('installer_started') is False and outcome.get('outcomeKnown') is True
+                        and outcome.get('running') is False):
+                    outcome=dict(outcome,navigation_cancelled=True)
             if shared_update_refusal(outcome):outcome=dict(outcome,shared_barrier=True)
             success=(isinstance(outcome,dict) and type(outcome.get('resultCode')) is int and outcome['resultCode']==2
                      and outcome.get('hresult',0)==0 and outcome.get('aggregateResultCode',2)==2 and outcome.get('aggregateHresult',0)==0)
