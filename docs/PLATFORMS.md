@@ -4,13 +4,13 @@ Optimus 0.12.21 runs as a native Qt desktop application on Windows, macOS and Li
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
-| Windows, Intel/AMD 64-bit | [Windows ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.44 MiB compressed</sub> | Windows Server 2025 GitHub runner; Windows 10/11 desktop target |
-| macOS, Apple Silicon | [Apple Silicon app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.69 MiB compressed</sub> | macOS 15, arm64 |
-| macOS, Intel | [Intel app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>51.90 MiB compressed</sub> | macOS 15, x86_64 |
-| Linux, Intel/AMD 64-bit | [Linux tar.gz](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>91.92 MiB compressed</sub> | Ubuntu 22.04, x86_64; glibc 2.35 or newer |
-| Every platform | [Editable source ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>4.96 MiB compressed</sub> | Source archive, not an executable |
+| Windows, Intel/AMD 64-bit | [Windows ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.46 MiB compressed</sub> | Windows Server 2025 GitHub runner; Windows 10/11 desktop target |
+| macOS, Apple Silicon | [Apple Silicon app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.70 MiB compressed</sub> | macOS 15, arm64 |
+| macOS, Intel | [Intel app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>51.91 MiB compressed</sub> | macOS 15, x86_64 |
+| Linux, Intel/AMD 64-bit | [Linux tar.gz](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>91.93 MiB compressed</sub> | Ubuntu 22.04, x86_64; glibc 2.35 or newer |
+| Every platform | [Editable source ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>4.97 MiB compressed</sub> | Source archive, not an executable |
 
-Download sizes shown are for **v0.12.19**.
+Download sizes shown are for **v0.12.21**.
 
 [SHA256SUMS.txt](https://github.com/Ag3nt47/Optimus/releases/latest/download/SHA256SUMS.txt) covers all five downloadable archives. The [release page](https://github.com/Ag3nt47/Optimus/releases/latest) also lists each file separately. Downloading starts with one click; extracting and the normal platform security review are still required.
 
