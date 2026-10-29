@@ -177,7 +177,8 @@ class PowerShellBridge:
                 info = cancel_directory.lstat()
                 with self._pending_lock:
                     self._cancellation_paths[request_id] = {
-                        'directory': cancel_directory, 'identity': (info.st_dev, info.st_ino), 'marker_identity': None}
+                        'directory': cancel_directory, 'identity': (info.st_dev, info.st_ino),
+                        'marker_identity': None, 'lock': threading.RLock(), 'closed': False}
                 arguments = dict(arguments, cooperativeCancellation=True)
             cancellation_sent = False
             submitted = False
@@ -198,14 +199,23 @@ class PowerShellBridge:
                 nonlocal cancellation_sent
                 if cancel_directory is None or cancellation_sent or not (force or cancel_event.is_set()):
                     return
+                with self._pending_lock:
+                    record = self._cancellation_paths.get(request_id)
+                if record is None:
+                    return
                 try:
-                    self._check_cancellation_directory(request_id)
-                    with (cancel_directory / 'cancel.request').open('x', encoding='ascii') as marker:
-                        marker.write('cancel\n')
-                        info = os.fstat(marker.fileno())
-                        with self._pending_lock:
-                            self._cancellation_paths[request_id]['marker_identity'] = (info.st_dev, info.st_ino)
-                    cancellation_sent = True
+                    # Both the request loop and STOP callback can arrive here.
+                    # Publish identity before terminal retirement can inspect
+                    # the file, and never write after that request has closed.
+                    with record['lock']:
+                        if record['closed'] or cancellation_sent:
+                            return
+                        self._check_cancellation_directory(request_id)
+                        with (cancel_directory / 'cancel.request').open('x', encoding='ascii') as marker:
+                            marker.write('cancel\n')
+                            info = os.fstat(marker.fileno())
+                            record['marker_identity'] = (info.st_dev, info.st_ino)
+                        cancellation_sent = True
                 except (OSError, ValueError, KeyError):
                     # Failure to request abort never authorizes abandoning or
                     # killing the still-owned native operation.
@@ -267,20 +277,26 @@ class PowerShellBridge:
         with self._pending_lock:
             record = self._cancellation_paths.get(request_id)
         if record is not None:
-            try:
-                self._check_cancellation_directory(request_id)
-                directory = record['directory']
-                marker = directory / 'cancel.request'
-                info = _ordinary_data_path(marker, file=True)
-                if info is not None:
-                    if (info.st_dev, info.st_ino) != record['marker_identity']:
-                        return  # A substituted marker is never deletion authority.
-                    marker.unlink()
-                directory.rmdir()
-                with self._pending_lock:
-                    self._cancellation_paths.pop(request_id, None)
-            except (OSError, ValueError, KeyError):
-                pass
+            with record['lock']:
+                # A callback already captured by STOP may still be queued.
+                # Closing its lifecycle precedes filesystem cleanup, including
+                # failed cleanup of substituted paths that must be preserved.
+                record['closed'] = True
+                try:
+                    self._check_cancellation_directory(request_id)
+                    directory = record['directory']
+                    marker = directory / 'cancel.request'
+                    info = _ordinary_data_path(marker, file=True)
+                    if info is not None:
+                        if (info.st_dev, info.st_ino) != record['marker_identity']:
+                            return  # A substituted marker is never deletion authority.
+                        marker.unlink()
+                    directory.rmdir()
+                    with self._pending_lock:
+                        if self._cancellation_paths.get(request_id) is record:
+                            self._cancellation_paths.pop(request_id, None)
+                except (OSError, ValueError, KeyError):
+                    pass
 
     def _check_cancellation_directory(self, request_id):
         with self._pending_lock:

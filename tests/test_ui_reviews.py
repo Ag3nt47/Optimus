@@ -107,14 +107,18 @@ def test_cloud_page_constructs_without_connecting(window):
     assert window.cloud_panel._plan is None
 
 
-def test_primary_window_has_four_requested_buttons(qapp, tmp_path, monkeypatch):
+def test_primary_window_has_four_menu_actions_and_fullscreen_stop_controls(qapp, tmp_path, monkeypatch):
     monkeypatch.setenv('OPTIMUS_REDUCE_MOTION', '1')
     value = OptimusWindow(SimpleNamespace(data_dir=tmp_path, preferences=lambda: {}), smoke_test=True)
     try:
         assert [button.text() for button in value.main_buttons] == ['1 click Optimize and debloat','Settings','Sandbox','Revert']
         fullscreen = value.fullscreen.button
         assert fullscreen not in value.main_buttons
-        assert set(value.findChildren(QPushButton)) == set(value.main_buttons) | {fullscreen}
+        stop = value.stop_button
+        assert stop.text() == 'STOP' and stop not in value.main_buttons
+        assert 'exit' in stop.accessibleName().lower()
+        assert set(value.findChildren(QPushButton)) == set(value.main_buttons) | {fullscreen, stop}
+        assert not value.landing_scroll.isAncestorOf(stop)
         assert not value.landing_scroll.isAncestorOf(fullscreen)
         value.show()
         def reachable():
