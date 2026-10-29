@@ -7,7 +7,7 @@ import pytest
 
 from optimus.parallel_updates import update_completion_state
 from optimus.post_run_fixes import CHANNELS, _prior_installer_barrier
-from test_native_post_run_fixes import backend, package, parent, software_report, software_settings
+from test_native_post_run_fixes import backend, package, parent, software_report, software_settings, assert_stop_bound_call
 
 
 DRIVER = {'id': '00000000-0000-0000-0000-000000000001', 'revision': 1, 'title': 'Fixture driver'}
@@ -56,7 +56,7 @@ def test_execution_of_known_blocked_plan_applies_security_only_without_pretendin
     before = copy.deepcopy(source)
     service = backend(tmp_path, settings, source)
     result = service.apply_available_fixes(source, settings)
-    service.apply_security_recommendation.assert_called_once_with('enable_firewall', cancel_event=None)
+    assert_stop_bound_call(service, service.apply_security_recommendation, 'enable_firewall')
     assert result['counts']['completed'] == 1 and result['counts']['deferred'] == 0
     assert {row['id'] for row in result['manual_items']} == set(CHANNELS)
     assert not any(row.get('action_id') in CHANNELS for row in result['stages'])

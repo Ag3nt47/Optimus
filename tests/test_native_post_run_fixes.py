@@ -10,6 +10,7 @@ import pytest
 
 from optimus.automation import CURRENT_SETUP_VERSION, RunLease
 from optimus.backend import Backend
+from optimus.emergency_stop import controller_for
 from optimus.native_backend import NativeBackend
 from optimus.native_settings import NativePreferences
 from optimus.post_run_fixes import SECURITY_FIXES
@@ -89,6 +90,16 @@ def backend(tmp_path, settings, report, *, native=False):
     return service
 
 
+def assert_stop_bound_call(service, operation, *args, **kwargs):
+    """Keep exact action/scope checks and prove its token receives STOP."""
+    token = operation.call_args.kwargs.get('cancel_event')
+    assert token is not None and callable(getattr(token, 'is_set', None))
+    assert not token.is_set()
+    operation.assert_called_once_with(*args, cancel_event=token, **kwargs)
+    controller_for(service).request_stop()
+    assert token.is_set()
+
+
 def test_preview_is_pure_canonical_and_excludes_optional_process_actions(tmp_path):
     settings = configuration()
     source = parent(settings, security=[*SECURITY_FIXES, 'review_security', 'restart_required', 'arbitrary-command'],
@@ -153,7 +164,7 @@ def test_apply_followup_updates_unchanged_app_rule_without_executing_presence(tm
     presence = Mock(return_value={'items': [], 'failed_items': 0})
     monkeypatch.setattr('optimus.app_presence.run_app_presence', presence)
     result = service.apply_available_fixes(source, settings)
-    service.update_app_unattended.assert_called_once_with('Fixture.One')
+    assert_stop_bound_call(service, service.update_app_unattended, 'Fixture.One')
     assert result['counts']['completed'] == 1
     assert presence.call_args.args[1]['software_app_rules'] == [dict(rule, presence='keep_current')]
     service.uninstall.assert_not_called()
@@ -309,7 +320,7 @@ def test_software_uses_fresh_helper_and_current_exclusions_without_adding_new_sc
     service.updates_scan.return_value['updates'] = [package(), package('Fixture.Two'), package('Fixture.Three')]
     result = service.apply_available_fixes(source, settings)
     service.updates_scan.assert_called_once()
-    service.update_app_unattended.assert_called_once_with('Fixture.One')
+    assert_stop_bound_call(service, service.update_app_unattended, 'Fixture.One')
     assert result['counts']['completed'] == 1
     assert result['stages'][0]['authorization']['software_update_policy'] == 'selected'
     assert 'actions/checks' in result['summary']
@@ -335,7 +346,7 @@ def test_supplied_snapshot_cannot_broaden_completed_run_approval(tmp_path):
     service.preferences.return_value = broadened
     service.updates_scan.return_value['updates'] = [package(), package('Fixture.Two')]
     result = service.apply_available_fixes(source, broadened)
-    service.update_app_unattended.assert_called_once_with('Fixture.One')
+    assert_stop_bound_call(service, service.update_app_unattended, 'Fixture.One')
     assert result['reviewed_plan']['actions'][0]['id'] == 'software_updates'
 
 
@@ -455,7 +466,7 @@ def test_same_id_modified_preview_cannot_add_unseen_active_actions(tmp_path):
     shown = copy.deepcopy(source)
     shown['security_review']['recommendations'] = [{'id': 'enable_firewall'}]
     result = service.apply_available_fixes(shown, settings)
-    service.apply_security_recommendation.assert_called_once_with('enable_firewall', cancel_event=None)
+    assert_stop_bound_call(service, service.apply_security_recommendation, 'enable_firewall')
     assert len(result['reviewed_plan']['actions']) == 1
 
 
@@ -500,15 +511,27 @@ def test_each_software_installer_has_a_linked_prepared_item_journal(tmp_path):
     source = parent(settings, software=software_report([package(), package('Fixture.Two')]))
     service = backend(tmp_path, settings, source)
     service.updates_scan.return_value['updates'] = [package(), package('Fixture.Two')]
-    def install(identity):
-        saved = json.loads(next((tmp_path / 'post-run-fixes').glob('*.json')).read_text())
+    captured = []
+    def install(identity, *, cancel_event=None):
+        assert identity in ('Fixture.One', 'Fixture.Two')
+        assert cancel_event is not None and not cancel_event.is_set()
+        captured.append((identity, cancel_event))
+        paths = list((tmp_path / 'post-run-fixes').glob('*.json'))
+        assert len(paths) == 1 and paths[0].parent == tmp_path / 'post-run-fixes'
+        saved = json.loads(paths[0].read_text())
+        assert paths[0].stem == saved['id']
         assert saved['parent_run_id'] == source['id']
         assert saved['stages'][0]['current_item']['id'] == identity
+        assert saved['stages'][0]['authorization']['software_update_ids'] == ['Fixture.One', 'Fixture.Two']
         return {'exitCode': 0}
     service.update_app_unattended.side_effect = install
     result = service.apply_available_fixes(source, settings)
     assert service.update_app_unattended.call_count == 2
     assert len(result['stages'][0]['result']['items']) == 2
+    assert [identity for identity, _ in captured] == ['Fixture.One', 'Fixture.Two']
+    assert all(not token.is_set() for _, token in captured)
+    controller_for(service).request_stop()
+    assert all(token.is_set() for _, token in captured)
 
 
 def test_windows_security_channel_uses_existing_service_with_saved_agreements(tmp_path):
@@ -523,7 +546,8 @@ def test_windows_security_channel_uses_existing_service_with_saved_agreements(tm
     args, kwargs = service.windows_security_updates.call_args
     assert args[0]['windows_security_updates_install_approved'] is True
     assert args[0]['windows_security_update_agreements_accepted'] is True
-    assert callable(kwargs['item_callback']) and kwargs['cancel_event'] is None
+    assert callable(kwargs['item_callback'])
+    assert_stop_bound_call(service, service.windows_security_updates, args[0], item_callback=kwargs['item_callback'])
     assert result['counts']['completed'] == 1
     assert result['stages'][0]['title'] == 'Check or install Windows security updates'
 
@@ -614,7 +638,7 @@ def test_native_inherited_api_routes_only_to_scoped_native_package_helper(tmp_pa
     preview = service.available_fixes(source, settings)
     assert [row['id'] for row in preview['actions']] == ['software_updates']
     result = service.apply_available_fixes(source, settings)
-    service.update_app_unattended.assert_called_once_with('apt:fixture', cancel_event=None)
+    assert_stop_bound_call(service, service.update_app_unattended, 'apt:fixture')
     service.apply_security_recommendation.assert_not_called()
     assert result['counts']['completed'] == 1
     assert result['stages'][0]['title'] == 'Review or install approved native package updates'

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.12.16
+## 0.12.17
 
 - Serialize startup so the Optimus release check and any approved update/restart finish before launch review or saved unattended maintenance can run.
 - Resume cleanup only through a verified single-use approval for unchanged saved choices. A failure after accepting an Optimus update, or a restart without valid cleanup approval, leaves maintenance paused for explicit review.
