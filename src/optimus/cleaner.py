@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 import psutil
-from .browser_paths import browser_definitions, native_locations, process_matches
+from .browser_paths import browser_definitions, native_locations, process_matcher
 
 _PLATFORM = sys.platform
 
@@ -277,14 +277,14 @@ class Cleaner:
         wanted = {name.casefold() for name in names}
         if not wanted:
             return []
+        browser_ids = tuple(browser_id for browser_id, browser in browser_definitions(_PLATFORM).items()
+                            if wanted.intersection(value.casefold() for value in browser['process_names']))
+        matches_browser = process_matcher(browser_ids, _PLATFORM)
         result = set()
         for process in psutil.process_iter(['name']):
             try:
                 name = process.info.get('name') or ''
-                if name.casefold() in wanted or any(
-                    browser_id for browser_id, browser in browser_definitions(_PLATFORM).items()
-                    if wanted.intersection(value.casefold() for value in browser['process_names'])
-                    and process_matches(browser_id, name, _PLATFORM)):
+                if name.casefold() in wanted or matches_browser(name):
                     result.add(name)
             except (psutil.Error, OSError):
                 continue

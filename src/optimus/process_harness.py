@@ -98,17 +98,42 @@ def _startup_approval(record):
     return descriptor, executable
 
 
-def _ownership(executable, applications):
-    matches = []
+def _ownership_index(applications):
+    """Compile registered locations once for this scan, without caching inventory."""
+    roots = {}
     for app in applications:
+        if not isinstance(app, dict):
+            continue
         root = app.get('InstallLocation') or app.get('install_location')
-        if isinstance(root, str) and ntpath.isabs(root) and _within(executable, root):
-            matches.append((len(_norm(root)), _text(app.get('Name') or app.get('name') or 'Installed application')))
+        if isinstance(root, str) and ntpath.isabs(root):
+            roots.setdefault(_norm(root), set()).add(_text(app.get('Name') or app.get('name') or 'Installed application'))
+    index = {}
+    for root, owners in roots.items():
+        index.setdefault(root.rstrip('\\'), []).append((root, owners))
+    return index
+
+
+def _indexed_ownership(executable, index):
+    normalized = _norm(executable)
+    # Only exact locations or directory boundaries can contain an executable.
+    # Keeping normalized variants in each bucket preserves drive/UNC root and
+    # equal-length ownership behavior, including unusual registered locations.
+    prefixes = {normalized.rstrip('\\')}
+    prefixes.update(normalized[:position].rstrip('\\') for position, char in enumerate(normalized) if char == '\\')
+    matches = []
+    for prefix in prefixes:
+        for root, owners in index.get(prefix, ()):
+            if normalized == root or normalized.startswith(root.rstrip('\\') + '\\'):
+                matches.append((len(root), owners))
     if not matches:
         return [], 'No installed-application location matches this executable.'
     longest = max(length for length, _ in matches)
-    owners = sorted({name for length, name in matches if length == longest})
+    owners = sorted({name for length, names in matches if length == longest for name in names})
     return owners, 'Exact executable containment in the most specific registered InstallLocation; this is ownership evidence, not proof of a launch source.'
+
+
+def _ownership(executable, applications):
+    return _indexed_ownership(executable, _ownership_index(applications))
 
 
 class ProcessHarness:
@@ -157,7 +182,9 @@ class ProcessHarness:
         if report['cancelled']:
             report['complete'] = False
         metrics = {_norm(item.get('exe')): item for item in sampled.get('applications', []) if isinstance(item, dict) and item.get('exe')}
-        startup_matches, private = [], {}
+        startup_matches, private = {}, {}
+        ownership_index = _ownership_index(applications)
+        ownership_cache = {}
         for record in startup:
             if not isinstance(record, dict):
                 report['complete'] = False
@@ -167,7 +194,7 @@ class ProcessHarness:
                 descriptor, executable = _startup_approval(record)
             except ValueError:
                 continue
-            startup_matches.append((descriptor, executable))
+            startup_matches.setdefault(_norm(executable), []).append(descriptor)
             action = {'id': uuid.uuid4().hex, 'kind': 'disable_startup',
                       'label': 'Disable sign-in launch: ' + _text(descriptor['Name']),
                       'target': _text(descriptor['Name']) + ' | ' + _text(descriptor['Source']),
@@ -184,12 +211,15 @@ class ProcessHarness:
             record = copy.deepcopy(source)
             exe, pid = record.get('exe', ''), record.get('pid')
             protected = _protection(record)
-            owners, owner_reason = _ownership(exe, [app for app in applications if isinstance(app, dict)])
+            normalized_exe = _norm(exe)
+            if normalized_exe not in ownership_cache:
+                ownership_cache[normalized_exe] = _indexed_ownership(exe, ownership_index)
+            owners, owner_reason = ownership_cache[normalized_exe]
             parent_record = by_pid.get(record.get('ppid'))
             parent = None
             if parent_record and _identity(parent_record) and _identity(record) and parent_record['create_time'] <= record['create_time']:
                 parent = {'pid': parent_record['pid'], 'name': _text(parent_record.get('name')), 'exe': _text(parent_record.get('exe'))}
-            matched = [descriptor for descriptor, launch_exe in startup_matches if _norm(launch_exe) == _norm(exe)] if exe else []
+            matched = startup_matches.get(normalized_exe, []) if exe else []
             evidence = []
             if matched:
                 evidence.append('The executable exactly matches enabled sign-in registration(s): ' + ', '.join(_text(item['Name']) for item in matched) + '. This does not prove which registration launched this instance.')
@@ -199,11 +229,11 @@ class ProcessHarness:
             if not evidence and re.search(r'update|helper|launcher|background', str(record.get('name', '')), re.I):
                 evidence.append('Its name suggests an updater, helper or launcher; this is a naming inference only.')
                 confidence = 'inferred'
-            measure = metrics.get(_norm(exe))
+            measure = metrics.get(normalized_exe)
             resource = None if measure is None else {key: copy.deepcopy(measure.get(key)) for key in ('cpu_percent', 'memory_rss', 'memory_percent', 'read_bytes_per_second', 'write_bytes_per_second', 'severity', 'measured_intervals')}
             row = {key: record.get(key) for key in ('pid', 'ppid', 'create_time', 'memory_rss', 'private_bytes')}
             row.update(name=_text(record.get('name')), exe=_text(exe), application=', '.join(owners) or 'Unidentified application',
-                       owners=owners, ownership_evidence=owner_reason, parent=parent,
+                       owners=list(owners), ownership_evidence=owner_reason, parent=parent,
                        why_running=' '.join(evidence) or 'The launch source is unknown from the available inventory.',
                        why_running_confidence=confidence, startup_matches=[{'name': _text(item['Name']), 'source': _text(item['Source'])} for item in matched],
                        protected=bool(protected), protection_reason=protected,

@@ -90,7 +90,9 @@ Review and save the first-start choices, then choose **Auto Clean** at the launc
 
 ### Current release
 
-Version **0.12.11** makes the dashboard, main menu, Settings and Sandbox adapt to their window size. Larger windows grow text and controls, give all four worker cards equal space and show fuller details when they fit. Smaller windows retain readable text and vertical scrolling. The bottom panel keeps the gag animation, computer/network utilization and disk-buffer checks visible; only Current processes and Stage log collapse behind Details. Full-screen controls support F11, and Escape restores the previous size. Resizing does not save preferences or expand approved actions. [Responsive layout](docs/responsive-layout.md)
+Version **0.12.12** reduces repeated work in process attribution, browser-cleaning checks, worker totals and the animated interface. The changes preserve fresh process checks, file protections, truthful progress and saved choices. These are improvements to Optimus's own overhead; fixture timings do not establish a general PC speed gain. [Performance changes and measurements](docs/performance-efficiency.md)
+
+The dashboard, main menu, Settings and Sandbox adapt to their window size. Larger windows grow text and controls, give all four worker cards equal space and show fuller details when they fit. Smaller windows retain readable text and vertical scrolling. The bottom panel keeps the gag animation, computer/network utilization and disk-buffer checks visible; only Current processes and Stage log collapse behind Details. Full-screen controls support F11, and Escape restores the previous size. Resizing does not save preferences or expand approved actions. [Responsive layout](docs/responsive-layout.md)
 
 Windows privacy checks read the selected controls together in one PowerShell session. Each change still keeps its own recovery record, checks the original value immediately before writing and verifies the result afterward. Repeated identical worker status updates also avoid unnecessary stylesheet work. Neither change disables security checks or changes saved privacy choices.
 

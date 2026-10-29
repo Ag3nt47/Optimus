@@ -106,6 +106,11 @@ class WorkerResourceTotals:
         self._receipts = {}
         self._installed_known = False
         self._removed_bytes = self._removed_files = self._downloaded_bytes = 0
+        # Progress emits many more snapshots than terminal receipts. Maintain
+        # aggregates when an identity changes instead of rescanning every prior
+        # package on each tick. The identity ledgers remain the source of truth.
+        self._partial_downloads = self._estimated_downloads = 0
+        self._missing_downloads = self._installed_items = self._reported_installs = 0
 
     def observe(self, state):
         if not isinstance(state, dict):
@@ -125,14 +130,20 @@ class WorkerResourceTotals:
         delta = row['downloaded_bytes'] - (previous['downloaded_bytes'] if previous else 0)
         if self._downloaded_bytes + delta > MAX_BYTES:
             return
-        if previous is None:
-            self._downloads[row['key']] = row
-            self._downloaded_bytes += row['downloaded_bytes']
-        elif row['downloaded_bytes'] >= previous['downloaded_bytes']:
+        if previous is None or row['downloaded_bytes'] >= previous['downloaded_bytes']:
             # A source change cannot upgrade a rounded observation to exact.
-            row['bytes_estimated'] = row['bytes_estimated'] or previous['bytes_estimated']
+            row['bytes_estimated'] = row['bytes_estimated'] or bool(previous and previous['bytes_estimated'])
+            if previous is not None:
+                self._partial_downloads -= int(previous['download_total_bytes'] is None
+                    or previous['downloaded_bytes'] < previous['download_total_bytes'])
+                self._estimated_downloads -= int(previous['bytes_estimated'])
+            elif self._receipts.get(row['key'], {}).get('transfer_unknown'):
+                self._missing_downloads -= 1
             self._downloads[row['key']] = row
             self._downloaded_bytes += delta
+            self._partial_downloads += int(row['download_total_bytes'] is None
+                or row['downloaded_bytes'] < row['download_total_bytes'])
+            self._estimated_downloads += int(row['bytes_estimated'])
 
     def removal_receipt(self, key, result):
         if (not _identity(key) or not key.startswith('cleanup:') or not isinstance(result, dict)
@@ -181,11 +192,16 @@ class WorkerResourceTotals:
         self._installed_known = self._installed_known or count_known
         previous = self._receipts.get(key, {})
         installed = _installed(row, outcome, self.kind)
-        self._receipts[key] = {'known': previous.get('known', False) or known,
+        current = {'known': previous.get('known', False) or known,
                               'transfer_unknown': outcome.get('installer_started') is not False,
                               'installed_reported': previous.get('installed_reported', False)
                                   or installed and self.kind != 'driver_updates' and outcome.get('verified') is not True,
                               'installed': previous.get('installed', False) or installed}
+        self._installed_items += int(current['installed']) - int(previous.get('installed', False))
+        self._reported_installs += int(current['installed_reported']) - int(previous.get('installed_reported', False))
+        if key not in self._downloads:
+            self._missing_downloads += int(current['transfer_unknown']) - int(previous.get('transfer_unknown', False))
+        self._receipts[key] = current
 
     def result(self, result):
         if not isinstance(result, dict):
@@ -204,22 +220,17 @@ class WorkerResourceTotals:
                     self.receipt(row)
 
     def snapshot(self):
-        downloaded = list(self._downloads.values())
-        partial = any(row['download_total_bytes'] is None
-                      or row['downloaded_bytes'] < row['download_total_bytes'] for row in downloaded)
         # Counted installs without a byte receipt are not zero-byte downloads.
-        partial = partial or any(key not in self._downloads for key, row in self._receipts.items()
-                                 if row['transfer_unknown'])
         return {'removed_bytes': self._removed_bytes,
                 'removed_files': self._removed_files,
                 'removed_known': bool(self._removed),
                 'downloaded_bytes': self._downloaded_bytes,
-                'downloaded_known': bool(downloaded),
-                'downloaded_estimated': any(row['bytes_estimated'] for row in downloaded),
-                'downloaded_partial': partial,
-                'installed_items': sum(row['installed'] for row in self._receipts.values()),
+                'downloaded_known': bool(self._downloads),
+                'downloaded_estimated': self._estimated_downloads > 0,
+                'downloaded_partial': self._partial_downloads > 0 or self._missing_downloads > 0,
+                'installed_items': self._installed_items,
                 'installed_known': self._installed_known,
-                'installed_reported': any(row['installed_reported'] for row in self._receipts.values())}
+                'installed_reported': self._reported_installs > 0}
 
 
 def resource_totals_from_smart_actions(snapshot):

@@ -1690,7 +1690,7 @@ import random
 import threading
 import time
 from PySide6.QtCore import QPointF, QRectF
-from PySide6.QtGui import QLinearGradient, QRadialGradient
+from PySide6.QtGui import QLinearGradient, QRadialGradient, QPolygonF, QTransform
 from optimus.widgets.loading import RunSpinner
 
 
@@ -1702,6 +1702,10 @@ class StarfieldCanvas(QWidget):
         self._motion_clock = QElapsedTimer()
         rng = random.Random(47)
         self.stars = [(rng.random(), rng.random(), rng.random(), rng.random()) for _ in range(190)]
+        self._spiral = QPolygonF([
+            QPointF((0.16 + index / 159 * 0.72) * math.cos(index / 159 * 5.3),
+                (0.16 + index / 159 * 0.72) * math.sin(index / 159 * 5.3))
+            for index in range(160)])
         self.timer = QTimer(self)
         self.timer.setInterval(33)
         self.timer.timeout.connect(self._tick)
@@ -1781,14 +1785,12 @@ class StarfieldCanvas(QWidget):
                 painter.drawEllipse(QPointF(x, y), dot * 3.3, dot * 3.3)
         for strand in range(3):
             painter.setPen(QPen(QColor(31, 156, 255, 15 + strand * 3), 1.0))
-            points = []
-            for index in range(160):
-                t = index / 159
-                radius = extent * (0.16 + t * 0.72)
-                angle = t * 5.3 + self.phase + strand * math.tau / 3
-                points.append(QPointF(cx + math.cos(angle) * radius, cy + math.sin(angle) * radius * 0.63))
-            for a, b in zip(points, points[1:]):
-                painter.drawLine(a, b)
+            # The spiral's shape is constant. Map its normalized points in Qt
+            # instead of rebuilding 480 points and crossing into Qt for every
+            # segment on every frame. Keep the pen in device coordinates.
+            transform = QTransform().translate(cx, cy).scale(extent, extent * 0.63)
+            transform.rotateRadians(self.phase + strand * math.tau / 3)
+            painter.drawPolyline(transform.map(self._spiral))
         painter.end()
 
 
@@ -1895,8 +1897,11 @@ class WorkflowSummaryLabel(QLabel):
         self.setText('')
 
     def set_summary(self, summary, full_text):
-        self._summary = '\n'.join(' '.join(line.split()) for line in str(summary).splitlines())
+        summary = '\n'.join(' '.join(line.split()) for line in str(summary).splitlines())
         full_text = str(full_text)
+        if self._summary == summary and self.text() == full_text:
+            return
+        self._summary = summary
         super().setText(full_text)
         self.setToolTip(full_text)
         self.setAccessibleDescription(full_text)

@@ -57,6 +57,31 @@ def process_matches(browser_id: str, name: str, platform: str | None = None, *, 
         for allowed in definition['process_names'] if allowed.endswith(' Helper'))
 
 
+def process_matcher(browser_ids, platform: str | None = None):
+    """Prepare browser-name rules for one fresh process inventory.
+
+    Only fixed matching rules are captured. No running process, active/inactive
+    result or filesystem identity is cached between inventory checks.
+    """
+    platform = platform or sys.platform
+    definitions = browser_definitions(platform)
+    allowed = tuple(name for identity in browser_ids
+                    for name in definitions.get(identity, {}).get('process_names', ()))
+    exact = frozenset(name.casefold() for name in allowed)
+    helpers = tuple(name + ' (' for name in allowed if name.endswith(' Helper')) if platform == 'darwin' else ()
+
+    def matches(name):
+        if not isinstance(name, str):
+            return False
+        if name.casefold() in exact:
+            return True
+        if platform != 'win32' and len(name) == 15 and any(value.startswith(name) for value in allowed):
+            return True
+        return bool(helpers) and name.endswith(')') and name.startswith(helpers)
+
+    return matches
+
+
 def native_locations(platform: str | None = None, home: Path | None = None) -> list[dict]:
     platform, home = platform or sys.platform, home or Path.home()
     definitions = browser_definitions(platform)

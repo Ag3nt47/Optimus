@@ -64,8 +64,9 @@ class _SpinRing(QWidget):
         super().hideEvent(event)
 
     def set_color(self, c: QColor) -> None:
-        self._color = c
-        self.update()
+        if c != self._color:
+            self._color = QColor(c)
+            self.update()
 
     def _tick(self) -> None:
         self._angle = (self._angle + 11.0) % 360.0
@@ -196,8 +197,15 @@ class RunSpinner(QWidget):
         c = color_for_pct(self._pct)
         self._ring.set_color(c)
         label = f"{self._text}  {self._pct}%" if self._text else f"{self._pct}%"
-        self._label.setText(label)
-        self._label.setStyleSheet(
-            f"color: rgb({c.red()},{c.green()},{c.blue()}); font-weight:700; letter-spacing:0.3px;")
-        self.setToolTip(label)
+        if self._label.text() != label:
+            self._label.setText(label)
+        style = f"color: rgb({c.red()},{c.green()},{c.blue()}); font-weight:700; letter-spacing:0.3px;"
+        # Progress heartbeats often repeat the same rounded percentage. Resetting
+        # an identical stylesheet still makes Qt repolish the label and relayout
+        # its ancestors. Read the current style so an external theme change is
+        # also restored on the next real render, without a stale cached style.
+        if self._label.styleSheet() != style:
+            self._label.setStyleSheet(style)
+        if self.toolTip() != label:
+            self.setToolTip(label)
 

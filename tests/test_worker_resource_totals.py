@@ -1,6 +1,7 @@
 """Resource accounting uses fixture observations, never host maintenance."""
 import copy
 import json
+import random
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,59 @@ def test_unknown_is_distinct_from_measured_zero():
     assert ledger.snapshot()['removed_bytes'] == 0
     assert ledger.snapshot()['removed_files'] == 1
     assert ledger.snapshot()['removed_known'] is True
+
+
+def test_late_download_and_replaced_receipt_update_partial_totals():
+    ledger = WorkerResourceTotals('software_updates')
+    ledger.receipt(receipt())
+    assert ledger.snapshot()['downloaded_partial'] is True
+    ledger.receipt(receipt(installer_started=False))
+    assert ledger.snapshot()['downloaded_partial'] is False
+    ledger.receipt(receipt())
+    assert ledger.snapshot()['downloaded_partial'] is True
+    ledger.observe({'item_progress': progress(done=100)})
+    assert ledger.snapshot()['downloaded_partial'] is False
+    ledger.observe({'item_progress': progress(done=100, total=None, estimated=True)})
+    assert ledger.snapshot()['downloaded_partial'] is True
+    assert ledger.snapshot()['downloaded_estimated'] is True
+    ledger.observe({'item_progress': progress(done=100)})
+    snapshot = ledger.snapshot()
+    assert snapshot['downloaded_partial'] is False
+    assert snapshot['downloaded_estimated'] is True
+    assert snapshot['installed_items'] == 1
+    snapshot['installed_items'] = 900
+    assert ledger.snapshot()['installed_items'] == 1
+
+
+@pytest.mark.parametrize('kind', ['software_updates', 'driver_updates', 'maintenance'])
+def test_incremental_totals_match_full_ledger_after_reordered_observations(kind):
+    """Mixed late/duplicate/invalid events agree with a full-history reduction."""
+    ledger = WorkerResourceTotals(kind)
+    rng = random.Random(741)
+    for _ in range(1200):
+        identity = 'Fixture.' + str(rng.randrange(40))
+        key = ('driver:update:' + identity + ':1' if kind == 'driver_updates'
+               else 'software:update:' + identity)
+        if rng.randrange(3):
+            done = rng.choice([0, 20, 100, -1, True, MAX_BYTES + 1])
+            ledger.observe({'item_progress': progress(key, done=done,
+                total=rng.choice([None, 100, 200]), estimated=bool(rng.randrange(2)))})
+        else:
+            row = receipt(identity, status=rng.choice(['completed', 'applied', 'failed']),
+                installer_started=rng.choice([True, False, None]),
+                verified=rng.choice([True, False, None]), installation_reported=bool(rng.randrange(2)),
+                resultCode=2, hresult=0, aggregateResultCode=2, aggregateHresult=0)
+            row['binding'] = {'revision': 1}
+            ledger.receipt(row)
+        result = ledger.snapshot()
+        downloads, receipts = ledger._downloads, ledger._receipts
+        assert result['downloaded_bytes'] == sum(row['downloaded_bytes'] for row in downloads.values())
+        assert result['downloaded_estimated'] == any(row['bytes_estimated'] for row in downloads.values())
+        assert result['downloaded_partial'] == (any(row['download_total_bytes'] is None
+            or row['downloaded_bytes'] < row['download_total_bytes'] for row in downloads.values())
+            or any(key not in downloads and row['transfer_unknown'] for key, row in receipts.items()))
+        assert result['installed_items'] == sum(row['installed'] for row in receipts.values())
+        assert result['installed_reported'] == any(row['installed_reported'] for row in receipts.values())
 
 
 def test_update_payload_removals_are_actual_and_deduplicated_by_attempt():
