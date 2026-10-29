@@ -16,6 +16,7 @@ from .filesystem import _ordinary_data_path
 
 _SID = re.compile(r'S-1-[0-9]+(?:-[0-9]+){1,14}\Z')
 _ADMIN = 'S-1-5-32-544'
+_WELL_KNOWN = {'S-1-5-18': 'SY', _ADMIN: 'BA', 'S-1-3-4': 'OW'}
 
 
 def _sid(owner):
@@ -35,6 +36,23 @@ def _identity(path):
 
 def _principals(security):
     """Accept only the small, protected, full-control policy we can repair."""
+    if isinstance(security, dict) and 'aces' in security:
+        # Compare binary trustees, not diagnostic SDDL abbreviations. Windows
+        # renders the local Administrator RID500 as LA, while a domain account
+        # with that RID is a different SID and must never be conflated with it.
+        entries = security['aces']
+        if security.get('dacl_protected') is not True or not isinstance(entries, list) or len(entries) != 3:
+            return None
+        principals = []
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {'type', 'flags', 'mask', 'sid'}:
+                return None
+            if (any(type(entry[field]) is not int for field in ('type', 'flags', 'mask'))
+                    or (entry['type'], entry['flags'], entry['mask']) != (0, 3, 0x1f01ff)
+                    or not isinstance(entry['sid'], str) or not _SID.fullmatch(entry['sid'])):
+                return None
+            principals.append(_WELL_KNOWN.get(entry['sid'], entry['sid']))
+        return frozenset(principals) if len(set(principals)) == 3 else None
     sddl = security.get('sddl', '') if isinstance(security, dict) else ''
     if not isinstance(sddl, str) or 'D:' not in sddl:
         return None
@@ -78,6 +96,16 @@ class WindowsDirectoryACL:
         self.api.GetNamedSecurityInfoW.restype = wintypes.DWORD
         self.api.GetSecurityDescriptorDacl.argtypes = [pointer, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(pointer), ctypes.POINTER(wintypes.BOOL)]
         self.api.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+        self.api.GetSecurityDescriptorControl.argtypes = [pointer, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD)]
+        self.api.GetSecurityDescriptorControl.restype = wintypes.BOOL
+        self.api.GetAclInformation.argtypes = [pointer, pointer, wintypes.DWORD, ctypes.c_int]
+        self.api.GetAclInformation.restype = wintypes.BOOL
+        self.api.GetAce.argtypes = [pointer, wintypes.DWORD, ctypes.POINTER(pointer)]
+        self.api.GetAce.restype = wintypes.BOOL
+        self.api.IsValidSid.argtypes = [pointer]
+        self.api.IsValidSid.restype = wintypes.BOOL
+        self.api.GetLengthSid.argtypes = [pointer]
+        self.api.GetLengthSid.restype = wintypes.DWORD
         self.api.SetSecurityInfo.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, pointer, pointer, pointer, pointer]
         self.api.SetSecurityInfo.restype = wintypes.DWORD
         self.kernel.LocalFree.argtypes = [pointer]
@@ -123,11 +151,48 @@ class WindowsDirectoryACL:
                 raise OSError('The private update directory has no verifiable owner or DACL.')
             if not self.api.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 5, ctypes.byref(text), None):
                 raise ctypes.WinError(ctypes.get_last_error())
-            return {'owner': sid.value, 'sddl': text.value}
+            return dict(self._binary_dacl(descriptor, dacl), owner=sid.value, sddl=text.value)
         finally:
             for allocation in (text, sid, descriptor):
                 if allocation:
                     self.kernel.LocalFree(allocation)
+
+    def _binary_dacl(self, descriptor, dacl):
+        """Read the exact allow-ACE policy using numeric trustees from the ACL."""
+        control, revision = self.w.WORD(), self.w.DWORD()
+        if not self.api.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        result = {'dacl_protected': bool(control.value & 0x1000), 'aces': []}
+        class ACLSize(ctypes.Structure):
+            _fields_ = [('count', self.w.DWORD), ('used', self.w.DWORD), ('free', self.w.DWORD)]
+        size = ACLSize()
+        if not self.api.GetAclInformation(dacl, ctypes.byref(size), ctypes.sizeof(size), 2):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if size.count != 3:
+            return result
+        class ACEHeader(ctypes.Structure):
+            _fields_ = [('kind', self.w.BYTE), ('flags', self.w.BYTE), ('size', self.w.WORD)]
+        for index in range(size.count):
+            ace = ctypes.c_void_p()
+            if not self.api.GetAce(dacl, index, ctypes.byref(ace)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            header = ACEHeader.from_address(ace.value)
+            if header.kind != 0 or header.size < 12:
+                return dict(result, aces=[])
+            trustee = ctypes.c_void_p(ace.value + 8)
+            if (not self.api.IsValidSid(trustee)
+                    or self.api.GetLengthSid(trustee) > header.size - 8):
+                return dict(result, aces=[])
+            text = self.w.LPWSTR()
+            try:
+                if not self.api.ConvertSidToStringSidW(trustee, ctypes.byref(text)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                result['aces'].append({'type': header.kind, 'flags': header.flags,
+                    'mask': self.w.DWORD.from_address(ace.value + 4).value, 'sid': text.value})
+            finally:
+                if text:
+                    self.kernel.LocalFree(text)
+        return result
 
     def replace(self, path, sddl, *, expected_identity):
         # Pin the leaf without following a junction and deny deletion/rename

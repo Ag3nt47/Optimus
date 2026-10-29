@@ -128,12 +128,33 @@ class ConsoleProtocolTests(unittest.TestCase):
         self.assertEqual(FakeConsole.instances[-1].events,
             ['launched', 'target_exited', 'console_closed', 'finished'])
         self.assertEqual(FakeConsole.instances[-1].arguments, result.args)
+        identity = result.native_diagnostics
+        self.assertTrue(identity['verified'])
+        self.assertEqual(identity['target_pid'], 9876)
+        self.assertEqual(identity['argv_sha256'], console._digest(result.args))
+        self.assertLessEqual(identity['started_at'], identity['finished_at'])
+        from optimus.speed_enhancements import _current_owner
+        self.assertEqual(identity['owner'], _current_owner())
+        self.assertNotIn('target_pid', result.console_receipt)
 
     def test_nonzero_target_exit_does_not_become_supervisor_success(self):
         FakeConsole.exit_code = 3010
         result = console.run_winget_console(['C:/fixtures/fake.exe'], timeout=2, progress_callback=lambda _: None)
         self.assertEqual(result.returncode, 3010)
         self.assertEqual(result.stderr, '')
+
+    def test_supplementary_diagnostic_failure_never_invalidates_completed_native_receipt(self):
+        original = console._Session._terminal
+        def terminal(session):
+            if session.finished.is_set():
+                raise ValueError('Supplementary identity unavailable')
+            return original(session)
+        with mock.patch.object(console._Session, '_terminal', terminal):
+            result = console.run_winget_console(['C:/fixtures/fake.exe'], timeout=2, progress_callback=lambda _: None)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.capture_complete)
+        self.assertTrue(result.console_receipt['verified'])
+        self.assertFalse(hasattr(result, 'native_diagnostics'))
 
     def test_authenticated_resident_handoff_releases_queue_but_retains_console_owner(self):
         arguments = ['C:/fixtures/winget.exe', 'upgrade', '--id', 'Ollama.Ollama', '--exact',

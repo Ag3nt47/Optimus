@@ -749,7 +749,7 @@ class Maintenance:
                 payload_verified = False
                 receipt['payload_verification_note'] = 'The installed version was verified, but disposable installer identity could not be verified; owned payloads are preserved.'
         try:
-            verification.finish(receipt)
+            verification.finish(receipt, native_result=result, arguments=arguments)
         except Exception:
             receipt['requiresReview'] = True
             receipt['failure_scope'] = 'package'

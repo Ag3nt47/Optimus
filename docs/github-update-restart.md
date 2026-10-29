@@ -42,7 +42,8 @@ verified newer version satisfy the target; exit code zero alone does not.
 
 Some MSIX installers report success while registration waits for a running app
 to close. Optimus records that pending state, the exact package offer and any
-verified blocking package/process identity from its own bounded installer log.
+verified blocking package/process identity from bounded native diagnostics
+correlated to that exact supervised attempt.
 It rechecks installed state and avoids downloading the identical offer repeatedly
 while the same prerequisite remains. Other applications continue through their
 queue. Optimus does not force-close Codex to replace the client running this work.

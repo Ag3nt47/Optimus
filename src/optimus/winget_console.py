@@ -669,6 +669,14 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
         raise ValueError('Resident handoff needs an explicit Boolean choice.')
     environment = _environment_block(environment)
     started = time.monotonic()
+    started_at = time.time()
+    # Supplementary diagnostics must never change the terminal receipt contract
+    # or turn an unavailable log identity into an installer launch failure.
+    try:
+        from .speed_enhancements import _current_owner
+        diagnostic_owner = _current_owner()
+    except Exception:
+        diagnostic_owner = None
     native = None
     try:
         if getattr(sys, 'frozen', False):
@@ -714,6 +722,15 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
         'console_client_count': 1, 'supervisor_exit_code': 0, 'target_exit_code': session.returncode,
         'job_verified': True, 'job_active_processes': 0,
         'output_eof': session.output_eof.is_set()}
+    try:
+        terminal = session._terminal()
+        if terminal is not None and diagnostic_owner and _current_owner() == diagnostic_owner:
+            result.native_diagnostics = {'schema': 1, 'verified': True,
+                'owner': diagnostic_owner, 'target_pid': terminal['target_pid'],
+                'argv_sha256': terminal['argv_sha256'],
+                'started_at': started_at, 'finished_at': time.time()}
+    except Exception:
+        pass  # Missing supplementary evidence never changes native completion.
     with session.lock:
         if session.download:
             result.download_progress = dict(session.download[0])

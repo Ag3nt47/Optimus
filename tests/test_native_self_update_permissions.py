@@ -1,4 +1,5 @@
 """Private updater ACL policy; native calls affect only test temporary paths."""
+import ctypes
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -134,6 +135,83 @@ def test_indirect_directory_is_rejected_before_native_acl_write(tmp_path, monkey
     with pytest.raises(ValueError, match='Indirect'):
         module.repair_legacy_private_directory(path, SID, authenticated_owner=SID, native=native)
     assert not native.replaced
+
+
+def binary_policy(sid=SID):
+    return {'dacl_protected': True, 'aces': [
+        {'type': 0, 'flags': 3, 'mask': 0x1f01ff, 'sid': trustee}
+        for trustee in (sid, 'S-1-5-18', 'S-1-5-32-544')]}
+
+
+@pytest.mark.parametrize('other_sid', ['S-1-5-21-444-555-666-500', 'S-1-5-21-444-555-666-1001'])
+def test_binary_wrong_domain_trustee_fails_creation_readback_and_is_never_adopted(tmp_path, other_sid):
+    native = Native()
+    native.read = lambda path: dict(binary_policy(other_sid), owner=SID, sddl=module._policy(other_sid))
+    with pytest.raises(OSError, match='readback'):
+        module.create_private_directory(tmp_path / 'new-private', SID, native=native)
+    existing = tmp_path / 'existing-private'
+    existing.mkdir()
+    with pytest.raises(PermissionError, match='preserved'):
+        module.repair_legacy_private_directory(existing, SID, authenticated_owner=SID, native=native)
+    assert not native.replaced
+
+
+@pytest.mark.parametrize('change', ['unprotected', 'fourth_ace', 'duplicate', 'deny',
+    'inherited', 'read_only', 'bool_type', 'sddl_alias', 'unknown_field'])
+def test_binary_policy_rejects_any_change_to_exact_private_allow_policy(change):
+    policy = binary_policy()
+    assert module._principals(policy) == frozenset((SID, 'SY', 'BA'))
+    if change == 'unprotected': policy['dacl_protected'] = False
+    elif change == 'fourth_ace': policy['aces'].append(dict(policy['aces'][0]))
+    elif change == 'duplicate': policy['aces'][0]['sid'] = 'S-1-5-18'
+    elif change == 'deny': policy['aces'][0]['type'] = 1
+    elif change == 'inherited': policy['aces'][0]['flags'] |= 0x10
+    elif change == 'read_only': policy['aces'][0]['mask'] = 0x120089
+    elif change == 'bool_type': policy['aces'][0]['type'] = False
+    elif change == 'sddl_alias': policy['aces'][0]['sid'] = 'LA'
+    elif change == 'unknown_field': policy['aces'][0]['extra'] = True
+    assert module._principals(policy) is None
+
+
+def native_descriptor_policy(native, sddl):
+    descriptor = native._descriptor(sddl)
+    text = native.w.LPWSTR()
+    try:
+        present, defaulted, dacl = native.w.BOOL(), native.w.BOOL(), ctypes.c_void_p()
+        assert native.api.GetSecurityDescriptorDacl(descriptor, ctypes.byref(present),
+            ctypes.byref(dacl), ctypes.byref(defaulted)) and present and dacl
+        assert native.api.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1,
+            4, ctypes.byref(text), None)
+        return dict(native._binary_dacl(descriptor, dacl), sddl=text.value)
+    finally:
+        if text: native.kernel.LocalFree(text)
+        native.kernel.LocalFree(descriptor)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows native in-memory ACL fixture')
+def test_native_local_administrator_alias_reads_back_as_exact_numeric_rid500_sid():
+    native = module.WindowsDirectoryACL()
+    policy = native_descriptor_policy(native, module._policy('LA'))
+    local_sid = policy['aces'][0]['sid']
+    assert local_sid.startswith('S-1-5-21-') and local_sid.endswith('-500')
+    assert ';;;LA)' in policy['sddl']
+    assert module._principals(policy) == frozenset((local_sid, 'SY', 'BA'))
+    assert native_descriptor_policy(native, module._policy(local_sid)) == policy
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows native in-memory ACL fixture')
+def test_native_same_rid_in_another_domain_never_matches_local_administrator():
+    native = module.WindowsDirectoryACL()
+    local = native_descriptor_policy(native, module._policy('LA'))
+    local_sid = local['aces'][0]['sid']
+    pieces = local_sid.split('-')
+    pieces[-2] = str((int(pieces[-2]) + 1) % 0x100000000)
+    other_sid = '-'.join(pieces)
+    other = native_descriptor_policy(native, module._policy(other_sid))
+    assert other['aces'][0]['sid'] == other_sid
+    assert ';;;LA)' not in other['sddl']
+    assert module._principals(other) == frozenset((other_sid, 'SY', 'BA'))
+    assert module._principals(other) != frozenset((local_sid, 'SY', 'BA'))
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows native ACL fixture')

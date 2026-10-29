@@ -23,9 +23,10 @@ def table(rows):
     return '\n'.join([header, '-' * 100, *body, str(len(rows)) + ' upgrades available.', ''])
 
 
-def configuration():
+def configuration(policy='all_supported'):
     return dict(DEFAULTS, setup_version=2, software_updates_enabled=True,
-        software_update_policy='all_supported', software_update_all_approved=True,
+        software_update_policy=policy, software_update_all_approved=policy == 'all_supported',
+        software_update_ids=list(IDENTITIES) if policy == 'selected' else [],
         software_update_agreements_accepted=True)
 
 
@@ -44,6 +45,12 @@ def fixture_backend(tmp_path, *, later_rows=None, pin_output='There are no pins 
             return subprocess.CompletedProcess(arguments, 0, output, '')
         if arguments[1:] == ['pin', 'list', '--disable-interactivity']:
             return subprocess.CompletedProcess(arguments, 0, pin_output, '')
+        if arguments[1] == 'list':
+            identity = arguments[arguments.index('--id') + 1]
+            assert identity in launches
+            assert arguments[arguments.index('--source') + 1] == 'winget'
+            assert '--exact' in arguments and '--disable-interactivity' in arguments
+            return subprocess.CompletedProcess(arguments, 0, table([(identity, '2.0', '2.0')]), '')
         assert arguments[1] == 'upgrade' and '--id' in arguments and '--exact' in arguments
         assert arguments[arguments.index('--source') + 1] == 'winget'
         assert arguments[arguments.index('--version') + 1] == '2.0'
@@ -59,16 +66,19 @@ def fixture_backend(tmp_path, *, later_rows=None, pin_output='There are no pins 
 
 
 @pytest.mark.parametrize('issue', ['missing', 'ambiguous', 'unsupported_version'])
-def test_middle_target_lost_during_first_revalidation_does_not_stop_last_package(tmp_path, issue):
+@pytest.mark.parametrize('policy', ['all_supported', 'selected'])
+def test_middle_target_lost_during_first_revalidation_does_not_stop_last_package(tmp_path, issue, policy):
     later = [(IDENTITIES[0], '1.0', '2.0'), (IDENTITIES[2], '1.0', '2.0')]
     if issue == 'ambiguous':
         later[1:1] = [(IDENTITIES[1], '1.0', '2.0')] * 2
     elif issue == 'unsupported_version':
         later.insert(1, (IDENTITIES[1], 'Unknown', '2.0'))
     backend, tool, launches = fixture_backend(tmp_path, later_rows=later)
-    result = run_software(backend, configuration())
+    result = run_software(backend, configuration(policy))
     assert launches == [IDENTITIES[0], IDENTITIES[2]]
     assert [row['status'] for row in result['items']] == ['completed','failed','completed']
+    for row in (result['items'][0], result['items'][2]):
+        assert row['result']['verified'] is True and row['result']['installed_version'] == '2.0'
     middle = result['items'][1]['result']
     assert middle['failure_scope'] == 'package' and middle['failureKind'] == 'package_unavailable'
     assert middle['installer_started'] is False and middle['outcomeKnown'] is True
@@ -76,9 +86,9 @@ def test_middle_target_lost_during_first_revalidation_does_not_stop_last_package
     assert installer_barrier(result) is None
 
 
-def test_middle_exact_hold_preserves_hold_and_updates_both_other_packages(tmp_path, monkeypatch):
-    owner = 'sid:S-1-5-21-1001'
-    monkeypatch.setattr('optimus.speed_enhancements._current_owner', lambda: owner)
+def test_middle_exact_hold_preserves_hold_and_updates_both_other_packages(tmp_path):
+    from optimus.speed_enhancements import _current_owner
+    owner = _current_owner()
     hold = {'schema':1,'owner':owner,'holds':[{'id':IDENTITIES[1], 'available_version':'2.0',
         'reason':'Fixture reviewed catalog payload mismatch; preserve exact offer hold.'}]}
     path = tmp_path / 'update-holds.json'

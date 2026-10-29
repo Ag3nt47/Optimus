@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -76,13 +77,21 @@ def test_supported_vendor_update_revalidates_then_invokes_only_exact_silent_vers
     native.updates_scan()
     native._run = Mock(side_effect=[subprocess.CompletedProcess([], 0, listing, ''),
         subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''),
-        subprocess.CompletedProcess([], 0, 'Fixture installed', '')])
+        subprocess.CompletedProcess([], 0, 'Fixture installed', ''),
+        subprocess.CompletedProcess([], 0, table(('Fixture', identity, available, available, 'winget')), '')])
     result = native.updates_apply(identity, confirmed=True, unattended=True)
     assert result['installer_started'] is True and result['outcomeKnown'] is True
     assert result['from_version'] == installed and result['to_version'] == available
-    args = native._run.call_args.args[0]
-    assert args == ['fixture-winget.exe', 'upgrade', '--id', identity, '--exact', '--source', 'winget',
+    assert result['verified'] is True and result['installed_version'] == available
+    upgrades = [call.args[0] for call in native._run.call_args_list
+                if call.args[0][1] == 'upgrade' and '--id' in call.args[0]]
+    assert len(upgrades) == 1
+    args = upgrades[0]
+    assert args[:-2] == ['fixture-winget.exe', 'upgrade', '--id', identity, '--exact', '--source', 'winget',
         '--version', available, '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements']
+    assert args[-2] == '--log' and Path(args[-1]).name == 'winget.log'
+    assert native._run.call_args.args[0] == ['fixture-winget.exe', 'list', '--id', identity,
+        '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']
 
 
 def test_expanded_version_support_does_not_override_exclusions_or_selected_scope():

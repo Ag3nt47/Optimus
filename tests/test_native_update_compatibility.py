@@ -13,6 +13,7 @@ from optimus.backend import Backend
 from optimus.maintenance import Maintenance
 from optimus.native_settings import NativePreferences
 from optimus.workflow import DEFAULTS
+from test_updates import table
 
 
 def tool(tmp_path):
@@ -25,7 +26,16 @@ def tool(tmp_path):
     value.updates_scan = Mock(return_value={'structured': True, 'exitCode': 0, 'updates': [row]})
     value._winget = Mock(return_value='fixture-winget.exe')
     value._pin_status = Mock(return_value=(True, '', False))
-    value._run = Mock(return_value=subprocess.CompletedProcess([], 0, 'Fixture updated', ''))
+    def native(arguments, **options):
+        assert arguments[arguments.index('--id') + 1] == 'Fixture.App'
+        assert arguments[arguments.index('--source') + 1] == 'winget'
+        assert '--exact' in arguments
+        if arguments[1] == 'list':
+            return subprocess.CompletedProcess(arguments, 0,
+                table(('Fixture App', 'Fixture.App', '2.0', '2.0', 'winget')), '')
+        assert arguments[1] == 'upgrade'
+        return subprocess.CompletedProcess(arguments, 0, 'Fixture updated', '')
+    value._run = Mock(side_effect=native)
     return value
 
 
@@ -33,7 +43,9 @@ def tool(tmp_path):
 def test_only_explicit_mode_adds_one_non_security_force_flag(tmp_path, enabled):
     service = tool(tmp_path)
     result = service.updates_apply('Fixture.App', confirmed=True, unattended=True, compatibility_mode=enabled)
-    argv = service._run.call_args.args[0]
+    upgrades = [call.args[0] for call in service._run.call_args_list if call.args[0][1] == 'upgrade']
+    assert len(upgrades) == 1
+    argv = upgrades[0]
     assert argv.count('--force') == int(enabled)
     assert argv[argv.index('--id') + 1] == 'Fixture.App'
     assert argv[argv.index('--version') + 1] == '2.0'
@@ -42,7 +54,11 @@ def test_only_explicit_mode_adds_one_non_security_force_flag(tmp_path, enabled):
     assert not {'--ignore-security-hash', '--ignore-local-archive-malware-scan', '--include-pinned',
                 '--allow-reboot', '--include-unknown', '--override'} & set(argv)
     assert result['compatibility_mode'] is enabled
-    assert service.updates_scan.call_count == service._pin_status.call_count == service._run.call_count == 1
+    assert result['verified'] is True and result['installed_version'] == '2.0'
+    assert service.updates_scan.call_count == service._pin_status.call_count == 1
+    assert service._run.call_args.args[0] == ['fixture-winget.exe', 'list', '--id', 'Fixture.App',
+        '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']
+    assert service._run.call_count == 2
 
 
 def test_force_mode_still_refuses_pin_and_changed_version(tmp_path):
