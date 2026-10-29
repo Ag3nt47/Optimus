@@ -455,6 +455,8 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
             timer = QTimer(window)
             timer.setInterval(30000)
             def automatic_tick():
+                if getattr(window, '_emergency_stopping', False) is True:
+                    return
                 if not window.session_approved():
                     window.invalidate_session_review('Saved actions changed. Automatic maintenance is paused until reviewed.')
                     return
@@ -484,6 +486,7 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
 
             def resume_approved_session():
                 if (not window.session_approved() or window._quitting or window._close_when_idle
+                        or getattr(window, '_emergency_stopping', False) is True
                         or getattr(window, '_startup_update_pending', False) is True):
                     return
                 try:
@@ -505,9 +508,12 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
             window._session_invalidated_callback = pause_automatic_session
             window._session_approved_callback = resume_approved_session
             def begin_startup_review():
-                if window._quitting or window._close_when_idle:
+                if window._quitting or window._close_when_idle or getattr(window, '_emergency_stopping', False) is True:
                     return
                 from .self_update_ui import StartupUpdateController
+                if isinstance(window._self_update_controller, StartupUpdateController):
+                    window._self_update_controller.start()
+                    return
                 window._self_update_controller = StartupUpdateController(window, backend,
                     resume_id=getattr(args, 'self_update_resume', None))
                 window._self_update_controller.start()

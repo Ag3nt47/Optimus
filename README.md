@@ -90,7 +90,9 @@ Review and save the first-start choices, then choose **Auto Clean** at the launc
 
 ### Current release
 
-Version **0.12.15** verifies the restarted Optimus window before reporting a successful GitHub update. A confirmed update closes the old window, preserves saved choices and starts the new version automatically. App updates also require a fresh installed-version check; a successful launcher exit alone is insufficient. Failed or held offers retain their reasons while other approved updates continue. Update-only continuation runs the remaining saved scope without cleanup or debloat; active or uncertain installers keep their safety gates. [Update and restart verification](docs/github-update-restart.md)
+Version **0.12.16** checks for an Optimus update before maintenance. A verified, single-use cleanup approval resumes the unchanged saved scope once after restart; an accepted update that fails leaves maintenance paused for explicit review. No-update, unavailable-check and explicit-decline routes can continue the normal launch review. Auto Clean cannot overtake a pending startup check. A red **STOP** on the main window and progress headers immediately blocks new work, requests cancellation and closes Optimus after outstanding operations are accounted for. Native system/vendor installers may need to finish safely; STOP does not claim they were killed. [Startup and STOP](docs/startup-and-emergency-stop.md)
+
+GitHub updates still verify the restarted window and preserve saved choices. App updates require a fresh installed-version check; a successful launcher exit alone is insufficient. Failed or held application offers retain their reasons while other approved app updates continue. Update-only continuation runs the remaining saved scope without cleanup or debloat; active or uncertain installers keep their safety gates. [Update and restart verification](docs/github-update-restart.md)
 
 The performance improvements from 0.12.12 reduce repeated work in process attribution, browser-cleaning checks, worker totals and the animated interface. Fresh process checks, file protections, truthful progress and saved choices remain in effect. Fixture timings do not establish a general PC speed gain. [Performance changes and measurements](docs/performance-efficiency.md)
 
@@ -112,6 +114,7 @@ The optional toolkit adds bounded application caches, folder-growth history, mea
 - **Settings** contains Low/Standard/High cleanup presets, individual removal choices, priority/affinity controls, optional background analysis, the full maintenance tools and appearance settings.
 - **Sandbox** opens an editable working copy of the full source. Save, version history, Revert and Original version are available. **Restart Optimus** validates the saved Python source and starts that version; the current app remains open if the new interface does not report ready.
 - **Revert** opens recorded changes and supported recovery choices. Review selected changes or all available undo actions before applying. Permanent deletions and actions without a supported recovery path remain clearly marked.
+- **STOP** is the red header control for stopping Optimus and exiting. It prevents further tasks immediately, cancels supported work and waits for active native operations and their result records. It does not close unrelated applications or discard unsaved Sandbox edits. [Stop behavior](docs/startup-and-emergency-stop.md#stop-and-exit)
 
 ![Revert history example using disposable test records](docs/optimus-revert.png)
 

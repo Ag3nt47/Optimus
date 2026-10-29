@@ -205,11 +205,13 @@ def test_dispatch_progress_commits_to_restart_then_restores_controls_if_close_de
     window.quit_application.return_value = False
     value, service = controller(owner, ask=lambda *_: 'yes_update')
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     assert value._revoked and not value._handoff_committed
-    assert value._progress.stage.text() == 'Continuing the current version'
-    assert value._progress.cancel_button.text() == 'Close update results'
+    assert value._progress.stage.text() == 'Auto Clean paused'
+    assert value._progress.cancel_button.text() == 'Close results'
     assert value._progress.cancel_button.isEnabled()
+    assert not value._progress.isVisible()
     service.cancel_handoff.assert_called_once_with('b' * 32)
     backend.optimize.assert_not_called()
 
@@ -238,7 +240,8 @@ def test_unsaved_sandbox_cancel_prevents_dispatch_and_old_window_closure(owner):
     window._sandbox_window = sandbox
     value, service = controller(owner, ask=lambda *_: 'yes_update')
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     sandbox.close.assert_called_once()
     assert sandbox._optimus_close_bypass is False
     assert window._sandbox_window is sandbox
@@ -247,12 +250,13 @@ def test_unsaved_sandbox_cancel_prevents_dispatch_and_old_window_closure(owner):
     window.quit_application.assert_not_called()
 
 
-def test_normal_close_guard_cancel_after_dispatch_revokes_before_returning_to_review(owner):
+def test_normal_close_guard_cancel_after_dispatch_revokes_and_pauses_cleanup(owner):
     app, window, backend, settings = owner
     window.quit_application.return_value = False
     value, service = controller(owner, ask=lambda *_: 'yes_update')
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     service.dispatch_worker.assert_called_once()
     service.cancel_handoff.assert_called_once_with('b' * 32)
     assert value._revoked and not value.pending and not value._handoff_committed
@@ -261,24 +265,26 @@ def test_normal_close_guard_cancel_after_dispatch_revokes_before_returning_to_re
 
 
 @pytest.mark.parametrize('phase', ['check', 'stage', 'prepare'])
-def test_known_pre_handoff_failure_falls_forward_to_normal_review(owner, phase):
+def test_check_failure_can_continue_but_accepted_update_failure_stays_paused(owner, phase):
     app, window, backend, settings = owner
     service = updater()
     getattr(service, phase if phase != 'prepare' else 'prepare_handoff').side_effect = ValueError('Fixture ' + phase + ' refusal')
     value, _ = controller(owner, service, ask=lambda *_: 'yes_update')
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: window.review_launch.called if phase == 'check' else not value.pending)
+    assert window.review_launch.called is (phase == 'check')
     window.start_optimization.assert_not_called()
     window.quit_application.assert_not_called()
     service.dispatch_worker.assert_not_called()
 
 
 @pytest.mark.parametrize('dispatch', [{'status': 'uncertain'}, {'status': 'wrong', 'started': True}])
-def test_uncertain_dispatch_is_revoked_before_continuing_old_version_without_cleanup(owner, dispatch):
+def test_uncertain_dispatch_is_revoked_before_pausing_old_version_without_cleanup(owner, dispatch):
     app, window, backend, settings = owner
     value, service = controller(owner, updater(dispatch_worker=Mock(return_value=dispatch)), ask=lambda *_: 'yes_update')
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     service.cancel_handoff.assert_called_once_with('b' * 32)
     assert not value.pending and not window.session_approved()
     window.start_optimization.assert_not_called()
@@ -328,7 +334,8 @@ def test_cancel_racing_handoff_waits_for_durable_revocation_before_review_or_exi
     window.review_launch.assert_not_called()
     assert not receipt.exists()
     release.set()
-    wait_for(app, lambda: window.quit_application.called if close else window.review_launch.called)
+    wait_for(app, lambda: window.quit_application.called if close else not value.pending)
+    window.review_launch.assert_not_called()
     assert receipt.exists() and value._revoked
     window.start_optimization.assert_not_called()
     backend.optimize.assert_not_called()
@@ -407,14 +414,15 @@ def test_resume_waits_for_visible_gui_readiness_ack_before_maintenance(owner):
 
 
 @pytest.mark.parametrize('acknowledgement', [None, {'status': 'unavailable'}, {'status': 'started'}])
-def test_unconfirmed_resume_readiness_returns_to_review_without_running_cleanup(owner, acknowledgement):
+def test_unconfirmed_resume_readiness_pauses_without_running_cleanup(owner, acknowledgement):
     app, window, backend, settings = owner
     service = updater(consume_resume=Mock(return_value={'status': 'accepted',
         'cleanup_approved': True, 'settings': copy.deepcopy(settings)}),
         acknowledge_resume=Mock(return_value=acknowledgement))
     value, _ = controller(owner, service, resume_id='b' * 32)
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     assert not window.session_approved() and not value.pending
     window.start_optimization.assert_not_called()
     backend.optimize.assert_not_called()
@@ -427,7 +435,8 @@ def test_hidden_updated_window_does_not_acknowledge_or_start_cleanup(owner):
         'cleanup_approved': True, 'settings': copy.deepcopy(settings)}))
     value, _ = controller(owner, service, resume_id='b' * 32)
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     service.acknowledge_resume.assert_not_called()
     window.start_optimization.assert_not_called()
     backend.optimize.assert_not_called()
@@ -445,7 +454,8 @@ def test_settings_changed_during_readiness_ack_do_not_gain_maintenance_consent(o
         acknowledge_resume=Mock(side_effect=acknowledge))
     value, _ = controller(owner, service, resume_id='b' * 32)
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     assert not window.session_approved()
     window.start_optimization.assert_not_called()
     backend.optimize.assert_not_called()
@@ -465,7 +475,7 @@ def test_valid_resume_surfaces_manual_launcher_items_without_inventing_a_fix(own
 
 
 @pytest.mark.parametrize('kind', ['already_consumed', 'changed', 'not_approved'])
-def test_rejected_changed_or_unapproved_resume_requires_normal_review(owner, kind):
+def test_rejected_changed_or_unapproved_resume_cannot_trigger_unattended_review(owner, kind):
     app, window, backend, settings = owner
     accepted = {'status': 'accepted', 'cleanup_approved': True, 'settings': copy.deepcopy(settings)}
     if kind == 'already_consumed':
@@ -476,13 +486,14 @@ def test_rejected_changed_or_unapproved_resume_requires_normal_review(owner, kin
         accepted['cleanup_approved'] = False
     value, service = controller(owner, updater(consume_resume=Mock(return_value=accepted)), resume_id='b' * 32)
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
+    wait_for(app, lambda: not value.pending)
+    window.review_launch.assert_not_called()
     assert not window.session_approved()
     window.start_optimization.assert_not_called()
     window._session_approved_callback.assert_not_called()
 
 
-def test_resumed_incomplete_setup_opens_questions_before_fresh_review(owner):
+def test_resumed_incomplete_setup_opens_questions_without_automatic_cleanup_review(owner):
     app, window, backend, settings = owner
     settings['setup_version'] = 0
     events = []
@@ -491,8 +502,9 @@ def test_resumed_incomplete_setup_opens_questions_before_fresh_review(owner):
     service = updater(consume_resume=Mock(return_value={'status': 'accepted', 'cleanup_approved': False, 'settings': copy.deepcopy(settings)}))
     value, _ = controller(owner, service, resume_id='b' * 32)
     value.start()
-    wait_for(app, lambda: window.review_launch.called)
-    assert events == ['setup', 'review'] and not window.session_approved()
+    wait_for(app, lambda: not value.pending)
+    assert events == ['setup'] and not window.session_approved()
+    window.review_launch.assert_not_called()
     window.open_initial_setup.assert_called_once_with(first_run=True)
     window.start_optimization.assert_not_called()
 

@@ -612,6 +612,9 @@ class _Session:
                     self.output_eof.wait()
                     self.returncode = terminal['exit_code']
                     self.native.finish()
+                    ticket = getattr(self, '_stop_ticket', None)
+                    if ticket is not None:
+                        ticket.finish()
                     self.finished.set()
                     with _RETAINED_LOCK:
                         _RETAINED.discard(self)
@@ -653,7 +656,8 @@ class _Session:
         self.ready.set()
 
 
-def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_handoff=False, environment=None):
+def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_handoff=False, environment=None,
+                       stop_controller=None):
     """Run once in a hidden console; a timeout retains every live native handle.
 
     stdout and stderr share the pseudoconsole's ordered output stream. Callback
@@ -668,6 +672,8 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
     if type(allow_resident_handoff) is not bool:
         raise ValueError('Resident handoff needs an explicit Boolean choice.')
     environment = _environment_block(environment)
+    if stop_controller is not None:
+        stop_controller.check()
     started = time.monotonic()
     started_at = time.time()
     # Supplementary diagnostics must never change the terminal receipt contract
@@ -678,6 +684,7 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
     except Exception:
         diagnostic_owner = None
     native = None
+    ticket = None
     try:
         if getattr(sys, 'frozen', False):
             _frozen_console_executable()  # No console or process exists yet.
@@ -687,13 +694,27 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
         native.allow_resident_handoff = allow_resident_handoff
         native.environment_block = environment
         session = _Session(native, arguments, progress_callback)
-        session.start()
+        if stop_controller is None:
+            session.start()
+        else:
+            with stop_controller.launch_gate():
+                ticket = stop_controller.begin_native('App update installer')
+                session._stop_ticket = ticket
+                session.start()
+                ticket.started = True
     except Exception as error:
         if native is None or native.started is False:
+            if ticket is not None:
+                ticket.finish()
             if native is not None and not native.closed:
                 native.dispose_unused()
+            from .emergency_stop import StopRequested
+            if isinstance(error, StopRequested):
+                raise
             raise ConsolePreflightError('The private console could not start; no application installer was launched ('
                 + type(error).__name__ + ').') from error
+        if ticket is not None:
+            ticket.started = True
         raise ConsoleOutcomeError('The console supervisor started but its target outcome is unknown; no retry was attempted.') from error
     while not session.finished.wait(0.025):
         if allow_resident_handoff and session.provider_ready.is_set() and session._handoff() is not None:
@@ -709,6 +730,8 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
     handoff = session._handoff() if not session.finished.is_set() else None
     result = subprocess.CompletedProcess(arguments, 0 if handoff is not None else session.returncode, session.output.value(), '')
     if handoff is not None:
+        if ticket is not None:
+            ticket.finish()  # Existing exact verified resident handoff only.
         result.capture_complete = False  # Console/job stay owned and drained passively.
         result.native_completion_verified = True
         result.console_receipt = dict(handoff, resident_handoff_verified=True,
@@ -717,6 +740,8 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
             if session.download:
                 result.download_progress = dict(session.download[0])
         return result
+    if ticket is not None:
+        ticket.finish()
     result.capture_complete = not session.fault.is_set() and session.output.complete()
     result.console_receipt = {'schema': 1, 'verified': True, 'quiescent': True,
         'console_client_count': 1, 'supervisor_exit_code': 0, 'target_exit_code': session.returncode,

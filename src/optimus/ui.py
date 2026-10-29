@@ -2695,6 +2695,9 @@ class OptimizationProgressWindow(QDialog):
         from .widgets.fullscreen import FullScreenControl
         self.fullscreen = FullScreenControl(self)
         header_layout.addWidget(self.fullscreen.button, 0, 1)
+        from .widgets.emergency_stop import EmergencyStopButton
+        self.stop_button = EmergencyStopButton(owner, self)
+        header_layout.addWidget(self.stop_button, 0, 2)
         self.spinner = RunSpinner(self)
         old_spinner_label = self.spinner._label
         self.spinner._label = WorkflowSummaryLabel(max_lines=1)
@@ -2705,14 +2708,14 @@ class OptimizationProgressWindow(QDialog):
         self.spinner._label.setMinimumWidth(0)
         self.spinner._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.spinner.start('Preparing')
-        header_layout.addWidget(self.spinner, 1, 0, 1, 2)
+        header_layout.addWidget(self.spinner, 1, 0, 1, 3)
         self.loading_animation = LocalLoadingAnimation(self, extent=64)
         self.progress = WorkflowProgressBar()
         self.progress.setObjectName('WorkflowProgress')
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat('%p%')
-        header_layout.addWidget(self.progress, 2, 0, 1, 2)
+        header_layout.addWidget(self.progress, 2, 0, 1, 3)
         from .widgets.resource_comparison import ResourceComparison
         self.resource_comparison = ResourceComparison(self)
         self.resource_comparison.layout().setVerticalSpacing(2)
@@ -2727,7 +2730,7 @@ class OptimizationProgressWindow(QDialog):
             setattr(self.resource_comparison, name, bounded)
             previous.hide()
             previous.deleteLater()
-        header_layout.addWidget(self.resource_comparison, 3, 0, 1, 2)
+        header_layout.addWidget(self.resource_comparison, 3, 0, 1, 3)
         self.analysis_panel = QFrame(body)
         self.analysis_panel.setObjectName('ProgressAnalysisPanel')
         self.analysis_panel.setStyleSheet('QFrame#ProgressAnalysisPanel {border:1px solid #2d4357; border-radius:7px; background:#0e1822;}')
@@ -2936,7 +2939,7 @@ class OptimizationProgressWindow(QDialog):
                     self.background_status, self.insights_summary, self.verification_summary,
                     self.auto_continue_summary, self.live_system_status.computer,
                     self.live_system_status.network, self.space_guard_status,
-                    self.details_toggle, self.cancel_button, self.auto_continue_button,
+                    self.details_toggle, self.cancel_button, self.auto_continue_button, self.stop_button,
                     self.processes, self.log):
                 scale_text(widget, scale, force=True)
             self.auto_continue_button.setMinimumHeight(max(36, self.auto_continue_button.fontMetrics().height() + 16))
@@ -4049,6 +4052,7 @@ class OptimusWindow(QMainWindow):
         self._self_update_notice = ''
         self.busy = False
         self._quitting = False
+        self._emergency_stopping = False
         self._close_when_idle = False
         self._settings_window = None
         self._sandbox_window = None
@@ -4148,6 +4152,9 @@ class OptimusWindow(QMainWindow):
         from .widgets.fullscreen import FullScreenControl
         self.fullscreen = FullScreenControl(self)
         top_controls.addWidget(self.fullscreen.button)
+        from .widgets.emergency_stop import EmergencyStopButton
+        self.stop_button = EmergencyStopButton(self, self)
+        top_controls.addWidget(self.stop_button)
         landing_layout.addLayout(top_controls)
         landing_layout.addWidget(self.landing_scroll, 1)
         self.setCentralWidget(landing)
@@ -4218,7 +4225,7 @@ class OptimusWindow(QMainWindow):
 
     def session_approved(self, settings=None):
         """Pure approval check, also usable by background busy predicates."""
-        if self._startup_update_pending:
+        if self._startup_update_pending or self._emergency_stopping:
             return False
         if not self._launch_consent.required:
             return True
@@ -4306,6 +4313,8 @@ class OptimusWindow(QMainWindow):
         return True
 
     def open_initial_setup(self, checked=False, *, first_run=False):
+        if self._emergency_stopping:
+            return False
         if self._startup_update_pending:
             self.status.setText('Finish the Optimus update check before setup. Maintenance is paused.')
             return False
@@ -4396,6 +4405,8 @@ class OptimusWindow(QMainWindow):
         return accepted
 
     def open_settings(self, checked=False, page=None):
+        if self._emergency_stopping:
+            return
         if self._startup_update_pending:
             self.status.setText('Finish the Optimus update prompt before opening Settings. Maintenance is paused.')
             return
@@ -4814,6 +4825,8 @@ class OptimusWindow(QMainWindow):
         self._apply_surface_scale(self._surface_scale)
 
     def open_revert(self, checked=False):
+        if self._emergency_stopping:
+            return
         if self._startup_update_pending:
             self.status.setText('Finish the Optimus update prompt before opening Revert.')
             return
@@ -4832,6 +4845,8 @@ class OptimusWindow(QMainWindow):
             QTimer.singleShot(0, self._revert_dialog.refresh)
 
     def open_sandbox(self, checked=False):
+        if self._emergency_stopping:
+            return
         if self._startup_update_pending:
             self.status.setText('Finish the Optimus update prompt before opening Sandbox.')
             return
@@ -4854,6 +4869,8 @@ class OptimusWindow(QMainWindow):
                 QMessageBox.warning(self, 'Optimus Sandbox', str(exc))
 
     def start_optimization(self, checked=False):
+        if self._emergency_stopping:
+            return
         if self._startup_update_pending:
             self.status.setText('Optimus checks and updates itself before Auto Clean. Maintenance is paused.')
             return
@@ -4980,14 +4997,14 @@ class OptimusWindow(QMainWindow):
     @Slot()
     def _workflow_finished(self):
         self.busy = False
-        self.main_buttons[0].setEnabled(True)
+        self.main_buttons[0].setEnabled(not self._emergency_stopping)
         bridge = getattr(self._worker, '_browser_prompts', None)
         if bridge is not None:
             bridge.shutdown()
             bridge.deleteLater()
         self._worker = None
         if self._close_when_idle:
-            QTimer.singleShot(0, self.quit_application)
+            QTimer.singleShot(0, self._finish_emergency_stop if self._emergency_stopping else self.quit_application)
             return
         self._enable_result_actions()
 
@@ -5009,7 +5026,7 @@ class OptimusWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self._continue_saved_fixes(progress, generation, parent))
 
     def _continue_saved_fixes(self, progress, generation, parent):
-        if (generation != self._post_review_generation or progress is not self._progress_window
+        if (self._emergency_stopping or generation != self._post_review_generation or progress is not self._progress_window
                 or self._pending_auto_fixes is None or self._pending_auto_fixes[0] is not parent):
             return
         try:
@@ -5023,6 +5040,8 @@ class OptimusWindow(QMainWindow):
             self._start_auto_continue(progress, automatic=True)
 
     def _start_auto_continue(self, progress, *, automatic=False):
+        if self._emergency_stopping:
+            return
         if (self.smoke_test or self._quitting or self._close_when_idle or self.busy or self._auto_continue_attempted
                 or self._pending_auto_fixes is None or progress is not self._progress_window
                 or not progress.isVisible() or not progress.completed
@@ -5073,14 +5092,18 @@ class OptimusWindow(QMainWindow):
     @Slot()
     def _auto_fixes_finished(self):
         self.busy = False
-        self.main_buttons[0].setEnabled(True)
+        self.main_buttons[0].setEnabled(not self._emergency_stopping)
         self._worker = None
         if self._close_when_idle:
-            QTimer.singleShot(0, self.quit_application)
+            QTimer.singleShot(0, self._finish_emergency_stop if self._emergency_stopping else self.quit_application)
             return
         self._enable_result_actions()
 
     def _continue_post_optimization_reviews(self):
+        if self._emergency_stopping:
+            self._pending_post_review = self._pending_auto_fixes = None
+            self._post_review_active = False
+            return
         self._pending_auto_fixes = None
         self._progress_window.clear_auto_continue()
         pending, self._pending_post_review = self._pending_post_review, None
@@ -5110,7 +5133,7 @@ class OptimusWindow(QMainWindow):
 
     def _offer_post_optimization_reviews(self, result, settings):
         from .unattended_configuration import matches_unattended
-        if self.smoke_test or self._quitting or matches_unattended(settings):
+        if self.smoke_test or self._quitting or self._emergency_stopping or matches_unattended(settings):
             self._post_review_active = False
             return
         self._post_review_active = True
@@ -5249,6 +5272,13 @@ class OptimusWindow(QMainWindow):
                 event.ignore()
 
     def quit_application(self):
+        if self._emergency_stopping:
+            state = self._emergency_stop.snapshot()
+            if (state.get('drained') is not True or self.busy or self.pool.activeThreadCount()
+                    or self._settings_window is not None and self._settings_window.busy
+                    or self._security_review_dialog is not None and self._security_review_dialog._worker is not None
+                    or self._revert_dialog is not None and self._revert_dialog._worker is not None):
+                return False
         if self._startup_update_pending and self._self_update_controller is not None:
             self._self_update_controller.request_safe_stop()
             return False
@@ -5286,6 +5316,68 @@ class OptimusWindow(QMainWindow):
         QApplication.instance().quit()
         return True
 
+    def request_emergency_stop(self, checked=False):
+        """Latch cancellation before any queued GUI callback can launch more work."""
+        if self._emergency_stopping or self._quitting:
+            return False
+        self._emergency_stopping = True
+        self._close_when_idle = True
+        self._cancel.set()
+        from .emergency_stop import controller_for
+        self._emergency_stop = controller_for(self.backend)
+        self._emergency_stop.request_stop()
+        self._pending_post_review = self._pending_auto_fixes = None
+        self._post_review_generation += 1
+        self.invalidate_session_review('STOP requested. Cancelling supported work; no more tasks will start.')
+        self.stop_button.setEnabled(False)
+        for button in self.main_buttons:
+            button.setEnabled(False)
+        progress = self._progress_window
+        if progress is not None:
+            progress.stop_button.setEnabled(False)
+            progress.clear_auto_continue()
+            progress.worker_navigation.refresh(enabled=False)
+        # End pending questions without approving them. Their return callbacks
+        # still see the latched exit/session gate before dispatching anything.
+        for name in ('_launch_review_dialog', '_setup_wizard'):
+            dialog = getattr(self, name, None)
+            if dialog is not None:
+                dialog.reject()
+        self._post_review_active = False
+        security = self._security_review_dialog
+        if security is not None:
+            security._cancel.set()
+            if security._worker is None:
+                security.close()
+        self.request_safe_stop()
+        QTimer.singleShot(0, self._finish_emergency_stop)
+        return True
+
+    def _finish_emergency_stop(self):
+        if self._quitting or not self._emergency_stopping:
+            return
+        wizard = self._setup_wizard
+        if wizard is not None and not getattr(wizard, 'busy', False):
+            wizard.reject()
+        state = self._emergency_stop.snapshot()
+        native = state.get('native_pending', 0)
+        note = ('STOP requested. An active system or vendor operation is finishing safely before Optimus exits.'
+                if native else 'STOP requested. Cancelling Optimus workers and saving their outcomes before exit.')
+        self.status.setText(note)
+        if self._progress_window is not None:
+            self._progress_window.description.setText(note)
+        security_busy = self._security_review_dialog is not None and self._security_review_dialog._worker is not None
+        revert_busy = self._revert_dialog is not None and self._revert_dialog._worker is not None
+        settings_busy = self._settings_window is not None and self._settings_window.busy
+        update_busy = self._self_update_controller is not None and self._self_update_controller.pending
+        if (not self.busy and not settings_busy and not security_busy and not revert_busy
+                and not update_busy and self.pool.activeThreadCount() == 0 and state.get('drained') is True):
+            if self._security_review_dialog is not None:
+                self._security_review_dialog.close()
+            self.quit_application()
+            return
+        QTimer.singleShot(100, self._finish_emergency_stop)
+
     def request_safe_stop(self):
         """Stop dispatching work, drain the current operation, then close.
 
@@ -5297,7 +5389,7 @@ class OptimusWindow(QMainWindow):
             return False
         if self._startup_update_pending and self._self_update_controller is not None:
             return self._self_update_controller.request_safe_stop()
-        if self._setup_wizard is not None or self._post_review_active:
+        if not self._emergency_stopping and (self._setup_wizard is not None or self._post_review_active):
             self.status.setText('Finish the active setup, recommendation or settings operation before safely exiting.')
             return False
         self._close_when_idle = True
@@ -5343,12 +5435,15 @@ class OptimusWindow(QMainWindow):
             self.status.setText('Stopping safely. Waiting for the current settings operation to save its outcome.')
             QTimer.singleShot(100, self._finish_optional_stop)
         else:
-            QTimer.singleShot(0, self.quit_application)
+            if not self._emergency_stopping:
+                QTimer.singleShot(0, self.quit_application)
         return True
 
     def _finish_optional_stop(self):
         if self._quitting or not self._close_when_idle:
             return
+        if self._emergency_stopping:
+            return  # The emergency poll also waits for native receipt observers.
         if self.busy or self._settings_window is not None and self._settings_window.busy:
             QTimer.singleShot(200, self._finish_optional_stop)
             return

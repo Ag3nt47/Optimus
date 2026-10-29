@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from functools import partial
 import json
 import math
 import os
@@ -386,15 +387,35 @@ def _script(operation, payload):
     return _POWERSHELL.replace('__OPERATION__', operation).replace('__PAYLOAD__', encode(payload or {})).replace('__CONTROLS__', encode(_CONTROLS))
 
 
-def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None):
+def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None, stop_controller=None):
     if _cancelled(cancel_event):
         return {'ok': False, 'cancelled': True, 'may_continue': False}
     if os.name != 'nt':
         return {'ok': False, 'unsupported': True, 'error': 'Windows is required.'}
+    from .emergency_stop import EmergencyStop
+    controller = stop_controller if stop_controller is not None else EmergencyStop()
+    controller.check()
+    cancel_event = controller.bind_cancel(cancel_event)
     executable = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-    process = subprocess.Popen([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', _script(operation, payload)],
+    arguments = [str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', _script(operation, payload)]
+    options = dict(
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if operation == 'quick_scan' else subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    ticket = None
+    read_only = operation in ('context', 'registry_read', 'privacy_snapshot', 'security_status', 'quick_scan')
+    if read_only:
+        # This is only the reporting client. Defender retains control of its
+        # service scan if the owned client stops waiting.
+        process = controller.spawn_disposable(arguments, label='Windows privacy or security scan client', **options)
+    else:
+        with controller.launch_gate():
+            ticket = controller.begin_native('Windows privacy or security change: ' + operation)
+            try:
+                process = subprocess.Popen(arguments, **options)
+                ticket.started = True
+            except Exception:
+                ticket.finish()
+                raise
     if operation == 'quick_scan':
         from .defender_scan import read_scan_process
         return read_scan_process(process, timeout=timeout, cancel_event=cancel_event, progress_callback=progress_callback)
@@ -402,6 +423,16 @@ def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, p
     while True:
         cancelled, expired = _cancelled(cancel_event), time.monotonic() >= deadline
         if cancelled or expired:
+            if ticket is not None:
+                # A synchronous security/registry operation cannot be safely
+                # aborted by killing its host. Keep the original child alive
+                # and observed without turning its unresolved result into a
+                # successful privacy change or completed remediation.
+                ticket.finish(known=False, error='Stopped waiting for a Windows privacy or security change.')
+                controller.observe_native_child(process, ticket)
+                return {'ok': False, 'cancelled': cancelled, 'timed_out': expired, 'may_continue': True,
+                        'outcomeKnown': False, 'running': True,
+                        'error': 'Stopped waiting. The Windows security or privacy change is still observed; its final result needs verification.'}
             if process.poll() is None:
                 process.terminate()  # Only this PowerShell host, never Defender/service processes.
             try:
@@ -418,11 +449,21 @@ def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, p
             value = json.loads(output.strip())
             if not isinstance(value, dict):
                 raise ValueError('Windows returned an invalid result.')
+            if ticket is not None:
+                ticket.finish()
             if process.returncode != 0 and value.get('ok') is not False:
                 return {'ok': False, 'error': 'Windows returned an unsuccessful native status.'}
             return value
         except subprocess.TimeoutExpired:
             continue
+        except Exception as error:
+            if ticket is not None:
+                if process.poll() is not None:
+                    ticket.finish()
+                else:
+                    ticket.finish(known=False, error=error)
+                    controller.observe_native_child(process, ticket)
+            raise
 
 
 def _snapshot(value):
@@ -503,14 +544,18 @@ def _recommendations(status):
 
 class SystemPrivacy:
     """Native operations are injectable for tests; no work runs on construction."""
-    def __init__(self, data_dir, runner=None):
+    def __init__(self, data_dir, runner=None, *, stop_controller=None):
         self.directory = Path(data_dir) / 'system-privacy'
-        self.runner = runner or _native_request
+        self.stop_controller = stop_controller
+        self.runner = partial(_native_request, stop_controller=stop_controller) if runner is None or runner is _native_request else runner
         # Existing injected runners retain their context/registry_read contract.
         self._batch_privacy_reads = runner is None or runner is _native_request
         self.lock = threading.RLock()
 
     def _call(self, operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None):
+        if self.stop_controller is not None:
+            self.stop_controller.check()
+            cancel_event = self.stop_controller.bind_cancel(cancel_event)
         if _cancelled(cancel_event):
             return {'ok': False, 'cancelled': True}
         options = {}

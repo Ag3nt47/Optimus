@@ -36,6 +36,8 @@ class Backend(ExtendedMaintenanceBackend):
         self.last_audit = None
         from .process_harness import ProcessHarness
         self.process_harness = ProcessHarness(self)
+        from .emergency_stop import controller_for
+        controller_for(self)
 
     @staticmethod
     def _list(value):
@@ -105,6 +107,10 @@ class Backend(ExtendedMaintenanceBackend):
         return self.startup_launch_status()
 
     def optimize(self, settings=None, progress_callback=None, cancel_event=None, *, browser_prompt=None):
+        from .emergency_stop import controller_for
+        controller = controller_for(self)
+        controller.check()
+        cancel_event = controller.bind_cancel(cancel_event)
         from .reboot_workflow import run_with_reboot_resume
         return run_with_reboot_resume(self, settings or self.preferences(), progress_callback or (lambda event: None),
                                       cancel_event, browser_prompt=browser_prompt)
@@ -131,6 +137,10 @@ class Backend(ExtendedMaintenanceBackend):
         return available_fixes(self, report, settings)
 
     def apply_available_fixes(self, report, settings, *, progress_callback=None, cancel_event=None):
+        from .emergency_stop import controller_for
+        controller = controller_for(self)
+        controller.check()
+        cancel_event = controller.bind_cancel(cancel_event)
         from .post_run_fixes import apply_available_fixes
         return apply_available_fixes(self, report, settings, progress_callback=progress_callback, cancel_event=cancel_event)
 
@@ -233,7 +243,8 @@ class Backend(ExtendedMaintenanceBackend):
     def _privacy_service(self):
         from .system_privacy import SystemPrivacy
         if not hasattr(self, '_system_privacy_service'):
-            self._system_privacy_service = SystemPrivacy(self.data_dir)
+            from .emergency_stop import controller_for
+            self._system_privacy_service = SystemPrivacy(self.data_dir, stop_controller=controller_for(self))
         return self._system_privacy_service
 
     def apply_system_privacy(self, settings, cancel_event=None, *, progress_callback=None):
@@ -253,7 +264,9 @@ class Backend(ExtendedMaintenanceBackend):
 
     def windows_security_updates(self, settings, cancel_event=None, item_callback=None):
         from .security_updates import SecurityUpdates
-        return SecurityUpdates(self.data_dir).run(settings, cancel_event=cancel_event, item_callback=item_callback)
+        from .emergency_stop import controller_for
+        return SecurityUpdates(self.data_dir, stop_controller=controller_for(self)).run(
+            settings, cancel_event=cancel_event, item_callback=item_callback)
 
     def legacy_patch_review(self, context=None):
         from .legacy_support import review_legacy_support
@@ -758,6 +771,8 @@ class Backend(ExtendedMaintenanceBackend):
         return {'path': str(destination / 'audit.json')}
 
     def close(self):
+        from .emergency_stop import controller_for
+        controller_for(self).request_stop()
         self._close_optional_tools()
         self.sampler.stop()
         self.bridge.close()

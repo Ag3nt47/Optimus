@@ -77,6 +77,7 @@ class Maintenance:
         self._last_update_packages: dict[str, dict[str, str]] = {}
         self._last_update_scan = 0.0
         self._payload_restart_reader = restart_reader
+        self.stop_controller = None
 
     @staticmethod
     def debloat_actions() -> list[dict[str, Any]]:
@@ -244,20 +245,54 @@ class Maintenance:
             raise ValueError("Invalid driver update revision.")
         return self._request("driver_update_apply", id=parsed, revision=revision)
 
-    @staticmethod
-    def _run(arguments: list[str], *, timeout: float = 120, progress_callback=None,
+    def _run(self, arguments: list[str], *, timeout: float = 120, progress_callback=None,
              allow_resident_handoff=False, environment=None) -> subprocess.CompletedProcess[str]:
+        controller = getattr(self, 'stop_controller', None)
+        if controller is not None:
+            controller.check()
         native_install = (os.name == 'nt' and len(arguments) > 1 and arguments[1] == 'upgrade' and '--id' in arguments)
         if progress_callback is not None or environment is not None and os.name == 'nt' or native_install:
             if os.name == 'nt':
                 from .winget_console import run_winget_console
                 options = {'environment': environment} if environment is not None else {}
+                if controller is not None:
+                    options['stop_controller'] = controller
                 return run_winget_console(arguments, timeout=timeout, progress_callback=progress_callback or (lambda value: None),
                     allow_resident_handoff=allow_resident_handoff, **options)
-            from .winget_progress import run_winget_with_progress
-            options = {'environment': environment} if environment is not None else {}
-            return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback, **options)
+            if controller is None:
+                from .winget_progress import run_winget_with_progress
+                options = {'environment': environment} if environment is not None else {}
+                return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback, **options)
         options = {'env': dict(os.environ, **environment)} if environment is not None else {}
+        if controller is not None:
+            options.update(shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            readonly = arguments[1:] in (
+                ['upgrade', '--source', 'winget', '--disable-interactivity'],
+                ['pin', 'list', '--disable-interactivity'])
+            ticket = None
+            if readonly:
+                child = controller.spawn_disposable(arguments, label='Read-only app update query', **options)
+            else:
+                with controller.launch_gate():
+                    ticket = controller.begin_native('App package operation')
+                    try:
+                        child = subprocess.Popen(arguments, **options)
+                        ticket.started = True
+                    except Exception:
+                        ticket.finish()
+                        raise
+            try:
+                output, errors = child.communicate(timeout=timeout)
+            except Exception as error:
+                if ticket is not None:
+                    ticket.finish(known=False, error=error)
+                    controller.observe_native_child(child, ticket)
+                raise  # Native commands are never killed by a timeout/STOP.
+            if ticket is not None:
+                ticket.finish()
+            return subprocess.CompletedProcess(arguments, child.returncode, output, errors)
         return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options)
 
     def _payload_restart_pending(self):
@@ -341,18 +376,24 @@ class Maintenance:
         apply commands continue using the non-interruptible installer runner.
         """
         arguments = [self._winget(), 'upgrade', '--source', 'winget', '--disable-interactivity']
-        return self._read_only_winget(arguments, cancel_event)
+        controller = getattr(self, 'stop_controller', None)
+        options = {'stop_controller': controller} if controller is not None else {}
+        return self._read_only_winget(arguments, cancel_event, **options)
 
     @staticmethod
-    def _read_only_winget(arguments, cancel_event):
+    def _read_only_winget(arguments, cancel_event, *, stop_controller=None):
         """Retire only an explicitly read-only child, then prove its exit."""
         if (not isinstance(arguments, list) or len(arguments) < 2 or arguments[1:] not in (
                 ['upgrade', '--source', 'winget', '--disable-interactivity'],
                 ['pin', 'list', '--disable-interactivity'])):
             raise ValueError('Only exact read-only WinGet queries support process cancellation.')
+        if stop_controller is not None:
+            stop_controller.check()
+            cancel_event = stop_controller.bind_cancel(cancel_event)
         if cancel_event.is_set():
             return subprocess.CompletedProcess(arguments, 130, '', 'Read-only update search cancelled.')
-        child = subprocess.Popen(arguments, shell=False, stdin=subprocess.DEVNULL,
+        launch = stop_controller.spawn_disposable if stop_controller is not None else subprocess.Popen
+        child = launch(arguments, shell=False, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         deadline = time.monotonic() + 120
@@ -462,7 +503,9 @@ class Maintenance:
         """A fresh check covers ordinary pins exact WinGet upgrades can bypass."""
         try:
             arguments = [self._winget(), 'pin', 'list', '--disable-interactivity']
-            result = (self._read_only_winget(arguments, cancel_event) if cancel_event is not None
+            controller = getattr(self, 'stop_controller', None)
+            options = {'stop_controller': controller} if controller is not None else {}
+            result = (self._read_only_winget(arguments, cancel_event, **options) if cancel_event is not None
                       else self._run(arguments))
         except (OSError, subprocess.TimeoutExpired):
             return False, 'The current WinGet pin inventory could not be read; no installer was started.', True

@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from optimus.backend import Backend
+from optimus.emergency_stop import controller_for
 from optimus.workflow import DEFAULTS, Preferences, Workflow
 from test_workflow import MockBackend
 
@@ -31,6 +32,17 @@ def mocked_orchestrator(operation):
     module = types.ModuleType('optimus.browser_cleanup')
     module.run_browser_cleanup = operation
     return patch.dict(sys.modules, {'optimus.browser_cleanup': module})
+
+
+def assert_cancellation_tracks_caller_and_session(token, caller, backend):
+    assert caller.is_set() is False and token.is_set() is False
+    caller.set()
+    assert token.is_set() is True
+    caller.clear()
+    assert token.is_set() is False
+    controller_for(backend).request_stop()
+    caller.clear()  # An ordinary per-run clear must not reset the lifetime STOP.
+    assert token.is_set() is True
 
 
 def test_upgrade_preserves_old_profile_and_leaves_new_privacy_operations_off():
@@ -144,13 +156,13 @@ def test_combined_browser_scopes_forward_the_ui_callback_cancel_and_progress_onc
             progress.append, cancelled, browser_prompt=prompt)
     operation.assert_called_once()
     assert observed['browser_prompt'] is prompt
-    assert observed['cancel_event'].external is cancelled
     assert cancelled.is_set() is False
     assert callable(observed['clean'])
     assert callable(observed['item_callback'])
     assert any(event['description'] == 'Fixture browser scope' for event in progress)
     assert report['status'] == 'completed'
     prompt.assert_not_called()  # Dispatch decides whether a prompt is required.
+    assert_cancellation_tracks_caller_and_session(observed['cancel_event'].external, cancelled, backend)
 
 
 def test_disabled_browser_scopes_do_not_dispatch_or_clean(tmp_path):
@@ -186,5 +198,5 @@ def test_backend_optimize_forwards_browser_prompt_to_workflow():
     args, kwargs = backend.workflow.run.call_args
     assert args[0] is settings
     assert args[1] is progress
-    assert args[2] is cancelled
     assert kwargs['browser_prompt'] is prompt
+    assert_cancellation_tracks_caller_and_session(args[2], cancelled, backend)

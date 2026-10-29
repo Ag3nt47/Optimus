@@ -108,13 +108,19 @@ def test_verifier_exception_does_not_omit_final_report_or_expose_exception_paylo
 
 
 def test_cancellation_during_final_check_cannot_emit_100_percent(tmp_path):
+    from optimus.emergency_stop import controller_for
     service = MockBackend(tmp_path)
     event = threading.Event()
     def verify(report, **kwargs):
-        assert kwargs['cancel_event'].external is event
-        assert kwargs['cancel_event'].is_set() is False
+        cancellation = kwargs['cancel_event']
+        assert cancellation.is_set() is False
         event.set()
-        assert kwargs['cancel_event'].is_set() is True
+        assert cancellation.is_set() is True
+        event.clear()
+        assert cancellation.is_set() is False
+        controller_for(service).request_stop()
+        event.clear()
+        assert cancellation.is_set() is True  # Clearing the run cannot undo STOP.
         return dict(verification('unverified'), cancelled=True)
     service.verify_optimization = Mock(side_effect=verify)
     events = []

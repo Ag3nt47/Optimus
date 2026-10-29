@@ -16,6 +16,7 @@ import re
 import subprocess
 import time
 import uuid
+from functools import partial
 
 from .filesystem import _ordinary_data_path
 
@@ -97,9 +98,22 @@ def _discover():
     return path
 
 
-def _read_command(arguments):
-    completed = subprocess.run(arguments, capture_output=True, text=True, errors='replace', timeout=60,
-                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), check=False)
+def _read_command(arguments, *, stop_controller=None):
+    if stop_controller is None:
+        completed = subprocess.run(arguments, capture_output=True, text=True, errors='replace', timeout=60,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), check=False)
+    else:
+        child = stop_controller.spawn_disposable(arguments, label='Read-only additional package inventory',
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        try:
+            output, errors = child.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            # Only this exact read-only child; installers use ConPTY below.
+            child.terminate()
+            child.communicate(timeout=3)
+            raise
+        completed = subprocess.CompletedProcess(arguments, child.returncode, output, errors)
     # The provider optionally reports outdated packages / an empty local list
     # with enhanced exit 2. These remain strict parsed read-only responses.
     accepted = (0, 2) if len(arguments) > 1 and arguments[1] in ('outdated', 'list') else (0,)
@@ -159,13 +173,17 @@ def _ownership_note(preferences):
 class AdditionalPackages:
     def __init__(self, backend, *, discover=_discover, reader=_read_command, installer=None):
         self.backend, self.data_dir = backend, Path(backend.data_dir)
-        self.discover, self.reader = discover, reader
+        from .emergency_stop import controller_for
+        self.stop_controller = controller_for(backend)
+        self.discover = discover
+        self.reader = partial(_read_command, stop_controller=self.stop_controller) if reader is _read_command else reader
         if installer is None:
             from .winget_console import run_winget_console
-            installer = run_winget_console
+            installer = partial(run_winget_console, stop_controller=self.stop_controller)
         self.installer = installer
 
     def scan(self):
+        self.stop_controller.check()
         executable = self.discover()
         if executable is None:
             return {'schema': 1, 'read_only': True, 'available': False, 'complete': False,
@@ -184,6 +202,9 @@ class AdditionalPackages:
                 'note': 'Only this provider reports these package identities. Pinned or unrecognized version ordering stays excluded.'}
 
     def run(self, configuration, *, lease, progress_callback=None, cancel_event=None):
+        from .emergency_stop import StopRequested
+        self.stop_controller.check()
+        cancel_event = self.stop_controller.bind_cancel(cancel_event)
         from .automation import RunLease
         from .parallel_updates import pending_updates_barrier
         from .speed_enhancements import _current_owner, _private_json
@@ -286,6 +307,7 @@ class AdditionalPackages:
                         raise ValueError('Saved choices or the package manager changed before installation.')
                 except Exception as error:
                     raise ConsolePreflightError(str(error)[:500]) from error
+                self.stop_controller.check()
                 result['installer_started'] = True
                 # Chocolatey's existing --no-progress command has no trusted
                 # item-percentage protocol. Drain output without interpreting
@@ -320,9 +342,12 @@ class AdditionalPackages:
                 record.update(status='needs_review' if restart else 'completed', finished_at=time.time(), result={'items': [row], 'outcomeKnown': True,
                               'running': False, 'restartNeeded': restart})
                 result['restartNeeded'] = restart
-            except ConsolePreflightError as error:
+            except (ConsolePreflightError, StopRequested) as error:
                 result['installer_started'] = any(item.get('result', {}).get('installer_started') is True for item in rows)
-                row.update(status='failed', uncertain=False, reason=str(error),
+                stopped = isinstance(error, StopRequested) or cancel_event.is_set()
+                if stopped:
+                    result['cancelled'] = True
+                row.update(status='cancelled' if stopped else 'failed', uncertain=False, reason=str(error),
                            result={'outcomeKnown': True, 'running': False, 'installer_started': False})
                 record.update(status='completed', installer_prepared=False, result={'items': [row], 'outcomeKnown': True, 'running': False})
             except Exception as error:
@@ -334,7 +359,7 @@ class AdditionalPackages:
             _private_json(path, record)
             rows.append(row)
             result['failed_items'] += row['status'] in ('failed', 'needs_review')
-            if result.get('uncertain') or result['restartNeeded']:
+            if result.get('uncertain') or result.get('cancelled') or result['restartNeeded']:
                 break
         result['note'] = 'Individual known failures were retained while eligible packages continued. Active or unknown native outcomes retain the shared installer gate.'
         return result

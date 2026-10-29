@@ -145,6 +145,8 @@ class SelfUpdateProgressWindow(OptimizationProgressWindow):
         self.processes_label.setText('CURRENT UPDATE OPERATION')
         self.processes.setPlainText('Download and verification only; no maintenance workflow is running.')
         self._last_update_phase = None
+        self.stop_button.setAccessibleName('STOP Optimus update and all automatic maintenance')
+        self.stop_button.setToolTip('Request STOP immediately. No new work starts; owned downloads and native operations stop at a safe cancellation point.')
 
     def update_phase(self, value):
         if self.completed or not isinstance(value, dict):
@@ -186,7 +188,7 @@ class SelfUpdateProgressWindow(OptimizationProgressWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(100 if staged else 0)
         self.progress.setFormat('Download verified' if staged else 'Update not applied')
-        self.stage.setText('Ready to restart' if staged else 'Continuing the current version')
+        self.stage.setText('Ready to restart' if staged else 'Auto Clean paused')
         self.description.setText(message)
         self.log.appendPlainText(message)
         self.cancel_button.setText('Close update results')
@@ -247,6 +249,28 @@ class StartupUpdateController(QObject):
         self._stage_id = None
         self._revocation_pending = self._revocation_attempted = self._revoked = self._handoff_committed = False
         self._revocation_note = ''
+        self._accepted_update = bool(resume_id)
+        self._epoch = 0
+        self._continuation_queued = self._continuation_started = False
+        self._resume_started = self._resume_completed = False
+        self._released = False
+
+    def _stopping(self):
+        return self._closed or self._closing or getattr(self.window, '_emergency_stopping', False) is True
+
+    def _continue_once(self):
+        """A declined/unneeded update may release exactly one startup review."""
+        if self._continuation_queued or self._continuation_started or self._stopping() or self.cancel.is_set():
+            return
+        self._continuation_queued = True
+        epoch = self._epoch
+        def continue_current():
+            if (epoch != self._epoch or self._stopping() or self.cancel.is_set() or self.pending
+                    or self._continuation_started or self._accepted_update):
+                return
+            self._continuation_started = True
+            self.continue_startup()
+        QTimer.singleShot(0, continue_current)
 
     def _service(self):
         if self.updater is None:
@@ -255,18 +279,31 @@ class StartupUpdateController(QObject):
         return self.updater
 
     def _submit(self, phase, action, done):
+        if phase != 'revoke' and (self._stopping() or self.cancel.is_set()):
+            if not self._closed and not self._closing:
+                self.request_safe_stop() if getattr(self.window, '_emergency_stopping', False) is True else self._fallback('The update was cancelled. Auto Clean remains paused.')
+            return
         job = _Job(action)
         job.phase = phase
+        job.handled = False
+        epoch = self._epoch
         self._jobs.add(job)
         job.signals.progress.connect(self._progress_event)
         def result(value):
-            if not self._closed:
+            if not self._closed and not job.handled and (self._closing or epoch == self._epoch):
+                job.handled = True
                 try:
+                    if getattr(self.window, '_emergency_stopping', False) is True and not self._closing:
+                        self.request_safe_stop()
                     done(value)
                 except Exception as error:
                     self._error(phase, error)
         job.signals.result.connect(result)
-        job.signals.error.connect(lambda error: self._error(phase, error) if not self._closed else None)
+        def failed(error):
+            if not self._closed and not job.handled and (self._closing or epoch == self._epoch):
+                job.handled = True
+                self._error(phase, error)
+        job.signals.error.connect(failed)
         job.signals.finished.connect(lambda: self._finished(job))
         self.pool.start(job)
 
@@ -283,6 +320,8 @@ class StartupUpdateController(QObject):
 
     def _exit_after_stop(self):
         if not self.window.quit_application():
+            if getattr(self.window, '_emergency_stopping', False) is True:
+                return  # The central emergency-stop poll retains the exit latch while native work drains.
             # The normal Sandbox unsaved-work guard can still cancel exit.
             # A cancelled exit leaves a usable current GUI with no approval.
             self._closing = False
@@ -290,7 +329,7 @@ class StartupUpdateController(QObject):
             self._release()
 
     def start(self):
-        if self._started or self._closed or self.window.smoke_test:
+        if self._started or self._stopping() or self.window.smoke_test:
             return
         self._started = True
         self.window._startup_update_pending = True
@@ -327,7 +366,7 @@ class StartupUpdateController(QObject):
             return
         self._snapshot = copy.deepcopy(self.window._settings())
         choice = self.ask(self.window, result['offer'], self._snapshot)
-        if self._closing:
+        if self._stopping():
             return
         if choice == 'adjust_settings':
             self._release()
@@ -340,6 +379,7 @@ class StartupUpdateController(QObject):
         if choice == 'no_update':
             self._fallback('Continuing the current Optimus version.')
             return
+        self._accepted_update = True
         self._cleanup_approved = (self._snapshot.get('setup_version', 0) >= CURRENT_SETUP_VERSION
             and scope_fingerprint(self.window._settings()) == scope_fingerprint(self._snapshot))
         self._progress = self.progress_factory(self.window, self.cancel)
@@ -351,12 +391,12 @@ class StartupUpdateController(QObject):
         if (isinstance(result, dict) and result.get('status') == 'staged'
                 and isinstance(result.get('stage_id'), str) and re.fullmatch('[a-f0-9]{32}', result['stage_id'])):
             self._stage_id = result['stage_id']
-        if self._closing or self.cancel.is_set():
+        if self._stopping() or self.cancel.is_set():
             self._fallback('Optimus update cancelled before handoff. The current version is still open.')
             return
         if (not isinstance(result, dict) or result.get('status') != 'staged'
                 or not isinstance(result.get('stage_id'), str) or re.fullmatch('[a-f0-9]{32}', result['stage_id']) is None):
-            self._fallback('The Optimus update could not be staged and verified. Continuing normal launch review.')
+            self._fallback('The Optimus update could not be staged and verified. Auto Clean remains paused; retry the update or choose Optimize explicitly.')
             return
         if not self._prepare_exit():
             self._fallback('Update handoff was cancelled. Save or discard Sandbox edits before updating.')
@@ -394,18 +434,18 @@ class StartupUpdateController(QObject):
         if (isinstance(result, dict) and result.get('status') == 'ready'
                 and isinstance(result.get('handoff_id'), str) and re.fullmatch('[a-f0-9]{32}', result['handoff_id'])):
             self._handoff_id = result['handoff_id']
-        if self._closing or self.cancel.is_set():
+        if self._stopping() or self.cancel.is_set():
             self._fallback('Update cancelled before starting the restart worker.')
             return
         if (not isinstance(result, dict) or result.get('status') != 'ready'
                 or not isinstance(result.get('handoff_id'), str) or re.fullmatch('[a-f0-9]{32}', result['handoff_id']) is None):
-            self._fallback('The verified update handoff was unavailable. Continuing normal launch review.')
+            self._fallback('The verified update handoff was unavailable. Auto Clean remains paused; retry the update or choose Optimize explicitly.')
             return
         self._handoff_id = result['handoff_id']
         self._submit('dispatch', lambda progress: self._service().dispatch_worker(self._handoff_id), self._dispatched)
 
     def _dispatched(self, result):
-        if self._closing or self.cancel.is_set():
+        if self._stopping() or self.cancel.is_set():
             self._begin_revoke('Update cancelled. The pending restart and automatic cleanup must be revoked before continuing.')
             return
         if isinstance(result, dict) and result.get('status') == 'dispatched' and result.get('started') is True:
@@ -451,8 +491,9 @@ class StartupUpdateController(QObject):
             self.window.status.setText('The update restart approval could not be revoked. Maintenance and automatic exit remain paused for review.')
 
     def _resume(self, result):
-        if self._closing:
+        if self._stopping() or self._resume_started or self._resume_completed:
             return
+        self._resume_started = True
         current = self.window._settings()
         accepted = (isinstance(result, dict) and result.get('status') == 'accepted'
                     and isinstance(result.get('settings'), dict)
@@ -461,26 +502,27 @@ class StartupUpdateController(QObject):
             self._complete_resume(result)
             return
         if not self.window.isVisible() or self.window._quitting or self.window._close_when_idle:
-            self._fallback('The updated Optimus window was not ready. Automatic maintenance remains paused for the normal launch review.')
+            self._fallback('The updated Optimus window was not ready. Auto Clean remains paused; choose Optimize explicitly to review saved actions.')
             return
         self.window.status.setText('Confirming the updated Optimus window is ready before continuing saved actions.')
         self._submit('acknowledge', lambda progress: self._service().acknowledge_resume(self.resume_id),
                      lambda acknowledgement: self._resume_acknowledged(result, acknowledgement))
 
     def _resume_acknowledged(self, result, acknowledgement):
-        if self._closing:
+        if self._stopping() or self._resume_completed:
             return
         if (not isinstance(acknowledgement, dict) or acknowledgement.get('status') != 'ready'
                 or not self.window.isVisible() or self.window._quitting or self.window._close_when_idle):
-            self._fallback('The updated Optimus window could not confirm its restart. Automatic maintenance remains paused for the normal launch review.')
+            self._fallback('The updated Optimus window could not confirm its restart. Auto Clean remains paused; choose Optimize explicitly to review saved actions.')
             return
         # The acknowledgement runs off-thread. Recheck the current choices
         # before the original one-shot resume consent can start any work.
         self._complete_resume(result)
 
     def _complete_resume(self, result):
-        if self._closing:
+        if self._stopping() or self._resume_completed or self.cancel.is_set():
             return
+        self._resume_completed = True
         current = self.window._settings()
         accepted = (isinstance(result, dict) and result.get('status') == 'accepted'
                     and isinstance(result.get('settings'), dict)
@@ -505,12 +547,16 @@ class StartupUpdateController(QObject):
         self._release()
         if accepted and current.get('setup_version', 0) < CURRENT_SETUP_VERSION:
             self.window.open_initial_setup(first_run=True)
-        QTimer.singleShot(0, self.continue_startup)
+        self.window.invalidate_session_review('The update restart did not authorize these saved cleanup actions. Auto Clean remains paused; choose Optimize for an explicit new launch review.')
 
     def _release(self):
+        if self._released:
+            return
+        self._released = True
+        self._epoch += 1
         self.pending = False
         self.window._startup_update_pending = False
-        if not self._closing:
+        if not self._stopping():
             for button in self.window.main_buttons:
                 button.setEnabled(True)
 
@@ -520,20 +566,26 @@ class StartupUpdateController(QObject):
             return
         if self._progress is not None:
             self._progress.settled(note)
+            if self._accepted_update:
+                self._progress.close()
         self.window.status.setText(note)
         if self._closing:
             return
         self._release()
-        QTimer.singleShot(0, self.continue_startup)
+        if self._accepted_update or self.cancel.is_set() or getattr(self.window, '_emergency_stopping', False) is True:
+            self.window.invalidate_session_review(note + ' Auto Clean remains paused. Choose Optimize for an explicit new launch review.')
+            return
+        self._continue_once()
 
     def _error(self, phase, error):
         if phase == 'revoke':
             self._revocation_pending = False
             self.window.status.setText('The update restart approval could not be revoked. Maintenance and automatic exit remain paused for review.')
             return
-        self._fallback('Optimus update ' + phase + ' was unavailable; continuing normal launch review. ' + str(error)[:400])
+        self._fallback('Optimus update ' + phase + ' was unavailable. ' + str(error)[:400])
 
     def request_safe_stop(self):
+        self._epoch += 1  # Invalidate any queued normal launch/cleanup continuation.
         self._closing = True
         self.cancel.set()
         self.window._close_when_idle = True
@@ -556,6 +608,7 @@ class StartupUpdateController(QObject):
         return True
 
     def shutdown(self):
+        self._epoch += 1
         self._closed = True
         self.cancel.set()
         pending = list(self._jobs)

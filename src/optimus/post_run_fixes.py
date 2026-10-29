@@ -440,6 +440,10 @@ class PostRunFixes:
         self.attempted = set()
 
     def apply(self, report, settings, *, progress_callback=None, cancel_event=None):
+        from .emergency_stop import controller_for
+        controller = controller_for(self.backend)
+        controller.check()
+        cancel_event = controller.bind_cancel(cancel_event)
         requested = _validate_report(report)
         approved = _settings(self.backend, settings)
         reviewed_ids = {row['id'] for row in _preview(self.backend, requested, approved)['actions']}

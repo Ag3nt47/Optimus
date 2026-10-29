@@ -218,7 +218,7 @@ def test_native_process_creation_failure_is_known_without_replay(updater, error)
 
 def test_process_stdin_cannot_wait_for_interactive_answers():
     with patch('optimus.maintenance.subprocess.run') as runner:
-        Maintenance._run(['winget-fixture.exe','upgrade'])
+        Maintenance(None, '.')._run(['winget-fixture.exe','upgrade'])
     assert runner.call_args.kwargs['stdin'] == subprocess.DEVNULL
     assert runner.call_args.kwargs['shell'] is False
 

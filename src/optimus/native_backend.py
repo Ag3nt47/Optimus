@@ -204,6 +204,8 @@ class NativeBackend(Backend):
         from .native_workflow import NativeWorkflow
         self.workflow = NativeWorkflow(self)
         self.last_audit = None
+        from .emergency_stop import controller_for
+        controller_for(self)
 
     def capabilities(self):
         supported = ['audit', 'process-inventory', 'process-harness', 'resource-sampling', 'process-sleep',
@@ -608,5 +610,7 @@ class NativeBackend(Backend):
         return verify_native_outcomes(self, report, cancel_event=cancel_event, timeout=timeout)
 
     def close(self):
+        from .emergency_stop import controller_for
+        controller_for(self).request_stop()
         self._close_optional_tools()
         self.sampler.stop()

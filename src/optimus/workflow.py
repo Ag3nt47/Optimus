@@ -309,6 +309,10 @@ class Workflow:
         self.last_report = None
 
     def run(self, settings, progress_callback, cancel_event=None, *, browser_prompt=None, _lease=None):
+        from .emergency_stop import controller_for
+        controller = controller_for(self.backend)
+        controller.check()
+        cancel_event = controller.bind_cancel(cancel_event)
         global_cancel_event = cancel_event
         configuration = Preferences.validate(settings)
         if not self.lock.acquire(blocking=False):

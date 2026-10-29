@@ -864,6 +864,8 @@ class NativeSettingsWindow(DetailedSettingsWindow):
 
 class NativeOptimusWindow(OptimusWindow):
     def open_initial_setup(self, checked=False, *, first_run=False):
+        if self._emergency_stopping:
+            return False
         if self._startup_update_pending:
             self.status.setText('Finish the Optimus update prompt before setup. Maintenance is paused.')
             return False
@@ -895,6 +897,8 @@ class NativeOptimusWindow(OptimusWindow):
         return accepted
 
     def open_settings(self, checked=False, page=None):
+        if self._emergency_stopping:
+            return
         if self._startup_update_pending:
             self.status.setText('Finish the Optimus update prompt before opening Settings. Maintenance is paused.')
             return
@@ -913,7 +917,7 @@ class NativeOptimusWindow(OptimusWindow):
 
     def _offer_post_optimization_reviews(self, result, settings):
         from .unattended_configuration import matches_unattended
-        if matches_unattended(settings):
+        if self._emergency_stopping or self._quitting or matches_unattended(settings):
             self._post_review_active = False
             return
         try:

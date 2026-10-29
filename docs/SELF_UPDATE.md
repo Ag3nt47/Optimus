@@ -2,13 +2,15 @@
 
 Each normal graphical startup checks the latest stable release in the official **Ag3nt47/Optimus** GitHub repository. The bounded check runs outside the interface thread, before maintenance, Smart Cleaning, browser-exit cleaning and background sampling are approved. Smoke tests, startup probes and read-only command-line tools do not check for or install Optimus updates.
 
+The startup gate is established before queued interface or automation callbacks can start work. Maintenance remains paused while the check, update question, verified download or restart handoff is pending. No newer release, an unavailable check or an explicit decline can continue to normal launch review. After an update is accepted, a download, verification, preparation or handoff failure leaves maintenance paused for explicit review. Saved unattended Auto Clean follows the same ordering.
+
 When a supported newer Windows release is available, Optimus presents clearly labeled choices:
 
 - **Yes — update then Auto Clean** shows the current saved removal, file and browser actions. It approves that Optimus update and only that unchanged cleanup scope after restart.
 - **No — continue current version** continues the normal launch review. It does not approve cleanup by itself.
 - **Adjust settings** keeps automatic work paused and opens Settings. Closing the update prompt does not approve an update.
 
-A first-time user gets **Yes — update then setup** instead. Completing setup and reviewing its actual saved choices remains required before cleanup. An unavailable check, network error or refused update returns to the existing launch behavior; it does not prevent use of the current version.
+A first-time user gets **Yes — update then setup** instead. Completing setup and reviewing its actual saved choices remains required before cleanup. An unavailable release check or an explicitly declined update can return to the existing launch behavior. A network or other failure after accepting an update keeps maintenance paused; the current version can still be used through an explicit review.
 
 ## Download and restart
 
@@ -20,13 +22,15 @@ Release checksums detect corrupt or inconsistent downloads. They are not indepen
 
 A separate handoff process waits for the exact old interface to exit normally and for maintenance ownership to be released. It does not kill processes or approve Windows dialogs. Unsaved Sandbox work can cancel the handoff. The verified new version starts through the normal administrator-consent path. Declining elevation retains the application's normal protected-operation limits.
 
-A short-lived, owner-bound one-use handoff binds the verified executable, data location, saved preferences and cleanup scope. Only the expected restarted version can consume it. Changed settings or an invalid, expired or reused handoff return to normal review. No arbitrary executable path, command line or cleanup scope is accepted from GitHub metadata.
+A short-lived, owner-bound one-use handoff binds the verified executable, data location, saved preferences and cleanup scope. Only the expected restarted version can consume it. A verified single-use cleanup approval resumes the unchanged saved scope once. Without that valid approval, the restarted window stays paused for explicit review, including changed settings and invalid, expired or reused handoffs. No arbitrary executable path, command line or cleanup scope is accepted from GitHub metadata.
 
 Existing plain owned launch shortcuts and enabled sign-in registration are retargeted only when their current identity still matches the old installation. Their previous bytes or registration are retained for conditional recovery. Unrelated or changed launchers are left alone. Settings, journals, Sandbox source and the existing data-location selection remain in place; old release folders are retained for recovery.
 
 The update has its own visible progress and cancellation. Maintenance has not started while download, verification or restart is pending. A failed or cancelled update does not claim success or silently approve cleanup.
 
-Failures before the original window closes return to normal launch review. If a later handoff fails after that window has exited, Optimus preserves the old release and the private update/launcher records for manual recovery; it does not launch another installer or assert that cleanup ran. Reopen the retained original `Optimus.exe` to review the current state. An uncertain launch or partly changed launcher is never blindly replayed.
+The red **STOP** requests exit for the entire Optimus session. It latches before queued callbacks, cancels supported update work and prevents the normal fallback from starting Auto Clean. Pending restart approval must be revoked or accounted for before exit. STOP does not approve an update or bypass the Sandbox unsaved-work guard. See [startup and STOP](startup-and-emergency-stop.md).
+
+After an update is accepted, failures before the original window closes leave that window's maintenance paused for explicit review. If a later handoff fails after that window has exited, Optimus preserves the old release and the private update/launcher records for manual recovery; it does not launch another installer or assert that cleanup ran. Reopen the retained original `Optimus.exe` to review the current state. An uncertain launch or partly changed launcher is never blindly replayed.
 
 ## Platform and scope limits
 

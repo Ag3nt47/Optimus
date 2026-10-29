@@ -75,6 +75,10 @@ def run_saved_updates(backend, *, output=None, progress_callback=None, cancel_ev
     The returned JSON contains a persistent report and live progress-file path;
     this also makes results available when launched from a windowed executable.
     """
+    from .emergency_stop import controller_for
+    controller = controller_for(backend)
+    controller.check()
+    cancel_event = controller.bind_cancel(cancel_event)
     from .maintenance_toolkit import _lease_context
     with _lease_context(backend.data_dir, _lease) as lease:
         if _pending_native_request(backend):

@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 import uuid
+from functools import partial
 from .workflow import atomic_json
 
 CLASSIFICATIONS = frozenset(('0fa1201d-4330-4fa8-8ae9-b877473b6441',
@@ -84,24 +85,49 @@ try {
 '''
 
 
-def native_request(operation, payload, *, timeout=900, cancel_event=None):
+def native_request(operation, payload, *, timeout=900, cancel_event=None, stop_controller=None):
     if os.name != 'nt':
         return {'ok': False, 'error': 'Windows is required.'}
     if cancel_event is not None and cancel_event.is_set():
         return {'ok': False, 'cancelled': True, 'may_continue': False}
+    from .emergency_stop import EmergencyStop
+    controller = stop_controller if stop_controller is not None else EmergencyStop()
+    controller.check()
+    cancel_event = controller.bind_cancel(cancel_event)
     encoded = base64.b64encode(json.dumps(dict(payload, operation=operation), allow_nan=False).encode()).decode('ascii')
     executable = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     environment = {k: v for k, v in os.environ.items() if k.casefold() != 'psmodulepath'}
     environment['PSModulePath'] = str(executable.parent / 'Modules')
-    process = subprocess.Popen([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-                               _NATIVE.replace('__PAYLOAD__', encoded)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    arguments = [str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+                 _NATIVE.replace('__PAYLOAD__', encoded)]
+    options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding='utf-8', errors='replace', env=environment,
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    ticket = None
+    if operation == 'scan':
+        process = controller.spawn_disposable(arguments, label='Read-only Windows security update search', **options)
+    else:
+        with controller.launch_gate():
+            ticket = controller.begin_native('Windows security update installer')
+            try:
+                process = subprocess.Popen(arguments, **options)
+                ticket.started = True
+            except Exception:
+                ticket.finish()
+                raise
     deadline = time.monotonic() + timeout
     while True:
         cancelled = cancel_event is not None and cancel_event.is_set()
         if cancelled or time.monotonic() >= deadline:
+            if ticket is not None:
+                # WUA Install() is synchronous in this owned host. Closing it
+                # mid-call cannot safely abort Windows servicing. Retain and
+                # drain the original process until its genuine exit; the caller
+                # saves an unresolved exact-update receipt and starts no retry.
+                ticket.finish(known=False, error='Stopped waiting for native security installation.')
+                controller.observe_native_child(process, ticket)
+                return {'ok': False, 'cancelled': cancelled, 'may_continue': True,
+                        'error': 'Cancellation requested. The Windows security update is still observed; its final installation outcome needs verification.'}
             if process.poll() is None:
                 process.terminate()
             try:
@@ -118,9 +144,21 @@ def native_request(operation, payload, *, timeout=900, cancel_event=None):
             result = json.loads(output.strip())
             if not isinstance(result, dict) or process.returncode != 0 and result.get('ok') is not False:
                 raise ValueError('Windows Update returned an invalid result.')
+            if ticket is not None:
+                ticket.finish()
             return result
         except subprocess.TimeoutExpired:
             continue
+        except Exception as error:
+            if ticket is not None:
+                # Malformed output after a real exit is not an installed claim.
+                # Preserve the caller's error and continue observing if live.
+                if process.poll() is not None:
+                    ticket.finish()
+                else:
+                    ticket.finish(known=False, error=error)
+                    controller.observe_native_child(process, ticket)
+            raise
 
 
 def candidates(scan):
@@ -149,12 +187,16 @@ def candidates(scan):
 
 
 class SecurityUpdates:
-    def __init__(self, data_dir, runner=None):
+    def __init__(self, data_dir, runner=None, *, stop_controller=None):
         self.directory = Path(data_dir) / 'security-updates'
-        self.runner = runner or native_request
+        self.stop_controller = stop_controller
+        self.runner = runner if runner is not None else partial(native_request, stop_controller=stop_controller)
         self._lock = threading.Lock()
 
     def run(self, settings, cancel_event=None, item_callback=None):
+        if self.stop_controller is not None:
+            self.stop_controller.check()
+            cancel_event = self.stop_controller.bind_cancel(cancel_event)
         if not self._lock.acquire(blocking=False):
             return {'skipped': True, 'failed_items': 1, 'items': [], 'note': 'Another security-update request is active.'}
         lease = None

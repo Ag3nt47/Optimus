@@ -103,12 +103,38 @@ class NativeRunner:
     """Bounded read-only commands and an explicit native privilege broker."""
     def __init__(self, system=None):
         self.system = system or sys.platform
+        self.stop_controller = None
 
     def run(self, argv, *, timeout=90, cancel_event=None):
+        controller = self.stop_controller
+        if controller is not None:
+            controller.check()
+            cancel_event = controller.bind_cancel(cancel_event)
         if cancel_event is not None and cancel_event.is_set():
             return {'exitCode': 0, 'cancelled': True, 'stdout': '', 'stderr': ''}
         environment = dict(os.environ, LC_ALL='C', LANG='C', HOMEBREW_NO_AUTO_UPDATE='1',
                            HOMEBREW_NO_INSTALL_CLEANUP='1')
+        if controller is not None:
+            # A package manager/privilege broker is conservatively native. Do
+            # not kill it (or descendants) on STOP or timeout.
+            with controller.launch_gate():
+                ticket = controller.begin_native('Native system/package command')
+                try:
+                    child = subprocess.Popen([str(value) for value in argv], stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, errors='replace', env=environment)
+                    ticket.started = True
+                except Exception:
+                    ticket.finish()
+                    raise
+            try:
+                output, errors = child.communicate(timeout=timeout)
+            except Exception as error:
+                ticket.finish(known=False, error=error)
+                controller.observe_native_child(child, ticket)
+                raise RuntimeError('The native command outcome is unresolved; no process was killed or retried.') from error
+            ticket.finish()
+            return {'exitCode': child.returncode, 'stdout': output, 'stderr': errors,
+                    'command': Path(str(argv[0])).name}
         try:
             completed = subprocess.run([str(value) for value in argv], capture_output=True,
                                        text=True, errors='replace', timeout=timeout, env=environment)
@@ -120,6 +146,8 @@ class NativeRunner:
                 'stderr': completed.stderr, 'command': Path(str(argv[0])).name}
 
     def privileged(self, argv, *, timeout=900, cancel_event=None):
+        if self.stop_controller is not None:
+            self.stop_controller.check()
         if cancel_event is not None and cancel_event.is_set():
             return {'exitCode': 0, 'cancelled': True, 'skipped': True}
         # There is no GUI-wide root mode. The OS asks only for this one

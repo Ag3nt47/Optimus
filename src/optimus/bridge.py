@@ -7,10 +7,20 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
 from .item_progress import normalize_item_progress
 from .filesystem import _ordinary_data_path
+
+# These bounded bridge handlers execute synchronously and cannot launch an
+# installer or Windows asynchronous mutator. Their exact terminal error is not
+# an unknown installation. Everything else keeps the conservative native guard.
+_SYNCHRONOUS_TERMINAL = frozenset({'update_recovery_probe', 'system_diagnostics', 'adaptive_network',
+    'audit', 'process_details', 'startup_list', 'installed_apps', 'services', 'storage_scan',
+    'duplicate_scan', 'drivers_list', 'changes', 'registry_scan', 'power_plans', 'registry_audit',
+    'driver_device_inventory', 'startup_set', 'startup_remove', 'service_set', 'duplicate_recycle',
+    'registry_remove', 'registry_restore', 'set_power_plan'})
 
 class PowerShellBridge:
     def __init__(self, data_dir: Path):
@@ -27,6 +37,39 @@ class PowerShellBridge:
         self._progress = {}
         self._cancellation_paths = {}
         self._errors: list[str] = []
+        self.stop_controller = None
+        self._stop_operations = {}
+
+    def _bind_emergency_stop(self, controller):
+        if self.stop_controller is not controller:
+            self.stop_controller = controller
+            controller.register_service(self._stop_idle_host)
+
+    def _stop_idle_host(self):
+        # Requests are registered inside the same launch gate. Once STOP is
+        # latched no new request can race this check. Never kill a busy host.
+        with self._pending_lock:
+            if self._pending or self._stop_operations or not self.stop_controller.is_set():
+                return
+            process = self._process
+            if process is not None and process.poll() is None:
+                process.terminate()  # Original Windows Popen HANDLE only.
+
+    def _complete_stop_operation(self, identity, response):
+        with self._pending_lock:
+            entry = self._stop_operations.get(identity)
+        if entry is None:
+            return
+        ticket, operation = entry
+        result = response.get('result')
+        lifecycle = isinstance(result, dict) and any(key in result for key in ('outcomeKnown', 'running', 'installer_started'))
+        known = (result.get('outcomeKnown') is True and result.get('running') is False
+                 and type(result.get('installer_started')) is bool) if lifecycle else (
+                     response.get('ok') is True or operation in _SYNCHRONOUS_TERMINAL)
+        ticket.finish(known=known, error=None if known else 'Native completion remains unverified.')
+        if known:
+            with self._pending_lock:
+                self._stop_operations.pop(identity, None)
 
     def _start(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -36,12 +79,13 @@ class PowerShellBridge:
         # modules with the same names; restrict this child to its own OS modules.
         child_environment = {key: value for key, value in os.environ.items() if key.casefold() != 'psmodulepath'}
         child_environment['PSModulePath'] = str(executable.parent / 'Modules')
-        process = subprocess.Popen([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                                    '-File', str(self.script), '-DataRoot', str(self.data_dir)], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
-                                   bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), env=child_environment)
-        self._process = process
-        self._closing_process = None
+        with self.stop_controller.launch_gate() if self.stop_controller else nullcontext():
+            process = subprocess.Popen([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                                        '-File', str(self.script), '-DataRoot', str(self.data_dir)], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+                                       bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), env=child_environment)
+            self._process = process
+            self._closing_process = None
         target_queue = self._replies
         def read_output():
             try:
@@ -72,6 +116,7 @@ class PowerShellBridge:
                             self._clear_cancellation_marker(identity)
                             with self._pending_lock:
                                 self._pending.pop(identity, None)
+                            self._complete_stop_operation(identity, value)
                             target_queue.put(value)
                     except json.JSONDecodeError:
                         continue
@@ -109,7 +154,14 @@ class PowerShellBridge:
             raise ValueError('An optional progress callback must be callable.')
         if cancel_event is not None and operation not in ('driver_updates_scan', 'driver_update_apply'):
             raise ValueError('This native operation has no supported cooperative cancellation contract.')
+        controller = self.stop_controller
+        if controller is not None:
+            controller.check()
+            if operation in ('driver_updates_scan', 'driver_update_apply'):
+                cancel_event = controller.bind_cancel(cancel_event)
         with self._lock:
+            if controller is not None:
+                controller.check()
             if self._process is None or self._process.poll() is not None:
                 self._start()
             request_id = uuid.uuid4().hex
@@ -128,6 +180,7 @@ class PowerShellBridge:
                         'directory': cancel_directory, 'identity': (info.st_dev, info.st_ino), 'marker_identity': None}
                 arguments = dict(arguments, cooperativeCancellation=True)
             cancellation_sent = False
+            submitted = False
             self._busy = True
             with self._pending_lock:
                 self._pending[request_id] = (operation, self._process.pid)
@@ -141,9 +194,9 @@ class PowerShellBridge:
                         progress_callback(value)
                     except Exception:
                         pass  # Display failure cannot cancel or replay a native operation.
-            def request_cancellation():
+            def request_cancellation(*, force=False):
                 nonlocal cancellation_sent
-                if cancel_directory is None or cancellation_sent or not cancel_event.is_set():
+                if cancel_directory is None or cancellation_sent or not (force or cancel_event.is_set()):
                     return
                 try:
                     self._check_cancellation_directory(request_id)
@@ -158,9 +211,17 @@ class PowerShellBridge:
                     # killing the still-owned native operation.
                     pass
             try:
-                request_cancellation()  # An already-set local token precedes launch.
-                self._process.stdin.write(json.dumps({'id': request_id, 'operation': operation, 'arguments': arguments}, separators=(',', ':')) + '\n')
-                self._process.stdin.flush()
+                with controller.launch_gate() if controller else nullcontext():
+                    if controller is not None:
+                        ticket = controller.begin_native('Windows operation: ' + operation,
+                            cancel=(lambda: request_cancellation(force=True)) if cancel_directory is not None else None)
+                        ticket.started = True
+                        with self._pending_lock:
+                            self._stop_operations[request_id] = (ticket, operation)
+                    request_cancellation()  # An already-set local token precedes launch.
+                    submitted = True  # A partial write is conservatively unresolved.
+                    self._process.stdin.write(json.dumps({'id': request_id, 'operation': operation, 'arguments': arguments}, separators=(',', ':')) + '\n')
+                    self._process.stdin.flush()
                 deadline = time.monotonic() + timeout
                 while True:
                     request_cancellation()
@@ -190,12 +251,14 @@ class PowerShellBridge:
                 except OSError:
                     exited_pid = None
                 with self._pending_lock:
+                    if not submitted:
+                        self._pending.pop(request_id, None)
                     if exited_pid is not None:
                         self._pending = {key: value for key, value in self._pending.items() if value[1] != exited_pid}
                     self._progress_active.discard(request_id)
                     self._progress.pop(request_id, None)
                 self._busy = False
-                if cancel_directory is not None and (terminal or exited_pid is not None):
+                if cancel_directory is not None and (not submitted or terminal or exited_pid is not None):
                     # Never remove an in-flight request marker on a timeout:
                     # its native worker still needs to observe the request.
                     self._clear_cancellation_marker(request_id)

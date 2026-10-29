@@ -70,6 +70,8 @@ def independent_stage(title):
 
 def isolated_backend(backend, *, isolate_bridge=False):
     """Copy known mutable updater caches without discovering host adapters."""
+    from .emergency_stop import controller_for
+    controller_for(backend)
     result = copy.copy(backend)
     if isolate_bridge:
         from .bridge import PowerShellBridge
@@ -93,6 +95,8 @@ def isolated_backend(backend, *, isolate_bridge=False):
         result.native_packages._last_scan = None
         # Preserve the manager's serialization lock, while isolating its cache.
         # Independent inventory never starts another package installer.
+    # The new bridge and copied caches share the application's lifetime latch.
+    controller_for(result)
     return result
 
 
