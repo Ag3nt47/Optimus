@@ -48,6 +48,13 @@ It rechecks installed state and avoids downloading the identical offer repeatedl
 while the same prerequisite remains. Other applications continue through their
 queue. Optimus does not force-close Codex to replace the client running this work.
 
+The update-only continuation uses the same saved app and driver approvals without
+running cleanup, debloat or app-presence rules. Failed or held items remain in the
+results while other eligible packages continue. It preserves native installation
+records: an active, uncertain or restart-required installer keeps its safety gate
+until its outcome or prerequisite is resolved. Reopening Optimus does not erase
+evidence or count a skipped package as installed.
+
 ## Updating drivers
 
 Automatic Windows Update driver installation retains the saved matching rules

@@ -12,7 +12,7 @@ from .automation import CURRENT_SETUP_VERSION, RunLease, record_attempt
 from .workflow import atomic_json, _space_guard_result
 from .native_operations import sha256_file
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
-from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal, accepts_cancel_event
+from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal, accepts_cancel_event, update_exception_receipt
 
 
 def _cancelled(event):
@@ -193,11 +193,14 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
                 result['cancelled'] = True
                 break
         except Exception as error:
-            known = getattr(error, 'installer_started', None) is False and getattr(error, 'outcomeKnown', None) is True
+            receipt = update_exception_receipt(error, default_scope='app_batch')
+            known = receipt['outcomeKnown'] is True and receipt['running'] is False
             result['items'].append({'id': row['id'], 'status': 'failed', 'error': str(error),
-                'result': {'installer_started': not known, 'outcomeKnown': known, 'running': False}})
+                'result': receipt})
             result['failed_items'] += 1
-            work.finish('failed', mutation_started=not known, outcome_known=known, message=str(error))
+            work.finish('failed', result=result['items'][-1], mutation_started=receipt['installer_started'], outcome_known=known, message=str(error))
+            if can_fail_forward(receipt):
+                continue
             break
         finally:
             reporter.close()

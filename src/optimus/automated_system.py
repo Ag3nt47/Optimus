@@ -12,7 +12,7 @@ import time
 import uuid
 from .automation import CURRENT_SETUP_VERSION
 from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
-from .navigation import WorkItem, cursor_for, navigation_skip, local_skip, can_fail_forward, shared_update_refusal, accepts_cancel_event
+from .navigation import WorkItem, cursor_for, navigation_skip, local_skip, can_fail_forward, shared_update_refusal, accepts_cancel_event, update_exception_receipt
 
 _HEX64 = re.compile(r'^[0-9a-fA-F]{64}$')
 _STARTUP_ID = re.compile(r'^(Registry|Shortcut)-[0-9a-fA-F]{64}$')
@@ -480,14 +480,11 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             if (not success or outcome.get('restartNeeded') is True or shared_update_refusal(outcome)
                     or outcome.get('outcomeKnown') is False or outcome.get('running') is True):break
         except Exception as error:
-            known=(getattr(error,'installer_started',None) is False and getattr(error,'outcomeKnown',None) is True)
-            receipt={'installer_started':False,'outcomeKnown':True,'running':False,
-                'requiresReview':True,'failure_scope':getattr(error,'failure_scope','shared'),
-                'failureKind':getattr(error,'failureKind','preflight_failed'),'note':str(error)[:2000]} if known else {
-                'installer_started':getattr(error,'installer_started',None),'outcomeKnown':False,'running':getattr(error,'running',None)}
+            receipt=update_exception_receipt(error,default_scope='shared')
+            known=receipt['outcomeKnown'] is True and receipt['running'] is False
             if shared_update_refusal(receipt):receipt['shared_barrier']=True
             items.append({'binding':value,'status':'failed','error':str(error),'uncertain':not known,'result':receipt})
-            work.finish('failed',result=items[-1],mutation_started=not known,outcome_known=known,message=str(error))
+            work.finish('failed',result=items[-1],mutation_started=receipt['installer_started'],outcome_known=known,message=str(error))
             if can_fail_forward(receipt):continue
             break
         finally:

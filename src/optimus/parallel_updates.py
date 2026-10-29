@@ -17,7 +17,7 @@ import uuid
 from .filesystem import _ordinary_data_path
 from .item_progress import normalize_item_progress
 from .worker_totals import WorkerResourceTotals, download_observation, normalize_resource_totals
-from .navigation import local_skip, shared_update_refusal, can_fail_forward
+from .navigation import local_skip, shared_update_refusal, can_fail_forward, update_exception_receipt
 
 WINDOWS_SOFTWARE = 'Review or update configured software'
 NATIVE_SOFTWARE = 'Review or install approved native package updates'
@@ -1243,15 +1243,49 @@ class ParallelAppUpdates:
             if not isinstance(self.result, dict):
                 raise ValueError('The ' + worker_kind + ' updater returned an unknown result.')
         except BaseException as error:
-            self.result = {'items': [], 'failed_items': 1,
-                           'uncertain': self.record['installer_prepared'],
-                           'stop_reason': ('The ' + worker_kind + ' worker raised an error; verify installer state before continuing.'
-                                           if self.record['installer_prepared'] else
-                                           'The ' + worker_kind + ' worker failed before any installer was prepared; review the saved error.'),
-                           'error': str(error)[:4000]}
-            if not self.record['installer_prepared'] or (getattr(error, 'installer_started', None) is False
-                                                        and getattr(error, 'outcomeKnown', None) is True):
-                self.result.update(installer_started=False, outcomeKnown=True, running=False, uncertain=False)
+            receipt = update_exception_receipt(error, default_scope='app_batch')
+            if (not self.record['installer_prepared'] and not any(hasattr(error, key)
+                    for key in ('installer_started', 'outcomeKnown', 'running', 'exitCode', 'hresult', 'aggregateHresult',
+                        'resultCode', 'aggregateResultCode', 'restartNeeded', 'reboot_required', 'rebootRequired',
+                        'cancelled', 'uncertain', 'shared_barrier'))):
+                # The owned discovery boundary proves no mutation intent was
+                # granted. Never override explicit active/unknown metadata.
+                receipt.update(installer_started=False, outcomeKnown=True, running=False, uncertain=False)
+            self.result = dict(receipt, items=[], failed_items=1,
+                stop_reason=('The ' + worker_kind + ' worker failed before any installer was prepared; review the saved error.'
+                    if not self.record['installer_prepared'] else
+                    'The ' + worker_kind + ' worker raised an error; review its exact terminal item.'),
+                error=str(error)[:4000])
+            if receipt.get('installer_started') is True and receipt.get('outcomeKnown') is True:
+                attempt = self.record.get('package_attempt')
+                current = self.record.get('current_item', {})
+                progress = current.get('item_progress') if isinstance(current, dict) else None
+                bound = (isinstance(attempt, dict) and attempt.get('kind') == 'terminal-package-attempt-v1'
+                    and re.fullmatch('[a-f0-9]{32}', str(attempt.get('id', ''))) is not None
+                    and attempt.get('state') == 'prepared'
+                    and isinstance(current, dict)
+                    and isinstance(attempt.get('item_id'), str) and bool(attempt['item_id'])
+                    and getattr(error, 'item_id', None) == attempt['item_id'] == current.get('id')
+                    and isinstance(progress, dict) and isinstance(progress.get('key'), str)
+                    and bool(progress['key']) and getattr(error, 'item_key', None) == progress['key'])
+                if bound:
+                    row = {'id': attempt['item_id'], 'status': 'failed', 'result': receipt, 'error': str(error)[:1800]}
+                    try:
+                        self.item_receipt(row)  # Durable exact closure precedes releasing another lane.
+                        self.result['items'] = [row]
+                    except BaseException as journal_error:
+                        self.result.update(outcomeKnown=False, uncertain=True,
+                            journal_error=str(journal_error)[:2000],
+                            stop_reason='The terminal item receipt could not be saved; verify installer state before continuing.')
+                else:
+                    self.result.update(outcomeKnown=False, uncertain=True,
+                        stop_reason='The terminal exception did not identify the exact prepared item; verify installer state before continuing.')
+            if self.result.get('outcomeKnown') is False and not self.record['installer_prepared']:
+                # Explicit native uncertainty overrides an absent local intent;
+                # a later startup must not discard it as read-only discovery.
+                # No package identity or terminal closure is invented here.
+                self.record['installer_prepared'] = True
+                self.result['stop_reason'] = 'The worker reported an unbound native outcome; verify installer state before continuing.'
             for key in ('driver_scan', 'app_scan'):
                 evidence = getattr(error, key, None)
                 if isinstance(evidence, dict):

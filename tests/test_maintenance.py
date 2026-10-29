@@ -95,13 +95,26 @@ class Tests(unittest.TestCase):
         header = f"{'Name':18}{'Id':24}{'Version':14}{'Available':14}Source"
         row = f"{'Example':18}{'Vendor.Example':24}{'1.0':14}{'2.0':14}winget"
         completed = subprocess.CompletedProcess([], 0, header + '\n' + '-'*80 + '\n' + row + '\n', '')
-        with patch.object(Maintenance, '_winget', return_value='winget-fixture.exe'), patch.object(Maintenance, '_run', side_effect=[completed,completed,subprocess.CompletedProcess([],0,'There are no pins configured.',''),subprocess.CompletedProcess([],0,'Fixture updated','')]) as run:
+        installed_row = f"{'Example':18}{'Vendor.Example':24}{'2.0':14}{'2.0':14}winget"
+        readback = subprocess.CompletedProcess([], 0, header + '\n' + '-'*80 + '\n' + installed_row + '\n', '')
+        with patch.object(Maintenance, '_winget', return_value='winget-fixture.exe'), patch.object(Maintenance, '_run', side_effect=[completed,completed,subprocess.CompletedProcess([],0,'There are no pins configured.',''),subprocess.CompletedProcess([],0,'Fixture updated',''),readback]) as run:
             scan = self.tool.updates_scan()
             self.assertEqual(scan['updates'][0]['id'], 'Vendor.Example')
             with self.assertRaises(ValueError): self.tool.updates_apply('Vendor.Example')
             with self.assertRaises(ValueError): self.tool.updates_apply('Other.Package', confirmed=True)
-            self.tool.updates_apply('Vendor.Example', confirmed=True)
-            self.assertEqual(run.call_args.args[0], ['winget-fixture.exe', 'upgrade', '--id', 'Vendor.Example', '--exact', '--source', 'winget', '--version', '2.0', '--disable-interactivity'])
+            result = self.tool.updates_apply('Vendor.Example', confirmed=True)
+            upgrades = [call.args[0] for call in run.call_args_list
+                        if call.args[0][1] == 'upgrade' and '--id' in call.args[0]]
+            self.assertEqual(len(upgrades), 1)
+            arguments = upgrades[0]
+            self.assertEqual(arguments[:-2], ['winget-fixture.exe', 'upgrade', '--id', 'Vendor.Example', '--exact', '--source', 'winget', '--version', '2.0', '--disable-interactivity'])
+            self.assertEqual(arguments[-2], '--log')
+            diagnostic = Path(arguments[-1])
+            self.assertEqual(diagnostic.name, 'winget.log')
+            self.assertIn(Path(self.temp.name) / 'app-update-verification', diagnostic.parents)
+            self.assertEqual(run.call_args.args[0], ['winget-fixture.exe', 'list', '--id', 'Vendor.Example', '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity'])
+            self.assertIs(result['verified'], True)
+            self.assertEqual(result['installed_version'], '2.0')
     def test_11_task_scope_and_no_implicit_creation(self):
         with patch.object(Maintenance, '_run') as run:
             with self.assertRaises(ValueError): self.tool.schedule_create()

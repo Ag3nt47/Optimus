@@ -90,7 +90,7 @@ Review and save the first-start choices, then choose **Auto Clean** at the launc
 
 ### Current release
 
-Version **0.12.14** verifies the restarted Optimus window before reporting a successful GitHub update. A confirmed update closes the old window, preserves saved choices and starts the new version automatically. App updates also require a fresh installed-version check; a successful launcher exit alone is insufficient. Pending app activation and skipped driver offers retain their reasons. [Update and restart verification](docs/github-update-restart.md)
+Version **0.12.15** verifies the restarted Optimus window before reporting a successful GitHub update. A confirmed update closes the old window, preserves saved choices and starts the new version automatically. App updates also require a fresh installed-version check; a successful launcher exit alone is insufficient. Failed or held offers retain their reasons while other approved updates continue. Update-only continuation runs the remaining saved scope without cleanup or debloat; active or uncertain installers keep their safety gates. [Update and restart verification](docs/github-update-restart.md)
 
 The performance improvements from 0.12.12 reduce repeated work in process attribution, browser-cleaning checks, worker totals and the animated interface. Fresh process checks, file protections, truthful progress and saved choices remain in effect. Fixture timings do not establish a general PC speed gain. [Performance changes and measurements](docs/performance-efficiency.md)
 

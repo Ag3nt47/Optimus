@@ -9,7 +9,7 @@ from typing import Any
 from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
 from .update_holds import load_update_holds, matching_update_hold, held_update_result, is_known_update_hold
-from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal
+from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal, update_exception_receipt
 
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _VERSION = re.compile(r'[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}')
@@ -498,18 +498,14 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 deferred = selected[index + 1:]
                 break
         except Exception as error:
-            preflight = (getattr(error, 'installer_started', None) is False
-                         and getattr(error, 'outcomeKnown', None) is True)
-            evidence = ({'installer_started': False, 'outcomeKnown': True, 'running': False,
-                         'failureKind': getattr(error, 'failureKind', 'preflight_failed'),
-                         'failure_scope': getattr(error, 'failure_scope', 'app_batch'), 'status': 'blocked'} if preflight else
-                        {'installer_started': getattr(error, 'installer_started', None),
-                         'outcomeKnown': False, 'running': getattr(error, 'running', None)})
+            evidence = update_exception_receipt(error, default_scope='app_batch')
+            known_idle = evidence['outcomeKnown'] is True and evidence['running'] is False
+            preflight = known_idle and evidence['installer_started'] is False
             results.append({'id': identity, 'status': 'failed', 'error': str(error), 'result': evidence})
             if preflight and shared_update_refusal(dict(evidence, requiresReview=True)):
                 evidence['shared_barrier'] = True
-            work.finish('failed', result=results[-1], mutation_started=not preflight, outcome_known=preflight, message=str(error))
-            if preflight and can_fail_forward(evidence):
+            work.finish('failed', result=results[-1], mutation_started=evidence['installer_started'], outcome_known=known_idle, message=str(error))
+            if can_fail_forward(evidence):
                 continue
             # Known pre-install refusals must not create an orphan-installer
             # record. Unclassified exceptions still cannot prove child exit.

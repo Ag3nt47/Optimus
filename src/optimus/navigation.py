@@ -377,6 +377,50 @@ def shared_update_refusal(value):
     return _line(value.get('note') or value.get('error') or 'Shared update safety checks require review before another installer.', 1000) if shared else None
 
 
+def update_exception_receipt(error, *, default_scope='app_batch'):
+    """Preserve explicit terminal exceptions without inventing native liveness.
+
+    A package-local error may describe a retired installer as well as a refusal
+    before launch. Missing, inconsistent or malformed metadata stays unknown;
+    callers still apply can_fail_forward and their durable item binding.
+    """
+    started = getattr(error, 'installer_started', None)
+    known = getattr(error, 'outcomeKnown', None)
+    running = getattr(error, 'running', None)
+    scope = getattr(error, 'failure_scope', default_scope)
+    scope = scope if scope in ('package', 'app_batch', 'shared', 'system', 'batch') else default_scope
+    receipt = {'installer_started': started if type(started) is bool else None,
+        'outcomeKnown': type(started) is bool and known is True and running is False,
+        'running': running if type(running) is bool else None,
+        'requiresReview': True, 'failure_scope': scope,
+        'failureKind': _line(getattr(error, 'failureKind', 'preflight_failed'), 100),
+        'note': _line(error, 2000)}
+    missing = object()
+    invalid = False
+    for key in ('exitCode', 'hresult', 'aggregateHresult', 'resultCode', 'aggregateResultCode',
+                'restartNeeded', 'reboot_required', 'rebootRequired', 'cancelled', 'uncertain', 'shared_barrier'):
+        value = getattr(error, key, missing)
+        if value is missing:
+            continue
+        # Keep malformed primitive fields visible; never drop one and let the
+        # existing native-code gate accidentally treat it as absent/benign.
+        receipt[key] = value if value is None or type(value) in (str, int, bool) else '<invalid ' + type(value).__name__ + '>'
+        if key in ('exitCode', 'hresult', 'aggregateHresult', 'resultCode', 'aggregateResultCode'):
+            invalid |= type(value) is not int and not (key == 'exitCode' and value is None)
+        else:
+            invalid |= type(value) is not bool and not (key == 'restartNeeded' and value is None)
+    if invalid or receipt.get('uncertain') is True:
+        receipt['outcomeKnown'] = False
+    code = receipt.get('exitCode')
+    native_restart = type(code) is int and code & 0xffffffff in (3010, 1641, 0x8A150109, 0x8A15010A, 0x8A15010B)
+    if native_restart or receipt.get('reboot_required') is True or receipt.get('rebootRequired') is True:
+        receipt['restartNeeded'] = True  # All installer lanes share this restart gate.
+    if receipt['outcomeKnown'] is not True:
+        receipt['uncertain'] = True
+    receipt['status'] = 'blocked' if started is False else 'failed'
+    return receipt
+
+
 def can_fail_forward(value):
     """Advance only after explicit terminal evidence, preserving shared gates."""
     if isinstance(value, dict):
@@ -389,5 +433,6 @@ def can_fail_forward(value):
             and value.get('failure_scope') != 'app_batch'
             and value.get('running') is False and type(value.get('installer_started')) is bool
             and value.get('cancelled') is not True and value.get('uncertain') is not True
-            and value.get('restartNeeded') is not True and value.get('exitCode') not in (3010, 1641)
+            and value.get('restartNeeded') is not True and value.get('reboot_required') is not True
+            and value.get('rebootRequired') is not True and value.get('exitCode') not in (3010, 1641)
             and not shared_update_refusal(value))
