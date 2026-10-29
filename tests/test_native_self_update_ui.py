@@ -19,13 +19,17 @@ from optimus.ui import OptimusWindow
 from optimus.workflow import DEFAULTS
 
 
-def wait_for(app, predicate):
+def wait_for(app, predicate, *, diagnostics=None):
     deadline = time.monotonic() + 5
     while not predicate() and time.monotonic() < deadline:
         app.processEvents()
-        QTest.qWait(5)
+        # Qt events are pumped explicitly. Yield Python's GIL as well so the
+        # real resume worker can perform its authenticated filesystem checks.
+        time.sleep(0.005)
     app.processEvents()
-    assert predicate()
+    if not predicate():
+        pytest.fail('Expected Qt fixture state was not reached. '
+                    + str(diagnostics() if diagnostics is not None else ''))
 
 
 @pytest.fixture

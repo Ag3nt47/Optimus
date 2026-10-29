@@ -18,7 +18,7 @@ import tempfile
 import time
 import uuid
 from typing import Any
-from .automated_software import is_newer_version, valid_update_version
+from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING, is_newer_version, valid_update_version
 
 
 _ACTIONS = (
@@ -339,7 +339,7 @@ class Maintenance:
             if re.fullmatch(r"\d+ upgrades? available\.", line.strip()):
                 continue
             if re.fullmatch(r"\d+ package\(s\) have version numbers that cannot be determined\. Use --include-unknown to see all results\.", line.strip()):
-                skipped.append("Installed packages with unknown versions require their publisher updater or version review.")
+                skipped.append(UNKNOWN_VERSION_COVERAGE_WARNING)
                 continue
             values = [line[start:starts[position + 1] if position < len(starts) - 1 else len(line)].strip()
                       for position, start in enumerate(starts)]

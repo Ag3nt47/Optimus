@@ -1,4 +1,4 @@
 """Optimus: Computer optimization tool."""
-__version__ = "0.12.20"
+__version__ = "0.12.21"
 
 

@@ -3,9 +3,15 @@ import copy
 import hashlib
 import hmac
 import json
+from pathlib import Path
+import sys
+import threading
+import time
+import traceback
 from unittest.mock import Mock
 
 import pytest
+from PySide6.QtCore import QTimer
 
 from optimus import self_update as module
 from optimus import workflow
@@ -144,7 +150,7 @@ def test_unrecognized_approval_schema_never_grants_cleanup(updater, schema):
     assert (p.data / 'preferences.json').read_bytes() == p.raw
 
 
-def test_effective_resume_reaches_strict_gui_gate_once_without_migrating_file(updater, owner):
+def test_effective_resume_reaches_strict_gui_gate_once_without_migrating_file(updater, owner, request):
     p = updater
     effective = saved_choices(p)
     identity = handoff(p)
@@ -153,10 +159,43 @@ def test_effective_resume_reaches_strict_gui_gate_once_without_migrating_file(up
     app, window, backend, settings = owner
     settings.clear()
     settings.update(copy.deepcopy(effective))
-    value, service = controller(owner, ui_updater(consume_resume=Mock(side_effect=child.consume_resume)),
+    resume_worker = {}
+    def consume(identity):
+        resume_worker['thread'] = threading.get_ident()
+        resume_worker['started_at'] = time.monotonic()
+        try:
+            return child.consume_resume(identity)
+        finally:
+            resume_worker['duration_seconds'] = time.monotonic() - resume_worker['started_at']
+    def worker_stack():
+        frame = sys._current_frames().get(resume_worker.get('thread'))
+        return ([f'{Path(row.filename).name}:{row.name}:{row.lineno}'
+                 for row in traceback.extract_stack(frame)[-12:]] if frame is not None else [])
+    value, service = controller(owner, ui_updater(consume_resume=Mock(side_effect=consume)),
                                 resume_id=identity)
-    value.start()
-    wait_for(app, lambda: window.start_optimization.called)
+    # app.start_session shows the main window, then schedules its startup
+    # controller on the next Qt event turn. Exercise that same ordering here.
+    visible_before_start = []
+    def begin_visible_session():
+        visible_before_start.append(window.isVisible())
+        value.start()
+    QTimer.singleShot(0, begin_visible_session)
+    wait_for(app, lambda: window.start_optimization.called, diagnostics=lambda: {
+        'window_visible': window.isVisible(), 'window_quitting': window._quitting,
+        'status': window.status.text(), 'pending': value.pending,
+        'resume_started': value._resume_started, 'resume_completed': value._resume_completed,
+        'cancelled': value.cancel.is_set(), 'startup_pending': window._startup_update_pending,
+        'consume_calls': service.consume_resume.call_count,
+        'acknowledge_calls': service.acknowledge_resume.call_count,
+        'active_threads': value.pool.activeThreadCount(),
+        'jobs': [(job.phase, job.handled, type(getattr(job, 'outcome', None)).__name__) for job in value._jobs],
+        'visible_before_start': visible_before_start,
+        'resume_worker_duration': resume_worker.get('duration_seconds'),
+        'worker_stack': worker_stack(),
+        'resume_receipt_exists': (child.directory / identity / 'resume-consumed.json').is_file(),
+    })
+    request.node.user_properties.append(('resume_worker_duration_seconds', resume_worker.get('duration_seconds')))
+    assert visible_before_start == [True]
     assert window.session_approved()
     service.consume_resume.assert_called_once_with(identity)
     service.acknowledge_resume.assert_called_once_with(identity)

@@ -262,6 +262,78 @@ def _narrow_settings(backend, approved, current):
     return _settings(backend, effective)
 
 
+def _terminal_software_coverage(value):
+    """Account for one known coverage advisory without inventing installer exit.
+
+    The counter is not authority. Require the native WinGet response, matching
+    derived scan evidence and explicit terminal receipts for every processed
+    item. Other scan errors and absent lifecycle evidence remain barriers.
+    """
+    from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING, fresh_candidates
+    from .navigation import can_fail_forward, shared_update_refusal
+    from .update_scan_evidence import app_scan_evidence
+
+    def terminal(receipt):
+        if (not isinstance(receipt, dict) or not can_fail_forward(receipt)
+                or receipt.get('status') == 'uncertain' or receipt.get('installation_blocked') is True):
+            return False
+        for key in ('cancelled', 'uncertain', 'may_continue', 'reboot_required', 'rebootRequired', 'shared_barrier'):
+            if key in receipt and (type(receipt[key]) is not bool or receipt[key]):
+                return False
+        if 'restartNeeded' in receipt and receipt['restartNeeded'] is not None and type(receipt['restartNeeded']) is not bool:
+            return False
+        if 'requiresReview' in receipt and type(receipt['requiresReview']) is not bool:
+            return False
+        if 'exitCode' in receipt and receipt['exitCode'] is not None and type(receipt['exitCode']) is not int:
+            return False
+        if 'failed_items' in receipt and (type(receipt['failed_items']) is not int or receipt['failed_items'] < 0):
+            return False
+        return not shared_update_refusal(receipt)
+
+    if not terminal(value) or value.get('stop_reason') or value.get('deferred_ids'):
+        return False
+    if value.get('navigation_cancelled') is True or value.get('navigation_cancelled_items', 0) != 0:
+        return False
+    scan, evidence, items = value.get('scan'), value.get('app_scan'), value.get('items')
+    if (not isinstance(scan, dict) or not isinstance(evidence, dict)
+            or not isinstance(items, list) or len(items) > 1000
+            or scan.get('source') != 'winget' or scan.get('structured') is not True
+            or type(scan.get('exitCode')) is not int or scan['exitCode'] != 0
+            or scan.get('complete', True) is not True
+            or scan.get('excluded') != [UNKNOWN_VERSION_COVERAGE_WARNING]
+            or scan.get('error') or scan.get('errors')):
+        return False
+    diagnostics = scan.get('stderr')
+    if diagnostics is not None and (not isinstance(diagnostics, str) or diagnostics.strip()):
+        return False
+    rows = scan.get('updates', scan.get('packages'))
+    if not isinstance(rows, list) or len(rows) > 1000 or any(not isinstance(row, dict) for row in rows):
+        return False
+    if len(fresh_candidates(scan)) != len(rows):
+        return False
+    reported = scan.get('source_reported_offers_count')
+    if reported is not None and (type(reported) is not int or reported != len(rows)):
+        return False
+    failures, started = 0, False
+    for item in items:
+        if (not isinstance(item, dict) or item.get('status') not in ('completed', 'failed', 'skipped', 'blocked', 'needs_review')
+                or not terminal(item.get('result'))):
+            return False
+        receipt = item['result']
+        failures += int(item['status'] == 'failed' or receipt.get('requiresReview') is True)
+        started |= receipt['installer_started']
+    if value['installer_started'] is not started or value.get('failed_items') != failures + 1:
+        return False
+    expected = app_scan_evidence(scan, result=value)
+    for key in ('schema', 'complete', 'status', 'source', 'criteria', 'offers_count',
+                'recognized_offers_count', 'source_reported_offers_count', 'completed_count',
+                'verified_count', 'failed_count', 'skipped_count', 'deferred_count',
+                'remaining_count', 'no_more_offered', 'errors'):
+        if type(evidence.get(key)) is not type(expected[key]) or evidence[key] != expected[key]:
+            return False
+    return True
+
+
 def _known_terminal_failure(value):
     """A group needs actual per-item terminal receipts, not inferred flags."""
     from .navigation import can_fail_forward
@@ -269,6 +341,12 @@ def _known_terminal_failure(value):
         return False
     items = value.get('items')
     if isinstance(items, list):
+        scan_failures = value.get('scan_failed_items', 0)
+        if type(scan_failures) is not int or scan_failures not in (0, 1):
+            return False
+        if scan_failures == 1:
+            count = value.get('failed_items')
+            return type(count) is int and count >= 1 and _terminal_software_coverage(value)
         failed = [row for row in items if isinstance(row, dict) and (
             row.get('status') in ('failed', 'blocked', 'needs_review') or isinstance(row.get('result'), dict)
             and (row['result'].get('requiresReview') is True or row['result'].get('failed_items', 0)))]

@@ -11,6 +11,8 @@ from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with
 from .update_holds import load_update_holds, matching_update_hold, held_update_result, is_known_update_hold
 from .navigation import WorkItem, cursor_for, navigation_skip, merge_presence, local_skip, can_fail_forward, shared_update_refusal, update_exception_receipt
 
+UNKNOWN_VERSION_COVERAGE_WARNING = 'Installed packages with unknown versions require their publisher updater or version review.'
+
 _PACKAGE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$')
 _VERSION = re.compile(r'[vV]?[0-9][0-9A-Za-z._+~\-]{0,127}')
 _ORDERED_VERSION = re.compile(r'[vV]?([0-9]+(?:[._][0-9]+)*)(?:[-_.]?(dev|alpha|a|beta|b|rc|pre|preview)(?:[-_.]?([0-9]+))?)?(?:\+[0-9A-Za-z.\-]+)?', re.I)
@@ -233,6 +235,7 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     if policy == 'review':
         prepared(scan_complete=not untrusted)
         return with_app_scan({'review_only': True, 'scan': scan, 'failed_items': int(partial_scan),
+                'scan_failed_items': int(partial_scan),
                 'installer_started': False, 'outcomeKnown': True, 'running': False,
                 'note': 'Software update review only; no installer was started. Failed, incomplete or unrecognized scans require review.'},
                 started=started, selected=[])
@@ -330,7 +333,8 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     def defer(reason, *, failed=0, refreshed_scan=None, error=None):
         return with_app_scan({'review_only': False, 'scan': scan if refreshed_scan is None else refreshed_scan,
                 'policy': policy, 'items': preflight_items,
-                'failed_items': failed + len(preflight_items) + int(partial_scan), 'skipped': True,
+                'failed_items': failed + len(preflight_items) + int(partial_scan),
+                'scan_failed_items': int(partial_scan), 'skipped': True,
                 'deferred_ids': list(selected), 'cancelled': cancelled(), 'stop_reason': reason,
                 'installer_started': False, 'outcomeKnown': True, **hold_details(preflight_items)},
                 started=started, selected=approved_ids, error=error)
@@ -384,7 +388,8 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 preflight_items.append({'id': identity, 'name': expected.get('name', identity),
                     'from_version': expected['version'], 'to_version': expected['available'], 'status': 'skipped',
                     'result': {'skipped': True, 'failureKind': 'version_changed', 'installer_started': False,
-                               'outcomeKnown': True, 'note': 'The prepared package identity or version pair changed while waiting; no installer was started.'}})
+                               'outcomeKnown': True, 'running': False,
+                               'note': 'The prepared package identity or version pair changed while waiting; no installer was started.'}})
             else:
                 unchanged.append(identity)
         selected = unchanged
@@ -519,14 +524,17 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
     lifecycle = {}
     evidence = [item.get('result') for item in results]
     if not evidence:
-        lifecycle = {'installer_started': False, 'outcomeKnown': True}
+        lifecycle = {'installer_started': False, 'outcomeKnown': True, 'running': False}
     elif all(isinstance(value, dict) and type(value.get('outcomeKnown')) is bool for value in evidence):
         lifecycle['outcomeKnown'] = all(value['outcomeKnown'] for value in evidence)
         if all(type(value.get('installer_started')) is bool for value in evidence):
             lifecycle['installer_started'] = any(value['installer_started'] for value in evidence)
+        if all(type(value.get('running')) is bool for value in evidence):
+            lifecycle['running'] = any(value['running'] for value in evidence)
     return with_app_scan({'review_only': not bool(selected), 'scan': scan, 'policy': policy, 'items': results,
             'failed_items': sum(item['status'] == 'failed' or isinstance(item.get('result'), dict)
                                 and item['result'].get('requiresReview') is True for item in results) + int(partial_scan),
+            'scan_failed_items': int(partial_scan),
             'skipped_items': sum(item['status'] == 'skipped' for item in results), 'requires_review_items': needs_review,
             'navigation_cancelled_items': sum(isinstance(item.get('result'), dict) and item['result'].get('navigation_cancelled') is True for item in results),
             'cancelled': cancelled() or interrupted, 'deferred_ids': deferred, 'restartNeeded': restart_needed,
