@@ -133,7 +133,7 @@ def test_driver_download_token_reaches_provider_and_next_offer_runs_after_abort_
             # Native provider returns only after RequestAbort + EndDownload.
             return {'cancelled': True, 'installer_started': False, 'outcomeKnown': True, 'running': False}
         assert not cancel_event.is_set()
-        return {'resultCode': 2, 'hresult': 0, 'installer_started': True, 'outcomeKnown': True, 'running': False}
+        return {'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0, 'installer_started': True, 'outcomeKnown': True, 'running': False}
     service.driver_update_apply_unattended = apply
     result = run_drivers(service, driver_config(driver_approved_updates=[first, second]), cancel_event=global_stop)
     assert order == [first['id'], second['id']] and result['navigation_cancelled_items'] == 1

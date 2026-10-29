@@ -64,10 +64,11 @@ Reset-Fixture;Add-AsyncFixture
 $frames=@(Invoke-BridgeFixture)
 Assert-Test (($script:BridgeResult|ConvertTo-Json -Depth 8 -Compress) -ceq $expected) 'async and original synchronous final receipts are identical'
 Assert-Test ($script:AsyncDownloads -eq 1 -and $script:AsyncDownloadEnds -eq 1 -and $script:AsyncInstalls -eq 1 -and $script:AsyncInstallEnds -eq 1) 'exact one matching Begin/End per operation'
-Assert-Test ($frames.Count -eq 4) 'unknown and native measured value for each exact phase'
+Assert-Test ($frames.Count -eq 5) 'download/install native values plus explicit post-install verification'
 Assert-Test (@($frames|Where-Object {$_.kind -cne 'progress' -or $_.id -cne ('a'*32)}).Count -eq 0) 'every frame is explicit progress and bound to exact request'
 Assert-Test ($frames[0].progress.phase -ceq 'downloading' -and $null -eq $frames[0].progress.percent -and $frames[1].progress.percent -eq 36) 'download phase reset and actual progress'
 Assert-Test ($frames[2].progress.phase -ceq 'installing' -and $null -eq $frames[2].progress.percent -and $frames[3].progress.percent -eq 64) 'install phase reset and actual progress'
+Assert-Test ($frames[4].progress.phase -ceq 'verify' -and $null -eq $frames[4].progress.percent) 'post-install search has unknown progress until its actual result is known'
 Assert-Test (@($frames|Where-Object {$_.PSObject.Properties.Name -contains 'ok' -or $_.PSObject.Properties.Name -contains 'result'}).Count -eq 0) 'progress frame can never masquerade as terminal response'
 
 Reset-Fixture;Add-AsyncFixture

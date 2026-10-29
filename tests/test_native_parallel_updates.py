@@ -636,7 +636,8 @@ def test_driver_only_background_job_does_not_require_software_scope(tmp_path):
     def install(*args, **kwargs):
         driver_started.set()
         assert driver_release.wait(15)
-        return {'resultCode': 2, 'hresult': 0}
+        return {'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0,
+                'installer_started': True, 'outcomeKnown': True, 'running': False}
     enable_fixture_driver(service, install)
     def independent():
         assert driver_started.wait(15)
@@ -672,7 +673,8 @@ def test_ready_driver_can_install_while_app_discovery_is_still_running(tmp_path)
         assert not scan_release.is_set()
         assert service.audit_count == 1
         driver_started.set()
-        return {'resultCode': 2, 'hresult': 0, 'restartNeeded': False}
+        return {'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0,
+                'installer_started': True, 'outcomeKnown': True, 'running': False, 'restartNeeded': False}
     enable_fixture_driver(service, install)
     workflow, thread, result, errors = start_workflow(service, driver_settings())
     try:
@@ -809,7 +811,8 @@ def test_known_before_installer_failure_still_allows_independent_driver_channel(
         service.updates_scan = Mock(side_effect=RuntimeError('Fixture package catalog unavailable'))
     else:
         service.outcome = UpdatePreflightError('Fixture exact-ID guard refused before installer launch')
-    install = Mock(return_value={'resultCode': 2, 'hresult': 0, 'restartNeeded': False})
+    install = Mock(return_value={'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0,
+        'installer_started': True, 'outcomeKnown': True, 'running': False, 'restartNeeded': False})
     enable_fixture_driver(service, install)
     report = Workflow(service).run(driver_settings(), lambda _: None)
     stages = {row['title']: row for row in report['stages']}

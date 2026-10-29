@@ -28,7 +28,8 @@ def backend():
     return SimpleNamespace(startup_list=Mock(return_value=[startup()]),startup_set=Mock(return_value={'Kind':'Startup'}),
            is_admin=Mock(return_value=True),driver_updates_scan=Mock(return_value={'updates':[driver()],'resultCode':2}),
            driver_backup_automatic=Mock(return_value={'exit_code':0,'destination':'fixture-backup'}),
-           driver_update_apply_unattended=Mock(return_value={'resultCode':2,'hresult':0,'restartNeeded':False}))
+           driver_update_apply_unattended=Mock(return_value={'resultCode':2,'hresult':0,'aggregateResultCode':2,'aggregateHresult':0,
+               'installer_started':True,'outcomeKnown':True,'running':False,'restartNeeded':False}))
 
 
 def startup_config(**changes):
@@ -102,7 +103,8 @@ def test_driver_snapshot_and_future_rule_include_exact_known_device_date():
 def test_exact_driver_requires_successful_backup_before_install():
     value=backend();calls=[]
     value.driver_backup_automatic.side_effect=lambda: calls.append('backup') or {'exit_code':0,'destination':'fixture'}
-    value.driver_update_apply_unattended.side_effect=lambda *a,**kw:calls.append('install') or {'resultCode':2,'hresult':0}
+    value.driver_update_apply_unattended.side_effect=lambda *a,**kw:calls.append('install') or {
+        'resultCode':2,'hresult':0,'aggregateResultCode':2,'aggregateHresult':0,'installer_started':True,'outcomeKnown':True,'running':False}
     result=system.run_drivers(value,driver_config())
     assert calls==['backup','install'] and result['failed_items']==0
     value.driver_update_apply_unattended.assert_called_once_with(system.driver_descriptor(driver()),accept_eula=True)
@@ -138,7 +140,7 @@ def test_known_input_capable_driver_uses_approved_quiet_backend_after_backup(pol
     calls=[]
     value.driver_backup_automatic.side_effect=lambda:calls.append('backup') or {'exit_code':0,'destination':'fixture'}
     value.driver_update_apply_unattended.side_effect=lambda *args,**kwargs:calls.append('quiet-install') or {
-        'resultCode':2,'hresult':0,'installer_started':True,'outcomeKnown':True,'running':False}
+        'resultCode':2,'hresult':0,'aggregateResultCode':2,'aggregateHresult':0,'installer_started':True,'outcomeKnown':True,'running':False}
     result=system.run_drivers(value,config)
     assert calls==['backup','quiet-install'] and result['failed_items']==0
     assert result['driver_scan']['eligible_count']==1

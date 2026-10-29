@@ -517,6 +517,68 @@ function Assert-SCMDriverNotOlderThanInstalled {
         }
     }
 }
+function Get-SCMDriverInstalledObservation {
+    param([Parameter(Mandatory=$true)]$Record)
+    $rows=@();$complete=$false;$errorText='';$expectedVersion=$null;$versionMatches=$false;$dateMatches=$false;$providerMatches=$false
+    try {
+        $match=[regex]::Match([string]$Record.title,'(?<![\d.])(\d+\.\d+\.\d+\.\d+)\)?$')
+        if($match.Success){$expectedVersion=[version]$match.Groups[1].Value}
+        if(-not [string]$Record.hardwareId){throw 'The exact offered hardware ID is unavailable.'}
+        $devices=@(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object {
+            $_.Present -ne $false -and (@($_.HardwareID)+@($_.CompatibleID)) -icontains [string]$Record.hardwareId
+        })
+        if(-not $devices.Count){throw 'The offered hardware is not present in the current PnP inventory.'}
+        $installed=@(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop)
+        $rows=@(foreach($device in $devices){
+            $id=if($device.PNPDeviceID){[string]$device.PNPDeviceID}else{[string]$device.DeviceID}
+            $drivers=@($installed | Where-Object {$_.DeviceID -ieq $id})
+            if(-not $id -or -not $drivers.Count){throw 'A matching present device has no verifiable signed-driver inventory.'}
+            foreach($driver in $drivers){
+                $version=[version]([string]$driver.DriverVersion)
+                $date=ConvertTo-SCMDriverDate $driver.DriverDate
+                if(-not [string]$driver.DriverProviderName){throw 'The matching installed-driver provider is unavailable.'}
+                if($driver.IsSigned -isnot [bool] -or -not $driver.IsSigned){throw 'The matching installed driver has no verified signed-driver state.'}
+                [pscustomobject]@{deviceId=$id;version=$version.ToString();date=$date.ToString('yyyy-MM-dd');provider=[string]$driver.DriverProviderName}
+            }
+        })
+        $candidateDate=ConvertTo-SCMDriverDate $Record.driverDate
+        $versionMatches=($null -ne $expectedVersion -and @($rows | Where-Object {[version]$_.version -lt $expectedVersion}).Count -eq 0)
+        $dateMatches=(@($rows | Where-Object {(ConvertTo-SCMDriverDate $_.date) -lt $candidateDate}).Count -eq 0)
+        $providerMatches=(@($rows | Where-Object {$_.provider.Trim() -ine ([string]$Record.provider).Trim()}).Count -eq 0)
+        $complete=($rows.Count -gt 0)
+    } catch {$errorText=$_.Exception.Message}
+    [pscustomobject]@{schema=1;complete=$complete;hardwareId=[string]$Record.hardwareId;drivers=@($rows)
+        offeredVersion=$(if($null -ne $expectedVersion){$expectedVersion.ToString()}else{$null});versionSource='offer_title_suffix'
+        versionMatches=$versionMatches;dateMatches=$dateMatches;providerMatches=$providerMatches
+        alreadyCurrent=($complete -and $versionMatches -and $dateMatches -and $providerMatches);error=$errorText}
+}
+function Get-SCMDriverPostInstallVerification {
+    param([Parameter(Mandatory=$true)]$Record,[Parameter(Mandatory=$true)]$Searcher,[bool]$RestartNeeded=$false,[scriptblock]$CancelRequested)
+    $code=$null;$offered=$null;$queryComplete=$false;$errorText=''
+    try {
+        $Searcher.Online=$true
+        if($null -ne $CancelRequested -and (& $CancelRequested)){throw 'Post-install verification was cancelled; installation result remains recorded.'}
+        $criteria="IsInstalled=0 and Type='Driver' and IsHidden=0"
+        $search=if($null -ne $CancelRequested){Invoke-SCMUpdateSearch -Owner $Searcher -Criteria $criteria -CancelRequested $CancelRequested}else{$Searcher.Search($criteria)}
+        if($null -eq $search -or $search.ResultCode -isnot [int] -or $search.ResultCode -ne 2 -or $null -eq $search.Updates){throw 'Fresh post-install Windows Update search did not complete successfully.'}
+        if(@((Get-SCMWuaProperty $search 'Warnings' @())).Count -gt 0){throw 'Fresh post-install Windows Update search reported warnings.'}
+        $updates=@($search.Updates)
+        if($updates.Count -gt 10000){throw 'Fresh post-install Windows Update offer inventory exceeded its bound.'}
+        foreach($update in $updates){
+            $guid=[guid]::Empty
+            if(-not [guid]::TryParse([string]$update.Identity.UpdateID,[ref]$guid) -or $update.Identity.RevisionNumber -isnot [int]){throw 'Fresh post-install Windows Update returned malformed offer identities.'}
+        }
+        $code=$search.ResultCode
+        $offered=(@($updates | Where-Object {$_.Identity.UpdateID -ieq $Record.id -and $_.Identity.RevisionNumber -eq $Record.revision}).Count -gt 0)
+        $queryComplete=$true
+    } catch {$errorText=$_.Exception.Message}
+    $device=Get-SCMDriverInstalledObservation -Record $Record
+    $verified=($queryComplete -and $offered -eq $false -and $device.alreadyCurrent -and -not $RestartNeeded)
+    $status=if($RestartNeeded){'pending_restart'}elseif($verified){'confirmed'}elseif($offered -eq $true){'still_offered'}else{'unverified'}
+    [pscustomobject]@{schema=1;status=$status;verified=$verified;searchComplete=$queryComplete;searchResultCode=$code
+        exactOfferStillApplicable=$offered;id=$Record.id;revision=$Record.revision;device=$device;error=$errorText
+        note='Fresh exact-offer applicability and present-device driver version/date observations; Windows Update may require a restart before activation.'}
+}
 function Assert-SCMDriverQuietMode {
     param([Parameter(Mandatory=$true)]$Installer)
     if($Installer.ForceQuiet -isnot [bool] -or $Installer.ForceQuiet -ne $true -or
@@ -598,6 +660,12 @@ function Invoke-SCMDriverUpdateApplyCore {
         }
     }
     if ($Unattended -and [string]$Record.approvalMode -eq 'matching') { Assert-SCMDriverNotOlderThanInstalled -Record $Record -Fresh $fresh }
+    $observed=Get-SCMDriverInstalledObservation -Record $fresh
+    if($observed.alreadyCurrent){
+        return [pscustomobject]@{id=$fresh.id;revision=$fresh.revision;title=$fresh.title;resultCode=2;aggregateResultCode=2;hresult=0;aggregateHresult=0
+            installer_started=$false;outcomeKnown=$true;running=$false;skipped=$true;alreadyCurrent=$true;restartNeeded=$false;verified=$true
+            deviceVerification=$observed;note='The present device already has the offered or newer driver version/date from this provider. The repeated offer was not reinstalled.'}
+    }
     $collection=New-SCMWuaCollection
     [void]$collection.Add($update)
     $installer=$session.CreateUpdateInstaller()
@@ -730,6 +798,21 @@ function Invoke-SCMDriverUpdateApplyCore {
         note='Windows Update returned the selected applicable driver installation result. No interactive fallback, forced installation, reboot API or automatic elevation was invoked.'
     }
     if ($null -ne $downloadState.last) { $receipt.download_progress = $downloadState.last }
+    if(-not $receipt.requiresReview){
+        Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase verify
+        $verification=Get-SCMDriverPostInstallVerification -Record $fresh -Searcher $searcher -RestartNeeded $receipt.restartNeeded -CancelRequested $CancelRequested
+        $receipt.post_install_verification=$verification
+        # WUA can finish installing a package while activation awaits reboot.
+        # Keep that reported installation distinct from verified active PnP state.
+        if(-not $receipt.restartNeeded){$receipt.verified=$verification.verified}else{$receipt.installation_reported=$true}
+        if($verification.verified){Publish-SCMDriverDiscoveryProgress -ProgressCallback $ProgressCallback -Phase verify -Percent 100}
+        if(-not $receipt.restartNeeded -and -not $verification.verified){
+            $receipt.requiresReview=$true
+            $receipt.note='Windows Update reported installation success, but fresh offer/device-version verification needs review. This is not reported as a confirmed installed driver; other independent updates may continue.'
+        }elseif($receipt.restartNeeded){
+            $receipt.note='Windows Update reported installation success and a required restart. Device activation remains pending; Optimus did not restart the PC.'
+        }
+    }
     [pscustomobject]$receipt
 }
 

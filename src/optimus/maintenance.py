@@ -247,7 +247,8 @@ class Maintenance:
     @staticmethod
     def _run(arguments: list[str], *, timeout: float = 120, progress_callback=None,
              allow_resident_handoff=False, environment=None) -> subprocess.CompletedProcess[str]:
-        if progress_callback is not None or environment is not None and os.name == 'nt':
+        native_install = (os.name == 'nt' and len(arguments) > 1 and arguments[1] == 'upgrade' and '--id' in arguments)
+        if progress_callback is not None or environment is not None and os.name == 'nt' or native_install:
             if os.name == 'nt':
                 from .winget_console import run_winget_console
                 options = {'environment': environment} if environment is not None else {}
@@ -564,6 +565,29 @@ class Maintenance:
             executable = self._winget()
         except Exception as error:
             raise UpdatePreflightError("WinGet became unavailable before any installer started.", failure_scope='app_batch', failureKind='manager_unavailable') from error
+        from .app_update_verification import AppUpdateVerification, deferred_receipt, target_installed
+        verification = AppUpdateVerification(self.data_dir, current)
+        if unattended:
+            try:
+                pending = verification.pending()
+            except Exception as error:
+                raise UpdatePreflightError('The prior app activation evidence could not be read; this application was not relaunched.',
+                    failure_scope='package', failureKind='activation_evidence_unavailable') from error
+            if pending:
+                from .app_presence import parse_installed
+                try:
+                    observed = parse_installed(self._run([executable, 'list', '--id', package_id, '--exact',
+                        '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']), package_id)
+                    installed = observed['version'] if observed else None
+                except Exception:
+                    installed = None
+                if target_installed(current['available'], installed, package_id):
+                    return {'id': package_id, 'source': 'winget', 'status': 'skipped', 'skipped': True,
+                        'installer_started': False, 'outcomeKnown': True, 'running': False,
+                        'verified': True, 'installed_version': installed, 'from_version': current['version'],
+                        'to_version': current['available'], 'exitCode': None,
+                        'note': 'Fresh installed-version readback already satisfies the offer; no repeat download was started.'}
+                return deferred_receipt(current, pending, installed)
         arguments = [executable, "upgrade", "--id", package_id, "--exact", "--source", "winget", "--version", current['available']]
         if compatibility_mode:
             arguments += ["--force"]
@@ -571,6 +595,20 @@ class Maintenance:
             arguments += ["--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"]
         else:
             arguments += ["--disable-interactivity"]
+        if (interrupted := cancelled_result()) is not None:
+            return interrupted
+        if (held := held_result()) is not None:
+            return held
+        try:
+            diagnostic_log = verification.prepare()
+            # The supported Ollama resident-runtime proof authenticates its
+            # existing default diagnostic stream and exact argument grammar.
+            # Keep that contract; app-version verification still always runs.
+            if package_id != 'Ollama.Ollama':
+                arguments += ['--log', str(diagnostic_log)]
+        except Exception as error:
+            raise UpdatePreflightError('Private app activation diagnostics could not be prepared; no installer was started.',
+                failure_scope='package', failureKind='activation_evidence_unavailable') from error
         attempt = None
         try:
             if (interrupted := cancelled_result()) is not None:
@@ -640,7 +678,7 @@ class Maintenance:
                              or 'another installation is already in progress.' in (output + '\n' + stderr).casefold())
         if progress_callback is not None and result.returncode == 0 and not restart and not installer_running:
             try:
-                progress_callback({'phase': 'install', 'percent': 100.0, 'item_terminal': True})
+                progress_callback({'phase': 'install', 'percent': 100.0, 'item_terminal': False})
             except Exception:
                 pass  # A verified native phase end is display-only, not app-version verification.
         receipt = {"id": package_id, "package_id": package_id, "source": "winget", "exitCode": result.returncode,
@@ -654,6 +692,7 @@ class Maintenance:
                 "note": (("The selected mode accepts vendor/source agreements and requests a silent installer. Elevation or app closure may still be required. No automatic-reboot permission or retry was requested."
                           if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")
                          + (" Saved compatibility mode adds WinGet --force for non-security issues only. Hash/signature verification and installer hard blocks remain in effect." if compatibility_mode else ""))}
+        receipt['application_restart_required'] = 'restart the application to complete the upgrade' in (output + '\n' + stderr).casefold()
         if resident_handoff:
             receipt['console_receipt'] = result.console_receipt
             receipt['resident_runtime_handoff'] = True
@@ -667,33 +706,59 @@ class Maintenance:
                 receipt['download_progress'] = observed
         from .update_payload_lifecycle import console_quiescent
         quiescent = console_quiescent(result)
-        verified, pending_restart, download_hashes = False, True, ()
-        if attempt is not None and attempt.enabled and quiescent and not restart and not installer_running:
+        verified, payload_verified, pending_restart, download_hashes = False, False, True, ()
+        receipt['verified'] = False
+        if receipt['installation_reported'] and not restart and not installer_running:
+            if progress_callback is not None:
+                try:
+                    progress_callback({'phase': 'verify', 'percent': None})
+                except Exception:
+                    pass
             try:
-                from .app_presence import parse_installed, parse_catalog
+                from .app_presence import parse_installed
                 after = parse_installed(self._run([executable, 'list', '--id', package_id, '--exact',
                     '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']), package_id)
-                verified = after is not None and after['version'] == current['available']
+                verified = after is not None and target_installed(current['available'], after['version'], package_id)
                 receipt['installed_version'] = after['version'] if after else None
                 receipt['verified'] = verified
-                if not verified:
-                    receipt['requiresReview'] = True
-                if verified:
+                receipt['verification_status'] = 'verified' if verified else 'version_unchanged'
+                if verified and progress_callback is not None:
+                    try:
+                        progress_callback({'phase': 'verify', 'percent': 100.0})
+                    except Exception:
+                        pass
+            except Exception:
+                receipt['verification_status'] = 'readback_unavailable'
+            if not verified:
+                receipt['requiresReview'] = True
+                receipt['status'] = 'needs_review'
+                receipt['note'] += ' Fresh installed-version verification did not confirm ' + current['available'] + '; observed ' + str(receipt.get('installed_version') or 'unknown') + '. Installer exit 0 is not counted as an installed update.'
+        if attempt is not None and attempt.enabled and verified and quiescent and not restart and not installer_running:
+            try:
+                from .app_presence import parse_catalog
+                if receipt.get('installed_version') == current['available']:
                     catalog = parse_catalog(self._run([executable, 'show', '--id', package_id, '--exact',
                         '--source', 'winget', '--version', current['available'], '--accept-source-agreements',
                         '--disable-interactivity']), package_id)
-                    verified = catalog['version'] == current['available']
+                    payload_verified = catalog['version'] == current['available']
                     receipt['payload_installer_type'] = catalog['installer_type']
-                    if verified:
+                    if payload_verified:
                         download_hashes = (catalog['installer_sha256'],)
-                pending_restart = self._payload_restart_pending() if verified else True
+                pending_restart = self._payload_restart_pending() if payload_verified else True
             except Exception:
-                verified = False
-                receipt['payload_verification_note'] = 'Fresh exact version and supported installer-handler readback could not both be verified; owned payloads are preserved.'
+                payload_verified = False
+                receipt['payload_verification_note'] = 'The installed version was verified, but disposable installer identity could not be verified; owned payloads are preserved.'
+        try:
+            verification.finish(receipt)
+        except Exception:
+            receipt['requiresReview'] = True
+            receipt['failure_scope'] = 'package'
+            receipt['verification_evidence_saved'] = False
+            receipt['note'] += ' The private activation record could not be saved; retain the terminal item evidence for review.'
         if attempt is not None:
-            cleanup_outcome = (dict(receipt, restartNeeded=False) if verified and quiescent
+            cleanup_outcome = (dict(receipt, restartNeeded=False) if payload_verified and quiescent
                 and restart is False and pending_restart is False else receipt)
-            receipt['payload_cleanup'] = attempt.finish(cleanup_outcome, verified=verified,
+            receipt['payload_cleanup'] = attempt.finish(cleanup_outcome, verified=payload_verified,
                 quiescent=quiescent, restart_pending=pending_restart, download_hashes=download_hashes)
         return receipt
 

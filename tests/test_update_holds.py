@@ -22,7 +22,8 @@ REASON = 'Catalog version 2.0 resolves to verified older payload 1.0; failed att
 
 @pytest.fixture(autouse=True)
 def owner():
-    with patch('optimus.speed_enhancements._current_owner', return_value=OWNER):
+    with patch('optimus.speed_enhancements._current_owner', return_value=OWNER), \
+         patch('optimus.self_update_permissions.create_private_directory', side_effect=lambda path, owner: path.mkdir(mode=0o700)):
         yield
 
 
@@ -95,12 +96,14 @@ def test_future_offer_and_explicit_manual_route_are_not_held(tmp_path, manual, a
     service._run = Mock(side_effect=[
         subprocess.CompletedProcess([], 0, table(('Fixture App', 'Vendor.One', '1.0', available, 'winget')), ''),
         subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''),
-        subprocess.CompletedProcess([], 0, 'Fixture installed', '')])
+        subprocess.CompletedProcess([], 0, 'Fixture installed', ''),
+        subprocess.CompletedProcess([], 0, table(('Fixture App', 'Vendor.One', available, available, 'winget')), '')])
     result = service.updates_apply('Vendor.One', confirmed=True, unattended=not manual)
     assert result['installer_started'] is True and result['status'] == 'completed'
-    assert service._run.call_count == 3
-    assert '--version' in service._run.call_args.args[0]
-    assert service._run.call_args.args[0][service._run.call_args.args[0].index('--version')+1] == available
+    assert result['verified'] is True and service._run.call_count == 4
+    installer = service._run.call_args_list[2].args[0]
+    assert '--version' in installer
+    assert installer[installer.index('--version')+1] == available
 
 
 def test_hold_added_during_pin_check_is_enforced_at_final_launch_boundary(tmp_path):
@@ -201,7 +204,8 @@ def test_held_app_does_not_block_other_app_or_parallel_driver_lane(tmp_path):
     service = Backend(tmp_path)
     service.release.set()
     service.outcome = {'exitCode': 0, 'installer_started': True, 'outcomeKnown': True, 'running': False}
-    install = Mock(return_value={'resultCode': 2, 'hresult': 0, 'restartNeeded': False})
+    install = Mock(return_value={'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0,
+        'installer_started': True, 'outcomeKnown': True, 'running': False, 'restartNeeded': False})
     enable_fixture_driver(service, install)
     report = Workflow(service).run(driver_settings(), lambda _: None)
     stages = {row['title']: row for row in report['stages']}

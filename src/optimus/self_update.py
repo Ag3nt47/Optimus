@@ -348,6 +348,9 @@ def _windows_executable(path):
 
 
 class NativeUpdateProcess:
+    def __init__(self):
+        self._children = {}
+
     def current(self):
         import psutil
         process = psutil.Process()
@@ -368,15 +371,25 @@ class NativeUpdateProcess:
     def launch(self, executable, arguments, *, background=False):
         if any(os.environ.get(name) for name in ('OPTIMUS_SOURCE_WORKSPACE', 'OPTIMUS_ORIGINAL_SOURCE')):
             raise ValueError('Editable-source overrides cannot participate in managed self-update.')
+        environment = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT='1')
         process = subprocess.Popen([str(executable), *arguments], cwd=str(Path(executable).parent), shell=False,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if background else 0)
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if background else 0, env=environment)
+        code = process.poll()
+        if type(code) is int:
+            return {'started': False, 'pid': process.pid, 'exit_code': code}
+        self._children[process.pid] = process
         return {'started': True, 'pid': process.pid}
+
+    def exit_code(self, pid):
+        child = self._children.get(pid)
+        return child.poll() if child is not None else None
 
 
 class SelfUpdater:
     def __init__(self, backend, *, installation=None, current_version=None, transport=None, native=None,
-                 system=None, machine=None, owner=None, clock=None, sleep=None, lease_factory=RunLease, launchers=None,key_codec=None):
+                 system=None, machine=None, owner=None, clock=None, sleep=None, lease_factory=RunLease, launchers=None,key_codec=None,
+                 directory_policy=None):
         from . import __version__
         self.backend, self.data_dir = backend, Path(backend.data_dir)
         self.installation = Path(installation) if installation is not None else Path(sys.executable).parent
@@ -386,6 +399,8 @@ class SelfUpdater:
         self.owner, self.clock, self.sleep = owner, clock or time.time, sleep or time.sleep
         self.lease_factory, self.launchers = lease_factory, launchers
         self.key_codec = key_codec
+        self.directory_policy = directory_policy
+        self._authenticated_workspace = None
         self.directory = self.data_dir / 'self-update'
 
     def _transport(self):
@@ -432,14 +447,36 @@ class SelfUpdater:
         path = self.directory / 'owner.key'
         _ordinary_data_path(self.directory)
         if create:
-            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not self.directory.exists():
+                try:
+                    self._create_private_directory(self.directory)
+                except FileExistsError:
+                    pass
             try: _new(path, self._key_bytes(os.urandom(32)))
             except FileExistsError: pass
         raw = self._key_bytes(_read(path,65536),decrypt=True)
         if os.name != 'nt' and (path.stat().st_uid != os.getuid() or stat.S_IMODE(path.stat().st_mode) & 0o077):
             raise ValueError('The self-update owner key is not private to this account.')
         if len(raw) != 32: raise ValueError('The self-update owner key is invalid.')
+        if os.name == 'nt':
+            info = self.directory.lstat()
+            identity = (info.st_dev, info.st_ino, _digest(raw), self._owner())
+            if identity != self._authenticated_workspace:
+                # Only authenticated current-user DPAPI material may repair the
+                # exact legacy OWNER RIGHTS ACL. Private evidence is not reset.
+                self._directory_policy().repair_legacy_private_directory(
+                    self.directory, self._owner(), authenticated_owner=self._owner())
+                self._authenticated_workspace = identity
         return raw
+
+    def _directory_policy(self):
+        if self.directory_policy is None:
+            from . import self_update_permissions
+            self.directory_policy = self_update_permissions
+        return self.directory_policy
+
+    def _create_private_directory(self, path):
+        return self._directory_policy().create_private_directory(path, self._owner())
 
     def _key_bytes(self,raw,decrypt=False):
         if self.key_codec is not None: return self.key_codec(raw,decrypt)
@@ -524,7 +561,9 @@ class SelfUpdater:
         if expected is None or expected != offer: raise ValueError('The approved release or asset identity changed; review the new offer.')
         self._key(create=True)
         identity = uuid.uuid4().hex; folder = self.directory / identity
-        folder.mkdir(mode=0o700); payload = folder / 'payload'; payload.mkdir(mode=0o700)
+        self._create_private_directory(folder)
+        payload = folder / 'payload'
+        self._create_private_directory(payload)
         created = self.clock()
         if shutil.disk_usage(folder).free < offer['asset']['size'] + _RESERVE: raise OSError('The update would consume the reserved destination buffer.')
         for asset in (offer['checksums'],offer['asset']):
@@ -598,7 +637,9 @@ class SelfUpdater:
         self._not_revoked(handoff_id,folder)
         self._load(handoff_id,'dispatch-intent.json')
         self._write(folder,'worker-intent.json',{'id':handoff_id,'owner':self._owner(),'expires_at':value['expires_at'],'at_most_once':True})
-        result = {'id':handoff_id,'owner':self._owner(),'expires_at':value['expires_at'],'status':'needs_review','started':False}
+        result = {'id':handoff_id,'owner':self._owner(),'expires_at':value['expires_at'],'status':'needs_review',
+                  'started':False,'installed':False,'restart_confirmed':False}
+        phase = 'wait_for_original_window'
         try:
             deadline = time.monotonic() + 120
             while self._native().alive(value['old_process']):
@@ -616,9 +657,11 @@ class SelfUpdater:
             try:
                 self._load(handoff_id,'handoff.json')
                 self._not_revoked(handoff_id,folder)
+                phase = 'verify_staged_release'
                 payload,target = self._verify_stage(value,folder)
                 if self._native().other_instances(): raise RuntimeError('Another Optimus instance appeared; no automatic restart was attempted.')
-                backup = folder / 'original-state'; backup.mkdir(mode=0o700)
+                backup = folder / 'original-state'
+                self._create_private_directory(backup)
                 _new(backup / 'preferences.raw.json',_read(self.data_dir / 'preferences.json',4 * 1024 ** 2))
                 _new(backup / 'Optimus.location.json',_read(self.installation / 'Optimus.location.json',4096))
                 if target.exists():
@@ -626,8 +669,25 @@ class SelfUpdater:
                 else:
                     self._load(handoff_id,'handoff.json'); self._not_revoked(handoff_id,folder)
                     _ordinary_data_path(target)
-                    os.rename(payload,target)  # Windows rename does not replace an existing directory.
+                    phase = 'publish_release'
+                    # A rename out of a protected private workspace retains its
+                    # Windows ACL. Create normal objects under Releases so the
+                    # new executable can start at the user's saved UAC level.
+                    publication = target.parent / ('.' + target.name + '-' + handoff_id + '-stage')
+                    _ordinary_data_path(publication)
+                    if publication.exists():
+                        raise FileExistsError('An earlier publication stage exists and was preserved.')
+                    expanded = sum(row['size'] for row in value['manifest'])
+                    if shutil.disk_usage(target.parent).free < expanded + _RESERVE:
+                        raise OSError('Publishing the release requires its expanded size and the reserved buffer.')
+                    shutil.copytree(payload, publication, copy_function=shutil.copyfile)
+                    if _tree(payload) != value['manifest'] or _tree(publication) != value['manifest']:
+                        raise ValueError('The publication copy differs from the verified private payload.')
+                    self._load(handoff_id,'handoff.json'); self._not_revoked(handoff_id,folder)
+                    os.rename(publication,target)  # Exclusive Windows rename preserves any existing target.
                 if _tree(target) != value['manifest']: raise ValueError('The published release failed complete readback.')
+                result['installed'] = True
+                phase = 'retarget_launchers'
                 if self.launchers is None:
                     from .self_update_launchers import ManagedLaunchers
                     self.launchers = ManagedLaunchers(self.data_dir)
@@ -644,17 +704,52 @@ class SelfUpdater:
                 self._write(folder,'ready.json',dict(value,status='ready_to_launch',launchers=integrations))
             finally:
                 lease.release()
+            phase = 'restart_new_version'
             self._write(folder,'launch-intent.json',{'id':handoff_id,'owner':self._owner(),'expires_at':value['expires_at'],'at_most_once':True})
             self._load(handoff_id,'handoff.json'); self._not_revoked(handoff_id,folder)
             if _hash_file(Path(value['target_executable']))['sha256'] != value['new_executable_sha256']:
                 raise ValueError('The new executable changed immediately before restart.')
-            dispatched = self._native().launch(value['target_executable'],['--self-update-resume',handoff_id],background=False)
-            result.update(dispatched,status='launched' if dispatched.get('started') is True else 'needs_review',target_version=value['offer']['version'])
+            # The new child inherits the already-approved privilege context.
+            # Do not open a second UAC relaunch that loses this child's identity
+            # or repeats a consent decision made during the original startup.
+            dispatched = self._native().launch(value['target_executable'],
+                ['--self-update-resume',handoff_id,'--admin-relaunch'],background=False)
+            result.update(dispatched,target_version=value['offer']['version'])
+            if dispatched.get('started') is not True:
+                raise RuntimeError('The new Optimus process exited before it could acknowledge startup.')
+            phase = 'verify_restarted_window'
+            ready = self._wait_for_startup(handoff_id, value, folder, dispatched, cancel_event, progress_callback)
+            result.update(status='launched', restart_confirmed=True, restarted_process=ready['process'])
         except Exception as error:
             result.update(status='cancelled' if cancel_event is not None and cancel_event.is_set() else 'needs_review',
-                          reason='The self-update handoff did not complete (' + type(error).__name__ + '). Review the private evidence; no blind retry or cleanup was started.')
+                          phase=phase,error_type=type(error).__name__,
+                          reason=('Optimus update ' + phase + ' did not complete: ' + str(error))[:1500])
         self._write(folder,'worker-result.json',result)
         return result
+
+    def _wait_for_startup(self, identity, value, folder, dispatched, cancel_event, progress_callback):
+        deadline = time.monotonic() + 120
+        while True:
+            _check(cancel_event, deadline)
+            self._not_revoked(identity, folder)
+            if (folder / 'startup-ready.json').exists():
+                ready, _ = self._load(identity, 'startup-ready.json')
+                process = ready.get('process')
+                if (ready.get('status') != 'ready' or ready.get('version') != value['offer']['version']
+                        or ready.get('manifest_sha256') != value['manifest_sha256'] or not isinstance(process, dict)
+                        or type(process.get('pid')) is not int or process['pid'] <= 0
+                        or type(process.get('created_at')) not in (int, float) or not math.isfinite(process['created_at'])
+                        or process['created_at'] <= 0 or Path(process.get('exe', '')) != Path(value['target_executable'])
+                        or not self._native().alive(process)):
+                    raise ValueError('The restarted window did not provide its exact authenticated process identity.')
+                return ready
+            exit_reader = getattr(self._native(), 'exit_code', None)
+            code = exit_reader(dispatched.get('pid')) if callable(exit_reader) else None
+            if type(code) is int:
+                raise RuntimeError('The new Optimus process exited before startup acknowledgement (exit ' + str(code) + ').')
+            if progress_callback:
+                progress_callback({'phase': 'restart', 'description': 'Waiting for the new Optimus window to verify its version and saved choices.'})
+            self.sleep(0.25)
 
     def consume_resume(self, handoff_id):
         value,folder = self._load(handoff_id,'ready.json'); self._load(handoff_id,'launch-intent.json')
@@ -678,6 +773,31 @@ class SelfUpdater:
             return {'status':'accepted','consumed':True,'cleanup_approved':approved,'settings':settings,
                     'approved_scope_sha256':value.get('approved_scope_sha256') if approved else None,'version':self.current_version,
                     'launchers':value.get('launchers',{})}
+
+    def acknowledge_resume(self, handoff_id):
+        """Called by the visible, resumed GUI before releasing maintenance."""
+        value, folder = self._load(handoff_id, 'ready.json')
+        consumed, _ = self._load(handoff_id, 'resume-consumed.json')
+        self._load(handoff_id, 'launch-intent.json')
+        self._not_revoked(handoff_id, folder)
+        with self.lease_factory(self.data_dir):
+            self._managed()
+            if consumed.get('at_most_once') is not True or self.current_version != value['offer']['version']:
+                raise ValueError('Only the consumed new-version resume can acknowledge its window.')
+            process = self._native().current()
+            if (not isinstance(process, dict) or type(process.get('pid')) is not int or process['pid'] <= 0
+                    or type(process.get('created_at')) not in (int, float) or not math.isfinite(process['created_at'])
+                    or process['created_at'] <= 0 or Path(process.get('exe', '')) != Path(value['target_executable'])
+                    or self.installation / 'Optimus.exe' != Path(value['target_executable'])
+                    or _hash_file(self.installation / 'Optimus.exe')['sha256'] != value['new_executable_sha256']
+                    or _tree(self.installation) != value['manifest']
+                    or _digest(_read(self.data_dir / 'preferences.json', 4 * 1024 ** 2)) != value['binding']['preferences_sha256']):
+                raise ValueError('The restarted GUI, release or saved choices changed before acknowledgement.')
+            self._not_revoked(handoff_id, folder)
+            self._write(folder, 'startup-ready.json', {'id': handoff_id, 'owner': self._owner(),
+                'expires_at': value['expires_at'], 'status': 'ready', 'version': self.current_version,
+                'manifest_sha256': value['manifest_sha256'], 'process': process})
+        return {'status': 'ready', 'version': self.current_version, 'process': process}
 
 
 def worker_main(handoff_id):

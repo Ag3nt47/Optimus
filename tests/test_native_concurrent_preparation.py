@@ -144,7 +144,8 @@ class FixtureBackend:
 
     def driver_update_apply_unattended(self, value, **kwargs):
         self._installer('driver')
-        return {'resultCode': 2, 'hresult': 0, 'restartNeeded': False}
+        return {'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0,
+                'installer_started': True, 'outcomeKnown': True, 'running': False, 'restartNeeded': False}
 
     def installed_apps(self):
         assert self.installer_started.wait(8)

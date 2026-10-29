@@ -67,7 +67,8 @@ def updater(**values):
         prepare_handoff=Mock(return_value={'status': 'ready', 'handoff_id': 'b' * 32}),
         dispatch_worker=Mock(return_value={'status': 'dispatched', 'started': True, 'pid': 123}),
         cancel_handoff=Mock(return_value={'status': 'cancelled', 'revoked': True, 'cleanup_approved': False}),
-        consume_resume=Mock(return_value={'status': 'unavailable'}))
+        consume_resume=Mock(return_value={'status': 'unavailable'}),
+        acknowledge_resume=Mock(return_value={'status': 'ready'}))
     result.__dict__.update(values)
     return result
 
@@ -175,6 +176,42 @@ def test_yes_stages_then_handoffs_before_any_cleanup_or_session_approval(owner):
     window._session_approved_callback.assert_not_called()
     backend.optimize.assert_not_called()
     assert not window.session_approved()
+
+
+def test_verified_dispatch_uses_real_quit_and_shutdown_without_another_prompt(owner, monkeypatch):
+    """Exercise the actual close path, not just the controller's mocked callback."""
+    app, window, backend, settings = owner
+    quit_app = Mock()
+    monkeypatch.setattr(app, 'quit', quit_app)
+    window.quit_application = lambda: OptimusWindow.quit_application(window)
+    value, service = controller(owner, ask=lambda *_: 'yes_update')
+    value.start()
+    wait_for(app, lambda: window._quitting and value._closed)
+    quit_app.assert_called_once_with()
+    assert window._presentation_shutdown is True
+    assert value.pool.activeThreadCount() == 0
+    assert value._handoff_committed and not value.pending
+    service.dispatch_worker.assert_called_once_with('b' * 32)
+    service.cancel_handoff.assert_not_called()
+    window.review_launch.assert_not_called()
+    window.start_optimization.assert_not_called()
+    backend.optimize.assert_not_called()
+    assert value._progress.stage.text() == 'Restarting Optimus automatically'
+    assert not value._progress.cancel_button.isEnabled()
+
+
+def test_dispatch_progress_commits_to_restart_then_restores_controls_if_close_declined(owner):
+    app, window, backend, settings = owner
+    window.quit_application.return_value = False
+    value, service = controller(owner, ask=lambda *_: 'yes_update')
+    value.start()
+    wait_for(app, lambda: window.review_launch.called)
+    assert value._revoked and not value._handoff_committed
+    assert value._progress.stage.text() == 'Continuing the current version'
+    assert value._progress.cancel_button.text() == 'Close update results'
+    assert value._progress.cancel_button.isEnabled()
+    service.cancel_handoff.assert_called_once_with('b' * 32)
+    backend.optimize.assert_not_called()
 
 
 @pytest.mark.parametrize('change', ['incomplete', 'changed'])
@@ -331,11 +368,87 @@ def test_valid_core_one_shot_resume_grants_current_launch_consent_then_normal_st
     value.start()
     wait_for(app, lambda: window.start_optimization.called)
     service.consume_resume.assert_called_once_with('b' * 32)
+    service.acknowledge_resume.assert_called_once_with('b' * 32)
     service.check.assert_not_called()
     assert window.session_approved() and not value.pending
     window.start_optimization.assert_called_once_with()
     window._session_approved_callback.assert_called_once_with()
     window.review_launch.assert_not_called()
+
+
+def test_resume_waits_for_visible_gui_readiness_ack_before_maintenance(owner):
+    app, window, backend, settings = owner
+    active, release = threading.Event(), threading.Event()
+    gui_thread = QThread.currentThread()
+
+    def acknowledge(identity):
+        assert identity == 'b' * 32
+        assert QThread.currentThread() != gui_thread
+        active.set()
+        assert release.wait(5)
+        return {'status': 'ready'}
+
+    service = updater(consume_resume=Mock(return_value={'status': 'accepted',
+        'cleanup_approved': True, 'settings': copy.deepcopy(settings)}),
+        acknowledge_resume=Mock(side_effect=acknowledge))
+    value, _ = controller(owner, service, resume_id='b' * 32)
+    value._fixture_release = [release]
+    value.start()
+    wait_for(app, active.is_set)
+    assert window.isVisible() and value.pending
+    assert not window.session_approved()
+    assert all(not button.isEnabled() for button in window.main_buttons)
+    window.start_optimization.assert_not_called()
+    window.review_launch.assert_not_called()
+    backend.optimize.assert_not_called()
+    release.set()
+    wait_for(app, lambda: window.start_optimization.called)
+    assert window.session_approved() and not value.pending
+
+
+@pytest.mark.parametrize('acknowledgement', [None, {'status': 'unavailable'}, {'status': 'started'}])
+def test_unconfirmed_resume_readiness_returns_to_review_without_running_cleanup(owner, acknowledgement):
+    app, window, backend, settings = owner
+    service = updater(consume_resume=Mock(return_value={'status': 'accepted',
+        'cleanup_approved': True, 'settings': copy.deepcopy(settings)}),
+        acknowledge_resume=Mock(return_value=acknowledgement))
+    value, _ = controller(owner, service, resume_id='b' * 32)
+    value.start()
+    wait_for(app, lambda: window.review_launch.called)
+    assert not window.session_approved() and not value.pending
+    window.start_optimization.assert_not_called()
+    backend.optimize.assert_not_called()
+
+
+def test_hidden_updated_window_does_not_acknowledge_or_start_cleanup(owner):
+    app, window, backend, settings = owner
+    window.hide()
+    service = updater(consume_resume=Mock(return_value={'status': 'accepted',
+        'cleanup_approved': True, 'settings': copy.deepcopy(settings)}))
+    value, _ = controller(owner, service, resume_id='b' * 32)
+    value.start()
+    wait_for(app, lambda: window.review_launch.called)
+    service.acknowledge_resume.assert_not_called()
+    window.start_optimization.assert_not_called()
+    backend.optimize.assert_not_called()
+
+
+def test_settings_changed_during_readiness_ack_do_not_gain_maintenance_consent(owner):
+    app, window, backend, settings = owner
+
+    def acknowledge(identity):
+        settings['cleanup_age_days'] += 1
+        return {'status': 'ready'}
+
+    service = updater(consume_resume=Mock(return_value={'status': 'accepted',
+        'cleanup_approved': True, 'settings': copy.deepcopy(settings)}),
+        acknowledge_resume=Mock(side_effect=acknowledge))
+    value, _ = controller(owner, service, resume_id='b' * 32)
+    value.start()
+    wait_for(app, lambda: window.review_launch.called)
+    assert not window.session_approved()
+    window.start_optimization.assert_not_called()
+    backend.optimize.assert_not_called()
 
 
 def test_valid_resume_surfaces_manual_launcher_items_without_inventing_a_fix(owner):

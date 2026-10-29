@@ -232,7 +232,7 @@ def test_update_only_preserves_always_update_ignore_rules_but_never_presence_uni
 def test_broken_catalog_does_not_block_successful_other_channel_or_claim_empty_scan(tmp_path):
     backend = service(tmp_path, driver_settings())
     backend.updates_scan = Mock(side_effect=RuntimeError('Fixture catalog unavailable'))
-    install = Mock(return_value={'resultCode': 2, 'hresult': 0, 'installer_started': True,
+    install = Mock(return_value={'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0, 'installer_started': True,
                                 'outcomeKnown': True, 'running': False, 'restartNeeded': False})
     enable_fixture_driver(backend, install)
     report = run_saved_updates(backend)

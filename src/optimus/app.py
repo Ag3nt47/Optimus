@@ -371,8 +371,10 @@ def _run_gui(backend, args, actual_arguments):
                     # Build the saved source hidden. The current editor only
                     # exits after its child has initialized and reported ready.
                     staged_restart = True
-                elif args.admin_relaunch:
+                elif args.admin_relaunch or getattr(args, 'self_update_resume', None):
                     if not instance.wait_for_handoff():
+                        if getattr(args, 'self_update_resume', None):
+                            raise RuntimeError('The previous Optimus window did not release its update handoff. The new version did not start automatic maintenance.')
                         if instance.activate_existing():
                             return 0
                         raise RuntimeError('The previous Optimus window is still open. The administrator relaunch could not take over.')

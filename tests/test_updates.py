@@ -76,10 +76,12 @@ def test_failed_scan_discards_previous_candidate_cache(updater):
 
 def test_unattended_exact_command_accepts_only_required_agreements(updater):
     scan(updater)
-    updater._run = Mock(side_effect=[subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','1.0','2.0','winget')),''), subprocess.CompletedProcess([],0,'There are no pins configured.',''), subprocess.CompletedProcess([],0,'fixture completed','')])
+    updater._run = Mock(side_effect=[subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','1.0','2.0','winget')),''), subprocess.CompletedProcess([],0,'There are no pins configured.',''), subprocess.CompletedProcess([],0,'fixture completed',''),
+        subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','2.0','2.0','winget')),'')])
     result = updater.updates_apply('Vendor.App',confirmed=True,unattended=True)
-    arguments = updater._run.call_args.args[0]
-    assert arguments == ['winget-fixture.exe','upgrade','--id','Vendor.App','--exact','--source','winget','--version','2.0','--silent','--disable-interactivity','--accept-source-agreements','--accept-package-agreements']
+    arguments = updater._run.call_args_list[2].args[0]
+    assert arguments[:-2] == ['winget-fixture.exe','upgrade','--id','Vendor.App','--exact','--source','winget','--version','2.0','--silent','--disable-interactivity','--accept-source-agreements','--accept-package-agreements']
+    assert arguments[-2] == '--log' and Path(arguments[-1]).name == 'winget.log'
     assert not {'--all','--force','--include-unknown','--allow-reboot','--ignore-security-hash'} & set(arguments)
     assert result['unattended'] and result['status'] == 'completed' and result['exitCode'] == 0
 
@@ -111,7 +113,7 @@ def test_long_previous_installer_refreshes_only_original_exact_offer(updater):
         subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''),
         subprocess.CompletedProcess([], 0, 'Fixture installed', '')])
     result = updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
-    installers = [call.args[0] for call in updater._run.call_args_list if '--id' in call.args[0]]
+    installers = [call.args[0] for call in updater._run.call_args_list if call.args[0][1] == 'upgrade' and '--id' in call.args[0]]
     assert len(installers) == 1
     assert installers[0][installers[0].index('--id') + 1] == 'Vendor.App'
     assert installers[0][installers[0].index('--version') + 1] == '2.0'
@@ -262,9 +264,10 @@ def test_unrelated_repository_pin_does_not_block_an_unpinned_application(updater
     updater._run = Mock(side_effect=[
         subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','1.0','2.0','winget')),''),
         subprocess.CompletedProcess([],0,pin_table(('Other App','Vendor.Other','1.0','winget','Gating','1.*')),''),
-        subprocess.CompletedProcess([],0,'fixture installed','')])
+        subprocess.CompletedProcess([],0,'fixture installed',''),
+        subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','2.0','2.0','winget')),'')])
     result = updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
-    assert result['status'] == 'completed' and updater._run.call_count == 3
+    assert result['status'] == 'completed' and result['verified'] is True and updater._run.call_count == 4
 
 
 @pytest.mark.parametrize('output,code', [
@@ -295,11 +298,12 @@ def test_pins_are_rechecked_for_each_application_not_reused_from_last_item(updat
     upgrade_scan = subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','1.0','2.0','winget')),'')
     updater._run = Mock(side_effect=[upgrade_scan,
         subprocess.CompletedProcess([],0,'There are no pins configured.',''),
-        subprocess.CompletedProcess([],0,'fixture installed',''), upgrade_scan,
+        subprocess.CompletedProcess([],0,'fixture installed',''),
+        subprocess.CompletedProcess([],0,table(('Fixture App','Vendor.App','2.0','2.0','winget')),''), upgrade_scan,
         subprocess.CompletedProcess([],0,pin_table(('Fixture App','Vendor.App','1.0','winget','Pinning','')),'')])
     assert updater.updates_apply('Vendor.App',confirmed=True,unattended=True)['status'] == 'completed'
     assert updater.updates_apply('Vendor.App',confirmed=True,unattended=True)['skipped']
-    assert updater._run.call_count == 5
+    assert updater._run.call_count == 6
 
 @pytest.mark.parametrize('code,text,restart,running', [
     (0, 'Restart your PC to finish installation.', True, False),
@@ -326,7 +330,8 @@ def test_native_outcome_includes_version_pair_actually_sent_to_installer(updater
         subprocess.CompletedProcess([],0,'Successfully installed.','')])
     result = updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
     assert result['from_version'] == '1.0' and result['to_version'] == '2.0'
-    assert updater._run.call_args.args[0][updater._run.call_args.args[0].index('--version') + 1] == result['to_version']
+    installer = next(call.args[0] for call in updater._run.call_args_list if '--version' in call.args[0])
+    assert installer[installer.index('--version') + 1] == result['to_version']
 
 
 def test_pin_inventory_failure_requires_review_and_retains_actual_package_pair(updater):
@@ -370,7 +375,8 @@ def test_source_scoped_four_column_layout_can_be_revalidated_before_install(upda
     scan(updater, output)
     updater._run = Mock(side_effect=[subprocess.CompletedProcess([],0,output,''),
         subprocess.CompletedProcess([],0,'There are no pins configured.',''),
-        subprocess.CompletedProcess([],0,'Successfully installed.','')])
+        subprocess.CompletedProcess([],0,'Successfully installed.',''),
+        subprocess.CompletedProcess([],0,table(('Fixture Application','Vendor.App','2.0','2.0','winget')),'')])
     result = updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
     assert result['status'] == 'completed' and result['to_version'] == '2.0'
 

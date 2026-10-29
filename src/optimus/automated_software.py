@@ -447,11 +447,11 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 outcome = dict(outcome, shared_barrier=True)
             skipped = isinstance(outcome, dict) and outcome.get('skipped') is True
             successful = (known_exit and outcome['exitCode'] in (0, 3010, 1641)
-                          and outcome.get('success', True) is not False)
+                          and outcome.get('success', True) is not False and outcome.get('verified') is not False)
             results.append({'id': identity, 'name': current.get('name', identity),
                             'from_version': outcome.get('from_version', current['version']) if isinstance(outcome, dict) else current['version'],
                             'to_version': outcome.get('to_version', current['available']) if isinstance(outcome, dict) else current['available'],
-                            'status': 'cancelled' if isinstance(outcome, dict) and outcome.get('cancelled') is True else 'skipped' if skipped else 'completed' if successful else 'failed', 'result': outcome})
+                            'status': 'cancelled' if isinstance(outcome, dict) and outcome.get('cancelled') is True else 'skipped' if skipped else 'needs_review' if known_exit and outcome['exitCode'] == 0 and outcome.get('verified') is False else 'completed' if successful else 'failed', 'result': outcome})
             if results[-1]['status'] == 'failed' and isinstance(outcome, dict):
                 diagnostic = outcome.get('stderr') or outcome.get('text') or outcome.get('note') or ''
                 results[-1]['error'] = ('App updater exit code ' + str(outcome.get('exitCode')) + '. '

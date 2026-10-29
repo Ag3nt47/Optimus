@@ -75,14 +75,34 @@ class Native:
         self.living = False
         self.others = []
         self.launches = []
+        self.resume_callback = None
+        self.restarted_identity = None
+        self.restarted_alive = True
+        self.restarted_exit = None
     def current(self): return copy.deepcopy(self.identity)
     def alive(self,identity):
-        assert identity == self.identity
-        return self.living
+        if identity == self.identity:
+            return self.living
+        return identity == self.restarted_identity and self.restarted_alive
     def other_instances(self): return self.others
     def launch(self,executable,arguments,**kwargs):
         self.launches.append((str(executable),list(arguments),kwargs))
-        return {'started':True,'pid':2000 + len(self.launches)}
+        pid = 2000 + len(self.launches)
+        if arguments and arguments[0] == '--self-update-resume':
+            self.restarted_identity = {'pid': pid, 'created_at': 200.0, 'exe': str(executable)}
+            if self.resume_callback is not None:
+                self.resume_callback(arguments[1], copy.deepcopy(self.restarted_identity))
+        return {'started':True,'pid':pid}
+    def exit_code(self, pid):
+        return self.restarted_exit
+
+
+class DirectoryPolicy:
+    """Only temporary fixture directories; no native ACL operations."""
+    def create_private_directory(self, path, owner):
+        Path(path).mkdir(parents=True, exist_ok=True, mode=0o700)
+    def repair_legacy_private_directory(self, path, owner, *, authenticated_owner):
+        assert authenticated_owner == owner
 
 
 @pytest.fixture
@@ -103,7 +123,15 @@ def updater(tmp_path):
         'changed':[],'manual_action_required':False,'preferences_written':False}))
     service = module.SelfUpdater(SimpleNamespace(data_dir=data),installation=installation,current_version='0.11.6',
         transport=transport,native=native,system='win32',machine='AMD64',owner='fixture-owner',clock=lambda:1000,
-        launchers=launchers,key_codec=lambda raw,decrypt:raw)
+        launchers=launchers,key_codec=lambda raw,decrypt:raw,directory_policy=DirectoryPolicy())
+    def acknowledge_fixture(identity, process):
+        # Simulate the separate visible child without consuming the one-shot
+        # resume used by the independent consume_resume contract tests below.
+        value, folder = service._load(identity, 'ready.json')
+        service._write(folder, 'startup-ready.json', {'id':identity,'owner':service._owner(),
+            'expires_at':value['expires_at'],'status':'ready','version':value['offer']['version'],
+            'manifest_sha256':value['manifest_sha256'],'process':process})
+    native.resume_callback = acknowledge_fixture
     return SimpleNamespace(service=service,transport=transport,native=native,launchers=launchers,base=base,
                            data=data,installation=installation,raw=raw,locator=locator,preferences=preferences)
 
@@ -126,7 +154,8 @@ def handoff(p,cleanup=True):
 def new_service(p):
     return module.SelfUpdater(SimpleNamespace(data_dir=p.data),installation=p.base / 'Releases' / '0.11.7',
         current_version='0.11.7',system='win32',machine='AMD64',owner='fixture-owner',clock=lambda:1000,
-        key_codec=lambda raw,decrypt:raw)
+        key_codec=lambda raw,decrypt:raw,native=Native(p.base / 'Releases' / '0.11.7' / 'Optimus.exe'),
+        directory_policy=DirectoryPolicy())
 
 
 def test_constructor_is_inert_and_readonly_check_does_not_create_update_state(updater):
@@ -303,7 +332,7 @@ def test_exact_update_waits_and_preserves_old_version_then_consumes_clean_once(u
     assert target.is_dir() and p.installation.is_dir()
     assert (target / 'Optimus.location.json').read_bytes()==p.locator
     assert (p.data / 'preferences.json').read_bytes()==p.raw
-    assert p.native.launches[-1]==(str(target / 'Optimus.exe'),['--self-update-resume',identity],{'background':False})
+    assert p.native.launches[-1]==(str(target / 'Optimus.exe'),['--self-update-resume',identity,'--admin-relaunch'],{'background':False})
     assert p.launchers.retarget.call_count==1
     accepted=new_service(p).consume_resume(identity)
     assert accepted['status']=='accepted' and accepted['consumed'] is True and accepted['cleanup_approved'] is True
@@ -469,16 +498,234 @@ def test_release_modified_during_launcher_integration_is_never_executed(updater)
 
 
 def test_native_launch_uses_only_exact_argv_and_no_shell_or_elevation(monkeypatch,tmp_path):
-    process=Mock(pid=123)
+    process=Mock(pid=123);process.poll.return_value=None
     popen=Mock(return_value=process);monkeypatch.setattr(module.subprocess,'Popen',popen)
     native=module.NativeUpdateProcess()
     executable=tmp_path / 'Optimus.exe'
     assert native.launch(executable,['--self-update-worker','a'*32],background=True)['started'] is True
     assert popen.call_args.args[0]==[str(executable),'--self-update-worker','a'*32]
-    assert popen.call_args.kwargs['shell'] is False and 'runas' not in str(popen.call_args)
+    assert popen.call_args.kwargs['shell'] is False
+    # Do not stringify the captured environment: a failing assertion must not
+    # disclose unrelated credentials inherited by the real child process.
+    assert 'runas' not in [value.casefold() for value in popen.call_args.args[0]]
     monkeypatch.setenv('OPTIMUS_SOURCE_WORKSPACE','edited-source')
     with pytest.raises(ValueError,match='overrides'):native.launch(executable,[])
     assert popen.call_count==1
+
+
+def test_native_restart_resets_frozen_runtime_without_changing_parent_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv('PYINSTALLER_RESET_ENVIRONMENT', '0')
+    monkeypatch.setenv('_PYI_PARENT_PROCESS_LEVEL', '1')
+    process = Mock(pid=5678)
+    process.poll.return_value = None
+    popen = Mock(return_value=process)
+    monkeypatch.setattr(module.subprocess, 'Popen', popen)
+    native = module.NativeUpdateProcess()
+    result = native.launch(tmp_path / 'Optimus.exe', ['--self-update-resume', 'a' * 32])
+    assert result == {'started': True, 'pid': 5678}
+    child_env = popen.call_args.kwargs['env']
+    assert child_env['PYINSTALLER_RESET_ENVIRONMENT'] == '1'
+    assert child_env['_PYI_PARENT_PROCESS_LEVEL'] == '1'
+    assert os.environ['PYINSTALLER_RESET_ENVIRONMENT'] == '0'
+    assert native.exit_code(5678) is None
+    process.poll.return_value = 3
+    assert native.exit_code(5678) == 3
+    assert native.exit_code(9999) is None
+
+
+@pytest.mark.parametrize('exit_code', [0, 1, -1073741515])
+def test_native_immediate_exit_is_never_claimed_as_a_running_restart(monkeypatch, tmp_path, exit_code):
+    process = Mock(pid=5678)
+    process.poll.return_value = exit_code
+    monkeypatch.setattr(module.subprocess, 'Popen', Mock(return_value=process))
+    result = module.NativeUpdateProcess().launch(tmp_path / 'Optimus.exe', ['--self-update-resume', 'a' * 32])
+    assert result == {'started': False, 'pid': 5678, 'exit_code': exit_code}
+
+
+def test_actual_new_gui_consumes_then_acknowledges_before_worker_reports_launched(updater):
+    p = updater
+    identities = []
+    def resumed_gui(identity, process):
+        child = new_service(p)
+        child.native.identity = process
+        assert child.consume_resume(identity)['status'] == 'accepted'
+        assert child.acknowledge_resume(identity) == {'status': 'ready', 'version': '0.11.7', 'process': process}
+        identities.append(process)
+    p.native.resume_callback = resumed_gui
+    identity = handoff(p)
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'launched' and result['installed'] and result['restart_confirmed']
+    assert result['restarted_process'] == identities[0]
+    ready, _ = p.service._load(identity, 'startup-ready.json')
+    assert ready['process'] == identities[0] and ready['version'] == '0.11.7'
+    assert (p.data / 'preferences.json').read_bytes() == p.raw
+
+
+def prepare_unacknowledged_child(p):
+    p.native.resume_callback = None
+    p.native.restarted_exit = 1
+    identity = handoff(p)
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'needs_review' and result['installed'] and not result['restart_confirmed']
+    return identity, new_service(p)
+
+
+def test_new_gui_acknowledgement_requires_consumed_transaction_and_is_one_shot(updater):
+    p = updater
+    identity, child = prepare_unacknowledged_child(p)
+    with pytest.raises(ValueError, match='ordinary bounded'):
+        child.acknowledge_resume(identity)
+    assert child.consume_resume(identity)['status'] == 'accepted'
+    result = child.acknowledge_resume(identity)
+    assert result['status'] == 'ready'
+    with pytest.raises(FileExistsError):
+        child.acknowledge_resume(identity)
+
+
+@pytest.mark.parametrize('change', ['preferences', 'version', 'executable', 'extra_file',
+    'process_path', 'process_pid', 'process_time', 'consumed_phase', 'consumed_signature', 'revoked'])
+def test_changed_new_gui_or_authority_never_writes_startup_ready(updater, change):
+    p = updater
+    identity, child = prepare_unacknowledged_child(p)
+    child.consume_resume(identity)
+    folder = p.service.directory / identity
+    if change == 'preferences':
+        (p.data / 'preferences.json').write_bytes(p.raw + b' ')
+    elif change == 'version':
+        child.current_version = '0.11.6'
+    elif change == 'executable':
+        (child.installation / 'Optimus.exe').write_bytes(pe() + b'changed')
+    elif change == 'extra_file':
+        (child.installation / 'extra.dll').write_bytes(b'not in the approved manifest')
+    elif change == 'process_path':
+        child.native.identity['exe'] = str(p.installation / 'Optimus.exe')
+    elif change == 'process_pid':
+        child.native.identity['pid'] = True
+    elif change == 'process_time':
+        child.native.identity['created_at'] = float('nan')
+    elif change == 'consumed_phase':
+        (folder / 'resume-consumed.json').write_bytes((folder / 'launch-intent.json').read_bytes())
+    elif change == 'consumed_signature':
+        path = folder / 'resume-consumed.json'
+        data = json.loads(path.read_bytes())
+        data['signature'] = '0' * 64
+        path.write_text(json.dumps(data))
+    else:
+        p.service.cancel_handoff(identity)
+    with pytest.raises((ValueError, RuntimeError, OSError)):
+        child.acknowledge_resume(identity)
+    assert not (folder / 'startup-ready.json').exists()
+
+
+def test_no_startup_acknowledgement_times_out_without_claiming_restart_success(updater, monkeypatch):
+    p = updater
+    identity = handoff(p)
+    p.native.resume_callback = None
+    state = {'clock': 0}
+    monkeypatch.setattr(module.time, 'monotonic', lambda: state['clock'])
+    p.service.sleep = lambda _: state.update(clock=state['clock'] + 30)
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'needs_review' and result['started'] and result['installed']
+    assert result['restart_confirmed'] is False
+    assert result['phase'] == 'verify_restarted_window' and result['error_type'] == 'RuntimeError'
+    assert state['clock'] <= 150
+    assert (p.service.directory / identity / 'payload/Optimus.exe').exists()
+    assert not (p.service.directory / identity / 'startup-ready.json').exists()
+
+
+@pytest.mark.parametrize('exit_code', [0, 1])
+def test_child_exits_without_readiness_receipt_without_a_long_wait(updater, exit_code):
+    p = updater
+    p.native.resume_callback = None
+    p.native.restarted_exit = exit_code
+    p.service.sleep = Mock(side_effect=AssertionError('Exited child must be detected before waiting.'))
+    identity = handoff(p)
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'needs_review' and result['installed'] and not result['restart_confirmed']
+    assert result['phase'] == 'verify_restarted_window'
+    assert 'exit ' + str(exit_code) in result['reason']
+    p.service.sleep.assert_not_called()
+
+
+@pytest.mark.parametrize('field, bad_value', [('version', '0.11.8'), ('manifest_sha256', '0' * 64),
+    ('status', 'starting'), ('process', {'pid': True, 'created_at': 200.0, 'exe': 'wrong'})])
+def test_signed_incorrect_readiness_never_counts_as_a_restarted_gui(updater, field, bad_value):
+    p = updater
+    def invalid_ready(identity, process):
+        value, folder = p.service._load(identity, 'ready.json')
+        ready = {'id': identity, 'owner': p.service._owner(), 'expires_at': value['expires_at'],
+            'status': 'ready', 'version': value['offer']['version'],
+            'manifest_sha256': value['manifest_sha256'], 'process': process}
+        ready[field] = bad_value
+        p.service._write(folder, 'startup-ready.json', ready)
+    p.native.resume_callback = invalid_ready
+    identity = handoff(p)
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'needs_review' and result['installed'] and not result['restart_confirmed']
+    assert result['phase'] == 'verify_restarted_window' and result['error_type'] == 'ValueError'
+
+
+def test_readiness_from_exited_process_is_not_confirmed(updater):
+    p = updater
+    identity = handoff(p)
+    p.native.restarted_alive = False
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'needs_review' and result['installed'] and not result['restart_confirmed']
+    assert result['error_type'] == 'ValueError'
+
+
+def test_publication_uses_distinct_release_objects_and_preserves_private_payload(updater, monkeypatch):
+    p = updater
+    identity = handoff(p)
+    folder = p.service.directory / identity
+    before = module._tree(folder / 'payload')
+    copytree = Mock(wraps=module.shutil.copytree)
+    monkeypatch.setattr(module.shutil, 'copytree', copytree)
+    result = p.service.finish_handoff(identity)
+    target = p.base / 'Releases/0.11.7'
+    assert result['status'] == 'launched'
+    assert module._tree(folder / 'payload') == module._tree(target) == before
+    first_copy = copytree.call_args_list[0]
+    source, publication = first_copy.args[:2]
+    assert source == folder / 'payload'
+    assert publication.parent == p.base / 'Releases' and publication.name.startswith('.0.11.7-')
+    assert first_copy.kwargs['copy_function'] is module.shutil.copyfile
+    assert (source / 'Optimus.exe').stat().st_ino != (target / 'Optimus.exe').stat().st_ino
+    assert not publication.exists()
+
+
+def test_publication_respects_expanded_payload_and_reserve_after_download(updater, monkeypatch):
+    p = updater
+    identity = handoff(p)
+    folder = p.service.directory / identity
+    before = module._tree(folder / 'payload')
+    expanded = sum(row['size'] for row in before)
+    monkeypatch.setattr(module.shutil, 'disk_usage', lambda path: SimpleNamespace(free=expanded + module._RESERVE - 1))
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'needs_review' and not result['installed'] and not result['started']
+    assert result['phase'] == 'publish_release' and result['error_type'] == 'OSError'
+    assert module._tree(folder / 'payload') == before
+    assert not (p.base / 'Releases/0.11.7').exists()
+    assert len(p.native.launches) == 1
+
+
+def test_changed_publication_copy_is_preserved_and_never_published(updater, monkeypatch):
+    p = updater
+    identity = handoff(p)
+    before = module._tree(p.service.directory / identity / 'payload')
+    copytree = module.shutil.copytree
+    def altered_copy(source, destination, *args, **kwargs):
+        result = copytree(source, destination, *args, **kwargs)
+        if Path(destination).parent == p.base / 'Releases':
+            (Path(destination) / 'unexpected.dll').write_bytes(b'not approved')
+        return result
+    monkeypatch.setattr(module.shutil, 'copytree', altered_copy)
+    result = p.service.finish_handoff(identity)
+    assert result['status'] == 'needs_review' and not result['installed'] and not result['started']
+    assert result['phase'] == 'publish_release'
+    assert module._tree(p.service.directory / identity / 'payload') == before
+    assert not (p.base / 'Releases/0.11.7').exists()
+    assert list((p.base / 'Releases').glob('.0.11.7-*-stage/unexpected.dll'))
 
 
 @pytest.mark.parametrize('url',['http://github.com/x','https://github.com.evil.example/x','https://user@github.com/x','https://github.com:444/x'])

@@ -320,7 +320,9 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
     else:
         for value in fresh:
             try:rule=driver_device_rule(value)
-            except ValueError:continue
+            except ValueError:
+                items.append({'binding':value,'status':'skipped','reason':'The offered driver lacks the complete hardware/provider/class/date metadata required by saved matching rules.'})
+                continue
             matches=[approved for approved in rules if all(rule[key].casefold()==approved[key].casefold() for key in ('hardwareId','provider','class'))]
             if matches:
                 floor=matches[0]['notOlderThanDriverDate']
@@ -329,6 +331,8 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
                 else:
                     value=dict(value,approvalMode='matching',notOlderThanDriverDate=floor)
                     selected.append(value)
+            else:
+                items.append({'binding':value,'status':'skipped','reason':'No exact saved hardware/provider/class rule approves this offered driver. New or disconnected hardware is not silently added to the approved scope.'})
     eligible=[]
     for value in selected:
         # CanRequestUserInput describes a handler's capability, not whether a
@@ -458,9 +462,16 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
                         and outcome.get('running') is False):
                     outcome=dict(outcome,navigation_cancelled=True)
             if shared_update_refusal(outcome):outcome=dict(outcome,shared_barrier=True)
-            success=(isinstance(outcome,dict) and type(outcome.get('resultCode')) is int and outcome['resultCode']==2
-                     and outcome.get('hresult',0)==0 and outcome.get('aggregateResultCode',2)==2 and outcome.get('aggregateHresult',0)==0)
-            items.append({'binding':value,'status':'cancelled' if isinstance(outcome,dict) and outcome.get('navigation_cancelled') is True else 'applied' if success else 'failed','result':outcome})
+            native_success=(isinstance(outcome,dict)
+                and outcome.get('installer_started') is True and outcome.get('outcomeKnown') is True
+                and outcome.get('running') is False and all(type(outcome.get(key)) is int and outcome[key]==expected
+                    for key,expected in (('resultCode',2),('hresult',0),('aggregateResultCode',2),('aggregateHresult',0))))
+            success=native_success and outcome.get('requiresReview') is not True
+            skipped=(isinstance(outcome,dict) and outcome.get('skipped') is True
+                and outcome.get('installer_started') is False and outcome.get('outcomeKnown') is True and outcome.get('running') is False)
+            status=('cancelled' if isinstance(outcome,dict) and outcome.get('navigation_cancelled') is True else
+                    'skipped' if skipped else 'applied' if success else 'needs_review' if native_success else 'failed')
+            items.append({'binding':value,'status':status,'result':outcome})
             work.finish(items[-1]['status'],result=items[-1],mutation_started=outcome.get('installer_started',success) if isinstance(outcome,dict) else None,
                 outcome_known=isinstance(outcome,dict) and outcome.get('outcomeKnown') is True and outcome.get('running') is False,
                 message=outcome.get('note') if isinstance(outcome,dict) else None)

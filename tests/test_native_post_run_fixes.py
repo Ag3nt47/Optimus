@@ -543,7 +543,8 @@ def test_driver_channel_keeps_exact_approval_fresh_scan_and_required_backup(tmp_
     service.driver_updates_scan.return_value = {'resultCode': 2, 'updates': [offered]}
     service.driver_backup_automatic.side_effect = None
     service.driver_backup_automatic.return_value = {'exit_code': 0, 'destination': str(tmp_path / 'driver-backup-fixture')}
-    service.driver_update_apply_unattended = Mock(return_value={'resultCode': 2, 'hresult': 0})
+    service.driver_update_apply_unattended = Mock(return_value={'resultCode': 2, 'hresult': 0, 'aggregateResultCode': 2, 'aggregateHresult': 0,
+        'installer_started': True, 'outcomeKnown': True, 'running': False})
     result = service.apply_available_fixes(source, settings)
     service.driver_updates_scan.assert_called_once()
     service.driver_backup_automatic.assert_called_once()

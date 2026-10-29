@@ -256,7 +256,7 @@ def test_driver_native_phases_are_bound_to_the_exact_update_and_revision():
         callbacks.append(progress_callback)
         progress_callback({'phase':'downloading','percent':30})
         progress_callback({'phase':'installing','percent':None})
-        return {'resultCode':2,'hresult':0,'restartNeeded':False,'installer_started':True,'outcomeKnown':True,'running':False}
+        return {'resultCode':2,'hresult':0,'aggregateResultCode':2,'aggregateHresult':0,'restartNeeded':False,'installer_started':True,'outcomeKnown':True,'running':False}
     value.driver_update_apply_unattended=install
     result=run_drivers(value,driver_config(),item_callback=events.append)
     actual=[e['item_progress'] for e in events if isinstance(e.get('item_progress'),dict)
@@ -289,8 +289,11 @@ def test_only_complete_successful_native_app_end_reports_100(tmp_path,code,text,
     else:
         tool.updates_apply('Vendor.App',confirmed=True,progress_callback=events.append)
     assert (any(e['percent']==100 for e in events))==complete
-    if complete:assert events[-1]['item_terminal'] is True
-    assert tool._run.call_count==1
+    if complete:
+        assert any(event.get('phase') == 'install' and event.get('percent') == 100
+                   and event.get('item_terminal') is False for event in events)
+        assert events[-1] == {'phase': 'verify', 'percent': None}
+    assert tool._run.call_count==(2 if complete else 1)
 
 
 def test_foreground_workflow_passes_actual_item_progress_but_not_stage_placeholder_percent(tmp_path):

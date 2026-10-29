@@ -372,7 +372,7 @@ def test_known_terminal_driver_failure_advances(failure):
     first, second = driver(), driver(id='00000000-0000-0000-0000-000000000002')
     service.driver_updates_scan.return_value['updates'] = [first,second]
     service.driver_update_apply_unattended.side_effect = [failure,
-        {'resultCode':2,'hresult':0,'installer_started':True,'outcomeKnown':True,'running':False}]
+        {'resultCode':2,'hresult':0,'aggregateResultCode':2,'aggregateHresult':0,'installer_started':True,'outcomeKnown':True,'running':False}]
     result = run_drivers(service,driver_config(driver_approved_updates=[first,second]))
     assert service.driver_update_apply_unattended.call_count == 2
     assert [row['status'] for row in result['items']] == ['failed','applied']

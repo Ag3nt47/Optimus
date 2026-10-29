@@ -411,6 +411,9 @@ class StartupUpdateController(QObject):
         if isinstance(result, dict) and result.get('status') == 'dispatched' and result.get('started') is True:
             if self._progress is not None:
                 self._progress.settled('The verified update worker is waiting for Optimus to close, then will restart the new version.', staged=True)
+                self._progress.stage.setText('Restarting Optimus automatically')
+                self._progress.cancel_button.setText('Restarting Optimus…')
+                self._progress.cancel_button.setEnabled(False)
             self.pending = False
             self._handoff_committed = True
             self.window._startup_update_pending = False
@@ -448,6 +451,34 @@ class StartupUpdateController(QObject):
             self.window.status.setText('The update restart approval could not be revoked. Maintenance and automatic exit remain paused for review.')
 
     def _resume(self, result):
+        if self._closing:
+            return
+        current = self.window._settings()
+        accepted = (isinstance(result, dict) and result.get('status') == 'accepted'
+                    and isinstance(result.get('settings'), dict)
+                    and scope_fingerprint(result['settings']) == scope_fingerprint(current))
+        if not accepted:
+            self._complete_resume(result)
+            return
+        if not self.window.isVisible() or self.window._quitting or self.window._close_when_idle:
+            self._fallback('The updated Optimus window was not ready. Automatic maintenance remains paused for the normal launch review.')
+            return
+        self.window.status.setText('Confirming the updated Optimus window is ready before continuing saved actions.')
+        self._submit('acknowledge', lambda progress: self._service().acknowledge_resume(self.resume_id),
+                     lambda acknowledgement: self._resume_acknowledged(result, acknowledgement))
+
+    def _resume_acknowledged(self, result, acknowledgement):
+        if self._closing:
+            return
+        if (not isinstance(acknowledgement, dict) or acknowledgement.get('status') != 'ready'
+                or not self.window.isVisible() or self.window._quitting or self.window._close_when_idle):
+            self._fallback('The updated Optimus window could not confirm its restart. Automatic maintenance remains paused for the normal launch review.')
+            return
+        # The acknowledgement runs off-thread. Recheck the current choices
+        # before the original one-shot resume consent can start any work.
+        self._complete_resume(result)
+
+    def _complete_resume(self, result):
         if self._closing:
             return
         current = self.window._settings()
@@ -545,5 +576,5 @@ class StartupUpdateController(QObject):
                                      and value.get('cleanup_approved') is False)
                 except Exception:
                     self.window.status.setText('Closing update approval needs review; automatic cleanup was not started by this window.')
-        if self._progress is not None:
+        if self._progress is not None and not self._handoff_committed:
             self._progress.settled('Optimus is closing; maintenance did not start during its update.')

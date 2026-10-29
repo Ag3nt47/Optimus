@@ -492,6 +492,38 @@ def _bounded_payload_cleanup(value):
     return saved
 
 
+def _bounded_driver_verification(value):
+    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1:
+        return None
+    saved = {'schema': 1}
+    for key in ('status', 'id', 'error', 'note'):
+        if isinstance(value.get(key), str):
+            saved[key] = value[key][:2000 if key in ('error', 'note') else 128]
+    for key in ('verified', 'searchComplete', 'exactOfferStillApplicable'):
+        if type(value.get(key)) is bool or value.get(key) is None:
+            saved[key] = value.get(key)
+    for key in ('revision', 'searchResultCode'):
+        if type(value.get(key)) is int and 0 <= value[key] <= 2147483647:
+            saved[key] = value[key]
+    device = value.get('device')
+    if isinstance(device, dict):
+        observation = {}
+        for key in ('complete', 'versionMatches', 'dateMatches', 'providerMatches', 'alreadyCurrent'):
+            if type(device.get(key)) is bool:
+                observation[key] = device[key]
+        for key in ('hardwareId', 'offeredVersion', 'versionSource', 'error'):
+            if isinstance(device.get(key), str):
+                observation[key] = device[key][:1000]
+        rows = device.get('drivers')
+        if isinstance(rows, list):
+            observation['driver_count'] = min(len(rows), 1000000)
+            observation['drivers_truncated'] = len(rows) > 20
+            observation['drivers'] = [{key: row[key][:512] for key in ('deviceId', 'version', 'date', 'provider')
+                if isinstance(row.get(key), str)} for row in rows[:20] if isinstance(row, dict)]
+        saved['device'] = observation
+    return saved
+
+
 def _journal_result(result):
     saved = {key: result[key] for key in ('failed_items', 'cancelled', 'restartNeeded', 'uncertain', 'policy', 'review_only',
              'stop_reason', 'reason', 'installer_started', 'outcomeKnown', 'running', 'blocked_by_prior_installer',
@@ -528,6 +560,28 @@ def _journal_result(result):
     rows = [row for row in result.get('items', []) if isinstance(row, dict)][:1000]
     for row, compact in zip(rows, saved['items']):
         outcome = row.get('result') if isinstance(row.get('result'), dict) else {}
+        binding = row.get('binding') if isinstance(row.get('binding'), dict) else {}
+        if type(binding.get('revision')) is int and 0 <= binding['revision'] <= 2147483647:
+            compact['binding']['revision'] = binding['revision']
+            for key in ('title', 'hardwareId', 'provider', 'driverClass', 'driverDate'):
+                if isinstance(binding.get(key), str):
+                    compact['binding'][key] = binding[key][:2048]
+        if type(outcome.get('alreadyCurrent')) is bool:
+            compact['result']['alreadyCurrent'] = outcome['alreadyCurrent']
+        driver_verification = _bounded_driver_verification(outcome.get('post_install_verification'))
+        if driver_verification is not None:
+            compact['result']['post_install_verification'] = driver_verification
+        for key in ('from_version', 'to_version'):
+            if isinstance(row.get(key), str):
+                compact[key] = row[key][:128]
+        for key in ('from_version', 'to_version', 'installed_version', 'verification_status', 'verification_attempt'):
+            if isinstance(outcome.get(key), str):
+                compact['result'][key] = outcome[key][:128]
+        if type(outcome.get('application_restart_required')) is bool:
+            compact['result']['application_restart_required'] = outcome['application_restart_required']
+        if isinstance(outcome.get('blocking_package_families'), list):
+            compact['result']['blocking_package_families'] = [value[:256] for value in outcome['blocking_package_families'][:20]
+                if isinstance(value, str)]
         if type(outcome.get('installation_reported')) is bool:
             compact['result']['installation_reported'] = outcome['installation_reported']
         observation = outcome.get('download_progress')
@@ -851,6 +905,9 @@ def _app_completion_presentation(result, evidence):
             counts['deferred'] = counts.get('deferred', 0) + 1
             continue
         if not can_fail_forward(value):
+            counts['unverified'] += 1
+            continue
+        if value.get('verified') is False:
             counts['unverified'] += 1
             continue
         if row.get('status') in ('completed', 'applied') and value.get('installer_started') is True and type(value.get('exitCode')) is int and value['exitCode'] == 0:

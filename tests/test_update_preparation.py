@@ -40,7 +40,8 @@ def fixture(kind):
         return run_software, backend, config, backend.update_app_unattended
     backend = SimpleNamespace(driver_updates_scan=Mock(return_value=dict(resultCode=2, updates=[driver()])),
         driver_backup_automatic=Mock(return_value=dict(exit_code=0, destination='fixture-backup')),
-        driver_update_apply_unattended=Mock(return_value=dict(resultCode=2, hresult=0, restartNeeded=False)),
+        driver_update_apply_unattended=Mock(return_value=dict(resultCode=2, hresult=0, aggregateResultCode=2, aggregateHresult=0,
+            installer_started=True, outcomeKnown=True, running=False, restartNeeded=False)),
         is_admin=Mock(return_value=True), update_disk_readiness=Mock(return_value=dict(ready=True)))
     config = dict(setup_version=CURRENT_SETUP_VERSION, driver_updates_enabled=True,
         driver_policy='install_approved', driver_changes_approved=True, driver_update_agreements_accepted=True,
