@@ -145,7 +145,7 @@ def staged(p):
 def handoff(p,cleanup=True):
     value = staged(p)
     prepared = p.service.prepare_handoff(value['stage_id'],cleanup_approved=cleanup,
-        approved_settings=p.preferences if cleanup else None)
+        approved_settings=module.canonical_approval_scope(p.preferences) if cleanup else None)
     assert prepared['worker_command'] == [str(p.installation / 'Optimus.exe'),'--self-update-worker',value['stage_id']]
     assert p.service.dispatch_worker(value['stage_id'])['status'] == 'dispatched'
     return value['stage_id']
@@ -336,7 +336,7 @@ def test_exact_update_waits_and_preserves_old_version_then_consumes_clean_once(u
     assert p.launchers.retarget.call_count==1
     accepted=new_service(p).consume_resume(identity)
     assert accepted['status']=='accepted' and accepted['consumed'] is True and accepted['cleanup_approved'] is True
-    assert accepted['settings']==p.preferences
+    assert accepted['settings']==module.canonical_approval_scope(p.preferences)
     with pytest.raises(FileExistsError):new_service(p).consume_resume(identity)
     assert (p.data / 'preferences.json').read_bytes()==p.raw
 
@@ -376,7 +376,7 @@ def test_dispatch_and_worker_are_each_permanently_at_most_once(updater):
 def test_durable_cancellation_prevents_late_handoff_or_cleanup_resume(updater,phase):
     p=updater
     result=staged(p);identity=result['stage_id']
-    if phase!='stage':p.service.prepare_handoff(identity,cleanup_approved=True,approved_settings=p.preferences)
+    if phase!='stage':p.service.prepare_handoff(identity,cleanup_approved=True,approved_settings=module.canonical_approval_scope(p.preferences))
     if phase in ('dispatched','ready'):p.service.dispatch_worker(identity)
     if phase=='ready':assert p.service.finish_handoff(identity)['status']=='launched'
     assert p.service.cancel_handoff(identity)['revoked'] is True
@@ -394,7 +394,7 @@ def test_durable_cancellation_prevents_late_handoff_or_cleanup_resume(updater,ph
 
 def test_cancel_arriving_during_dispatch_is_seen_before_worker_actions(updater):
     p=updater;value=staged(p);identity=value['stage_id']
-    p.service.prepare_handoff(identity,cleanup_approved=True,approved_settings=p.preferences)
+    p.service.prepare_handoff(identity,cleanup_approved=True,approved_settings=module.canonical_approval_scope(p.preferences))
     def launch_and_cancel(*args,**kwargs):
         p.service.cancel_handoff(identity)
         return {'started':True,'pid':5678}
@@ -433,7 +433,7 @@ def test_expired_stage_never_dispatches_or_extends_approval(updater):
 @pytest.mark.parametrize('phase',['stage','prepared','dispatched','ready'])
 def test_expired_consent_can_only_be_durably_revoked(updater,phase):
     p=updater;identity=staged(p)['stage_id']
-    if phase!='stage':p.service.prepare_handoff(identity,cleanup_approved=True,approved_settings=p.preferences)
+    if phase!='stage':p.service.prepare_handoff(identity,cleanup_approved=True,approved_settings=module.canonical_approval_scope(p.preferences))
     if phase in ('dispatched','ready'):p.service.dispatch_worker(identity)
     if phase=='ready':assert p.service.finish_handoff(identity)['status']=='launched'
     launch_count=len(p.native.launches)

@@ -24,6 +24,8 @@ A separate handoff process waits for the exact old interface to exit normally an
 
 A short-lived, owner-bound one-use handoff binds the verified executable, data location, saved preferences and cleanup scope. Only the expected restarted version can consume it. A verified single-use cleanup approval resumes the unchanged saved scope once. Without that valid approval, the restarted window stays paused for explicit review, including changed settings and invalid, expired or reused handoffs. No arbitrary executable path, command line or cleanup scope is accepted from GitHub metadata.
 
+The approved cleanup snapshot contains the effective settings shown by the current interface, produced through the same validation and defaults used at resume. An older saved file may omit those existing default fields. The updater retains the raw file's exact SHA256 binding separately and does not rewrite it to add defaults. It never silently expands an older approval: the caller must explicitly supply the complete effective snapshot, and a changed effective scope or future default pauses cleanup instead of granting new permission.
+
 Existing plain owned launch shortcuts and enabled sign-in registration are retargeted only when their current identity still matches the old installation. Their previous bytes or registration are retained for conditional recovery. Unrelated or changed launchers are left alone. Settings, journals, Sandbox source and the existing data-location selection remain in place; old release folders are retained for recovery.
 
 The update has its own visible progress and cancellation. Maintenance has not started while download, verification or restart is pending. A failed or cancelled update does not claim success or silently approve cleanup.

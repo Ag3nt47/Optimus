@@ -7,6 +7,8 @@ Optimus checks its own stable GitHub release before maintenance or background au
 3. If approved, download and verify the update, complete its guarded restart and confirm the new window is ready. Maintenance remains paused throughout that handoff.
 4. A verified single-use cleanup approval resumes the unchanged saved scope once. A restarted window without that valid approval stays paused for explicit review. Setup and saved-action consent still apply.
 
+Update approval and resume use the same validated effective settings, including existing defaults missing from an older saved file. The raw file's byte hash is preserved independently; adding defaults in memory does not rewrite saved preferences. An old approval is not automatically expanded, and changed effective choices or defaults require explicit review.
+
 No newer release, an unavailable release check or an explicit decline can return to the current version's normal launch review. After accepting an update, a download, verification, preparation or handoff failure leaves maintenance paused for explicit review. Closing a question does not approve cleanup. Pressing STOP cancels the session instead of continuing a launch fallback.
 
 ## STOP and exit

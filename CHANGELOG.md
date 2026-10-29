@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.12.18
+## 0.12.19
 
+- Compare the explicitly approved effective settings at update handoff and resume while preserving the original saved-preference bytes. Older files can omit existing defaults without causing a false mismatch; changed effective choices or defaults still pause cleanup for review.
 - Serialize startup so the Optimus release check and any approved update/restart finish before launch review or saved unattended maintenance can run.
 - Resume cleanup only through a verified single-use approval for unchanged saved choices. A failure after accepting an Optimus update, or a restart without valid cleanup approval, leaves maintenance paused for explicit review.
 - Add a red STOP control to main and progress headers. Latch it immediately, reject pending questions, cancel supported work and prevent queued follow-ups or automation from restarting the session.

@@ -60,6 +60,19 @@ def _json(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode()
 
 
+def canonical_approval_scope(settings):
+    """Return the effective Windows choices shown by the running application.
+
+    This does not save or migrate preferences. The original file bytes remain
+    separately authenticated by the update binding; cleanup consent covers the
+    validated runtime choices, including that runtime's existing defaults.
+    """
+    if not isinstance(settings, dict) or len(_json(settings)) > 4 * 1024 ** 2:
+        raise ValueError('Saved maintenance choices must be a bounded object.')
+    from .workflow import Preferences
+    return Preferences.validate(copy.deepcopy(settings))
+
+
 def _version(value):
     if not isinstance(value, str) or not _VERSION.fullmatch(value):
         raise ValueError('Only stable three-part Optimus release versions are supported.')
@@ -608,9 +621,11 @@ class SelfUpdater:
         self._not_revoked(stage_id,folder)
         with self.lease_factory(self.data_dir):
             self._verify_stage(value,folder)
-            raw = _read(self.data_dir / 'preferences.json',4 * 1024 ** 2); settings = json.loads(raw)
+            raw = _read(self.data_dir / 'preferences.json',4 * 1024 ** 2)
+            settings = canonical_approval_scope(json.loads(raw))
             if type(cleanup_approved) is not bool: raise ValueError('An explicit cleanup approval choice is required.')
-            if cleanup_approved and (approved_settings != settings or type(settings.get('setup_version')) is not int
+            if cleanup_approved and (not isinstance(approved_settings, dict) or _json(approved_settings) != _json(settings)
+                                     or type(settings.get('setup_version')) is not int
                                      or settings['setup_version'] != CURRENT_SETUP_VERSION):
                 raise ValueError('Cleanup requires explicitly approved unchanged completed-setup settings.')
             process = old_process or self._native().current()
@@ -619,6 +634,7 @@ class SelfUpdater:
                     or Path(process.get('exe','')) != Path(value['binding']['old_executable'])):
                 raise ValueError('The exact running original GUI identity is required.')
             handoff = dict(value,old_process=copy.deepcopy(process),cleanup_approved=cleanup_approved,
+                           cleanup_approval_schema=2,
                            approved_scope_sha256=_digest(_json(settings)) if cleanup_approved else None)
             self._not_revoked(stage_id,folder)
             self._write(folder,'handoff.json',handoff)
@@ -760,17 +776,26 @@ class SelfUpdater:
                     or _hash_file(self.installation / 'Optimus.exe')['sha256'] != value['new_executable_sha256']
                     or _tree(self.installation) != value['manifest']):
                 raise ValueError('Only the exact verified new executable may consume this resume approval.')
-            raw = _read(self.data_dir / 'preferences.json',4 * 1024 ** 2); settings = json.loads(raw)
+            raw = _read(self.data_dir / 'preferences.json',4 * 1024 ** 2)
+            saved = json.loads(raw)
             if (_digest(raw) != value['binding']['preferences_sha256']
                     or _digest(_read(self.installation / 'Optimus.location.json',4096)) != value['binding']['locator_sha256']):
                 raise ValueError('Saved settings/data location changed after update; use the normal launch review.')
+            settings = canonical_approval_scope(saved)
+            approval_schema = value.get('cleanup_approval_schema', 1)
+            scope_matches = (type(approval_schema) is int and approval_schema in (1, 2)
+                             and _digest(_json(settings)) == value.get('approved_scope_sha256')
+                             and (approval_schema == 2 or _json(saved) == _json(settings)))
             approved = (value.get('cleanup_approved') is True and type(settings.get('setup_version')) is int
                         and settings['setup_version'] == CURRENT_SETUP_VERSION
-                        and _digest(_json(settings)) == value.get('approved_scope_sha256'))
+                        and scope_matches)
             self._not_revoked(handoff_id,folder)
             self._write(folder,'resume-consumed.json',{'id':handoff_id,'owner':self._owner(),'expires_at':value['expires_at'],
-                'consumed_at':self.clock(),'cleanup_approved':approved,'at_most_once':True})
+                'consumed_at':self.clock(),'cleanup_approved':approved,'at_most_once':True,
+                'cleanup_approval_schema':approval_schema,
+                'approved_scope_sha256':value.get('approved_scope_sha256') if approved else None})
             return {'status':'accepted','consumed':True,'cleanup_approved':approved,'settings':settings,
+                    'cleanup_approval_schema':approval_schema,
                     'approved_scope_sha256':value.get('approved_scope_sha256') if approved else None,'version':self.current_version,
                     'launchers':value.get('launchers',{})}
 
