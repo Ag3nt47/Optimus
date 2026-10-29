@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "version": "0.12.11",
-  "source_commit": "efb580a6ee4f247de16d3c732937c5010cf6ca96",
+  "version": "0.12.12",
+  "source_commit": "d7c5f7391a15be9e49307d4356651de0f31cd312",
   "capture": "Actual QWidget.grab() renders with labelled surrounding title/footer",
   "fixture_scope": "In-memory backend, navigation and mock Sandbox; all metrics and outcomes are simulated. No measured cleanup, performance or native-operation proof.",
   "primary_button": "Connected only to fixture progress-window handoff",
@@ -66,16 +66,16 @@
   "assets": [
     {
       "file": "optimus-completed.png",
-      "bytes": 116398,
-      "sha256": "ced10e7905359bee0d78cdbe436683fcadeeeb3974ae4a778ccf159cbe826d03",
+      "bytes": 116397,
+      "sha256": "e245dee9c807175ab141e643eba5388378f61a3373cac26ebf4561035fb7179f",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
     },
     {
       "file": "optimus-demo.gif",
-      "bytes": 1304804,
-      "sha256": "e76fe30a192f3d3c4a5e0dbacbda72851d5cc30f16d739b695e23696db68e1f9",
+      "bytes": 1261336,
+      "sha256": "275f4f6d74960e9c0fa8acabfbe4cc25f1555b4d9a4118dcaa8b0fa5cbcc9df1",
       "width": 1120,
       "height": 900,
       "codec": "GIF89a",
@@ -87,24 +87,24 @@
     },
     {
       "file": "optimus-main.png",
-      "bytes": 135022,
-      "sha256": "1e3eaf6543d56fdaa1854c39150e3216713415863400a416221955c82f7b721a",
+      "bytes": 133508,
+      "sha256": "f05973b9e035793aca8b5f5f0d3924fed707685ea2023d0224ddd95ac893c5a4",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
     },
     {
       "file": "optimus-sandbox.png",
-      "bytes": 167126,
-      "sha256": "d774a373258b28fc665fced5af394734b312612655fb1254eb62e96808cd019f",
+      "bytes": 167129,
+      "sha256": "018bb367d2cc8cff9c21326939b92b4baee3b0367bdc3b71630ec359a5b5f742",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
     },
     {
       "file": "optimus-walkthrough.mp4",
-      "bytes": 789342,
-      "sha256": "fec362bdb72aeac80f6ee4fece9c76c4ff67b5c9dd33218690438da184e6b8b2",
+      "bytes": 764985,
+      "sha256": "c6540a68cf99c2f67127a2b2041d299e3af97dcaf58f57e59ce433760af849e4",
       "width": 1120,
       "height": 900,
       "codec": "H.264 / AVC",
@@ -116,8 +116,8 @@
     },
     {
       "file": "optimus-workers.png",
-      "bytes": 120072,
-      "sha256": "ffe4efb4261bba13fb2b732021a28158b93e5cd64412bd192544e3e03e2d4e84",
+      "bytes": 120630,
+      "sha256": "80470b4debe222153aa9d2b9d82bb8b1914cd2c06d8bb7fa90a70349b25afb1b",
       "width": 1120,
       "height": 900,
       "codec": "PNG"
