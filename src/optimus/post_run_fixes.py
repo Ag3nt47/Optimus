@@ -40,6 +40,11 @@ CHANNELS = {
 _IDENTITY = re.compile(r'[0-9a-f]{32}\Z')
 _STATES = ('confirmed', 'needs_review', 'unverified', 'not_applicable')
 _ACTION_STATES = ('completed', 'skipped', 'blocked', 'failed', 'uncertain', 'cancelled', 'deferred')
+# Full optimization reports retain initial/final inventories and worker receipts.
+# A normal large installation can exceed 100,000 JSON values even while its
+# text is well below the separate 8 MiB limit. The same budget must cover the
+# linked follow-up journal, which also retains fresh before/after inventories.
+_MAX_JSON_NODES = 500000
 
 
 def _bounded(value):
@@ -48,7 +53,7 @@ def _bounded(value):
     while pending:
         item, depth = pending.pop()
         nodes += 1
-        if nodes > 100000 or depth > 24:
+        if nodes > _MAX_JSON_NODES or depth > 24:
             raise ValueError('The report exceeds the post-run review bounds.')
         if type(item) is dict:
             if len(item) > 10000 or any(type(key) is not str or len(key) > 512 for key in item):

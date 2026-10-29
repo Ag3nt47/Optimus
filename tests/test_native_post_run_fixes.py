@@ -261,6 +261,57 @@ def test_exported_different_parent_and_nested_oversized_inputs_are_rejected(tmp_
     service.apply_security_recommendation.assert_not_called()
 
 
+def test_large_completed_inventory_can_preview_apply_and_save_followup(tmp_path):
+    """Real full runs exceed 100k nodes without exceeding report size limits."""
+    settings = software_settings(auto_continue_fixes_enabled=True)
+    inventory = {'Processes': [
+        {'Pid': index, 'Name': 'Fixture process', 'CpuPct': 0.0,
+         'WorkingSetBytes': 1024, 'Status': 'running', 'Owner': 'Fixture',
+         'Publisher': 'Fixture', 'Category': 'user', 'Signed': True,
+         'Executable': 'Fixture.exe'} for index in range(5000)],
+        'InstalledApps': [], 'System': {}, 'InventoryErrors': []}
+    source = parent(settings, software=software_report())
+    source['stages'].insert(0, {'title': 'Inspect current resource usage',
+        'status': 'completed', 'result': copy.deepcopy(inventory)})
+    source['stages'].append({'title': 'Capture final resource report',
+        'status': 'completed', 'result': copy.deepcopy(inventory)})
+    before = copy.deepcopy(source)
+    service = backend(tmp_path, settings, source)
+    service.audit.return_value = inventory
+
+    shown = service.available_fixes(source, settings)
+    assert [row['id'] for row in shown['actions']] == ['software_updates']
+    assert not list(tmp_path.iterdir())
+    service.update_app_unattended.assert_not_called()
+
+    result = service.apply_available_fixes(source, settings)
+    service.updates_scan.assert_called_once()
+    assert_stop_bound_call(service, service.update_app_unattended, 'Fixture.One')
+    assert result['counts']['completed'] == 1
+    assert len(result['software_before_snapshot']['Processes']) == 5000
+    saved = json.loads(Path(result['log_path']).read_text(encoding='utf-8'))
+    assert saved['parent_run_id'] == source['id']
+    assert saved['status'] == 'completed'
+    after = next(stage['result'] for stage in saved['stages']
+                 if stage['title'] == 'Capture final resource report')
+    assert len(after['Processes']) == 5000
+    assert source == before and not service.workflow.active
+
+
+def test_large_report_budget_still_rejects_excessive_nodes_and_cycles(tmp_path):
+    settings = software_settings()
+    source = parent(settings, software=software_report())
+    service = backend(tmp_path, settings, source)
+    excessive = [[None] * 10000 for _ in range(51)]
+    cyclic = []
+    cyclic.append(cyclic)
+    for value in (excessive, cyclic):
+        with pytest.raises(ValueError, match='bounds'):
+            service.available_fixes(dict(source, extra=value), settings)
+    service.update_app_unattended.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
 def test_security_batch_is_one_shot_durable_linked_and_preserves_parent(tmp_path):
     settings = configuration()
     source = parent(settings, security=list(SECURITY_FIXES), process={'id': 'b' * 32, 'actions': []})

@@ -101,7 +101,8 @@ def test_completed_scan_only_previews_exact_batch_until_explicit_click(window, a
     assert '1 automatic action available; 1 item requires manual review' in progress.auto_continue_summary.text()
     assert 'approves the automatic actions listed below' in progress.auto_continue_summary.text()
     assert not progress.auto_continue_button.autoDefault() and not progress.auto_continue_button.isDefault()
-    assert progress.cancel_button.text() == 'Continue to recommendations'
+    assert not progress.cancel_button.autoDefault() and not progress.cancel_button.isDefault()
+    assert progress.cancel_button.text() == 'Apply fixes before recommendations'
 
 
 def test_click_uses_separate_worker_once_and_keeps_manual_continue(window, app):
@@ -208,10 +209,17 @@ def test_no_available_batch_has_disabled_control_with_visible_reason(window, app
         window.backend.available_fixes.side_effect = RuntimeError('Fixture preview unavailable')
     progress = complete_initial(window, app)
     assert progress.auto_continue_button.isVisible() and not progress.auto_continue_button.isEnabled()
-    assert 'No automatic fixes are available' in progress.auto_continue_summary.text()
+    if mode != 'preview_error':
+        assert 'No automatic fixes are available' in progress.auto_continue_summary.text()
     assert window._pending_auto_fixes is None
     if mode == 'preview_error':
         assert 'Fixture preview unavailable' in progress.auto_continue_summary.text()
+        assert 'Automatic continuation could not be prepared' in progress.auto_continue_summary.text()
+        assert progress.stage.text() == 'FOLLOW-UP CHECK FAILED'
+        assert 'No follow-up changes were applied' in progress.description.text()
+        assert 'Fixture preview unavailable' in progress.log.toPlainText()
+        assert 'Fixture preview unavailable' in progress.auto_continue_details.toPlainText()
+        assert 'Fixture preview unavailable' in window.status.text()
     progress.autoContinueRequested.emit()
     if mode != 'legacy_backend':
         window.backend.apply_available_fixes.assert_not_called()
@@ -243,15 +251,57 @@ def test_followup_worker_error_cannot_be_retried(window, app):
     window.backend.apply_available_fixes.assert_called_once()
 
 
-def test_manual_continue_discards_the_batch_and_dismiss_can_cancel_queued_review(window, app):
+def test_footer_applies_pending_fixes_before_offering_recommendations(window, app):
     progress = complete_initial(window, app)
+    assert progress.cancel_button.text() == 'Apply fixes before recommendations'
     QTest.mouseClick(progress.cancel_button, Qt.LeftButton)
+    wait_until(app, lambda: window.backend.apply_available_fixes.called and not window.busy)
     assert window._pending_auto_fixes is None
     assert progress.auto_continue_button.isHidden()
-    progress.close()
-    app.processEvents()
+    assert progress.cancel_button.text() == 'Continue to recommendations'
+    assert progress.isVisible()
+    window.backend.apply_available_fixes.assert_called_once()
     window._offer_post_optimization_reviews.assert_not_called()
+
+
+def test_queued_recommendation_acknowledgement_cannot_discard_pending_fixes(window, app):
+    progress = complete_initial(window, app)
+    pending = window._pending_auto_fixes
+    progress.resultsAcknowledged.emit()
+    app.processEvents()
+    assert window._pending_auto_fixes is pending
+    assert progress.cancel_button.text() == 'Apply fixes before recommendations'
+    assert 'still pending' in window.status.text()
     window.backend.apply_available_fixes.assert_not_called()
+    window._offer_post_optimization_reviews.assert_not_called()
+
+
+def test_footer_applies_pending_fixes_even_without_manual_recommendations(window, app):
+    window.backend.optimize.return_value = report(security_review={}, process_review=None)
+    progress = complete_initial(window, app)
+    assert window._pending_post_review is None
+    assert progress.cancel_button.text() == 'Apply fixes before recommendations'
+    QTest.mouseClick(progress.cancel_button, Qt.LeftButton)
+    wait_until(app, lambda: window.backend.apply_available_fixes.called and not window.busy)
+    window.backend.apply_available_fixes.assert_called_once()
+    assert progress.isVisible()
+    window._offer_post_optimization_reviews.assert_not_called()
+
+
+def test_saved_automatic_choice_surfaces_preview_failure_and_keeps_results_open(window, app):
+    window.backend.preferences = Mock(return_value=dict(window.backend.preferences(), auto_continue_fixes_enabled=True))
+    window.backend.available_fixes.side_effect = ValueError('Fixture report review bound exceeded')
+    progress = complete_initial(window, app)
+    app.processEvents()
+    assert progress.isVisible()
+    assert progress.stage.text() == 'FOLLOW-UP CHECK FAILED'
+    assert 'Fixture report review bound exceeded' in progress.description.text()
+    assert 'No follow-up changes were applied' in progress.auto_continue_summary.text()
+    assert 'Fixture report review bound exceeded' in progress.auto_continue_details.toPlainText()
+    assert not progress.auto_continue_button.isEnabled()
+    assert progress.cancel_button.text() == 'Continue to recommendations'
+    window.backend.apply_available_fixes.assert_not_called()
+    window._offer_post_optimization_reviews.assert_not_called()
 
 
 def test_new_scan_discards_old_result_actions_and_stale_window_signals(window, app):
@@ -376,6 +426,45 @@ def test_saved_automatic_choice_continues_once_without_a_second_click(window, ap
     assert 'SAVED AUTOMATIC FIX CHOICE' in window._progress_window.log.toPlainText()
     assert window._progress_window.progress.format() == 'Follow-up %p%'
     window._offer_post_optimization_reviews.assert_not_called()
+
+
+def test_large_completed_inventory_reaches_real_preview_and_saved_followup(window, app):
+    from optimus.post_run_fixes import available_fixes
+    settings = dict(window.backend.preferences(), auto_continue_fixes_enabled=True)
+    window.backend.preferences = Mock(return_value=settings)
+    # Real runs contain multiple inventories. This is over the former 100k
+    # JSON-value limit but comfortably within the ordinary bounded report size.
+    source = report('a' * 32, inventory_detail=[[0] * 1000 for _ in range(110)],
+        security_review={'recommendations': [{'id': 'enable_firewall', 'title': 'Enable Windows Firewall'}]})
+    original = copy.deepcopy(source)
+    window.backend.optimize.return_value = source
+    previews = []
+    def preview(actual, choices):
+        value = available_fixes(window.backend, actual, choices)
+        previews.append(value)
+        return value
+    window.backend.available_fixes = preview
+    def apply(actual, choices, *, progress_callback, cancel_event):
+        assert actual is source
+        assert choices == settings
+        assert not cancel_event.is_set()
+        progress_callback({'stage': 'Fixture firewall readback', 'percentage': 100,
+            'description': 'Fixture follow-up only; no host changes.'})
+        return report('b' * 32, parent_run_id=source['id'], counts={'completed': 1},
+            summary='One fixture action completed.')
+    window.backend.apply_available_fixes.side_effect = apply
+    QTest.mouseClick(window.main_buttons[0], Qt.LeftButton)
+    wait_until(app, lambda: window.backend.apply_available_fixes.called and not window.busy)
+    assert len(previews) == 1
+    assert previews[0]['actions'] == [{'id': 'enable_firewall',
+        'title': 'Enable disabled Windows Firewall profiles', 'kind': 'security'}]
+    window.backend.apply_available_fixes.assert_called_once()
+    window._offer_post_optimization_reviews.assert_not_called()
+    assert window._auto_continue_attempted
+    assert window._progress_window.title.text() == 'AVAILABLE FIXES RESULTS'
+    assert window._progress_window.isVisible()
+    assert 'SAVED AUTOMATIC FIX CHOICE' in window._progress_window.log.toPlainText()
+    assert source == original
 
 
 def test_saved_opt_out_keeps_available_fixes_as_a_button_only(window, app):

@@ -2886,6 +2886,8 @@ class OptimizationProgressWindow(QDialog):
         outer.addWidget(self.auto_continue_button)
         self.clear_auto_continue()
         self.cancel_button = QPushButton('Cancel after current stage')
+        self.cancel_button.setAutoDefault(False)
+        self.cancel_button.setDefault(False)
         self.cancel_button.setMinimumHeight(36)
         self.cancel_button.setMinimumWidth(0)
         self.cancel_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -3513,6 +3515,7 @@ class OptimizationProgressWindow(QDialog):
                     card._set_resource_totals(totals, maintenance=identity == 'maintenance')
         self._refresh_resource_comparison()
         self.cancel_button.setText('Close results')
+        self.cancel_button.setToolTip('Close the saved results.')
         self.cancel_button.setEnabled(True)
         self._set_completed_footer(True)
         self.completion_review.show()
@@ -3536,12 +3539,17 @@ class OptimizationProgressWindow(QDialog):
     def set_auto_continue_plan(self, plan, *, ready=False):
         actions = rows(field(plan, 'actions', default=[]))
         manual = rows(field(plan, 'manual_items', default=[]))
+        preview_error = field(plan, 'error', default='')
         self.auto_continue_summary.setText(
+            'Automatic continuation could not be prepared. No follow-up changes were applied. '
+            + display(preview_error) if preview_error else
             f'{len(actions)} automatic {"action" if len(actions) == 1 else "actions"} available; '
             f'{len(manual)} {"item requires" if len(manual) == 1 else "items require"} manual review. '
             + (' Clicking Auto continue approves the automatic actions listed below.' if actions
                else 'No automatic fixes are available for this result. ' + display(field(plan, 'summary'))))
         details = ['AUTOMATIC ACTIONS']
+        if preview_error:
+            details = ['FOLLOW-UP CHECK FAILED', display(preview_error), '\nAUTOMATIC ACTIONS']
         details.extend('• ' + display(field(item, 'title')) for item in actions)
         if not actions:
             details.append('None available.')
@@ -3559,7 +3567,15 @@ class OptimizationProgressWindow(QDialog):
         self.auto_continue_button.show()
         self.auto_continue_button.setEnabled(bool(actions) and ready and self.completed)
         self.auto_continue_button.setToolTip('Apply the listed automatic actions once.' if actions
-            else 'No automatic fixes are available; use Continue for any remaining recommendations.')
+            else ('Automatic continuation failed: ' + display(preview_error) if preview_error
+                  else 'No automatic fixes are available; use Continue for any remaining recommendations.'))
+        if actions and ready and self.completed:
+            self.cancel_button.setText('Apply fixes before recommendations')
+            self.cancel_button.setToolTip('Apply the automatic actions listed above, then keep their results open for review.')
+        elif preview_error:
+            self.stage.setText('FOLLOW-UP CHECK FAILED')
+            self.description.setText('The main run finished, but its automatic follow-up could not be prepared. '
+                'No follow-up changes were applied. ' + display(preview_error))
         self._update_responsive_layout()
         if self.completed:
             self._reveal_completion_review()
@@ -3598,6 +3614,7 @@ class OptimizationProgressWindow(QDialog):
         self.processes.clear()
         self.log.appendPlainText('\nAUTO CONTINUE — ' + ('SAVED AUTOMATIC FIX CHOICE' if automatic else 'USER APPROVED AVAILABLE FIXES'))
         self.cancel_button.setText('Cancel after current stage')
+        self.cancel_button.setToolTip('Request cancellation after the current operation safely saves its outcome.')
         self.cancel_button.setEnabled(True)
         self._queue_body_view(self.worker_grid)
 
@@ -3618,10 +3635,22 @@ class OptimizationProgressWindow(QDialog):
     def set_recommendations_available(self, available):
         self._recommendations_ready = bool(available)
         if self.completed:
-            self.cancel_button.setText('Continue to recommendations' if self._recommendations_ready else 'Close results')
+            if self.auto_continue_button.isVisible() and self.auto_continue_button.isEnabled():
+                self.cancel_button.setText('Apply fixes before recommendations')
+                self.cancel_button.setToolTip('Apply the automatic actions listed above, then keep their results open for review.')
+            else:
+                self.cancel_button.setText('Continue to recommendations' if self._recommendations_ready else 'Close results')
+                self.cancel_button.setToolTip('Review the remaining recommendations; this does not install or apply changes.'
+                    if self._recommendations_ready else 'Close the saved results.')
 
     def request_close(self):
         if self.completed:
+            if self.auto_continue_button.isVisible() and self.auto_continue_button.isEnabled():
+                # The footer is explicitly labelled as applying fixes while a
+                # batch is ready. It must not discard that batch as a shortcut
+                # to the separate recommendation review.
+                self.autoContinueRequested.emit()
+                return
             if self._recommendations_ready:
                 self.set_recommendations_available(False)
                 self.resultsAcknowledged.emit()
@@ -4962,6 +4991,8 @@ class OptimusWindow(QMainWindow):
                         plan = candidate
                 except Exception as exc:
                     plan['summary'] = 'Available fixes could not be reviewed: ' + str(exc)
+                    plan['error'] = str(exc)
+                    self._progress_window.log.appendPlainText('Automatic continuation preview failed: ' + str(exc))
             self._progress_window.set_auto_continue_plan(plan)
             if isinstance(plan.get('actions'), list) and plan['actions']:
                 self._pending_auto_fixes = (result, settings, plan)
@@ -4969,7 +5000,9 @@ class OptimusWindow(QMainWindow):
                     self._progress_window.title.setText('CONTINUING OPTIMIZATION')
                     self._progress_window.stage.setText('SCAN COMPLETE — SAVED FOLLOW-UP QUEUED')
                     self._progress_window.description.setText('Your saved automatic fix choice continues with the supported actions listed below. Closing these results skips the queued continuation.')
-        self.status.setText('Workflow returned results. Review available fixes and final verification before continuing.')
+        self.status.setText('Automatic continuation could not be prepared. No follow-up changes were applied. '
+            + str(plan['error']) if self._completed_result(result) and plan.get('error') else
+            'Workflow returned results. Review available fixes and final verification before continuing.')
 
     @staticmethod
     def _completed_result(result):
@@ -5103,6 +5136,14 @@ class OptimusWindow(QMainWindow):
         if self._emergency_stopping:
             self._pending_post_review = self._pending_auto_fixes = None
             self._post_review_active = False
+            return
+        if self._pending_auto_fixes is not None and not self._auto_continue_attempted:
+            # A queued acknowledgement from the old recommendation footer is
+            # not approval to apply a batch, and must not silently drop it.
+            self.status.setText('Automatic fixes are still pending. Choose Apply fixes before recommendations '
+                'to apply the listed actions, or close the results to skip them.')
+            self._progress_window.set_recommendations_available(self._pending_post_review is not None)
+            self._progress_window.set_auto_continue_plan(self._pending_auto_fixes[2], ready=not self.busy)
             return
         self._pending_auto_fixes = None
         self._progress_window.clear_auto_continue()
