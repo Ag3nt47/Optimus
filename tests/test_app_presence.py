@@ -639,6 +639,66 @@ def test_unknown_installed_metadata_never_becomes_absent(output, code):
     with pytest.raises(PresencePreflightError): parse_installed(result(output, code), IDENTITY)
 
 
+def test_native_git_compact_installed_table_confirms_exact_version():
+    # Actual output from the exact source-scoped query after a successful Git
+    # upgrade: the four-character Name header needs only one separator space.
+    output = 'Name Id      Version\n---------------------\nGit  Git.Git 2.56.0.4\n'
+    assert parse_installed(result(output), 'Git.Git') == {
+        'id': 'Git.Git', 'source': 'winget', 'name': 'Git', 'version': '2.56.0.4'}
+
+
+def compact_installed_table(*, available=False, source=False):
+    columns = [('Name', 'Git'), ('Id', 'Git.Git'), ('Version', '2.56.0.4')]
+    if available:
+        columns.append(('Available', '2.56.0.5'))
+    if source:
+        columns.append(('Source', 'winget'))
+    widths = [max(len(label), len(value)) + 1 for label, value in columns]
+    header = ''.join(label.ljust(width) for (label, _), width in zip(columns, widths)).rstrip()
+    row = ''.join(value.ljust(width) for (_, value), width in zip(columns, widths)).rstrip()
+    return header + '\n' + '-' * max(len(header), len(row)) + '\n' + row + '\n'
+
+
+@pytest.mark.parametrize('available,source', [(False, False), (False, True), (True, False), (True, True)])
+def test_compact_installed_headers_preserve_optional_column_positions(available, source):
+    output = compact_installed_table(available=available, source=source)
+    assert parse_installed(result(output), 'Git.Git') == {
+        'id': 'Git.Git', 'source': 'winget', 'name': 'Git', 'version': '2.56.0.4'}
+
+
+@pytest.mark.parametrize('change', ['joined_name_id', 'joined_id_version', 'joined_version_available',
+    'joined_available_source', 'tab_separator', 'duplicate_header', 'duplicate_row', 'foreign_id',
+    'truncated_id', 'truncated_name', 'wrong_source', 'unknown_version'])
+def test_compact_installed_tables_reject_ambiguous_or_inexact_evidence(change):
+    output = compact_installed_table(available=True, source=True)
+    if change == 'joined_name_id':
+        output = output.replace('Name Id', 'NameId', 1)
+    elif change == 'joined_id_version':
+        output = output.replace('Id      Version', 'IdVersion', 1)
+    elif change == 'joined_version_available':
+        output = output.replace('Version  Available', 'VersionAvailable', 1)
+    elif change == 'joined_available_source':
+        output = output.replace('Available Source', 'AvailableSource', 1)
+    elif change == 'tab_separator':
+        output = output.replace('Name Id', 'Name\tId', 1)
+    elif change == 'duplicate_header':
+        output += output
+    elif change == 'duplicate_row':
+        output += output.splitlines()[-1] + '\n'
+    elif change == 'foreign_id':
+        output = output.replace('Git.Git', 'Bad.App')
+    elif change == 'truncated_id':
+        output = output.replace('Git.Git', 'Git.Gi\u2026')
+    elif change == 'truncated_name':
+        output = output.replace('Git  Git.Git', 'Gi\u2026  Git.Git')
+    elif change == 'wrong_source':
+        output = output.replace('winget', 'msstore')
+    elif change == 'unknown_version':
+        output = output.replace('2.56.0.4', 'Unknown ')
+    with pytest.raises(PresencePreflightError):
+        parse_installed(result(output), 'Git.Git')
+
+
 @pytest.mark.parametrize('change', ['duplicate', 'wrong_id', 'hash', 'http', 'exe', 'version'])
 def test_incomplete_or_untrusted_catalog_metadata_fails_closed(change):
     text = catalog_text()

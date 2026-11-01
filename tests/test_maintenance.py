@@ -158,4 +158,85 @@ class Tests(unittest.TestCase):
         self.assertEqual(saved['state'], 'preview')
         self.assertEqual(len(self.bridge.calls), 1)
 
+    def _git_update_output(self):
+        header = f"{'Name':18}{'Id':24}{'Version':14}{'Available':14}Source"
+        row = f"{'Git':18}{'Git.Git':24}{'2.56.0.3':14}{'2.56.0.4':14}winget"
+        return subprocess.CompletedProcess([], 0, header + '\n' + '-' * 80 + '\n' + row + '\n', '')
+
+    @staticmethod
+    def _compact_git_installed(version):
+        # Real WinGet 1.29 output: a fully filled Name heading leaves one
+        # separator before Id. This must still identify the exact fixed columns.
+        return subprocess.CompletedProcess([], 0,
+            'Name Id      Version\n---------------------\nGit  Git.Git ' + version + '\n', '')
+
+    def test_15_compact_native_readback_confirms_install_without_pending_history(self):
+        from optimus.app_update_verification import AppUpdateVerification
+        preferences = Path(self.temp.name) / 'preferences.json'
+        saved_preferences = b'{"update_payload_cleanup_enabled":false}\n'
+        preferences.write_bytes(saved_preferences)
+        scan = self._git_update_output()
+        responses = [scan, scan,
+            subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''),
+            subprocess.CompletedProcess([], 0, 'Successfully installed', ''),
+            self._compact_git_installed('2.56.0.4')]
+        with patch.object(Maintenance, '_winget', return_value='winget-fixture.exe'), \
+                patch.object(Maintenance, '_run', side_effect=responses) as run:
+            self.tool.updates_scan()
+            result = self.tool.updates_apply('Git.Git', confirmed=True, unattended=True)
+        self.assertEqual(result['status'], 'completed')
+        self.assertIs(result['verified'], True)
+        self.assertEqual(result['installed_version'], '2.56.0.4')
+        self.assertEqual(result['verification_status'], 'verified')
+        self.assertIs(result['installation_reported'], True)
+        upgrades = [call.args[0] for call in run.call_args_list
+                    if call.args[0][1] == 'upgrade' and '--id' in call.args[0]]
+        self.assertEqual(len(upgrades), 1)
+        self.assertIn('--silent', upgrades[0])
+        package = {'id': 'Git.Git', 'version': '2.56.0.3',
+                   'available': '2.56.0.4', 'source': 'winget'}
+        history = AppUpdateVerification(self.temp.name, package)
+        self.assertIsNone(history.pending())
+        records = list(history.directory.glob('*/verification.json'))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(json.loads(records[0].read_text())['status'], 'verified')
+        self.assertEqual(result['payload_cleanup']['status'], 'disabled')
+        self.assertEqual(preferences.read_bytes(), saved_preferences)
+
+    def test_16_compact_native_recheck_confirms_pending_install_without_redownloading(self):
+        from optimus.app_update_verification import AppUpdateVerification
+        preferences = Path(self.temp.name) / 'preferences.json'
+        saved_preferences = b'{"update_payload_cleanup_enabled":false}\n'
+        preferences.write_bytes(saved_preferences)
+        scan = self._git_update_output()
+        responses = [scan, scan,
+            subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''),
+            subprocess.CompletedProcess([], 0, 'Successfully installed', ''),
+            self._compact_git_installed('2.56.0.3'), scan,
+            subprocess.CompletedProcess([], 0, 'There are no pins configured.', ''),
+            self._compact_git_installed('2.56.0.4')]
+        with patch.object(Maintenance, '_winget', return_value='winget-fixture.exe'), \
+                patch.object(Maintenance, '_run', side_effect=responses) as run:
+            self.tool.updates_scan()
+            first = self.tool.updates_apply('Git.Git', confirmed=True, unattended=True)
+            self.assertIs(first['verified'], False)
+            self.assertEqual(first['verification_status'], 'pending_verification')
+            package = {'id': 'Git.Git', 'version': '2.56.0.3',
+                       'available': '2.56.0.4', 'source': 'winget'}
+            history = AppUpdateVerification(self.temp.name, package)
+            self.assertIsNotNone(history.pending())
+            previous = {path: path.read_bytes() for path in history.directory.glob('*/verification.json')}
+            second = self.tool.updates_apply('Git.Git', confirmed=True, unattended=True)
+        self.assertEqual(second['status'], 'skipped')
+        self.assertIs(second['verified'], True)
+        self.assertIs(second['installer_started'], False)
+        self.assertEqual(second['installed_version'], '2.56.0.4')
+        self.assertIs(second['outcomeKnown'], True)
+        self.assertIs(second['running'], False)
+        upgrades = [call.args[0] for call in run.call_args_list
+                    if call.args[0][1] == 'upgrade' and '--id' in call.args[0]]
+        self.assertEqual(len(upgrades), 1)
+        self.assertEqual({path: path.read_bytes() for path in history.directory.glob('*/verification.json')}, previous)
+        self.assertEqual(preferences.read_bytes(), saved_preferences)
+
 if __name__ == '__main__': unittest.main(verbosity=2)

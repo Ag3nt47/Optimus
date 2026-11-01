@@ -118,8 +118,11 @@ def parse_installed(result, identity):
         return None
     _require(result.returncode == 0, 'The installed application query failed; absence is unverified.')
     lines = text.splitlines()
+    # WinGet pads each column to its widest header/value plus one space. A
+    # short exact query (for example Git) can therefore have a single space
+    # between labels. Keep positional parsing and the exact row checks below.
     headers = [(index, line) for index, line in enumerate(lines)
-        if re.fullmatch(r'Name {2,}Id {2,}Version(?: {2,}Available)?(?: {2,}Source)? *', line)]
+        if re.fullmatch(r'Name +Id +Version(?: +Available)?(?: +Source)? *', line)]
     _require(len(headers) == 1, 'The installed application table is unsupported or ambiguous.')
     index, header = headers[0]
     _require(index + 1 < len(lines) and re.fullmatch(r'-{10,}', lines[index + 1].strip()),

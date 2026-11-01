@@ -321,7 +321,7 @@ class Maintenance:
         lines = output.splitlines()
         headers = [(index, line) for index, line in enumerate(lines)
                    if (re.fullmatch(r"Name +Id +Version +Available +Source *", line)
-                       or source_context == "winget" and re.fullmatch(r"Name {2,}Id {2,}Version {2,}Available *", line))]
+                       or source_context == "winget" and re.fullmatch(r"Name +Id +Version +Available *", line))]
         if len(headers) != 1:
             return [], False, ["Unsupported, missing or repeated update-table header."]
         index, header = headers[0]

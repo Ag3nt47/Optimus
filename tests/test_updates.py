@@ -52,11 +52,22 @@ def test_repeated_id_including_unknown_installation_is_ambiguous(updater):
     assert result['packages'] == [] and any('Ambiguous' in text for text in result['excluded'])
 
 
-@pytest.mark.parametrize('output', ['Nom Id Version Disponible Source\n------------------------------\nFixture Vendor.App 1.0 2.0 winget', 'Name Id Version Available Source\nFixture Vendor.App 1.0 2.0 winget', 'Name Id Version Available\n--------------------------------\nFixture Vendor.App 1.0 2.0'])
+@pytest.mark.parametrize('output', ['Nom Id Version Disponible Source\n------------------------------\nFixture Vendor.App 1.0 2.0 winget', 'Name Id Version Available Source\nFixture Vendor.App 1.0 2.0 winget'])
 def test_localized_or_changed_layout_is_text_only(updater,output):
     result = scan(updater,output)
     assert not result['structured'] and not result['packages']
     assert result['text'] == output
+
+
+def test_compact_source_scoped_header_does_not_authorize_misaligned_row(updater):
+    output = 'Name Id Version Available\n--------------------------------\nFixture Vendor.App 1.0 2.0'
+    result = scan(updater, output)
+    assert result['structured'] is True and result['packages'] == []
+    assert result['excluded'] and result['text'] == output
+    updater._run.reset_mock()
+    with pytest.raises(UpdatePreflightError):
+        updater.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    updater._run.assert_not_called()
 
 
 def test_source_mismatch_and_nonzero_scan_clear_candidates(updater):
