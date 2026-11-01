@@ -54,6 +54,7 @@ DEFAULTS = {
     'software_update_policy': 'review', 'software_update_ids': [],
     'software_update_all_approved': False, 'software_update_exclude_ids': [],
     'software_update_agreements_accepted': False, 'driver_updates_enabled': False,
+    'python_relocation_repair_enabled': False, 'python_relocation_approvals': [],
     'update_payload_cleanup_enabled': True,
     'cleanup_category_ids': [],
     'codex_archives_cleanup_enabled': False, 'codex_archives_retention_days': 7,
@@ -208,6 +209,16 @@ class Preferences:
         result.update(validate_smart_configuration(result))
         result.update(validate_unattended_configuration(result))
         result['software_app_rules'] = validate_app_rules(result['software_app_rules'])
+        from .python_relocation import ApprovedPythonRelocation
+        relocations = result['python_relocation_approvals']
+        if type(relocations) is not list or len(relocations) > 20:
+            raise ValueError('Approve at most 20 exact Python relocation mappings.')
+        relocations = [ApprovedPythonRelocation.from_dict(row).as_dict() for row in relocations]
+        if len({row['package_id'].casefold() for row in relocations}) != len(relocations):
+            raise ValueError('Python relocation approvals must have unique package identities.')
+        result['python_relocation_approvals'] = relocations
+        if result['python_relocation_repair_enabled'] and not relocations:
+            raise ValueError('Approve an exact Python relocation before enabling its automatic repair.')
         if result['software_update_policy'] not in ('review', 'selected', 'all_supported'):
             raise ValueError('Software updates require review, selected IDs, or all-supported policy.')
         packages = result['consumer_debloat_package_names']

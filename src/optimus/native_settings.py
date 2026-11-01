@@ -20,6 +20,7 @@ WINDOWS_ONLY = (
     'codex_priority_enabled', 'interface_priority_boost_enabled',
     'update_compatibility_mode_enabled', 'windows_cpu_compatibility_enabled',
     'drive_optimization_enabled',
+    'python_relocation_repair_enabled',
 )
 PACKAGE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9@+_.:/-]{0,255}\Z')
 
@@ -102,6 +103,7 @@ class NativePreferences(Preferences):
         for key in WINDOWS_ONLY:
             common[key] = False
         common.update(duplicate_roots=[], duplicates_enabled=False,
+                      python_relocation_approvals=[],
                       startup_approved_entries=[], startup_review_enabled=False,
                       startup_policy='review', driver_policy='review', cloud_policy='review',
                       software_update_ids=[], software_update_exclude_ids=[], software_app_rules=[],

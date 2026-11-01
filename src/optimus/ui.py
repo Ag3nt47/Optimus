@@ -4704,6 +4704,7 @@ class OptimusWindow(QMainWindow):
             ('driver_updates_enabled','Check/apply driver offers under saved device approval'),
             ('drive_optimization_enabled','Optimize eligible internal drives (SSD TRIM / HDD optimization)'),
             ('parallel_app_updates_enabled','Update apps and Windows drivers in background while independent steps continue'),
+            ('python_relocation_repair_enabled','Repair approved Python relocation junctions after native installer error 448\n(exact saved paths only; administrator access required)'),
             ('auto_continue_fixes_enabled','Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)'),
             ('post_process_review_enabled','Offer process/program review after completion'),
             ('security_review_enabled','Check Windows security and offer reviewed fixes'),
@@ -4715,6 +4716,9 @@ class OptimusWindow(QMainWindow):
         for index,(key,label) in enumerate(labels):
             checkbox=WrappingCheckBox(label)
             checkbox.setChecked(bool(settings.get(key,False)))
+            if key == 'python_relocation_repair_enabled':
+                checkbox.setEnabled(bool(settings.get('python_relocation_approvals')))
+                checkbox.setToolTip('Repair only previously approved exact Python relocations. No files are moved and no Windows security protection is disabled. Turn off to revoke automatic repair.')
             if 'debloat' in key:
                 checkbox.setStyleSheet('color:#ffad73;')
                 checkbox.setToolTip('Opt in to this removal stage. Review the Debloat page and target list before enabling it.')

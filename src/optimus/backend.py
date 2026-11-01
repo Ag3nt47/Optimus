@@ -459,7 +459,21 @@ class Backend(ExtendedMaintenanceBackend):
                 return {'skipped': True, 'requiresReview': True, 'exitCode': None, 'status': 'deferred',
                         'note': 'A Windows restart is pending or its state could not be verified. Compatibility mode did not start an installer.', **before_install}
             options['compatibility_mode'] = True
-        return self.maintenance.updates_apply(package_id, confirmed=True, unattended=True, **options)
+        from .python_relocation_automation import prepare_python_update
+        relocation = prepare_python_update(self, package_id, cancel_event=cancel_event,
+            progress_callback=progress_callback)
+        if isinstance(relocation, dict) and relocation.get('proceed') is False:
+            cancelled = relocation.get('cancelled') is True
+            return {'id': package_id, 'package_id': package_id, 'source': 'winget',
+                'status': 'cancelled' if cancelled else 'skipped', 'skipped': True,
+                'requiresReview': not cancelled, **({'cancelled': True} if cancelled else {}),
+                'failure_scope': 'package', 'failureKind': 'python_relocation_repair',
+                'exitCode': None, **before_install, 'relocation_repair': relocation,
+                'note': relocation.get('reason') or 'The approved Python relocation needs review; other applications can continue.'}
+        result = self.maintenance.updates_apply(package_id, confirmed=True, unattended=True, **options)
+        if isinstance(result, dict) and isinstance(relocation, dict):
+            result = dict(result, relocation_repair=relocation)
+        return result
 
     def app_presence_inspect(self, package_id, source='winget'):
         """Read-only exact catalog and installed identity; grants no apply authority."""

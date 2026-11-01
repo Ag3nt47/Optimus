@@ -10,12 +10,15 @@ import stat
 import threading
 import time
 import uuid
+import weakref
 from .filesystem import replace_with_retry
 
 CURRENT_SETUP_VERSION = 2
 SESSION_ID = uuid.uuid4().hex
 MODES = frozenset(('manual', 'startup', 'daily', 'weekly', 'monthly'))
 _STATE_LOCK = threading.RLock()
+_LEASES_LOCK = threading.RLock()
+_ACTIVE_LEASES = weakref.WeakValueDictionary()
 
 
 def _timestamp(value=None):
@@ -178,6 +181,28 @@ class RunLease:
         self.path = Path(data_dir) / 'maintenance-run.lock'
         self.handle = None
 
+    @classmethod
+    def owned_by_current_process(cls, data_dir):
+        """Recognize our existing live OS lease, including background threads.
+
+        This never treats another process's locked file as our authority and
+        never acquires/replaces a lease. Callers must retain their owning context
+        until their background operations join.
+        """
+        key = (os.getpid(), os.path.normcase(os.path.abspath(Path(data_dir) / 'maintenance-run.lock')))
+        with _LEASES_LOCK:
+            lease = _ACTIVE_LEASES.get(key)
+            handle = getattr(lease, 'handle', None)
+            if handle is None or handle.closed:
+                return False
+            try:
+                opened, current = os.fstat(handle.fileno()), lease.path.lstat()
+                return ((opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+                        and stat.S_ISREG(current.st_mode) and current.st_nlink == 1
+                        and not getattr(current, 'st_file_attributes', 0) & 0x400)
+            except (OSError, ValueError):
+                return False
+
     def acquire(self):
         if self.handle is not None:
             raise RuntimeError('This maintenance lease is already held.')
@@ -204,10 +229,17 @@ class RunLease:
                 raise RuntimeError('Another Optimus process is already running maintenance.') from error
             raise
         self.handle = handle
+        with _LEASES_LOCK:
+            key = (os.getpid(), os.path.normcase(os.path.abspath(self.path)))
+            _ACTIVE_LEASES[key] = self
         return self
 
     def release(self):
         handle, self.handle = self.handle, None
+        with _LEASES_LOCK:
+            key = (os.getpid(), os.path.normcase(os.path.abspath(self.path)))
+            if _ACTIVE_LEASES.get(key) is self:
+                _ACTIVE_LEASES.pop(key, None)
         if handle is not None:
             try:
                 handle.seek(0)

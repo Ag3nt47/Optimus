@@ -55,6 +55,13 @@ def _scope_hash(settings):
         # they can change which automatic deletion batches are eligible.
         excluded = _EXCLUDED - _LOW_SPACE_GUARD_KEYS
     value = {key: value for key, value in settings.items() if key not in excluded}
+    # These optional capabilities did not exist in older approvals. An empty,
+    # disabled scope adds no action; preserve those existing approval hashes.
+    # Enabling repair or approving any mapping must change the approved scope.
+    if (settings.get('python_relocation_repair_enabled', False) is False
+            and settings.get('python_relocation_approvals', []) == []):
+        value.pop('python_relocation_repair_enabled', None)
+        value.pop('python_relocation_approvals', None)
     try:
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'),
                              ensure_ascii=True, allow_nan=False).encode('ascii')
