@@ -1,6 +1,6 @@
 # Automatic efficiency
 
-Optimus 0.12.28 reduces the work its own maintenance and monitoring need to do.
+Optimus 0.12.29 reduces the work its own maintenance and monitoring need to do.
 These defaults add no cleanup folder, uninstall target or update approval.
 Existing saved choices, exclusions and browser scopes remain in effect.
 

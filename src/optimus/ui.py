@@ -2585,7 +2585,8 @@ class WorkflowWorkerCard(QFrame):
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
             self.progress.setFormat('Percentage unavailable' if raw_status in ('running', 'scanning') else
-                'Not started' if raw_status == 'not_started' else 'Scan completion unverified')
+                'Not started' if raw_status == 'not_started' else
+                'Recent scan reused; no new scan' if raw_status == 'skipped' else 'Scan completion unverified')
         elif maintenance:
             self.progress.setRange(0, 100)
             self.progress.setValue(max(0, min(100, int(state.get('percentage') or 0))))
@@ -2628,7 +2629,7 @@ class WorkflowWorkerCard(QFrame):
         self._live_worker_metrics, self._live_computer_metrics = dict(metrics), dict(computer)
         cpu = metrics.get('cpu_percent')
         terminal = self._raw_status in ('completed', 'completed_with_errors', 'failed', 'needs_review',
-            'cancelled', 'stopped', 'not_started', 'not_selected', 'not_run', 'deferred')
+            'cancelled', 'stopped', 'not_started', 'not_selected', 'not_run', 'deferred', 'skipped')
         if getattr(self, '_finished_with_skips', False):
             health, label = 'waiting', 'Finished with skips; review findings'
         elif self._raw_status in ('failed', 'needs_review', 'completed_with_errors'):
@@ -2637,6 +2638,8 @@ class WorkflowWorkerCard(QFrame):
             health, label = 'unverified', 'Not running'
         elif self._raw_status == 'completed':
             health, label = 'complete', 'Finished'
+        elif self._raw_status == 'skipped':
+            health, label = 'waiting', 'Skipped; no new work'
         elif self._raw_status in ('cancelled', 'stopped', 'deferred') or self._navigation_state.get('pending'):
             health, label = 'waiting', 'Stopping / deferred' if terminal else 'Stopping safely'
         elif self._raw_status.startswith('waiting') or self._raw_status == 'pending':
