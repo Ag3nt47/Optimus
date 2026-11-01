@@ -26,6 +26,7 @@ MISSING_DEFAULT_KEYS = {
     'failed_downloads_cleanup_enabled', 'failed_downloads_retention_days',
     'drive_space_guard_enabled', 'drive_space_guard_target_gib',
     'update_payload_cleanup_enabled', 'toolkit_settings',
+    'python_relocation_repair_enabled', 'python_relocation_approvals',
 }
 
 
@@ -33,8 +34,9 @@ def saved_choices(p, *, complete=False):
     effective = workflow.Preferences.validate(dict(copy.deepcopy(workflow.DEFAULTS), setup_version=2))
     raw_choices = copy.deepcopy(effective) if complete else {
         key: value for key, value in effective.items() if key not in MISSING_DEFAULT_KEYS}
-    assert len(effective) == 101
-    assert len(raw_choices) == (101 if complete else 91)
+    assert effective.keys() == workflow.DEFAULTS.keys()
+    assert MISSING_DEFAULT_KEYS <= effective.keys()
+    assert len(raw_choices) == (len(effective) if complete else 91)
     p.preferences = raw_choices
     p.raw = (json.dumps(raw_choices, indent=3) + '\n').encode()
     (p.data / 'preferences.json').write_bytes(p.raw)
