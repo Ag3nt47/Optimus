@@ -156,6 +156,30 @@ def _navigation_skipped(value):
     return any(_navigation_skipped(value.get(key)) for key in ('app_presence', 'presence'))
 
 
+def _failed_parent_app_offers(report):
+    """Return bounded exact failures only from the current owned parent run."""
+    from .automated_software import known_failed_offer
+    offers = {}
+    for result, _ in _channel_results(report, 'software_updates'):
+        rows = result.get('items') if isinstance(result, dict) else None
+        for row in rows[:1000] if isinstance(rows, list) else []:
+            key = known_failed_offer(row)
+            if key is None:
+                continue
+            if len(offers) >= 1000 and key not in offers:
+                continue
+            receipt = row['result']
+            fields = ('id', 'package_id', 'source', 'from_version', 'to_version', 'status',
+                      'installer_started', 'outcomeKnown', 'running', 'exitCode')
+            text = row.get('error') or receipt.get('note') or ''
+            text = (' '.join(''.join(c if c.isprintable() else ' ' for c in text).split())[-1000:]
+                    if isinstance(text, str) else '')
+            offers[key] = {'id': row['id'], 'from_version': row['from_version'],
+                'to_version': row['to_version'], 'status': 'failed', 'error': text,
+                'result': {field: receipt[field] for field in fields}}
+    return tuple(offers.values())
+
+
 def _authorized(settings, channel):
     if channel == 'software_updates':
         return (settings.get('software_updates_enabled') is True
@@ -498,6 +522,19 @@ def _verification(backend, report, cancel_event):
     for item in report.get('manual_items', []):
         checks.append({'kind': 'manual_review', 'target': item['title'],
                        'status': 'not_applicable' if item['id'] == 'process_review' else 'needs_review', 'reason': item['reason']})
+    for stage in report['stages']:
+        if stage.get('action_id') != 'software_updates':
+            continue
+        outcome = stage.get('result')
+        rows = outcome.get('items') if isinstance(outcome, dict) else None
+        for row in rows[:1000] if isinstance(rows, list) else []:
+            receipt = row.get('result') if isinstance(row, dict) else None
+            if (isinstance(receipt, dict) and receipt.get('failureKind') == 'failed_in_parent_run'
+                    and receipt.get('requiresReview') is True and receipt.get('installer_started') is False
+                    and receipt.get('outcomeKnown') is True and receipt.get('running') is False):
+                checks.append({'kind': 'previous_app_update_failure', 'target': row.get('id', 'Application'),
+                    'status': 'needs_review', 'previous_exit_code': receipt.get('previous_exit_code'),
+                    'reason': receipt.get('note') or 'The earlier installer failed; skipping its immediate retry did not repair this application.'})
     if fresh.get('status') == 'partial':
         checks.append({'kind': 'security_readback', 'target': 'Final security state', 'status': 'unverified',
                        'reason': 'Fresh security evidence was incomplete; unknown protection state is not a clean result.'})
@@ -561,6 +598,10 @@ class PostRunFixes:
                       'settings': approved, 'status': 'running', 'stages': [], 'cancelled': False,
                       'manual_items': [], 'counts': {key: 0 for key in _ACTION_STATES},
                       'log_path': str(path), 'note': 'The Auto continue click or saved automatic-follow-up choice authorizes these supported security fixes for one attempt. Update installation remains within saved scopes and agreements. Processes, startup entries, application removal and cleanup are not included.'}
+            from .worker_totals import WorkerResourceTotals
+            maintenance_totals = WorkerResourceTotals()
+            worker_totals = {}
+            failed_parent_offers = _failed_parent_app_offers(source) if not _native(self.backend) else ()
             original_plan = _preview(self.backend, source, approved)
             original_plan['actions'] = [row for row in original_plan['actions'] if row['id'] in reviewed_ids]
             result['reviewed_plan'] = original_plan
@@ -568,6 +609,8 @@ class PostRunFixes:
             if isinstance(source.get('process_review'), dict):
                 result['process_review'] = copy.deepcopy(source['process_review'])
             def journal():
+                result['resource_totals'] = maintenance_totals.snapshot()
+                result['worker_resource_totals'] = {key: ledger.snapshot() for key, ledger in worker_totals.items()}
                 _ordinary_data_path(directory)
                 _ordinary_data_path(path, file=True)
                 _bounded(result)
@@ -585,6 +628,13 @@ class PostRunFixes:
             installer_barrier = initial_installer_barrier
             installer_state_checked = False
             for index, action in enumerate(actions):
+                ledger = (worker_totals.setdefault(action['id'], WorkerResourceTotals(action['id']))
+                          if action['id'] in CHANNELS else None)
+                def terminal_totals(stage):
+                    outcome = stage.get('result')
+                    if ledger is not None and isinstance(outcome, dict):
+                        ledger.result(outcome)
+                        stage['result'] = dict(outcome, resource_totals=ledger.snapshot())
                 stage = {'title': action['title'], 'action_id': action['id'], 'kind': action['kind'],
                          'started_at': time.time(), 'status': 'prepared', 'action_status': 'prepared'}
                 result['stages'].append(stage)
@@ -596,6 +646,7 @@ class PostRunFixes:
                     stage.update(status='skipped', action_status='deferred', result=outcome)
                     result['counts']['deferred'] += 1
                     result['cancelled'] = result['cancelled'] or stopped()
+                    terminal_totals(stage)
                     journal()
                     continue
                 progress({'stage': action['title'], 'description': action['title'], 'percentage': int(index * 85 / max(1, len(actions))),
@@ -628,6 +679,7 @@ class PostRunFixes:
                                 result['manual_items'].append({'id': 'installer_state', 'title': 'Review installer and restart state',
                                                                'reason': installer_barrier})
                             stage['finished_at'] = time.time()
+                            terminal_totals(stage)
                             journal()
                             continue
                         result['effective_settings'] = effective
@@ -651,12 +703,17 @@ class PostRunFixes:
                             journal()
                         def item_progress(event):
                             _bounded(event)
+                            if ledger is not None:
+                                ledger.observe(event)
                             stage['current_item'] = copy.deepcopy(event)
                             journal()  # Existing helpers call this before each installer.
                             update = dict(event, stage=action['title'], percentage=int(index * 85 / max(1, len(actions))))
                             update.setdefault('processes', [event.get('description') or action['title']])
+                            update['worker_resource_totals'] = {key: value.snapshot() for key, value in worker_totals.items()}
                             progress(update)
-                        outcome = self._execute(action, effective, cancel_event, item_progress)
+                        execution_options = ({'prior_failed_offers': failed_parent_offers}
+                            if action['id'] == 'software_updates' and failed_parent_offers else {})
+                        outcome = self._execute(action, effective, cancel_event, item_progress, **execution_options)
                     _bounded(outcome)
                     status = _action_status(outcome)
                     stage.update(result=outcome, action_status=status,
@@ -674,6 +731,7 @@ class PostRunFixes:
                     halted = True
                 stage['finished_at'] = time.time()
                 result['cancelled'] = result['cancelled'] or stopped() or stage['action_status'] == 'cancelled'
+                terminal_totals(stage)
                 journal()
             self._final_readbacks(result, cancel_event, progress, journal)
             result['finished_at'] = time.time()
@@ -699,7 +757,7 @@ class PostRunFixes:
                 workflow.active = False
                 workflow.lock.release()
 
-    def _execute(self, action, settings, cancel_event, progress):
+    def _execute(self, action, settings, cancel_event, progress, *, prior_failed_offers=()):
         identity = action['id']
         if identity in SECURITY_FIXES:
             return self.backend.apply_security_recommendation(identity, cancel_event=cancel_event)
@@ -708,7 +766,8 @@ class PostRunFixes:
                 from .native_workflow import run_native_software
                 return run_native_software(self.backend, settings, cancel_event=cancel_event, item_callback=progress)
             from .automated_software import run_software
-            return run_software(self.backend, settings, cancel_event=cancel_event, item_callback=progress)
+            options = {'prior_failed_offers': prior_failed_offers} if prior_failed_offers else {}
+            return run_software(self.backend, settings, cancel_event=cancel_event, item_callback=progress, **options)
         if identity == 'windows_security_updates':
             return self.backend.windows_security_updates(settings, cancel_event=cancel_event, item_callback=progress)
         if identity == 'driver_updates':

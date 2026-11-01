@@ -716,9 +716,27 @@ def _driver_completion_counts(result, evidence):
         unexplained = (result['failed_items'] - counts['failed'] - counts['unverified']
                        - known_prerequisite_failures)
         counts['unverified'] += max(0, unexplained)
-    if (offers > 0 and evidence.get('eligible_count') == 0 and type(evidence.get('eligible_count')) is int
-            and not items and not deferred and not result.get('failed_items') and result.get('installer_started') is False
-            and result.get('outcomeKnown') is True and result.get('running') is not True):
+    unapproved_rows = (not items or len(items) == offers and counts['skipped'] == offers
+        and all(isinstance(row, dict) and row.get('status') == 'skipped'
+            and isinstance(row.get('result', {}), dict)
+            and row.get('uncertain') is not True and row.get('installer_started') is not True
+            and row.get('outcomeKnown') is not False and row.get('running') is not True
+            and not any(row.get('result', {}).get(key) is value for key, value in (
+                ('installer_started', True), ('outcomeKnown', False), ('running', True), ('uncertain', True)))
+            for row in items))
+    if (offers > 0 and evidence.get('status') == 'completed'
+            and evidence.get('eligible_count') == 0 and type(evidence.get('eligible_count')) is int
+            and unapproved_rows and not deferred and not result.get('failed_items')
+            and not result.get('cancelled') and not result.get('navigation_cancelled')
+            and not result.get('navigation_cancelled_items') and not result.get('uncertain')
+            and not result.get('skipped') and not result.get('deferred_ids') and not result.get('stop_reason')
+            and not result.get('installation_blocked') and not result.get('blocked_by_prior_installer')
+            and result.get('status') in (None, 'completed')
+            and result.get('installer_started') is False and result.get('outcomeKnown') is True
+            and result.get('running') is not True and not installer_barrier(result)):
+        # These offers were checked and excluded by the saved approval scope.
+        # Keep this separate from an installer that is waiting to continue.
+        counts['skipped'] = 0
         counts['not_approved'] = offers
     counts['not_processed'] = max(0, offers - sum(counts.values()))
     return counts
@@ -867,6 +885,9 @@ def update_completion_state(result):
     if driver_counts is not None:
         state.update(driver_counts=driver_counts,
                      prerequisite_findings=_driver_prerequisite_findings(result), total=0)
+        if driver_counts.get('not_approved') and not installer_barrier(result):
+            state.update(approval_required=True, presentation_status='finished_with_skips',
+                         worker_finished=True, continuation_blocked=False)
     if presence_counts is not None:
         state['presence_counts'] = presence_counts
     if evidence:
@@ -901,6 +922,15 @@ def _app_completion_presentation(result, evidence):
             counts['unverified'] += 1
             continue
         seen.add(identity.casefold())
+        if (any(key in row and type(row[key]) is not bool
+                for key in ('installer_started', 'outcomeKnown', 'running', 'uncertain'))
+                or row.get('uncertain') is True or row.get('running') is True
+                or row.get('outcomeKnown') is False
+                or type(row.get('installer_started')) is bool
+                    and type(value.get('installer_started')) is bool
+                    and row['installer_started'] != value['installer_started']):
+            counts['unverified'] += 1
+            continue
         if (value.get('status') == 'deferred' and value.get('installer_started') is False
                 and value.get('outcomeKnown') is True and value.get('running') is False
                 and value.get('uncertain') is not True and row.get('uncertain') is not True
@@ -910,6 +940,16 @@ def _app_completion_presentation(result, evidence):
             continue
         if not can_fail_forward(value):
             counts['unverified'] += 1
+            continue
+        if (row.get('status') == 'failed' and row.get('uncertain') is not True
+                and row.get('outcomeKnown') is not False and row.get('running') is not True
+                and type(value.get('exitCode')) is int and value['exitCode'] != 0
+                and value.get('installer_started') is True):
+            counts['failed'] += 1
+            continue
+        if row.get('status') == 'skipped' and value.get('installer_started') is False:
+            counts['skipped'] += 1
+            counts['held'] += int(is_known_update_hold(value))
             continue
         if value.get('verified') is False:
             counts['unverified'] += 1
@@ -1011,7 +1051,7 @@ def update_completion_status(result):
         return 'deferred'
     if evidence and (result.get('skipped') is True or result.get('deferred') or result.get('deferred_ids')):
         return 'deferred'
-    if driver_counts is not None and any(driver_counts.get(key) for key in ('skipped', 'deferred', 'not_processed', 'not_approved')):
+    if driver_counts is not None and any(driver_counts.get(key) for key in ('skipped', 'deferred', 'not_processed')):
         return 'deferred'
     return 'completed'
 

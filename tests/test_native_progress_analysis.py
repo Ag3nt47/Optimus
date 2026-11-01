@@ -140,7 +140,7 @@ def test_only_processes_and_log_toggle_and_completion_scope_keeps_one_click(prog
         'description': 'Exact fixture operation', 'processes': ['Fixture.exe'], 'log': 'Read-only fixture log'})
     value.details_toggle.click()
     wait_until(app, lambda: value.log.isVisible() and value.processes.isVisible())
-    assert value.content_scroll.widget().layout().count() == 4
+    assert value.content_scroll.widget().layout().count() == 5
     assert not value.content_scroll.isAncestorOf(value.analysis_panel)
     value.details_toggle.click()
     wait_until(app, lambda: value.loading_animation.isVisibleTo(value) and not value.log.isVisible())
@@ -149,7 +149,9 @@ def test_only_processes_and_log_toggle_and_completion_scope_keeps_one_click(prog
     actions = [{'title': f'Exact approved fixture action {index}'} for index in range(7)]
     value.set_auto_continue_plan({'actions': actions, 'manual_items': []}, ready=True)
     wait_until(app, lambda: value.body_scroll.viewport().rect().contains(mapped(value.completion_review, value.body_scroll.viewport())))
-    for pane in (value.verification_details, value.auto_continue_details):
+    assert not value.verification_details.isVisibleTo(value)
+    assert value.verification_summary.isVisibleTo(value)
+    for pane in (value.auto_continue_details,):
         assert pane.isReadOnly() and pane.viewport().height() >= 45
         assert_hit(value, pane.viewport())
     requested = []

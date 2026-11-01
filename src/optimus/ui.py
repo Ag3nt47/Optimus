@@ -1871,6 +1871,47 @@ def _compact_worker_reason(text):
     return text
 
 
+def _combined_followup_totals(main, followup):
+    """Add two distinct run scopes, never successive absolute UI snapshots."""
+    from .worker_totals import MAX_BYTES, MAX_ITEMS, normalize_resource_totals
+    values = [normalize_resource_totals(value) for value in (main, followup)]
+    values = [value for value in values if value is not None]
+    if not values:
+        return None
+    result = {}
+    for flag, keys in (('removed_known', ('removed_bytes', 'removed_files')),
+                       ('downloaded_known', ('downloaded_bytes',)),
+                       ('installed_known', ('installed_items',))):
+        known = [value for value in values if value[flag]]
+        sums = {key: sum(value[key] for value in known) for key in keys}
+        bounded = all(value <= (MAX_BYTES if key.endswith('_bytes') else MAX_ITEMS)
+                      for key, value in sums.items())
+        result[flag] = bool(known) and bounded
+        result.update({key: value if bounded else 0 for key, value in sums.items()})
+    result['downloaded_estimated'] = any(value['downloaded_estimated'] for value in values)
+    result['downloaded_partial'] = (any(value['downloaded_partial'] for value in values)
+        or any(value['downloaded_known'] for value in values) and not result['downloaded_known'])
+    result['installed_reported'] = any(value['installed_reported'] for value in values)
+    return result
+
+
+def _verification_findings(verification):
+    """Keep a bounded human explanation visible; technical evidence is optional."""
+    findings = []
+    for stage in rows(field(verification, 'stages', default=[]))[:64]:
+        for check in rows(field(stage, 'checks', default=[]))[:32]:
+            if field(check, 'status') not in ('needs_review', 'unverified', 'failed', 'blocked'):
+                continue
+            reason = field(check, 'reason', 'note', default='')
+            if isinstance(reason, str) and reason.strip():
+                text = ' '.join(reason.split())[:500]
+                if text not in findings:
+                    findings.append(text)
+            if len(findings) == 4:
+                return '\n'.join(findings)
+    return '\n'.join(findings)
+
+
 class WorkflowSummaryLabel(QLabel):
     """Paint bounded fitting lines while retaining complete accessible text."""
     def __init__(self, text='', parent=None, *, max_lines=2):
@@ -2155,6 +2196,8 @@ class WorkflowWorkerCard(QFrame):
             layout.addWidget(self.details)
         layout.addWidget(self.progress)
         layout.addWidget(self.totals)
+        if not self._spacious:
+            layout.addWidget(self.details)
         if self._spacious:
             layout.addWidget(self.elapsed)
         layout.addStretch(1)
@@ -2322,6 +2365,23 @@ class WorkflowWorkerCard(QFrame):
                 changed = True
             if changed:
                 self.layout().invalidate()
+            if not self._spacious:
+                # A compact dashboard can still have useful spare height.
+                # Spend it on the reason for a skip/failure before empty space,
+                # while retaining the small view's progress and navigation.
+                margins = self.layout().contentsMargins()
+                base = (self._compact_header.height() + self.progress.height() + self.totals.height()
+                    + max(button.height() for button in self.navigation_buttons.values())
+                    + margins.top() + margins.bottom() + self.layout().spacing() * 5)
+                line = self.details.fontMetrics().lineSpacing()
+                lines = (2 if self.height() >= base + line * 2 + 16 else
+                         1 if self.height() >= base + line + 16 else 0)
+                show = bool(lines and self.details.text())
+                if lines and self.details._max_lines != lines:
+                    self.details.set_max_lines(lines)
+                if self.details.isHidden() == show:
+                    self.details.setVisible(show)
+                    self.layout().invalidate()
                 self.layout().activate()
             self._compact_header.fit()
         margins = self.contentsMargins()
@@ -2357,7 +2417,7 @@ class WorkflowWorkerCard(QFrame):
         if isinstance(value, dict):
             self._resource_totals = dict(value)
         if isinstance(scope, str):
-            self._resource_scope = scope if scope == 'last_check' else ''
+            self._resource_scope = scope if scope in ('last_check', 'main_and_followup') else ''
         if self._resource_scope == 'last_check':
             maintenance = True
         values = self._resource_totals
@@ -2393,6 +2453,11 @@ class WorkflowWorkerCard(QFrame):
         if self._resource_scope == 'last_check':
             lines.append('Latest smart check')
             details.append('These totals cover only the latest Smart Maintenance check; they are separate from this one-click run and lifetime totals.')
+        elif self._resource_scope == 'main_and_followup':
+            details.append('Totals combine the main run and this follow-up batch. Repeated progress snapshots are not added again.')
+            detail = getattr(self, '_followup_resource_detail', '')
+            if detail:
+                details.append(detail)
         summary = '\n'.join(lines[:3])
         if self._compact and not self._spacious:
             summary = ' · '.join(lines[:3]).replace('Completed installs:', 'Installs:').replace('Downloaded:', 'Down:')
@@ -2479,6 +2544,8 @@ class WorkflowWorkerCard(QFrame):
                 self.status.setText(operation + ' · ' + percent_text)
         if self._finished_with_skips:
             self.status.setText('Finished with skips' + ('; scan incomplete' if state.get('scan_complete') is not True else ''))
+        if state.get('approval_required') is True and state.get('worker_finished') is True:
+            self.status.setText('Checked; needs approval')
         set_scaled_style(self.status, 'color:#e8b34b;' if self._finished_with_skips else '', self._presentation_scale)
         if installation_blocked and raw_status in ('deferred', 'needs_review', 'completed', 'completed_with_errors', 'not_run', 'failed'):
             self.status.setText('Search not started; install blocked' if scan_not_started else
@@ -2640,6 +2707,8 @@ class OptimizationProgressWindow(QDialog):
         self._waiting_update_kind = None
         self._worker_selection = {}
         self._foreground_update_clocks = {}
+        self._followup_baseline_totals = None
+        self._followup_latest_totals = {}
         self._logged_update_reasons = set()
         self._maintenance_clock = QElapsedTimer()
         self._maintenance_clock.start()
@@ -2843,12 +2912,17 @@ class OptimizationProgressWindow(QDialog):
         self.verification_summary.setWordWrap(True)
         self.verification_summary.hide()
         evidence_layout.addWidget(self.verification_summary)
+        self.verification_findings = WorkflowSummaryLabel(max_lines=2)
+        self.verification_findings.setWordWrap(True)
+        self.verification_findings.hide()
+        evidence_layout.addWidget(self.verification_findings)
         self.verification_details = QPlainTextEdit()
         self.verification_details.setReadOnly(True)
         self.verification_details.setMinimumHeight(60)
         self.verification_details.setMaximumHeight(96)
         self.verification_details.hide()
-        evidence_layout.addWidget(self.verification_details)
+        self.verification_details.setAccessibleName('Detailed verification evidence')
+        layout.addWidget(self.verification_details)
         self.processes_label = QLabel('CURRENT PROCESSES / ITEMS')
         layout.addWidget(self.processes_label)
         self.processes = QPlainTextEdit()
@@ -2938,7 +3012,7 @@ class OptimizationProgressWindow(QDialog):
             for widget in (self.title, self.spinner._label, self.progress,
                     self.resource_comparison.removed, self.resource_comparison.downloaded,
                     self.resource_comparison.note, self.stage, self.description,
-                    self.background_status, self.insights_summary, self.verification_summary,
+                    self.background_status, self.insights_summary, self.verification_summary, self.verification_findings,
                     self.auto_continue_summary, self.live_system_status.computer,
                     self.live_system_status.network, self.space_guard_status,
                     self.details_toggle, self.cancel_button, self.auto_continue_button, self.stop_button,
@@ -3079,6 +3153,42 @@ class OptimizationProgressWindow(QDialog):
             for identity, card in self.worker_cards.items()
             if identity in ('maintenance', 'software_updates', 'driver_updates')
             and card._resource_scope != 'last_check'})
+        if self._followup_baseline_totals is not None:
+            self.resource_comparison.note.setText(self.resource_comparison.note.text() + ' Main run + this follow-up.')
+
+    def _apply_followup_resource_totals(self, state):
+        if self._followup_baseline_totals is None:
+            return
+        from .worker_totals import normalize_resource_totals
+        snapshots = field(state, 'worker_resource_totals', default={})
+        snapshots = dict(snapshots) if isinstance(snapshots, dict) else {}
+        maintenance = normalize_resource_totals(field(state, 'resource_totals', default=None))
+        if maintenance is not None:
+            snapshots['maintenance'] = maintenance
+        for job in rows(field(state, 'jobs', default=[])):
+            if isinstance(job, dict) and isinstance(job.get('id'), str):
+                snapshots[job['id']] = job.get('resource_totals')
+        for identity, value in snapshots.items():
+            normalized = normalize_resource_totals(value)
+            if normalized is not None and identity in self.worker_cards and identity != 'security_scan':
+                self._followup_latest_totals[identity] = normalized
+        for identity in self._followup_baseline_totals.keys() | self._followup_latest_totals.keys():
+            if identity == 'security_scan' or identity not in self.worker_cards:
+                continue
+            baseline = self._followup_baseline_totals.get(identity)
+            fresh = self._followup_latest_totals.get(identity)
+            combined = _combined_followup_totals(baseline, fresh)
+            if combined is not None:
+                def describe(value):
+                    value = normalize_resource_totals(value)
+                    if value is None:
+                        return 'No measurements reported.'
+                    return ('Removed ' + (_worker_bytes(value['removed_bytes']) if value['removed_known'] else 'not reported')
+                        + '; downloaded ' + (_worker_bytes(value['downloaded_bytes']) if value['downloaded_known'] else 'not reported')
+                        + '; completed installs ' + (str(value['installed_items']) if value['installed_known'] else 'not reported') + '.')
+                card = self.worker_cards[identity]
+                card._followup_resource_detail = 'Main run: ' + describe(baseline) + '\nThis follow-up: ' + describe(fresh)
+                card._set_resource_totals(combined, maintenance=identity == 'maintenance', scope='main_and_followup')
 
     def _update_space_guard(self, payload):
         if not isinstance(payload, dict) or type(payload.get('enabled')) is not bool:
@@ -3168,6 +3278,8 @@ class OptimizationProgressWindow(QDialog):
                 self._sync_live_metrics(True)
 
     def configure_workers(self, settings):
+        self._followup_baseline_totals = None
+        self._followup_latest_totals = {}
         self._worker_selection = dict(settings) if isinstance(settings, dict) else {}
         for card in self.worker_cards.values():
             card.reset_resource_totals()
@@ -3398,6 +3510,7 @@ class OptimizationProgressWindow(QDialog):
                                                'Background: ' + '; '.join(descriptions))
             self.background_status.setVisible(bool(descriptions))
             self.description.setVisible(not bool(descriptions))
+        self._apply_followup_resource_totals(state)
         self._refresh_resource_comparison()
         log = field(state, 'log', default='')
         if log:
@@ -3440,6 +3553,8 @@ class OptimizationProgressWindow(QDialog):
             self.verification_details.setPlainText(str(error))
             self.verification_summary.show()
             self.verification_details.show()
+            self.verification_findings.setText(str(error))
+            self.verification_findings.show()
         else:
             cancelled = bool(field(result, 'cancelled', 'canceled', default=False))
             if field(result, 'status') in ('completed', 'completed_with_errors') and not cancelled:
@@ -3467,6 +3582,9 @@ class OptimizationProgressWindow(QDialog):
                 self.verification_details.appendPlainText('\nREAD-ONLY MAINTENANCE OBSERVATIONS\n' + _report_preview(insights))
             self.verification_summary.show()
             self.verification_details.show()
+            findings = _verification_findings(verification)
+            self.verification_findings.setText(findings)
+            self.verification_findings.setVisible(bool(findings))
             self.description.setText('Review the final verification and any skipped or failed stages. Recommendations open only after you continue; closing this window skips those prompts.')
             self.log.appendPlainText(_report_preview(result))
         self.worker_cards['maintenance'].update_state({'status': 'stopped' if error else
@@ -3513,6 +3631,7 @@ class OptimizationProgressWindow(QDialog):
                 card = self.worker_cards.get(identity)
                 if card is not None and isinstance(totals, dict):
                     card._set_resource_totals(totals, maintenance=identity == 'maintenance')
+        self._apply_followup_resource_totals(result)
         self._refresh_resource_comparison()
         self.cancel_button.setText('Close results')
         self.cancel_button.setToolTip('Close the saved results.')
@@ -3593,7 +3712,16 @@ class OptimizationProgressWindow(QDialog):
         if self.isVisible():
             self._worker_elapsed_timer.start()
             self._sync_live_metrics(True)
-        self.configure_workers(self._worker_selection)
+        # This is one further batch in the same results window. Keep measured
+        # main-run facts and terminal states of workers this batch does not run.
+        if self._followup_baseline_totals is None:
+            from .worker_totals import normalize_resource_totals
+            self._followup_baseline_totals = {identity: normalized
+                for identity, card in self.worker_cards.items()
+                if identity != 'security_scan' and card._resource_scope != 'last_check'
+                and (normalized := normalize_resource_totals(card._resource_totals)) is not None}
+        self._apply_followup_resource_totals({})
+        self._refresh_resource_comparison()
         self.worker_cards['maintenance'].update_state({'status': 'pending',
             'description': 'Preparing the approved follow-up checks and fixes.', 'percentage': 0}, maintenance=True)
         self._results_dismissed = False
@@ -3608,6 +3736,7 @@ class OptimizationProgressWindow(QDialog):
         self.description.setText('Applying the automatic actions you approved. Progress is recorded by stage.')
         self.insights_summary.hide()
         self.verification_summary.hide()
+        self.verification_findings.hide()
         self.verification_details.hide()
         self.processes_label.show()
         self.processes.show()
@@ -3622,6 +3751,9 @@ class OptimizationProgressWindow(QDialog):
         self.finish(result, error=error)
         self.title.setText('AVAILABLE FIXES RESULTS')
         if not error:
+            if field(result, 'status') == 'completed_with_errors':
+                self.progress.setFormat('Follow-up %p% · review findings')
+            self.progress.setToolTip('Completion measures finished checks and attempts. It does not mean every update or fix succeeded.')
             counts = field(result, 'counts', default={})
             outcomes = '; '.join(str(value) + ' ' + str(key).replace('_', ' ')
                 for key, value in counts.items()) if isinstance(counts, dict) else display(counts)

@@ -130,8 +130,63 @@ def fresh_candidates(scan: Any) -> dict[str, dict[str, Any]]:
     return {identity: item for identity, item in candidates.items() if identity.casefold() not in repeated}
 
 
+def known_failed_offer(row):
+    """Identify one proven retired failed offer, without authorizing a retry.
+
+    Used only to suppress the same offer in its parent's immediate follow-up.
+    Missing identities, changed versions and shared/unknown native state cannot
+    become such a suppression. The ordinary installer barriers remain in force.
+    """
+    if not isinstance(row, dict) or row.get('status') != 'failed':
+        return None
+    value = row.get('result')
+    identity, before, after = row.get('id'), row.get('from_version'), row.get('to_version')
+    if (not isinstance(value, dict) or not isinstance(identity, str) or not _PACKAGE_ID.fullmatch(identity)
+            or not valid_update_version(before, installed=True) or not valid_update_version(after)
+            or value.get('id') != identity or value.get('package_id') != identity
+            or value.get('source') != 'winget' or value.get('from_version') != before
+            or value.get('to_version') != after or value.get('status') != 'failed'
+            or value.get('installer_started') is not True or value.get('outcomeKnown') is not True
+            or value.get('running') is not False or not can_fail_forward(value)
+            or type(value.get('exitCode')) is not int or value['exitCode'] & 0xffffffff in
+                (0, 3010, 1641, 0x8A150109, 0x8A15010A, 0x8A15010B)
+            or row.get('source', 'winget') != 'winget' or row.get('package_id', identity) != identity
+            or any(key in row and row[key] is not expected for key, expected in
+                   (('installer_started', True), ('outcomeKnown', True), ('running', False)))):
+        return None
+    pending, count = [row], 0
+    while pending:
+        item = pending.pop()
+        count += 1
+        if count > 10000:
+            return None
+        if isinstance(item, dict):
+            code = item.get('exitCode')
+            if (any(key in item and type(item[key]) is not bool for key in (
+                    'installer_started', 'outcomeKnown', 'running', 'uncertain', 'cancelled',
+                    'may_continue', 'shared_barrier', 'reboot_required', 'rebootRequired'))
+                    or 'restartNeeded' in item and item['restartNeeded'] is not None
+                        and type(item['restartNeeded']) is not bool
+                    or any(key in item and type(item[key]) is not int for key in ('hresult', 'aggregateHresult'))
+                    or 'exitCode' in item and code is not None and type(code) is not int):
+                return None
+            if (item.get('running') is True or item.get('outcomeKnown') is False
+                    or item.get('uncertain') is True or item.get('cancelled') is True
+                    or item.get('may_continue') is True or item.get('restartNeeded') is True
+                    or item.get('reboot_required') is True or item.get('rebootRequired') is True
+                    or type(code) is int and code & 0xffffffff in
+                        (3010, 1641, 0x8A150109, 0x8A15010A, 0x8A15010B)
+                    or shared_update_refusal(item)):
+                return None
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return (identity.casefold(), before, after, 'winget')
+
+
 def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=None, item_callback=None,
-                 prepared_callback=None, before_install=None, updates_only=False) -> dict[str, Any]:
+                 prepared_callback=None, before_install=None, updates_only=False,
+                 prior_failed_offers=()) -> dict[str, Any]:
     """Discover now and optionally block before the first native updater call.
 
     The owner retains its job-wide exclusive installer gate until this returns.
@@ -171,7 +226,8 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
             outcome = _run_software(backend, configuration, cancel_event=cancel_event, item_callback=item_callback,
                                  prepared=prepared, before_install=before_install, scan_context=context,
                                  phased=prepared_callback is not None or before_install is not None,
-                                 navigation=navigation, scope_reader=lambda: apply_update_rules(source_configuration))
+                                 navigation=navigation, scope_reader=lambda: apply_update_rules(source_configuration),
+                                 prior_failed_offers=prior_failed_offers)
             outcome = merge_presence(outcome, presence)
             context['outcome'] = outcome
             return outcome
@@ -185,7 +241,8 @@ def run_software(backend: Any, configuration: dict[str, Any], *, cancel_event=No
 
 
 def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, item_callback,
-                  prepared, before_install, phased, scan_context, navigation=None, scope_reader=None) -> dict[str, Any]:
+                  prepared, before_install, phased, scan_context, navigation=None, scope_reader=None,
+                  prior_failed_offers=()) -> dict[str, Any]:
     """Apply only a current scan's exact IDs under the saved selected/all scope.
 
     The native updater checks pins again before each installation. No generic
@@ -309,6 +366,15 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
                 except Exception:
                     catalog_blocked = 'The fresh application source scan failed after metadata refresh; no application installer was started.'
     recheck_items = rechecks.get('items') if isinstance(rechecks.get('items'), list) else []
+    # A follow-up receives these rows from its owned completed parent journal,
+    # never from preferences. This suppresses only a repeated failed native
+    # offer; normal future runs and changed offers retain their usual checks.
+    prior_failures = {}
+    if isinstance(prior_failed_offers, (tuple, list)) and len(prior_failed_offers) <= 1000:
+        for row in prior_failed_offers:
+            key = known_failed_offer(row)
+            if key is not None:
+                prior_failures[key] = row
     allowed = []
     for identity in selected:
         current = candidates[identity]
@@ -319,6 +385,24 @@ def _run_software(backend: Any, configuration: dict[str, Any], *, cancel_event, 
             preflight_items.append({'id': identity, 'name': current.get('name', identity),
                 'from_version': current['version'], 'to_version': current['available'], 'status': 'skipped',
                 'result': held_update_result(current, hold, recheck=evidence)})
+        elif (key := (identity.casefold(), current['version'], current['available'], current['source'])) in prior_failures:
+            previous = prior_failures[key]
+            code = previous['result']['exitCode']
+            prior_error = previous.get('error')
+            prior_error = (' '.join(''.join(c if c.isprintable() else ' ' for c in prior_error).split())[-1000:]
+                           if isinstance(prior_error, str) else '')
+            preflight_items.append({'id': identity, 'name': current.get('name', identity),
+                'from_version': current['version'], 'to_version': current['available'], 'status': 'skipped',
+                'result': {'id': identity, 'package_id': identity, 'source': 'winget', 'status': 'skipped',
+                    'skipped': True, 'installer_started': False, 'outcomeKnown': True, 'running': False,
+                    'failureKind': 'failed_in_parent_run', 'failure_scope': 'package', 'requiresReview': True,
+                    'from_version': current['version'], 'to_version': current['available'],
+                    'previous_exit_code': code,
+                    'previous_error': prior_error,
+                    'note': ('The main run already attempted this exact app/version offer and its installer failed '
+                        'with exit code ' + str(code) + '. This immediate follow-up does not download or install '
+                        'the same failed offer again. Review the saved native installer error; other approved '
+                        'applications continue, and a different fresh offer remains eligible.')}})
         else:
             allowed.append(identity)
     selected = allowed

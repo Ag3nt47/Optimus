@@ -362,7 +362,7 @@ def capture(output, scratch):
                 if index >= 150:
                     progress.body_scroll.verticalScrollBar().setValue(progress.body_scroll.verticalScrollBar().maximum())
                 if index == 14 * FPS:
-                    for details in (progress.verification_details, progress.auto_continue_details):
+                    for details in (progress.auto_continue_details,):
                         details.verticalScrollBar().setValue(details.verticalScrollBar().maximum())
             else:
                 if index == 16 * FPS:

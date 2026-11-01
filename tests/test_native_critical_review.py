@@ -11,7 +11,7 @@ from unittest.mock import Mock
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QPushButton, QScrollArea, QStyle, QWidget
 
 
@@ -445,6 +445,25 @@ def test_completion_review_detects_action_scope_hidden_before_auto_continue(revi
         reviewer.dispose(window)
 
 
+def test_completion_review_detects_raw_evidence_outside_collapsed_details(reviewer, monkeypatch):
+    original = bot.OptimizationProgressWindow.finish
+    def broken(progress, *args, **kwargs):
+        original(progress, *args, **kwargs)
+        progress.verification_details.setParent(progress.completion_evidence)
+        progress.completion_evidence.layout().addWidget(progress.verification_details)
+        progress.verification_details.show()
+    monkeypatch.setattr(bot.OptimizationProgressWindow, 'finish', broken)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_workflow(window, backend, (850, 650), 'raw-evidence-defect')
+        by_id = {row['id']: row for row in reviewer.report['checks']}
+        assert by_id['raw-evidence-defect.workflow.scope-outside-details']['status'] == 'failed'
+        assert by_id['raw-evidence-defect.workflow.explicit-auto-continue']['status'] == 'passed'
+    finally:
+        reviewer.dispose(window)
+
+
 def test_fullscreen_routing_counts_actual_events_without_timing_thresholds(reviewer):
     reviewer.review_fullscreen_router()
     findings = [row for row in reviewer.report['checks'] if row['id'].startswith('fullscreen-router.')]
@@ -709,7 +728,9 @@ def test_deferred_review_detects_long_warning_caption_and_counter_overlap(review
             card.details.setText(card.details.text())
         else:
             card.layout().setEnabled(False)
-            card.progress.move(card.details.geometry().topLeft())
+            # Compact reasons are now hidden when space is tight. Inject an
+            # actual overlap with the always-visible status, in card coordinates.
+            card.progress.move(card.status.mapTo(card, QPoint()))
     monkeypatch.setattr(bot.OptimizationProgressWindow, 'update_progress', broken_update)
     owner = QWidget()
     try:
@@ -915,3 +936,45 @@ def test_maintenance_review_detects_a_long_description_that_is_not_fitted(review
         assert checks['long-defect.maintenance-progress.fixture-only']['status'] == 'passed'
     finally:
         reviewer.dispose(window)
+
+
+@pytest.mark.parametrize('dimensions', [(850, 650), (1024, 768)])
+def test_fitted_worker_reasons_pass_maintenance_and_deferred_reviews(reviewer, dimensions):
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.review_maintenance_progress(window, backend, dimensions, 'brief-maintenance')
+        reviewer.review_update_wait(window, dimensions, 'brief-deferred')
+        checks = {row['id']: row for row in reviewer.report['checks']}
+        assert checks['brief-maintenance.maintenance-progress.description-fit']['status'] == 'passed'
+        assert checks['brief-deferred.updates-deferred.layout']['status'] == 'passed'
+        backend.optimize.assert_not_called()
+        backend.apply_available_fixes.assert_not_called()
+    finally:
+        reviewer.dispose(window)
+
+
+def test_worker_reason_review_rejects_clipped_visible_summary(reviewer, app):
+    import threading
+    owner = QWidget()
+    owner.smoke_test = True
+    progress = bot.OptimizationProgressWindow(owner, threading.Event())
+    try:
+        progress.resize(850, 810)
+        progress.show()
+        progress.update_progress({'stage': 'Fixture read-only check', 'percentage': 50,
+            'jobs': [{'id': 'software_updates', 'status': 'needs_review',
+                'description': 'This fixture app failed; other updates continued.'}]})
+        bot.drain(app)
+        card = progress.worker_cards['software_updates']
+        assert card.details.isVisibleTo(progress)
+        assert bot.worker_reason_fits(card, progress, app)
+        card.details.setFixedHeight(1)
+        assert not bot.worker_reason_fits(card, progress, app)
+    finally:
+        progress.completed = True
+        progress.close()
+        progress.deleteLater()
+        owner.close()
+        owner.deleteLater()
+        app.processEvents()

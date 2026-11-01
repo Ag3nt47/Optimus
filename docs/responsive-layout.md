@@ -4,7 +4,7 @@ The main menu, maintenance dashboard, Settings and Sandbox adapt to their window
 
 The four main worker cards share equal columns and rows. When the measured space allows it, the cards also show the overall percentage, current operation, separate transfer/removal totals and elapsed time. Smaller views retain the compact presentation and full hover descriptions. Current-item percentages and scan findings keep their original meaning through resizing.
 
-Spare dashboard height goes to the cards. The bottom analysis panel and main actions stay reachable; smaller windows and enlarged accessibility fonts can scroll vertically. Additional workers appear below the main dashboard rather than shrinking its four core cards. Details toggles Current processes and Stage log.
+Spare dashboard height goes to the cards and bounded status reasons. The bottom analysis panel and main actions stay reachable; smaller windows and enlarged accessibility fonts can scroll vertically. Additional workers appear below the main dashboard rather than shrinking its four core cards. Details toggles Current processes, Stage log and raw verification data. Brief findings and the exact approval scope stay visible outside Details.
 
 Choose **Full screen** or press **F11** on the main window, maintenance view or Sandbox. **Esc** returns to the previous window size before any close or cancellation action. The Sandbox editor expands with its window and retains a manually adjusted file-tree split.
 

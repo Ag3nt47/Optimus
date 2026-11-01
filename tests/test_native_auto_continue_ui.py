@@ -345,7 +345,7 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
         mask = progress.mask()
         ready = mask.isEmpty()
         panes = []
-        for pane in (progress.verification_details, progress.auto_continue_details):
+        for pane in (progress.auto_continue_details,):
             viewport = pane.viewport()
             point = viewport.mapTo(progress, viewport.rect().center())
             hit = progress.childAt(point)
@@ -367,9 +367,11 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
     assert progress.cancel_button.geometry().bottom() < 650
     assert progress.processes.isHidden()
     assert not progress.log.isVisible()  # Logs remain optional; approval scope does not.
-    assert progress.verification_details.isVisible() and progress.verification_details.isReadOnly()
+    assert not progress.verification_details.isVisibleTo(progress)
+    assert progress.verification_details.isReadOnly()
+    assert progress.content_scroll.isAncestorOf(progress.verification_details)
     assert progress.auto_continue_details.isReadOnly()
-    for widget in (progress.verification_summary, progress.verification_details,
+    for widget in (progress.verification_summary,
             progress.auto_continue_summary, progress.auto_continue_details,
             progress.auto_continue_button, progress.cancel_button):
         assert widget.isVisibleTo(progress)
@@ -383,10 +385,10 @@ def test_batch_scope_and_both_controls_fit_completed_results_at_850_by_650(windo
             ancestor = ancestor.parentWidget()
         assert ancestor is progress
     assert progress.worker_grid.mapTo(progress, progress.worker_grid.rect().bottomLeft()).y() < progress.completion_review.mapTo(progress, QPoint()).y()
-    assert progress.verification_details.mapTo(progress, progress.verification_details.rect().topRight()).x() < progress.auto_continue_details.mapTo(progress, QPoint()).x()
+    assert progress.verification_summary.mapTo(progress, progress.verification_summary.rect().topRight()).x() < progress.auto_continue_details.mapTo(progress, QPoint()).x()
     assert progress.completion_review.mapTo(progress, progress.completion_review.rect().bottomLeft()).y() < progress.auto_continue_button.mapTo(progress, QPoint()).y()
     assert progress.auto_continue_details.viewport().height() >= 45
-    for pane in (progress.verification_details, progress.auto_continue_details):
+    for pane in (progress.auto_continue_details,):
         viewport = pane.viewport()
         assert pane.contentsRect().contains(viewport.rect().translated(viewport.mapTo(pane, QPoint())))
         hit = progress.childAt(viewport.mapTo(progress, viewport.rect().center()))

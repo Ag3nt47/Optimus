@@ -64,14 +64,10 @@ def dispose(value, qapp):
 
 def assert_pinned_report_visible(progress):
     def settled():
-        pane = progress.verification_details
-        viewport = pane.viewport()
-        hit = progress.childAt(viewport.mapTo(progress, viewport.rect().center()))
-        return (progress.body_scroll.viewport().rect().contains(
+        return progress.body_scroll.viewport().rect().contains(
             progress.completion_review.rect().translated(progress.completion_review.mapTo(progress.body_scroll.viewport(), QPoint())))
-            and (hit is viewport or hit is not None and viewport.isAncestorOf(hit)))
     wait_until(QApplication.instance(), settled)
-    for widget in (progress.verification_summary, progress.verification_details):
+    for widget in (progress.verification_summary, progress.verification_findings):
         assert widget.isVisibleTo(progress)
         assert not progress.content_scroll.isAncestorOf(widget)
         assert progress.rect().contains(widget.rect().translated(widget.mapTo(progress, QPoint())))
@@ -82,7 +78,8 @@ def assert_pinned_report_visible(progress):
                 break
             ancestor = ancestor.parentWidget()
         assert ancestor is progress
-    assert progress.verification_details.viewport().height() >= 45
+    assert not progress.verification_details.isVisibleTo(progress)
+    assert progress.content_scroll.isAncestorOf(progress.verification_details)
     assert progress.worker_grid.mapTo(progress, progress.worker_grid.rect().bottomLeft()).y() < progress.completion_review.mapTo(progress, QPoint()).y()
 
 
@@ -93,7 +90,7 @@ def test_completed_report_is_visible_before_user_continues_to_prompts(qapp, tmp_
         assert_pinned_report_visible(progress)
         assert progress.verification_summary.isVisible()
         assert 'Needs review' in progress.verification_summary.text()
-        assert 'could not be verified' in progress.verification_details.toPlainText()
+        assert 'could not be verified' in progress.verification_findings.text()
         observed.append('recommendations')
         main._post_review_active = False
     main._offer_post_optimization_reviews = Mock(side_effect=offer)

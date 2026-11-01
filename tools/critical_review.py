@@ -182,6 +182,31 @@ def control_geometry(control, window, *, hit_test=False):
             'clipped_ancestors': clipped, 'hit': hit_ok}
 
 
+def worker_reason_fits(card, progress, app=None):
+    """A brief may hide on small views or use spare room without obscuring controls."""
+    label = card.details
+    if label.isHidden():
+        return True
+    app = app or QApplication.instance()
+    previous = progress.body_scroll.verticalScrollBar().value()
+    try:
+        reveal_control(label, progress, app)
+        rectangle = window_rect(label, card)
+        controls = (card.heading, card.status, card.progress, card.totals, card.activity_ring,
+                    *card.navigation_buttons.values())
+        lines = label.visible_text.splitlines()
+        return (0 < len(lines) <= 2 and label._max_lines <= 2
+            and label.height() >= label.fontMetrics().lineSpacing() * len(lines)
+            and all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width() for line in lines)
+            and card.contentsRect().contains(rectangle)
+            and not any(rectangle.intersects(window_rect(control, card)) for control in controls)
+            and control_geometry(label, progress, hit_test=True)['reachable']
+            and label.toolTip() == label.text() and label.accessibleDescription() == label.text())
+    finally:
+        progress.body_scroll.verticalScrollBar().setValue(previous)
+        app.processEvents()
+
+
 def measure_dashboard(progress, app=None):
     """Measure fixed geometry and separately reveal each core control if needed."""
     app = app or QApplication.instance()
@@ -1215,7 +1240,7 @@ class CriticalReview:
                     and control_geometry(label, progress)['reachable']
                     and all(label.fontMetrics().horizontalAdvance(line) <= label.contentsRect().width()
                         for line in label.visible_text.splitlines()) for label in labels)
-                and maintenance.details.isHidden() and maintenance.details.toolTip() == description
+                and worker_reason_fits(maintenance, progress, self.app) and maintenance.details.toolTip() == description
                 and maintenance.details.accessibleDescription() == description
                 and description in progress.worker_details.toPlainText(),
                 'A bounded effective status remains visible; the full foreground description is retained in the analysis tooltip, accessible text and transcript when background status replaces it.')
@@ -1519,11 +1544,12 @@ class CriticalReview:
                 and journal not in progress.background_status.visible_text
                 and progress.log.toPlainText().count(unresolved) == 1,
                 'Shared unresolved-installer warnings must have short readable captions and preserve one full saved-record reason in the log.')
+            deferred_geometry = measure_dashboard(progress)
             self.check(prefix + '.updates-deferred.layout',
-                measure_dashboard(progress)['essentials']
-                and all(card.details.isHidden() and card.elapsed.isHidden() for card in cards.values())
+                deferred_geometry['essentials'] and deferred_geometry['no_internal_overlap']
+                and all(worker_reason_fits(card, progress, self.app) and card.elapsed.isHidden() for card in cards.values())
                 and unresolved in progress.worker_details.toPlainText(),
-                'Long descriptions and elapsed details must remain in Details while the pinned essential fields and navigation stay unobscured.')
+                'Brief reasons may use spare space without clipping or overlap; elapsed details and complete reasons remain available without obscuring essential fields.')
             self.check(prefix + '.updates-deferred.honest-state',
                 all(cards[identity].status.text() == 'Deferred' and cards[identity].progress.value() == 0
                     for identity in ('software_updates', 'driver_updates'))
@@ -1657,8 +1683,10 @@ class CriticalReview:
             self.check(prefix + '.workflow.unverified-honesty', 'Not fully verified' in progress.verification_summary.text()
                 and '0 confirmed' in progress.verification_summary.text(),
                 'An unverified fixture outcome must not display a verified-success summary.')
-            scope_controls = (progress.verification_summary, progress.verification_details,
+            scope_controls = (progress.verification_summary,
                 progress.auto_continue_summary, progress.auto_continue_details)
+            if progress.verification_findings.text():
+                scope_controls += (progress.verification_findings,)
             scope_geometry = []
             for control in scope_controls:
                 reveal_control(control, progress, self.app)
@@ -1667,11 +1695,13 @@ class CriticalReview:
                 all(item['reachable'] for item in scope_geometry)
                 and progress.verification_details.isReadOnly() and progress.auto_continue_details.isReadOnly()
                 and control_geometry(progress.auto_continue_button, progress, hit_test=True)['reachable'],
-                'Verification evidence and the exact automatic-action scope must be reachable before pressing the fixed Auto continue button.',
+                'The plain verification summary and exact automatic-action scope must be reachable before pressing the fixed Auto continue button.',
                 evidence=scope_geometry)
             self.check(prefix + '.workflow.scope-outside-details', not progress.details_toggle.isChecked()
-                and all(not progress.content_scroll.isAncestorOf(control) for control in scope_controls),
-                'Completion evidence and action scope stay outside the process/log Details toggle.')
+                and all(not progress.content_scroll.isAncestorOf(control) for control in scope_controls)
+                and progress.content_scroll.isAncestorOf(progress.verification_details)
+                and not progress.verification_details.isVisibleTo(progress),
+                'The plain completion summary and approval scope stay visible; raw verification evidence is behind Details.')
             self.screenshot(progress, prefix + '-completed-results')
             progress.auto_continue_button.click()
             drain(self.app, entered_batch.is_set)
@@ -2023,11 +2053,14 @@ class CriticalReview:
         content = progress.content_scroll.widget()
         self.check(prefix + '.analysis.details-only-logs', content.isAncestorOf(progress.processes)
             and content.isAncestorOf(progress.log)
-            and set(content.findChildren(QPlainTextEdit)) == {progress.processes, progress.log}
+            and content.isAncestorOf(progress.verification_details)
+            and progress.verification_details.isHidden()
+            and set(content.findChildren(QPlainTextEdit)) == {
+                progress.processes, progress.log, progress.verification_details}
             and all(not content.isAncestorOf(control) and control.isVisibleTo(progress)
                 for control in (progress.analysis_panel, progress.worker_grid, progress.space_guard_status))
             and progress.content_scroll.isVisibleTo(progress),
-            'Details reveals only Current processes and Stage log; dashboard and bottom information stay in the body.')
+            'During analysis Details shows processes and logs; technical verification stays hidden until results. Dashboard and bottom information stay in the body.')
         progress.details_toggle.setChecked(False)
         drain(self.app)
         self.check(prefix + '.analysis.details-close-preserves-info', progress.content_scroll.isHidden()
