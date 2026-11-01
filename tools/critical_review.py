@@ -207,6 +207,25 @@ def worker_reason_fits(card, progress, app=None):
         app.processEvents()
 
 
+def installer_warning_caption_fits(card, progress, app=None):
+    """Require the concise warning and only the elision measured room needs."""
+    label = card.details
+    expected = 'Previous installer needs review.\nNo automatic retry started.'
+    if label._summary != expected:
+        return False
+    if label.isHidden():
+        return True
+    if not worker_reason_fits(card, progress, app):
+        return False
+    metrics, width = label.fontMetrics(), label.contentsRect().width()
+    if label._max_lines == 1:
+        return label.visible_text == metrics.elidedText(' '.join(expected.split()), Qt.ElideRight, width)
+    if all(metrics.horizontalAdvance(line) <= width for line in expected.splitlines()):
+        return label.visible_text == expected
+    painted, complete = ' '.join(label.visible_text.split()), ' '.join(expected.split())
+    return (painted.endswith('…') and complete.startswith(painted[:-1]) or painted == complete)
+
+
 def measure_dashboard(progress, app=None):
     """Measure fixed geometry and separately reveal each core control if needed."""
     app = app or QApplication.instance()
@@ -1535,8 +1554,7 @@ class CriticalReview:
             self.viewport(progress, dimensions, prefix + '.updates-deferred')
             self.buttons(progress, dimensions, prefix + '.updates-deferred', [progress.cancel_button])
             self.check(prefix + '.updates-deferred.compact-reason',
-                all('Previous installer needs review.' in cards[identity].details.visible_text
-                    and 'No automatic retry started.' in cards[identity].details.visible_text
+                all(installer_warning_caption_fits(cards[identity], progress, self.app)
                     and cards[identity].details.toolTip() == unresolved
                     and cards[identity].details.accessibleDescription() == unresolved
                     for identity in ('software_updates', 'driver_updates'))

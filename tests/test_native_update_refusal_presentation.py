@@ -104,7 +104,9 @@ def test_driver_offers_without_eligible_saved_approvals_are_not_unprocessed_inst
         assert state['driver_counts']['not_approved'] == 1
         assert state['driver_counts']['not_processed'] == state['driver_counts']['installed'] == 0
         assert state['description'].startswith('No driver offers match the saved approvals; no driver installer started.')
-        assert update_completion_status(outcome) == 'deferred'
+        assert update_completion_status(outcome) == 'completed'
+        assert state['approval_required'] is True and state['worker_finished'] is True
+        assert state['continuation_blocked'] is False
     assert result == original
     result['driver_scan'].pop('eligible_count')
     assert update_completion_state(result)['driver_counts']['not_processed'] == 1

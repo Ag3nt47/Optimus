@@ -6,6 +6,9 @@ import pytest
 from PySide6.QtCore import QPoint, QRect
 
 from test_native_worker_cards import app, fonts, progress
+from test_native_deferred_worker_details import (
+    assert_short_installer_warning, assert_optional_reason_fit, assert_body_reachable,
+)
 from optimus.parallel_updates import ProgressMux, update_completion_state, update_completion_status
 
 
@@ -36,7 +39,9 @@ def test_completed_search_keeps_real_offer_count_and_prior_install_barrier(progr
     assert card.progress.format() == ('5 driver updates found' if identity == 'driver_updates' else '5 app updates found')
     assert card.elapsed.text() == 'Elapsed: 46s' and not card._elapsed_active
     assert card.progress.value() == 0 and card.progress.maximum() == 1
-    assert 'Previous installer needs review.' in card.details.visible_text
+    assert_short_installer_warning(card,
+        ('5 driver updates found' if identity == 'driver_updates' else '5 app updates found')
+        + '\nPrevious installer needs review.')
     assert JOURNAL in card.details.toolTip() and JOURNAL in card.details.accessibleDescription()
     assert 'Search completed' in card.details.text()
     assert progress.log.toPlainText().count(JOURNAL) == 1
@@ -119,7 +124,14 @@ def test_long_blocked_status_reflows_without_overlapping_the_count(progress, app
             assert progress.rect().contains(QRect(field.mapTo(progress, QPoint()), field.size()))
             hit = progress.childAt(field.mapTo(progress, field.rect().center()))
             assert hit is field or hit is not None and field.isAncestorOf(hit)
-        assert card.details.isHidden() and card.elapsed.isHidden()
+        assert all(label.isHidden() for label in (card.elapsed, card.activity_state, card.navigation_note))
+        if not card.details.isHidden():
+            assert_body_reachable(card.details, progress, app)
+        assert_optional_reason_fit(card, progress)
+        if identity == 'driver_updates':
+            assert_short_installer_warning(card, '5 driver updates found\nPrevious installer needs review.')
+        else:
+            assert_short_installer_warning(card)
         assert REASON in card.details.text()
         assert card.details.text() == card.details.toolTip() == card.details.accessibleDescription()
         assert REASON in progress.worker_details.toPlainText()
