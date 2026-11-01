@@ -172,6 +172,11 @@ def launch_warning(settings):
             actions.append(description)
     if settings.get('background_analysis_enabled') is True:
         checks.append('Resume the saved background resource analysis after approval.')
+    if settings.get('review_inventory_reuse_enabled', True) is True:
+        checks.append('Reuse complete application/startup review metadata for up to 30 seconds within this run; action checks stay fresh.')
+    if settings.get('spyware_scan_enabled') is True and settings.get('defender_scan_reuse_enabled', True) is True:
+        checks.append('Avoid a duplicate Defender quick scan within ' + str(settings.get('defender_scan_reuse_hours', 6))
+                      + ' hours only when fresh protection, threat and signature checks confirm eligibility. No new scan is claimed.')
     if not actions:
         checks.insert(0, 'No automatic deletion, app-removal or update-install request is enabled in this saved configuration.')
     header = ('Auto Clean runs the saved requests below. File deletion, browser-data removal and app uninstallation can be irreversible; app data can be lost.'

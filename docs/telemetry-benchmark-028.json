@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "read_only": true,
+  "platform": "win32",
+  "workers": 4,
+  "samples_per_implementation": 30,
+  "process_time_resolution_seconds": 1e-07,
+  "thread_query": {
+    "before": {
+      "median_ms": 69.7972,
+      "p95_ms": 83.9994,
+      "min_ms": 59.2001,
+      "max_ms": 87.5169,
+      "cpu_ms_total": 2078.125
+    },
+    "after": {
+      "median_ms": 0.1369,
+      "p95_ms": 0.2682,
+      "min_ms": 0.0837,
+      "max_ms": 0.2768,
+      "cpu_ms_total": 0.0
+    },
+    "median_sample_cost_reduction_percent": 99.8
+  },
+  "full_sample": {
+    "before": {
+      "median_ms": 131.6422,
+      "p95_ms": 160.3238,
+      "min_ms": 106.6308,
+      "max_ms": 183.4243,
+      "cpu_ms_total": 3171.875
+    },
+    "after": {
+      "median_ms": 39.0112,
+      "p95_ms": 66.3193,
+      "min_ms": 28.7815,
+      "max_ms": 112.5561,
+      "cpu_ms_total": 359.375
+    },
+    "median_sample_cost_reduction_percent": 70.37
+  },
+  "note": "Observed sampler overhead only. This is not a benchmark of whole-PC performance or installer speed; timing varies with system load and CPU timers have finite resolution."
+}

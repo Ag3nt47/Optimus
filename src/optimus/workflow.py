@@ -45,6 +45,8 @@ DEFAULTS = {
     'setup_version': 0, 'automation_mode': 'manual',
     'applications_review_enabled': False, 'performance_review_enabled': False,
     'speed_enhancements_enabled': False,
+    'review_inventory_reuse_enabled': True,
+    'defender_scan_reuse_enabled': True, 'defender_scan_reuse_hours': 6,
     'drive_optimization_enabled': False, 'auto_continue_fixes_enabled': False,
     'parallel_app_updates_enabled': False,
     'interface_priority_boost_enabled': True,
@@ -196,6 +198,8 @@ class Preferences:
             raise ValueError('Cleanup age must be 0 to 3650 days (0 includes all eligible temporary files).')
         if type(result['analysis_interval']) is not int or not 2 <= result['analysis_interval'] <= 60:
             raise ValueError('Analysis interval must be 2 to 60 seconds.')
+        if type(result['defender_scan_reuse_hours']) is not int or not 1 <= result['defender_scan_reuse_hours'] <= 24:
+            raise ValueError('Recent Defender scan reuse must be 1 to 24 hours.')
         from .retention_configuration import validate_retention_scope
         validate_retention_scope(result, require_all=True)
         if (type(result['drive_space_guard_target_gib']) not in (int, float)
@@ -331,6 +335,7 @@ class Workflow:
         self.active = True
         report, log_path, lease, parallel_job = None, None, None, None
         attempt_started = False
+        inventory_scope_started = False
         try:
             from .parallel_updates import (ProgressMux, ParallelAppUpdates, ParallelInstallerQueue, WINDOWS_SOFTWARE, WINDOWS_DRIVERS,
                                            WINDOWS_DRIVER_REVIEW, DRIVER_TITLES,
@@ -344,6 +349,10 @@ class Workflow:
                         or _lease.path != self.backend.data_dir / 'maintenance-run.lock'):
                     raise ValueError('A current supplied maintenance lease is required.')
                 lease = _lease
+            begin_inventory = getattr(self.backend, 'begin_review_inventory', None)
+            if callable(begin_inventory):
+                begin_inventory(enabled=configuration['review_inventory_reuse_enabled'])
+                inventory_scope_started = True
             recovery = None
             reconcile = getattr(self.backend, 'reconcile_completed_updates', None)
             if callable(reconcile):
@@ -391,7 +400,7 @@ class Workflow:
             elif configuration['drive_space_guard_enabled']:
                 space_guard(initial=True)
             if configuration['applications_review_enabled']:
-                stages.append(('Review installed applications', 'Collecting installed-program metadata; no uninstaller is launched.', lambda: review(self.backend.installed_apps, 'Review only; no applications were uninstalled.')))
+                stages.append(('Review installed applications', 'Collecting installed-program metadata; no uninstaller is launched.', lambda: review(getattr(self.backend, 'installed_apps_review', self.backend.installed_apps), 'Review only; no applications were uninstalled.')))
             if configuration['performance_review_enabled']:
                 stages.append(('Identify programs contributing to slowdowns', 'Sampling CPU, memory and disk activity to identify sustained pressure and explain each program.', lambda: review(lambda: self.backend.slowdown_report(cancel_event=cancel_event), 'Measured review only; no process is suspended, killed or reprioritized automatically.')))
             def item_progress(title):
@@ -436,7 +445,7 @@ class Workflow:
                     stages.append(('Disable approved startup entries', 'Revalidating saved registration identities and disabling only approved matches with recovery records.',
                                    lambda: run_startup(self.backend, configuration, cancel_event=cancel_event, item_callback=item_progress('Disable approved startup entries'))))
                 else:
-                    stages.append(('Review startup registrations', 'Inspecting sign-in entries; no registration is changed.', lambda: review(self.backend.startup_list, 'Review only; no startup entry was disabled or deleted.')))
+                    stages.append(('Review startup registrations', 'Inspecting sign-in entries; no registration is changed.', lambda: review(getattr(self.backend, 'startup_list_review', self.backend.startup_list), 'Review only; no startup entry was disabled or deleted.')))
             if configuration['duplicates_enabled']:
                 if configuration['duplicate_policy'] != 'review':
                     from .automated_files import run_local
@@ -608,14 +617,17 @@ class Workflow:
                                'Checking applicable Security/Critical patches through the configured Windows Update service; installation uses saved scope and agreement approvals, without an automatic reboot.', security_updates))
             if configuration['spyware_scan_enabled']:
                 def scan_threats():
-                    operation = self.backend.scan_spyware
+                    automatic_scan = getattr(self.backend, 'scan_spyware_automatic', None)
+                    operation = automatic_scan if callable(automatic_scan) else self.backend.scan_spyware
                     from .item_progress import accepts_progress_callback
                     kwargs = {'cancel_event': cancel_event}
+                    if callable(automatic_scan):
+                        kwargs['settings'] = configuration
                     if accepts_progress_callback(operation):
                         kwargs['progress_callback'] = item_progress('Scan for spyware and malware')
                     return operation(**kwargs)
                 stages.append(('Scan for spyware and malware',
-                               'Running a Microsoft Defender quick scan for viruses, malware and spyware using its existing protection and quarantine policy.',
+                               'Checking current Defender protection and threats, then running a quick scan unless a recent completed scan meets the saved reuse conditions.',
                                scan_threats))
             if configuration['security_review_enabled']:
                 def security_review():
@@ -754,6 +766,10 @@ class Workflow:
                 cancel_event = (stage_navigation.cancellation(global_cancel_event)
                                 if navigation_item else global_cancel_event)
                 mutation_item = title.startswith(('Apply ', 'Prepare approved ', 'Disable ', 'Recycle ', 'Clean ', 'Optimize ', 'Remove ', 'Uninstall ', 'Enable '))
+                if title.startswith(('Disable ', 'Remove ', 'Uninstall ')):
+                    invalidate_inventory = getattr(self.backend, 'invalidate_review_inventory', None)
+                    if callable(invalidate_inventory):
+                        invalidate_inventory()
                 navigation_available = True
                 if navigation_item:
                     navigation_available = stage_navigation.begin_item('stage:' + str(completed) + ':' + title, title,
@@ -901,6 +917,9 @@ class Workflow:
                                    'stage_status': stage['status'],
                                    'processes': process_lines, 'log': f"{stage['status'].upper()}: {title}" + (': ' + stage['error'] if stage.get('error') else ': ' + insight_summary if insight_summary else ''), 'completed': completed, 'total': total_stages, **scan_fields})
             join_updates()
+            inventory_status = getattr(self.backend, 'review_inventory_status', None)
+            if callable(inventory_status):
+                report['review_inventory'] = inventory_status()
             report['finished_at'] = time.time()
             report['failed_stages'] = sum(item['status'] == 'failed' for item in report['stages'])
             report['cancelled_stages'] = sum(item['status'] == 'cancelled' for item in report['stages'])
@@ -951,8 +970,14 @@ class Workflow:
                 if lease is not None and _lease is None:
                     lease.release()
             finally:
-                self.navigation.end((report or {}).get('status', 'failed'))
-                self.active = False
-                self.lock.release()
+                try:
+                    if inventory_scope_started:
+                        end_inventory = getattr(self.backend, 'end_review_inventory', None)
+                        if callable(end_inventory):
+                            end_inventory()
+                finally:
+                    self.navigation.end((report or {}).get('status', 'failed'))
+                    self.active = False
+                    self.lock.release()
 
 

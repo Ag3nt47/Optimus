@@ -102,7 +102,7 @@ def identify_wifi(*, system=None, runner=subprocess.run, linux_root=Path('/sys/c
     return report
 
 
-def _read_system():
+def _read_system(thread_ids=()):
     import psutil
     value = {'errors': []}
     def read(name, operation):
@@ -119,7 +119,20 @@ def _read_system():
     read('cpu_count', lambda: psutil.cpu_count(logical=True))
     read('cpu_frequency_mhz', lambda: getattr(psutil.cpu_freq(), 'current', None))
     read('memory_percent', lambda: psutil.virtual_memory().percent)
-    read('threads', lambda: {row.id: row.user_time + row.system_time for row in psutil.Process().threads()})
+    if sys.platform == 'win32':
+        from .thread_metrics import read_own_thread_times
+        observed = read_own_thread_times(thread_ids)
+        value['threads'] = observed['threads']
+        value['thread_identities'] = observed['identities']
+        value['thread_identity_required'] = True
+        if observed['unavailable']:
+            value['errors'].append('threads')
+    else:
+        # Existing portable psutil readers remain supported. An empty workflow
+        # has no worker CPU to attribute and does not need a thread census.
+        selected = set(thread_ids)
+        read('threads', lambda: {row.id: row.user_time + row.system_time
+             for row in psutil.Process().threads() if row.id in selected} if selected else {})
     read('network_counters', lambda: {name: {'received': row.bytes_recv, 'sent': row.bytes_sent}
          for name, row in psutil.net_io_counters(pernic=True, nowrap=False).items()})
     read('network_stats', lambda: {name: {'is_up': row.isup, 'link_mbps': row.speed}
@@ -133,7 +146,7 @@ class LiveMetrics:
         if not _number(interval, .5, 30):
             raise ValueError('Use a metrics interval between 0.5 and 30 seconds.')
         self.backend, self.interval = backend, float(interval)
-        self._reader, self._wifi_provider = reader or _read_system, wifi_provider or identify_wifi
+        self._reader, self._wifi_provider = reader, wifi_provider or identify_wifi
         self._clock, self._thread_factory = clock, thread_factory
         self._lock, self._wake = threading.RLock(), threading.Event()
         self._thread, self._desired, self._generation = None, False, 0
@@ -205,7 +218,8 @@ class LiveMetrics:
         """One worker-thread sample; exposed privately for injected fixture tests."""
         before = self._navigation()
         try:
-            raw = self._reader()
+            selected = tuple(sorted({binding[2] for binding in self._bindings(before).values() if binding is not None}))
+            raw = self._reader() if self._reader is not None else _read_system(selected)
             now = self._clock()
             with self._lock:
                 if generation is not None and (generation != self._generation or not self._desired):
@@ -308,13 +322,17 @@ class LiveMetrics:
                 result[job['id']] = None
                 continue
             tid = current.get('thread_id')
-            result[job['id']] = (snapshot.get('session_id'), current.get('key'), tid) if type(tid) is int and tid > 0 else None
+            valid_tid = type(tid) is int and tid > 0 and (sys.platform != 'win32' or tid <= 0xFFFFFFFF)
+            result[job['id']] = (snapshot.get('session_id'), current.get('key'), tid) if valid_tid else None
         return result
 
     def _workers(self, raw, before, after, now, valid_dt):
         first, last = self._bindings(before), self._bindings(after)
         threads, count = raw.get('threads'), raw.get('cpu_count')
         threads = threads if isinstance(threads, dict) and len(threads) <= 4096 else {}
+        identities = raw.get('thread_identities')
+        identities = identities if isinstance(identities, dict) and len(identities) <= 4096 else {}
+        requires_identity = raw.get('thread_identity_required', False) is not False
         valid_count = type(count) is int and 0 < count <= 4096
         owners = {}
         for identity, binding in last.items():
@@ -335,10 +353,18 @@ class LiveMetrics:
             if not _number(cpu):
                 row['reason'] = 'The current worker thread has exited or its CPU counters are unavailable.'
                 continue
+            thread_identity = identities.get(binding[2]) if requires_identity else None
+            if requires_identity and (type(thread_identity) is not tuple or len(thread_identity) != 2
+                    or type(thread_identity[0]) is not int or thread_identity[0] != os.getpid()
+                    or type(thread_identity[1]) is not int or not 0 < thread_identity[1] <= 0xFFFFFFFFFFFFFFFF):
+                row['reason'] = 'The current worker thread lifetime could not be verified; CPU is unavailable.'
+                continue
             previous = self._worker_previous.get(identity)
-            upcoming[identity] = {'binding': binding, 'at': now, 'cpu': cpu, 'count': count}
+            upcoming[identity] = {'binding': binding, 'at': now, 'cpu': cpu, 'count': count,
+                                  'thread_identity': thread_identity}
             row['reason'] = 'Waiting for a second sample of this exact worker thread. External installer CPU is excluded.'
-            if valid_dt and previous and previous['binding'] == binding and previous['count'] == count:
+            if (valid_dt and previous and previous['binding'] == binding and previous['count'] == count
+                    and previous.get('thread_identity') == thread_identity):
                 elapsed, used = now - previous['at'], cpu - previous['cpu']
                 if elapsed > 0 and 0 <= used <= elapsed * 1.2:
                     row.update(cpu_percent=round(min(100, used * 100 / elapsed / count), 2),

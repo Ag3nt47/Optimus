@@ -79,6 +79,36 @@ def test_saved_full_mode_keeps_user_changes_on_reopen(qapp, full_backend):
         dispose(wizard, qapp)
 
 
+def test_efficiency_setup_and_settings_preserve_explicit_choices(qapp, full_backend):
+    full_backend.settings.update(defender_scan_reuse_enabled=False,
+        defender_scan_reuse_hours=2, review_inventory_reuse_enabled=False)
+    wizard = InitialSetupWizard(full_backend, first_run=False)
+    try:
+        assert not wizard.controls['defender_scan_reuse_enabled'].isChecked()
+        assert not wizard.controls['defender_scan_reuse_hours'].isEnabled()
+        assert wizard.collect_choices()['defender_scan_reuse_hours'] == 2
+        wizard.controls['defender_scan_reuse_enabled'].setChecked(True)
+        assert wizard.controls['defender_scan_reuse_hours'].isEnabled()
+        assert wizard.collect_choices()['review_inventory_reuse_enabled'] is False
+    finally:
+        wizard.reject()
+        dispose(wizard, qapp)
+    window = OptimusWindow(full_backend, smoke_test=True)
+    try:
+        window.open_settings(page='Settings')
+        controls = window._settings_window.workflow_controls
+        assert not controls['defender_scan_reuse_enabled'].isChecked()
+        assert not controls['defender_scan_reuse_hours'].isEnabled()
+        assert controls['defender_scan_reuse_hours'].value() == 2
+        assert not controls['review_inventory_reuse_enabled'].isChecked()
+        controls['defender_scan_reuse_enabled'].setChecked(True)
+        assert controls['defender_scan_reuse_hours'].isEnabled()
+        full_backend.optimize.assert_not_called()
+        assert full_backend.saved == []
+    finally:
+        dispose(window, qapp)
+
+
 def test_selecting_full_applies_once_and_preserves_explicit_scopes(qapp, tmp_path):
     backend = FixtureBackend(tmp_path, {'browser_cleanup_browsers': ['firefox'], 'browser_keep_domains': ['example.com'],
                                        'software_update_exclude_ids': ['Fixture.Excluded'],

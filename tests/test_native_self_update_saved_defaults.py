@@ -27,6 +27,7 @@ MISSING_DEFAULT_KEYS = {
     'drive_space_guard_enabled', 'drive_space_guard_target_gib',
     'update_payload_cleanup_enabled', 'toolkit_settings',
     'python_relocation_repair_enabled', 'python_relocation_approvals',
+    'review_inventory_reuse_enabled', 'defender_scan_reuse_enabled', 'defender_scan_reuse_hours',
 }
 
 

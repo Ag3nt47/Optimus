@@ -21,6 +21,7 @@ WINDOWS_ONLY = (
     'update_compatibility_mode_enabled', 'windows_cpu_compatibility_enabled',
     'drive_optimization_enabled',
     'python_relocation_repair_enabled',
+    'review_inventory_reuse_enabled', 'defender_scan_reuse_enabled',
 )
 PACKAGE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9@+_.:/-]{0,255}\Z')
 

@@ -14,6 +14,7 @@ from .workflow import Preferences, Workflow
 from . import performance
 from .filesystem import resolve_data_root, default_data_root
 from .extended_backend import ExtendedMaintenanceBackend
+from .run_review_inventory import service as review_inventory_service, invalidate_on_mutation
 
 class Backend(ExtendedMaintenanceBackend):
     def __init__(self, data_dir: Path | None = None):
@@ -57,6 +58,39 @@ class Backend(ExtendedMaintenanceBackend):
 
     def preferences(self):
         return self.preference_store.load()
+
+    def begin_review_inventory(self, *, enabled=True):
+        review_inventory_service(self, create=True).begin(enabled=enabled)
+
+    def end_review_inventory(self):
+        inventory = review_inventory_service(self)
+        if inventory is not None:
+            inventory.end()
+
+    def invalidate_review_inventory(self):
+        inventory = review_inventory_service(self)
+        if inventory is not None:
+            inventory.invalidate()
+
+    def review_inventory_status(self):
+        inventory = review_inventory_service(self)
+        return inventory.status() if inventory is not None else {
+            'enabled': False, 'reused_inventories': 0,
+            'scope': 'Current workflow read-only application/startup reviews only',
+            'maximum_age_seconds': 30}
+
+    def _review_inventory(self, name, fresh_reader):
+        inventory = review_inventory_service(self)
+        cached = inventory.get(name) if inventory is not None else None
+        return fresh_reader() if cached is None else cached
+
+    def installed_apps_review(self):
+        """Display metadata only; installed_apps() stays fresh for every action."""
+        return self._review_inventory('applications', self.installed_apps)
+
+    def startup_list_review(self):
+        """Display metadata only; startup_list() stays fresh for every action."""
+        return self._review_inventory('startup', self.startup_list)
 
     def retention_cleanup(self, kind, settings, *, progress_callback=None, cancel_event=None):
         from .retention_cleanup import RetentionCleanup
@@ -247,9 +281,11 @@ class Backend(ExtendedMaintenanceBackend):
             self._system_privacy_service = SystemPrivacy(self.data_dir, stop_controller=controller_for(self))
         return self._system_privacy_service
 
+    @invalidate_on_mutation
     def apply_system_privacy(self, settings, cancel_event=None, *, progress_callback=None):
         return self._privacy_service().apply_privacy(settings, cancel_event=cancel_event, progress_callback=progress_callback)
 
+    @invalidate_on_mutation
     def restore_system_privacy(self, change_id, cancel_event=None):
         return self._privacy_service().restore_privacy(change_id, cancel_event=cancel_event)
 
@@ -259,9 +295,16 @@ class Backend(ExtendedMaintenanceBackend):
     def scan_spyware(self, cancel_event=None, *, progress_callback=None):
         return self._privacy_service().scan_spyware(cancel_event=cancel_event, progress_callback=progress_callback)
 
+    def scan_spyware_automatic(self, settings, cancel_event=None, *, progress_callback=None):
+        configuration = Preferences.validate(settings)
+        hours = configuration['defender_scan_reuse_hours'] if configuration['defender_scan_reuse_enabled'] else 0
+        return self._privacy_service().scan_spyware(reuse_hours=hours,
+            cancel_event=cancel_event, progress_callback=progress_callback)
+
     def security_status(self):
         return self._privacy_service().security_status()
 
+    @invalidate_on_mutation
     def windows_security_updates(self, settings, cancel_event=None, item_callback=None):
         from .security_updates import SecurityUpdates
         from .emergency_stop import controller_for
@@ -272,7 +315,7 @@ class Backend(ExtendedMaintenanceBackend):
         from .legacy_support import review_legacy_support
         errors = []
         try:
-            applications = self.installed_apps()
+            applications = getattr(self, 'installed_apps_review', self.installed_apps)()
         except Exception as error:
             applications = []
             errors.append('Installed applications could not be read: ' + type(error).__name__)
@@ -303,11 +346,15 @@ class Backend(ExtendedMaintenanceBackend):
 
     def audit(self):
         from . import __version__
+        captured_at = time.monotonic()
         snapshot = self.bridge.request('audit')
         if not isinstance(snapshot, dict):
             raise RuntimeError('The Windows audit returned no usable report.')
         self.last_audit = dict(snapshot, EngineVersion=snapshot.get('ToolVersion'),
                                ToolVersion=__version__, ApplicationVersion=__version__)
+        inventory = review_inventory_service(self)
+        if inventory is not None:
+            inventory.seed(self.last_audit, captured_at=captured_at)
         return self.last_audit
 
     def processes(self):
@@ -388,21 +435,25 @@ class Backend(ExtendedMaintenanceBackend):
     def startup_list(self):
         return self._list(self.bridge.request('startup_list'))
 
+    @invalidate_on_mutation
     def startup_set(self, record, enabled):
         return self.bridge.request('startup_set', record=record, enabled=bool(enabled))
 
+    @invalidate_on_mutation
     def startup_remove(self, record):
         return self.bridge.request('startup_remove', record=record)
 
     def services(self):
         return self._list(self.bridge.request('services'))
 
+    @invalidate_on_mutation
     def service_set(self, record, action):
         return self.bridge.request('service_set', record=record, action=action)
 
     def installed_apps(self):
         return self._list(self.bridge.request('installed_apps'))
 
+    @invalidate_on_mutation
     def uninstall(self, record):
         current = self.installed_apps()
         if not any(item.get('Identity') == record.get('Identity') and item.get('Name') == record.get('Name') for item in current):
@@ -419,9 +470,11 @@ class Backend(ExtendedMaintenanceBackend):
     def recheck_held_updates(self, packages, *, cancel_event=None, item_callback=None):
         return self.maintenance.recheck_held_updates(packages, cancel_event=cancel_event, item_callback=item_callback)
 
+    @invalidate_on_mutation
     def update_app(self, package_id):
         return self.maintenance.updates_apply(package_id, confirmed=True)
 
+    @invalidate_on_mutation
     def update_app_unattended(self, package_id, *, cancel_event=None, compatibility_mode=False, progress_callback=None):
         """Saved scope/agreements authorize updates; cancellation still gates installation."""
         from .maintenance import UpdatePreflightError
@@ -585,6 +638,7 @@ class Backend(ExtendedMaintenanceBackend):
         from .driver_update_backup import DriverUpdateBackup
         return DriverUpdateBackup(self).backup(offers, cancel_event=cancel_event, item_callback=item_callback)
 
+    @invalidate_on_mutation
     def driver_update_apply_unattended(self, record, accept_eula=False, *, progress_callback=None, cancel_event=None):
         if accept_eula is not True:
             raise ValueError('Saved driver agreement approval is required.')
@@ -610,6 +664,7 @@ class Backend(ExtendedMaintenanceBackend):
                 result.pop('download_progress', None)
         return result
 
+    @invalidate_on_mutation
     def driver_update_apply(self, record, *, cancel_event=None):
         return self.bridge.request('driver_update_apply', id=record['id'], revision=record['revision'],
                                    cleanupDownloads=self._driver_payload_cleanup_enabled(), timeout=900,
@@ -634,6 +689,7 @@ class Backend(ExtendedMaintenanceBackend):
     def debloat_preview(self, action):
         return self.maintenance.debloat_preview(action)
 
+    @invalidate_on_mutation
     def debloat_apply(self, plan, *, progress_callback=None):
         options = {'progress_callback': progress_callback} if progress_callback is not None else {}
         return self.maintenance.debloat_apply(plan, **options)
@@ -642,6 +698,7 @@ class Backend(ExtendedMaintenanceBackend):
         return (self._list(self.bridge.request('changes')) + self.performance_controller.allocation_history()
                 + self._windows_compatibility_service().history())
 
+    @invalidate_on_mutation
     def restore(self, change):
         if change.get('source') == 'python-compatibility':
             return self._speed_maintenance(lambda: self._windows_compatibility_service().restore(change.get('Id') or change.get('id')))
@@ -652,6 +709,7 @@ class Backend(ExtendedMaintenanceBackend):
     def registry_scan(self):
         return self.bridge.request('registry_scan')
 
+    @invalidate_on_mutation
     def registry_remove(self, record):
         return self.bridge.request('registry_remove', record=record)
 

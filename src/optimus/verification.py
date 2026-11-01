@@ -372,6 +372,13 @@ class OutcomeVerification:
             self._add(checks, 'read_only_toolkit_observation', title, 'not_applicable',
                 'This stage records bounded read-only observations or local metadata history; it claims no cleanup, repair or performance gain.')
             return
+        if (title == 'Scan for spyware and malware' and value.get('status') == 'skipped_recent_scan'
+                and value.get('skipped') is True and value.get('read_only') is True
+                and value.get('completion_verified') is False and _no_change_claimed(value)):
+            self._add(checks, 'defender_scan_reuse', title, 'not_applicable',
+                'A recent native scan was reused under the saved cadence. No new scan or clean-system result is claimed.',
+                completion_verified=False, cadence_check=value.get('cadence_check'))
+            return
         if title in ('Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
                      'Scan for spyware and malware', 'Optimize eligible internal drives') and _no_change_claimed(value):
             self._add(checks, 'review', title, 'not_applicable',

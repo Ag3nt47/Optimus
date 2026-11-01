@@ -171,8 +171,10 @@ class ProcessHarness:
                 return [] if expected is list else {}
         processes = inventory('Process inventory', self.backend.processes, list)
         sampled = inventory('Resource sample', lambda: self.backend.slowdown_report(cancel_event=cancel_event), dict)
-        startup = inventory('Startup inventory', self.backend.startup_list, list)
-        applications = inventory('Installed application inventory', self.backend.installed_apps, list)
+        startup_reader = getattr(self.backend, 'startup_list_review', self.backend.startup_list)
+        applications_reader = getattr(self.backend, 'installed_apps_review', self.backend.installed_apps)
+        startup = inventory('Startup inventory', startup_reader, list)
+        applications = inventory('Installed application inventory', applications_reader, list)
         if sampled.get('complete') is not True:
             report['complete'] = False
             report['errors'].append('The resource sample is incomplete; resource comparisons are partial.')

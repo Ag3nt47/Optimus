@@ -342,6 +342,17 @@ class InitialSetupWizard(QWizard):
         self._check(body, 'post_process_review_enabled', 'After completion, offer process/startup and installed-application review')
         self._check(body, 'security_review_enabled', 'Check Windows security and offer individually reviewed fixes after completion')
         self._check(body, 'spyware_scan_enabled', 'Run a Microsoft Defender quick scan for viruses, malware and spyware')
+        reuse_scan = self._check(body, 'defender_scan_reuse_enabled', 'Avoid repeating a recent healthy Defender quick scan during Auto Clean')
+        reuse_age = QSpinBox()
+        reuse_age.setRange(1, 24)
+        reuse_age.setSuffix(' hours')
+        reuse_age.setValue(self.initial.get('defender_scan_reuse_hours', 6))
+        self.controls['defender_scan_reuse_hours'] = reuse_age
+        reuse_age.setEnabled(reuse_scan.isChecked())
+        reuse_scan.toggled.connect(reuse_age.setEnabled)
+        body.addWidget(_label('Maximum age of a reusable Defender quick scan'))
+        body.addWidget(reuse_age)
+        body.addWidget(_label('Current protection, threats, definitions and native scan-completion evidence are checked each time. Missing or changed evidence requests a fresh scan. Reused evidence is labelled; a new scan is not claimed. Direct manual scans always run fresh.'))
         self._check(body, 'privacy_advertising_enabled', 'Apply my selected Windows advertising and suggestion privacy preferences')
         self._check(body, 'privacy_diagnostics_enabled', 'Apply my selected optional Windows diagnostic-data preferences')
         self._check(body, 'privacy_block_silent_consumer_apps_enabled',
@@ -539,7 +550,7 @@ class InitialSetupWizard(QWizard):
     def _build_performance(self):
         body = self._page('performance', '7. Performance Optimizer',
             'Review process CPU/memory and priority/affinity information without closing applications. Optional Codex priority and background sampling are separate choices. Existing external priority watchers are preserved.')
-        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'interface_priority_boost_enabled', 'codex_priority_enabled', 'background_analysis_enabled')])
+        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'interface_priority_boost_enabled', 'codex_priority_enabled', 'background_analysis_enabled', 'review_inventory_reuse_enabled')])
         self._check(body, 'performance_review_enabled', 'Include a detailed process/resource review report')
         self._check(body, 'interface_priority_boost_enabled', 'Prioritize Optimus interface (Above Normal CPU; takes effect the next time Optimus opens)')
         self._check(body, 'speed_enhancements_enabled', 'Automatically apply supported reversible speed enhancements during Optimize')
@@ -552,6 +563,7 @@ class InitialSetupWizard(QWizard):
         self.controls['codex_priority'] = priority
         body.addWidget(priority)
         self._check(body, 'background_analysis_enabled', 'Keep background resource analysis on while Optimus is running')
+        self._check(body, 'review_inventory_reuse_enabled', 'Avoid duplicate complete application/startup metadata queries within a maintenance run')
         interval = QSpinBox()
         interval.setRange(2, 60)
         interval.setSuffix(' seconds between samples')

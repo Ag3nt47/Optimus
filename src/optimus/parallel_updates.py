@@ -1542,6 +1542,9 @@ class ParallelInstallerQueue:
                     if assessment is not None and not assessment['allowed']:
                         job.gate_refusal = ' '.join(assessment['reasons'])
                         return False
+                    invalidate_inventory = getattr(self.backend, 'invalidate_review_inventory', None)
+                    if callable(invalidate_inventory):
+                        invalidate_inventory()
                     return True
                 if not self.maintenance_ready:
                     current = 'waiting_for_maintenance'
@@ -1558,6 +1561,9 @@ class ParallelInstallerQueue:
                             return False
                         self.active_job = job
                         job.mux.background('preparing', {'description': 'Installer slot acquired; rechecking approved scope and current readiness.'})
+                        invalidate_inventory = getattr(self.backend, 'invalidate_review_inventory', None)
+                        if callable(invalidate_inventory):
+                            invalidate_inventory()
                         return True
                     current = 'waiting_for_installer'
                     description = 'Discovery finished; waiting for the other update installer and its verified outcome. Maintenance can continue.'

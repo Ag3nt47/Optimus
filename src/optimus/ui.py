@@ -3315,6 +3315,8 @@ class OptimizationProgressWindow(QDialog):
             status = 'running'
         elif status in ('provider_scan_progress', 'waiting_for_defender'):
             status = 'scanning'
+        elif status == 'skipped_recent_scan':
+            status = 'skipped'
         item = state.get('item_progress')
         from .item_progress import normalize_item_progress
         item = normalize_item_progress(item)
@@ -3328,6 +3330,8 @@ class OptimizationProgressWindow(QDialog):
         if type(elapsed) not in (int, float):
             elapsed = clock.elapsed() / 1000 if clock is not None else None
         description = display(state.get('description') or state.get('reason'))
+        if state.get('scan_status') == 'skipped_recent_scan':
+            description = 'Recent Defender scan reused after current protection and threat checks. No new scan was run.'
         if verified and type(count) is int and count > 0:
             description += ' Active threats found; review removal before Optimus requests remediation.'
         elif verified and type(count) is not int:
@@ -4709,6 +4713,8 @@ class OptimusWindow(QMainWindow):
             ('post_process_review_enabled','Offer process/program review after completion'),
             ('security_review_enabled','Check Windows security and offer reviewed fixes'),
             ('spyware_scan_enabled','Run a quick virus, malware and spyware scan with Microsoft Defender'),
+            ('defender_scan_reuse_enabled','Avoid repeating a recent healthy Defender quick scan during Auto Clean'),
+            ('review_inventory_reuse_enabled','Reuse complete application/startup review metadata briefly within this run'),
             ('privacy_advertising_enabled','Apply selected Windows advertising/suggestion privacy preferences'),
             ('privacy_diagnostics_enabled','Apply selected optional Windows diagnostic preferences'),
             ('codex_priority_enabled','Apply optional Codex priority profile'),('background_analysis_enabled','Enable background resource analysis'),
@@ -4719,12 +4725,28 @@ class OptimusWindow(QMainWindow):
             if key == 'python_relocation_repair_enabled':
                 checkbox.setEnabled(bool(settings.get('python_relocation_approvals')))
                 checkbox.setToolTip('Repair only previously approved exact Python relocations. No files are moved and no Windows security protection is disabled. Turn off to revoke automatic repair.')
+            if key == 'defender_scan_reuse_enabled':
+                checkbox.setToolTip('Auto Clean checks current Defender protection, threats and scan/signature metadata before reusing recent scan evidence. Missing or changed evidence requests a fresh scan. Manual scans always run fresh.')
+            if key == 'review_inventory_reuse_enabled':
+                checkbox.setToolTip('Avoid duplicate metadata queries for up to 30 seconds within one maintenance run. Actions, process identities and update offers still use fresh checks; cache is discarded before relevant changes and when the run ends.')
             if 'debloat' in key:
                 checkbox.setStyleSheet('color:#ffad73;')
                 checkbox.setToolTip('Opt in to this removal stage. Review the Debloat page and target list before enabling it.')
             controls[key]=checkbox
             toggles.addWidget(checkbox,index,0)
         layout.addLayout(toggles)
+        scan_age = QSpinBox()
+        scan_age.setRange(1, 24)
+        scan_age.setSuffix(' hours')
+        scan_age.setValue(settings.get('defender_scan_reuse_hours', 6))
+        scan_age.setToolTip('Maximum age of a reusable Defender quick scan. Current protection, threats and signature checks must also pass; this does not change Defender scheduling.')
+        scan_age.setEnabled(controls['defender_scan_reuse_enabled'].isChecked())
+        controls['defender_scan_reuse_enabled'].toggled.connect(scan_age.setEnabled)
+        controls['defender_scan_reuse_hours'] = scan_age
+        scan_age_row = QHBoxLayout()
+        scan_age_row.addWidget(QLabel('Recent Defender scan window'))
+        scan_age_row.addWidget(scan_age)
+        layout.addLayout(scan_age_row)
         from .widgets.retention_cleanup_choices import RetentionCleanupChoices
         def add_retention_check(key, text):
             control = WrappingCheckBox(text)

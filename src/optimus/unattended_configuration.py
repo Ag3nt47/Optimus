@@ -13,6 +13,7 @@ UNATTENDED_DEFAULTS = {'unattended_auto_clean_enabled': False,
 UNATTENDED_SETUP_VERSION = 2
 _EXCLUDED = frozenset(('unattended_scope_hash', 'reduce_motion', 'theme', 'motion',
                        'ui_theme', 'ui_motion_enabled',
+                       'review_inventory_reuse_enabled',
                        'drive_space_guard_enabled', 'drive_space_guard_target_gib'))
 _LOW_SPACE_GUARD_KEYS = frozenset(('drive_space_guard_enabled', 'drive_space_guard_target_gib'))
 
@@ -55,6 +56,13 @@ def _scope_hash(settings):
         # they can change which automatic deletion batches are eligible.
         excluded = _EXCLUDED - _LOW_SPACE_GUARD_KEYS
     value = {key: value for key, value in settings.items() if key not in excluded}
+    # These performance-only defaults add no approved mutation. A changed
+    # scan cadence is bound to the scope; older default scopes stay valid.
+    if (settings.get('spyware_scan_enabled', False) is False
+            or settings.get('defender_scan_reuse_enabled', True) is True
+            and settings.get('defender_scan_reuse_hours', 6) == 6):
+        value.pop('defender_scan_reuse_enabled', None)
+        value.pop('defender_scan_reuse_hours', None)
     # These optional capabilities did not exist in older approvals. An empty,
     # disabled scope adds no action; preserve those existing approval hashes.
     # Enabling repair or approving any mapping must change the approved scope.

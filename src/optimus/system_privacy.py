@@ -47,6 +47,8 @@ SOURCES = [
     'https://support.microsoft.com/windows/privacy/general-privacy-settings-in-windows',
     'https://support.microsoft.com/windows/privacy/privacy-settings-for-recommendations-offers-in-windows-11',
     'https://learn.microsoft.com/powershell/module/defender/start-mpscan',
+    'https://learn.microsoft.com/powershell/module/defender/get-mpcomputerstatus',
+    'https://learn.microsoft.com/defender-endpoint/troubleshoot-microsoft-defender-antivirus',
     'https://learn.microsoft.com/powershell/module/defender/remove-mpthreat',
     'https://learn.microsoft.com/powershell/module/defender/set-mppreference',
     'https://learn.microsoft.com/powershell/module/netsecurity/set-netfirewallprofile',
@@ -140,6 +142,81 @@ MITRE_MITIGATIONS = {
 }
 _ACTIONS = {'enable_defender_realtime', 'enable_firewall', 'update_defender_signatures',
             'remediate_defender_threats', 'review_security', 'review_windows_update', 'restart_required'}
+
+_CADENCE_POWERSHELL = r'''
+function Cadence-Date($Value) {
+ if($Value -is [datetime]){return $Value.ToUniversalTime().ToString('o')}
+ return ''
+}
+function Cadence-Bool($Value) {
+ if($Value -is [bool]){return $Value}
+ return $null
+}
+function Quick-Scan-ReuseStatus {
+ # This probe is read-only. Never infer successful completion from a timestamp
+ # alone, or no current scan from a bounded history that has lost older starts.
+ $log='Microsoft-Windows-Windows Defender/Operational'
+ $boot=(Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+ if($boot -isnot [datetime]){throw 'Current boot metadata is unavailable.'}
+ $logInfo=Get-WinEvent -ListLog $log -ErrorAction Stop
+ if($logInfo.IsEnabled -isnot [bool] -or -not $logInfo.IsEnabled){throw 'Defender lifecycle logging is unavailable.'}
+ $oldest=Get-WinEvent -LogName $log -Oldest -MaxEvents 1 -ErrorAction Stop
+ $filter=@{LogName=$log;Id=@(1000,1001,1002);StartTime=$boot}
+ $nativeEvents=@(Get-WinEvent -FilterHashtable $filter -MaxEvents 257 -ErrorAction Stop)
+ $complete=($nativeEvents.Count -le 256);$events=@()
+ $events=@(foreach($event in @($nativeEvents|Select-Object -First 256)){
+  if($event.ProviderName -cne 'Microsoft-Windows-Windows Defender'){$complete=$false}
+  $xml=[xml]$event.ToXml()
+  $ids=@($xml.Event.EventData.Data|Where-Object{
+   ([regex]::Replace([string]$_.Name,'[^A-Za-z0-9]','')).ToLowerInvariant() -ceq 'scanid'
+  })
+  $scanID=[guid]::Empty
+  if($ids.Count -ne 1 -or -not [guid]::TryParse([string]$ids[0].'#text',[ref]$scanID) -or $scanID -eq [guid]::Empty){$complete=$false}
+  if(($event.RecordId -isnot [long] -and $event.RecordId -isnot [int]) -or
+     ($event.Id -isnot [int] -and $event.Id -isnot [long])){$complete=$false}
+  @{id=[int]$event.Id;record_id=[long]$event.RecordId;scan_id=$scanID.ToString().ToLowerInvariant();time=(Cadence-Date $event.TimeCreated)}
+ })
+ $d=Get-MpComputerStatus -ErrorAction Stop
+ $defender=@{available=$true;service_enabled=(Cadence-Bool $d.AMServiceEnabled);
+  antivirus_enabled=(Cadence-Bool $d.AntivirusEnabled);antispyware_enabled=(Cadence-Bool $d.AntispywareEnabled);
+  realtime_enabled=(Cadence-Bool $d.RealTimeProtectionEnabled);running_mode=[string]$d.AMRunningMode;
+  on_access_enabled=(Cadence-Bool $d.OnAccessProtectionEnabled);behavior_enabled=(Cadence-Bool $d.BehaviorMonitorEnabled);
+  ioav_enabled=(Cadence-Bool $d.IoavProtectionEnabled);quick_scan_overdue=(Cadence-Bool $d.QuickScanOverdue);
+  signatures_out_of_date=(Cadence-Bool $d.DefenderSignaturesOutOfDate);
+  quick_scan_start=(Cadence-Date $d.QuickScanStartTime);quick_scan_end=(Cadence-Date $d.QuickScanEndTime);
+  full_scan_start=(Cadence-Date $d.FullScanStartTime);full_scan_end=(Cadence-Date $d.FullScanEndTime);
+  full_scan_metadata_complete=(($d.PSObject.Properties.Name -contains 'FullScanStartTime') -and ($d.PSObject.Properties.Name -contains 'FullScanEndTime') -and
+   (($null -eq $d.FullScanStartTime -and $null -eq $d.FullScanEndTime) -or ($d.FullScanStartTime -is [datetime] -and $d.FullScanEndTime -is [datetime])));
+  antivirus_signature_version=[string]$d.AntivirusSignatureVersion;antivirus_signature_updated=(Cadence-Date $d.AntivirusSignatureLastUpdated);
+  antispyware_signature_version=[string]$d.AntispywareSignatureVersion;antispyware_signature_updated=(Cadence-Date $d.AntispywareSignatureLastUpdated)}
+ $threats=Threats
+ # Existing display snapshots intentionally tolerate unavailable legacy fields.
+ # Reuse has a stricter native type/coverage gate and cannot turn them into zero.
+ $rawThreats=@(Get-MpThreat -ErrorAction Stop|Select-Object -First 201)
+ if($rawThreats.Count -gt 200 -or @($rawThreats|Where-Object{$_.IsActive -isnot [bool] -or $_.IsActive -eq $true}).Count -gt 0){$threats.complete=$false}
+ $rawDetections=@(Get-MpThreatDetection -ErrorAction Stop|Select-Object -First 201)
+ if($rawDetections.Count -gt 200 -or @($rawDetections|Where-Object{
+  $_.ActionSuccess -isnot [bool] -or $_.ActionSuccess -ne $true -or
+  ($_.ThreatID -isnot [int] -and $_.ThreatID -isnot [long] -and $_.ThreatID -isnot [uint32] -and $_.ThreatID -isnot [uint64]) -or $_.ThreatID -lt 0 -or $_.ThreatID -gt [long]::MaxValue -or
+  ($_.ThreatStatusID -isnot [byte] -and $_.ThreatStatusID -isnot [int] -and $_.ThreatStatusID -isnot [long] -and $_.ThreatStatusID -isnot [uint32]) -or $_.ThreatStatusID -notin @(2,3,4,5,6,106)
+ }).Count -gt 0){$threats.detections_complete=$false;$threats.detections=@()}
+ # Only this read-only cadence view carries historical dates. The existing
+ # threat display/remediation serializer remains unchanged. uint8 is the
+ # documented native ThreatStatusID type; strings/bools never authorize reuse.
+ else{$threats.detections=@(foreach($row in $rawDetections){
+  @{threat_id=[long]$row.ThreatID;status_id=[int]$row.ThreatStatusID;action_success=(Cadence-Bool $row.ActionSuccess);
+   initial_detection_time=(Cadence-Date $row.InitialDetectionTime);last_status_change_time=(Cadence-Date $row.LastThreatStatusChangeTime)}
+ })}
+ $providers=Providers 'AntiVirusProduct'
+ $fence=Get-WinEvent -FilterHashtable $filter -MaxEvents 1 -ErrorAction Stop
+ $latest=if($events.Count){[long]($events|ForEach-Object{[long]$_.record_id}|Measure-Object -Maximum).Maximum}else{0}
+ @{ok=$true;schema=1;observed_at=[datetime]::UtcNow.ToString('o');defender=$defender;
+  antivirus_providers=$providers;threats=$threats;
+  lifecycle=@{complete=$complete;boot_time=(Cadence-Date $boot);log_oldest=(Cadence-Date $oldest.TimeCreated);
+   latest_record_id=$latest;fence_record_id=[long]$fence.RecordId;events=$events}}
+}
+'''
+
 
 _POWERSHELL = r'''
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
@@ -247,6 +324,7 @@ function Security-Status {
  $t=@{complete=$false;items=@();active_count=$null};if($d.available){try{$t=Threats}catch{}}
  return @{context=(Context);defender=$d;antivirus_providers=$av;firewall_providers=$fwProviders;firewall=$f;reboot_required=$pending;threats=$t}
 }
+__CADENCE_FUNCTIONS__
 try {
  $result=switch('__OPERATION__'){
  'context' {Context;break}
@@ -280,6 +358,7 @@ try {
   @{ok=$true;current=(Read-Control ([string]$P.control))};break
  }
  'security_status' {Security-Status;break}
+ 'quick_scan_reuse_status' {Quick-Scan-ReuseStatus;break}
  'quick_scan' {
   if(-not(Is-Admin)){throw [UnauthorizedAccessException]::new('Administrator access is required.')}
   if(-not(Active-Defender)){throw 'Defender is not the active antivirus provider.'}
@@ -381,10 +460,11 @@ def _cancelled(event):
 
 
 def _script(operation, payload):
-    if operation not in {'context', 'registry_read', 'privacy_snapshot', 'registry_write', 'security_status', 'quick_scan'} | _ACTIONS:
+    if operation not in {'context', 'registry_read', 'privacy_snapshot', 'registry_write', 'security_status', 'quick_scan', 'quick_scan_reuse_status'} | _ACTIONS:
         raise ValueError('Unknown native operation.')
     encode = lambda value: base64.b64encode(json.dumps(value, separators=(',', ':'), allow_nan=False).encode('utf-8')).decode('ascii')
-    return _POWERSHELL.replace('__OPERATION__', operation).replace('__PAYLOAD__', encode(payload or {})).replace('__CONTROLS__', encode(_CONTROLS))
+    return (_POWERSHELL.replace('__CADENCE_FUNCTIONS__', _CADENCE_POWERSHELL if operation == 'quick_scan_reuse_status' else '')
+            .replace('__OPERATION__', operation).replace('__PAYLOAD__', encode(payload or {})).replace('__CONTROLS__', encode(_CONTROLS)))
 
 
 def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None, stop_controller=None):
@@ -402,7 +482,7 @@ def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, p
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if operation == 'quick_scan' else subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     ticket = None
-    read_only = operation in ('context', 'registry_read', 'privacy_snapshot', 'security_status', 'quick_scan')
+    read_only = operation in ('context', 'registry_read', 'privacy_snapshot', 'security_status', 'quick_scan', 'quick_scan_reuse_status')
     if read_only:
         # This is only the reporting client. Defender retains control of its
         # service scan if the owned client stops waiting.
@@ -440,7 +520,7 @@ def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, p
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate(timeout=3)
-            return {'ok': False, 'cancelled': cancelled, 'timed_out': expired, 'may_continue': operation not in ('context', 'registry_read', 'privacy_snapshot', 'security_status'),
+            return {'ok': False, 'cancelled': cancelled, 'timed_out': expired, 'may_continue': operation not in ('context', 'registry_read', 'privacy_snapshot', 'security_status', 'quick_scan_reuse_status'),
                     'error': 'The request stopped waiting. A Windows antivirus operation may continue under Windows control.'}
         try:
             output, _stderr = process.communicate(timeout=min(0.2, max(0.01, deadline - time.monotonic())))
@@ -875,8 +955,10 @@ class SystemPrivacy:
         report['note'] = 'Local security checks do not prove that no spyware or data sharing exists. Windows privacy permissions and app/account choices are separate. No protection was disabled.'
         return report
 
-    def scan_spyware(self, cancel_event=None, *, progress_callback=None):
+    def scan_spyware(self, cancel_event=None, *, progress_callback=None, reuse_hours=0):
         from .defender_scan import ScanProgress, threat_snapshot
+        from .scan_cadence import recent_quick_scan, validate_reuse_hours
+        validate_reuse_hours(reuse_hours)
         progress = ScanProgress(progress_callback)
         report = {'id': uuid.uuid4().hex, 'kind': 'defender-scan', 'status': 'running', 'items': [], 'errors': [], 'failed_items': 0, 'cancelled': False, 'sources': SOURCES}
         report.update(scan_type='Defender quick scan for viruses, malware and spyware', completion_verified=False,
@@ -888,6 +970,30 @@ class SystemPrivacy:
             return dict(report, status='cancelled', cancelled=True, elapsed_seconds=progress.elapsed())
         before = self.security_status()
         report['recommendations'] = before['recommendations']
+        if _cancelled(cancel_event):
+            progress.emit('cancelled')
+            return dict(report, status='cancelled', cancelled=True, elapsed_seconds=progress.elapsed())
+        if reuse_hours:
+            try:
+                observed = self._call('quick_scan_reuse_status', timeout=20, cancel_event=cancel_event)
+                if _cancelled(cancel_event) or observed.get('cancelled') is True:
+                    progress.emit('cancelled')
+                    return dict(report, status='cancelled', cancelled=True, elapsed_seconds=progress.elapsed())
+                cadence = recent_quick_scan(observed, reuse_hours)
+            except Exception:
+                cadence = {'reuse': False, 'reason': 'Native recent-scan evidence could not be verified; request a fresh scan.'}
+            report['cadence_check'] = cadence
+            if _cancelled(cancel_event):
+                progress.emit('cancelled')
+                return dict(report, status='cancelled', cancelled=True, elapsed_seconds=progress.elapsed())
+            if cadence['reuse'] is True:
+                report.update(status='skipped_recent_scan', skipped=True, read_only=True,
+                    active_threat_count=0, threats=threat_snapshot(observed['threats']),
+                    elapsed_seconds=progress.elapsed(),
+                    note='A recent completed Defender quick scan was reused after fresh protection, definition, lifecycle and active-threat checks. No new scan ran; real-time protection is unchanged. This is not a clean-system guarantee.')
+                report['log_path'] = str(self._journal(report))
+                progress.emit('skipped_recent_scan')
+                return report
         if not _active(before) or not isinstance(before.get('context'), dict) or before['context'].get('is_admin') is not True:
             progress.emit('blocked')
             return dict(report, status='blocked', failed_items=1, elapsed_seconds=progress.elapsed(), reason='A verified active Microsoft Defender provider and administrator session are required. Other antivirus products are not replaced or disabled.')
