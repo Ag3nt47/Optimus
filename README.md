@@ -6,13 +6,13 @@
 
 | Your computer | One-click download |
 | --- | --- |
-| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.57 MiB compressed</sub> |
-| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.78 MiB compressed</sub> |
-| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>51.98 MiB compressed</sub> |
-| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>91.99 MiB compressed</sub> |
-| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>4.98 MiB compressed</sub> |
+| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.70 MiB compressed</sub> |
+| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.89 MiB compressed</sub> |
+| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.10 MiB compressed</sub> |
+| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.09 MiB compressed</sub> |
+| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.05 MiB compressed</sub> |
 
-Download sizes shown are for **v0.12.27**.
+Download sizes shown are for **v0.12.30**.
 
 [Release notes and SHA256 checksums](https://github.com/Ag3nt47/Optimus/releases/latest) · [Platform capabilities and installation](docs/PLATFORMS.md)
 
