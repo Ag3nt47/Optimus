@@ -6,13 +6,13 @@
 
 | Your computer | One-click download |
 | --- | --- |
-| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.50 MiB compressed</sub> |
-| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.74 MiB compressed</sub> |
-| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>51.95 MiB compressed</sub> |
-| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>91.96 MiB compressed</sub> |
+| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.57 MiB compressed</sub> |
+| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.78 MiB compressed</sub> |
+| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>51.98 MiB compressed</sub> |
+| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>91.99 MiB compressed</sub> |
 | Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>4.98 MiB compressed</sub> |
 
-Download sizes shown are for **v0.12.24**.
+Download sizes shown are for **v0.12.27**.
 
 [Release notes and SHA256 checksums](https://github.com/Ag3nt47/Optimus/releases/latest) · [Platform capabilities and installation](docs/PLATFORMS.md)
 
@@ -90,7 +90,7 @@ Review and save the first-start choices, then choose **Auto Clean** at the launc
 
 ### Current release
 
-Version **0.12.27** adds an opt-in repair for explicitly approved Python relocations rejected by Windows Installer with error 448. It checks the exact package, owned installer evidence, saved source/target and junction fingerprint, then uses administrator access to re-apply identical junction metadata. All path components must also resist replacement or security changes by other accounts; unsafe parent permissions require a separate review. A separate process verifies the path with RedirectionGuard enforced before the normal updater can proceed. Files stay on their existing drive; permissions and security protections are preserved. A failed repair skips that package while other eligible updates continue. Existing saved choices remain unchanged; new repair authority requires an exact approved mapping.
+Version **0.12.27** adds an opt-in repair for [explicitly approved Python relocations](docs/PYTHON-RELOCATION.md) rejected by Windows Installer with error 448. It checks the exact package, owned installer evidence, saved source/target and junction fingerprint, then uses administrator access to re-apply identical junction metadata. All path components must also resist replacement or security changes by other accounts; unsafe parent permissions require a separate review. A separate process verifies the path with RedirectionGuard enforced before the normal updater can proceed. Files stay on their existing drive; permissions and security protections are preserved. A failed repair skips that package while other eligible updates continue. Existing saved choices remain unchanged; new repair authority requires an exact approved mapping.
 
 Auto Continue retains the 0.12.24 fixes: cleanup totals and the earlier virus-scan outcome stay visible through the follow-up, measured follow-up transfers are added once, and raw verification data sits behind **Show details and logs**. Finished driver searches distinguish offers needing saved approval from deferred installation. An unchanged offer that failed in the same parent run is skipped in its immediate follow-up; fresh later runs can retry after prerequisites are repaired. Applicable driver offers require a connected matching device, recovery backup, saved approval and actual post-install verification. Downloading an installer is never counted as installation.
 
