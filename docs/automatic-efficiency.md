@@ -1,6 +1,6 @@
 # Automatic efficiency
 
-Optimus 0.12.29 reduces the work its own maintenance and monitoring need to do.
+Optimus 0.12.30 reduces the work its own maintenance and monitoring need to do.
 These defaults add no cleanup folder, uninstall target or update approval.
 Existing saved choices, exclusions and browser scopes remain in effect.
 
@@ -60,6 +60,9 @@ closed. An unavailable or replaced thread produces an unknown reading rather
 than an artificial zero. Idle dashboards with no worker thread IDs perform no
 thread census. macOS and Linux keep their native monitoring path and omit the
 thread census when no workflow worker needs attribution.
+
+An unavailable or unsupported CPU-frequency sensor leaves clock speed unknown;
+CPU utilization, memory and network readings continue independently.
 
 This changes monitoring cost, not the CPU priority of another application. It
 does not suspend processes, purge useful RAM or modify Windows security.

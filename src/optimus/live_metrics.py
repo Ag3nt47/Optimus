@@ -115,9 +115,19 @@ def _read_system(thread_ids=()):
         fields = psutil.cpu_times()._asdict()
         total = sum(v for key, v in fields.items() if key not in ('guest', 'guest_nice'))
         return {'total': total, 'idle': fields.get('idle', 0) + fields.get('iowait', 0)}
+    def frequency():
+        # psutil does not expose this API on every platform/hardware target.
+        # An unsupported frequency must not discard the other live readings.
+        getter = getattr(psutil, 'cpu_freq', None)
+        if not callable(getter):
+            return None
+        try:
+            return getattr(getter(), 'current', None)
+        except (AttributeError, NotImplementedError, SystemError):
+            return None
     read('cpu_times', cpu)
     read('cpu_count', lambda: psutil.cpu_count(logical=True))
-    read('cpu_frequency_mhz', lambda: getattr(psutil.cpu_freq(), 'current', None))
+    read('cpu_frequency_mhz', frequency)
     read('memory_percent', lambda: psutil.virtual_memory().percent)
     if sys.platform == 'win32':
         from .thread_metrics import read_own_thread_times

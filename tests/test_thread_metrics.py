@@ -156,7 +156,7 @@ def system_fixture(monkeypatch, *, platform='win32'):
     monkeypatch.setattr(live_metrics, 'sys', SimpleNamespace(platform=platform))
     monkeypatch.setattr(psutil, 'cpu_times', lambda: SimpleNamespace(_asdict=lambda: dict(user=10, idle=10)))
     monkeypatch.setattr(psutil, 'cpu_count', lambda **options: 8)
-    monkeypatch.setattr(psutil, 'cpu_freq', lambda: SimpleNamespace(current=3200))
+    monkeypatch.setattr(psutil, 'cpu_freq', lambda: SimpleNamespace(current=3200), raising=False)
     monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(percent=30))
     monkeypatch.setattr(psutil, 'net_io_counters', lambda **options: {})
     monkeypatch.setattr(psutil, 'net_if_stats', lambda: {})
@@ -198,6 +198,38 @@ def test_portable_psutil_reader_keeps_selected_thread_filter_and_skips_empty_cen
     raw = live_metrics._read_system((101,))
     assert raw['threads'] == {101: pytest.approx(.3)} and 'thread_identity_required' not in raw
     threads.assert_called_once_with()
+
+
+@pytest.mark.parametrize('platform', ['darwin', 'linux', 'win32'])
+@pytest.mark.parametrize('capability', ['missing', 'non_callable', 'attribute_error', 'not_implemented', 'system_error'])
+def test_optional_cpu_frequency_never_discards_cpu_memory_or_network(monkeypatch, platform, capability):
+    psutil, process = system_fixture(monkeypatch, platform=platform)
+    if capability == 'missing':
+        monkeypatch.delattr(psutil, 'cpu_freq', raising=False)
+    elif capability == 'non_callable':
+        monkeypatch.setattr(psutil, 'cpu_freq', None, raising=False)
+    else:
+        error = {'attribute_error': AttributeError, 'not_implemented': NotImplementedError,
+                 'system_error': SystemError}[capability]('Unsupported hardware frequency')
+        monkeypatch.setattr(psutil, 'cpu_freq', Mock(side_effect=error), raising=False)
+    state = {'now': 100.0, 'cpu': 10, 'received': 1000, 'sent': 500}
+    monkeypatch.setattr(psutil, 'cpu_times', lambda: SimpleNamespace(
+        _asdict=lambda: dict(user=state['cpu'], idle=state['cpu'])))
+    monkeypatch.setattr(psutil, 'net_io_counters', lambda **options: {
+        'Fixture network': SimpleNamespace(bytes_recv=state['received'], bytes_sent=state['sent'])})
+    monkeypatch.setattr(psutil, 'net_if_stats', lambda: {
+        'Fixture network': SimpleNamespace(isup=True, speed=100)})
+    metrics = live_metrics.LiveMetrics(SimpleNamespace(), wifi_provider=lambda: {}, clock=lambda: state['now'])
+    metrics._sample()
+    state.update(now=102.0, cpu=20, received=3000, sent=1500)
+    metrics._sample()
+    result = metrics.status()
+    assert result['computer']['cpu_frequency_mhz'] is None
+    assert result['computer']['cpu_percent'] == 50.0
+    assert result['computer']['memory_percent'] == 30
+    assert result['network']['is_up'] is True and result['network']['link_mbps'] == 100
+    assert result['network']['receive_mbps'] == .008 and result['network']['send_mbps'] == .004
+    process.assert_not_called()
 
 
 def navigation(tid=101):
