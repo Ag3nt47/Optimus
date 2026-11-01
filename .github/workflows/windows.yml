@@ -81,18 +81,55 @@ jobs:
       - name: Package public editable source
         if: runner.os == 'Windows'
         run: python tools/build_native.py --source-only
-      - uses: actions/upload-artifact@v4
+      # One fallback upload per artifact avoids repeating the native test suite
+      # for a transient artifact-service failure. Names belong to this matrix
+      # target in this run; a retry replaces only that same current-run artifact.
+      - name: Upload native release package
+        id: release_artifact_upload
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: Optimus-release-${{ matrix.target }}
           path: release-assets/*
           if-no-files-found: error
+      - name: Retry native release package upload once
+        id: release_artifact_upload_retry
+        if: ${{ !cancelled() && steps.release_artifact_upload.outcome == 'failure' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: Optimus-release-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          overwrite: true
       - name: Upload test and packaged interface results
+        id: qa_artifact_upload
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: Optimus-test-results-${{ matrix.target }}
           path: test-artifacts/
           if-no-files-found: ignore
+      - name: Retry test and packaged interface results upload once
+        id: qa_artifact_upload_retry
+        if: ${{ !cancelled() && steps.qa_artifact_upload.outcome == 'failure' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: Optimus-test-results-${{ matrix.target }}
+          path: test-artifacts/
+          if-no-files-found: ignore
+          overwrite: true
+      # Use outcome (before continue-on-error), not conclusion. Recovering an
+      # upload never changes an earlier test/build failure or the release gate.
+      - name: Fail if required artifact uploads did not recover
+        if: >-
+          ${{ !cancelled() && (
+            (steps.release_artifact_upload.outcome == 'failure' && steps.release_artifact_upload_retry.outcome != 'success') ||
+            (steps.qa_artifact_upload.outcome == 'failure' && steps.qa_artifact_upload_retry.outcome != 'success')
+          ) }}
+        run: python -c "raise SystemExit('Artifact upload failed after one retry; release remains blocked. See upload logs.')"
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build

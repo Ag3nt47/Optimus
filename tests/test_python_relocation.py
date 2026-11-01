@@ -282,6 +282,144 @@ def test_inherit_only_acl_entries_do_not_apply_to_this_object():
     assert repair.repair_python_relocation(approval(), api=api)['status'] == 'repaired'
 
 
+NAMESPACE_PATHS = list(dict.fromkeys(repair._path_chain(SOURCE) + repair._path_chain(TARGET)
+    + [str(PureWindowsPath(approval().target_dll).parent), approval().target_dll]))
+STRICT_PATHS = {SOURCE, TARGET, str(PureWindowsPath(approval().target_dll).parent), approval().target_dll}
+ANCESTOR_PATHS = [path for path in NAMESPACE_PATHS if path not in STRICT_PATHS]
+
+
+def add_ace(api, path, *, sid='S-1-1-0', mask=0x1F01FF, flags=0, kind=0):
+    policy = api.security(path)
+    policy['aces'].append(dict(type=kind, flags=flags, mask=mask, sid=sid))
+    api.securities[path] = policy
+
+
+@pytest.mark.parametrize('path', NAMESPACE_PATHS)
+@pytest.mark.parametrize('right', [0x10000, 0x40000, 0x80000, 0x40, 0x100,
+    0x10, 0x10000000, 0x40000000, 0x1F01FF])
+def test_each_component_must_remain_protected_after_handles_close(path, right):
+    for operation in (repair.preflight_python_relocation, repair.repair_python_relocation):
+        api = FakeAPI()
+        add_ace(api, path, mask=right)
+        result = operation(approval(), api=api)
+        assert result['status'] == 'review_required' and result['code'] == 'unsafe_namespace'
+        assert result['unsafe_path'] == path
+        assert result['path_role'] == ('ancestor' if path in ANCESTOR_PATHS else
+            {SOURCE: 'junction', TARGET: 'target', approval().target_dll: 'dll'}.get(path, 'interpreter'))
+        assert result['mutated'] is False and result['probe_error'] is None
+        assert not api.writes and not api.active
+        assert not any(event[0] == 'probe' for event in api.events)
+
+
+@pytest.mark.parametrize('parent,child', [(str(PureWindowsPath(path).parent), path)
+    for path in NAMESPACE_PATHS if PureWindowsPath(path).parent != PureWindowsPath(path)])
+def test_parent_delete_child_cannot_be_hidden_by_a_strict_child_dacl(parent, child):
+    api = FakeAPI()
+    assert api.security(child)['owner'] == SID
+    add_ace(api, parent, mask=0x40)
+    result = repair.repair_python_relocation(approval(), api=api)
+    assert result['code'] == 'unsafe_namespace' and result['unsafe_path'] == parent
+    assert not api.writes
+
+
+@pytest.mark.parametrize('path', ANCESTOR_PATHS)
+@pytest.mark.parametrize('rights', [0x2, 0x4, 0x6, 0x1200AF])
+def test_create_siblings_only_does_not_authorize_replacement_of_selected_child(path, rights):
+    api = FakeAPI()
+    add_ace(api, path, mask=rights)
+    assert repair.repair_python_relocation(approval(), api=api)['status'] == 'repaired'
+
+
+@pytest.mark.parametrize('path', STRICT_PATHS)
+@pytest.mark.parametrize('rights', [0x2, 0x4, 0x6])
+def test_approved_leaf_paths_keep_strict_write_and_add_child_gate(path, rights):
+    api = FakeAPI()
+    add_ace(api, path, mask=rights)
+    assert repair.repair_python_relocation(approval(), api=api)['code'] == 'unsafe_namespace'
+    assert not api.writes
+
+
+@pytest.mark.parametrize('path', NAMESPACE_PATHS)
+@pytest.mark.parametrize('info', [None, True, {}, {'owner': SID}, {'aces': []},
+    {'owner': SID, 'aces': None}, {'owner': SID, 'aces': True}, {'owner': True, 'aces': []}])
+def test_missing_or_boolean_acl_information_fails_closed_on_each_component(path, info):
+    api = FakeAPI()
+    api.securities[path] = info
+    result = repair.preflight_python_relocation(approval(), api=api)
+    assert result['code'] == 'unsafe_namespace' and result['unsafe_path'] == path
+    assert not api.writes
+
+
+@pytest.mark.parametrize('ace', [None, True, {},
+    dict(type=True, flags=0, mask=1, sid='S-1-1-0'),
+    dict(type=0, flags=True, mask=1, sid='S-1-1-0'),
+    dict(type=0, flags=0, mask=True, sid='S-1-1-0'),
+    dict(type=0, flags=0, mask=1, sid=True),
+    dict(type=0, flags=0, sid='S-1-1-0'),
+    dict(type=0, mask=1, sid='S-1-1-0'),
+    dict(type=0, flags=0, mask=1),
+    dict(type=0, flags=0, mask=-1, sid='S-1-1-0'),
+    dict(type=0, flags=0, mask=0x100000000, sid='S-1-1-0'),
+    dict(type=0, flags=0, mask=0x200, sid='S-1-1-0'),
+    dict(type=0, flags=0x40, mask=1, sid='S-1-1-0'),
+    dict(type=5, flags=8, mask=1, sid='S-1-1-0'),
+    dict(type=0, flags=0, mask=1, sid='not-a-sid')])
+def test_unknown_or_incomplete_ace_is_not_mistaken_for_no_effect(ace):
+    api = FakeAPI()
+    policy = api.security('D:\\')
+    policy['aces'].append(ace)
+    api.securities['D:\\'] = policy
+    result = repair.repair_python_relocation(approval(), api=api)
+    assert result['code'] == 'unsafe_namespace' and not api.writes
+
+
+@pytest.mark.parametrize('error', [OSError('DACL read denied'), ValueError('Null DACL'), TypeError('Invalid ACL')])
+def test_native_unreadable_or_null_dacl_has_the_same_unsafe_namespace_receipt(error):
+    api = FakeAPI()
+    original = api.security
+    def failed_security(path):
+        if path == 'D:\\':
+            raise error
+        return original(path)
+    api.security = failed_security
+    result = repair.preflight_python_relocation(approval(), api=api)
+    assert result['code'] == 'unsafe_namespace' and result['unsafe_path'] == 'D:\\'
+    assert not api.writes
+
+
+@pytest.mark.parametrize('sid', ['S-1-3-0', 'S-1-3-1', 'S-1-3-2', 'S-1-3-3'])
+def test_creator_placeholder_is_safe_only_while_inherit_only(sid):
+    api = FakeAPI()
+    add_ace(api, 'C:\\', sid=sid, flags=0x0B)
+    assert repair.repair_python_relocation(approval(), api=api)['status'] == 'repaired'
+    for flags in (0, 0x10, 0x13):
+        api = FakeAPI()
+        add_ace(api, 'C:\\', sid=sid, flags=flags)
+        assert repair.repair_python_relocation(approval(), api=api)['code'] == 'unsafe_namespace'
+        assert not api.writes
+
+
+@pytest.mark.parametrize('owner', [SID, 'S-1-5-18', 'S-1-5-32-544', repair._TRUSTED_INSTALLER])
+def test_owner_rights_ace_maps_the_actual_trusted_object_owner(owner):
+    api = FakeAPI()
+    policy = api.security('D:\\')
+    policy['owner'] = owner
+    api.securities['D:\\'] = policy
+    add_ace(api, 'D:\\', sid='S-1-3-4')
+    assert repair.repair_python_relocation(approval(), api=api)['status'] == 'repaired'
+
+
+def test_deny_aces_never_erase_an_unsafe_allow_for_automatic_namespace_approval():
+    api = FakeAPI()
+    add_ace(api, 'D:\\', kind=1)
+    assert repair.repair_python_relocation(approval(), api=api)['status'] == 'repaired'
+    api = FakeAPI()
+    add_ace(api, 'D:\\', kind=1)
+    add_ace(api, 'D:\\')
+    assert repair.repair_python_relocation(approval(), api=api)['code'] == 'unsafe_namespace'
+    assert not api.writes
+
+
 @pytest.mark.parametrize('volume', [(4, 'NTFS'), (3, 'ReFS'), (2, 'NTFS'), (3, 'FAT32')])
 def test_network_removable_or_non_ntfs_volumes_are_rejected(volume):
     api = FakeAPI()

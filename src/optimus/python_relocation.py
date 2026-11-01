@@ -35,6 +35,14 @@ _LOG_NAME = re.compile(r'winget_[0-9]{3}_core_JustForMe\.log\Z', re.I)
 _TRUSTED_INSTALLER = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 _TRUSTED_SIDS = {'S-1-5-18', 'S-1-5-32-544', _TRUSTED_INSTALLER}
 _WRITE_MASK = 0x10000000 | 0x40000000 | 0x000D0000 | 0x00000156
+# On an ordinary nonempty ancestor, adding a new sibling alone cannot replace
+# the selected child. Deletion/renaming, DACL/owner edits and reparse metadata
+# writes can invalidate the namespace after our temporary handles close.
+_ANCESTOR_WRITE_MASK = _WRITE_MASK & ~0x6
+_SID = re.compile(r'S-1-(?:[0-9]+-)*[0-9]+\Z')
+_CREATOR_PLACEHOLDERS = {'S-1-3-0', 'S-1-3-1', 'S-1-3-2', 'S-1-3-3'}
+_OWNER_RIGHTS = 'S-1-3-4'
+_VALID_FILE_MASK = 0xF11F01FF
 _MAX_LOG = 4 * 1024**2
 _REPARSE = 0x400
 _DIRECTORY = 0x10
@@ -168,28 +176,64 @@ def _path_chain(path):
     return [str(PureWindowsPath(*parts[:i])) for i in range(1, len(parts) + 1)]
 
 
-def _check_security(info, owner):
+class _UnsafeNamespaceError(ValueError):
+    def __init__(self, reason, path, role):
+        super().__init__(reason + (': ' + path if path else '.'))
+        self.path, self.role = path, role
+
+
+def _check_security(info, owner, *, role='leaf', path=None):
+    """Reject persistent namespace authority outside the approved account.
+
+    This is deliberately conservative, not a general Windows AccessCheck
+    implementation: deny ACEs never cancel an unsafe allow ACE for this gate.
+    Harmless ancestor sibling creation is permitted, while every selected
+    directory's deletion and every parent's DELETE_CHILD remain forbidden.
+
+    https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-deletefile
+    https://learn.microsoft.com/windows/win32/secauthz/ace-inheritance-rules
+    """
+    def unsafe(reason):
+        raise _UnsafeNamespaceError(reason, path, role)
+
+    if not isinstance(owner, str) or not _SID.fullmatch(owner):
+        unsafe('The approved account identity is unavailable')
     allowed = _TRUSTED_SIDS | {owner}
-    if info.get('owner') not in allowed or not isinstance(info.get('aces'), list) or not info['aces']:
-        raise ValueError('The approved Python path needs a known owner and explicit DACL.')
+    if (not isinstance(info, dict) or not isinstance(info.get('owner'), str)
+            or info['owner'] not in allowed or type(info.get('aces')) is not list or not info['aces']):
+        unsafe('The Python namespace needs a known owner and explicit DACL')
+    forbidden = _ANCESTOR_WRITE_MASK if role == 'ancestor' else _WRITE_MASK
     for ace in info['aces']:
-        # Ignore inherit-only entries; reject unknown/object/callback ACEs rather
-        # than trying to approximate the effective access of an unfamiliar DACL.
-        if ace.get('flags', 0) & 8:
+        # Validate before interpreting inherit-only, including boolean values
+        # that Python otherwise considers integers. Unrecognized object,
+        # callback or audit ACEs must not silently widen automatic repair.
+        if (not isinstance(ace, dict) or type(ace.get('type')) is not int
+                or ace['type'] not in (0, 1) or type(ace.get('flags')) is not int
+                or ace['flags'] < 0 or ace['flags'] & ~0x1F
+                or type(ace.get('mask')) is not int or not 0 <= ace['mask'] <= 0xFFFFFFFF
+                or ace['mask'] & ~_VALID_FILE_MASK
+                or not isinstance(ace.get('sid'), str) or not _SID.fullmatch(ace['sid'])):
+            unsafe('An unsupported or incomplete access-control entry needs review')
+        # Inherit-only grants do not authorize access to an existing component.
+        # CREATOR_OWNER/GROUP are placeholders replaced on effective inherited
+        # ACEs. Never treat an unresolved effective placeholder as the caller.
+        if ace['flags'] & 8:
             continue
-        if ace.get('type') not in (0, 1):
-            raise ValueError('An unsupported access-control entry needs review.')
-        if ace['type'] == 0 and ace.get('mask', 0) & _WRITE_MASK and ace.get('sid') not in allowed:
-            raise ValueError('Another account can modify the approved Python path.')
+        if ace['sid'] in _CREATOR_PLACEHOLDERS:
+            unsafe('An unmapped effective creator access-control entry needs review')
+        sid = info['owner'] if ace['sid'] == _OWNER_RIGHTS else ace['sid']
+        if ace['type'] == 0 and ace['mask'] & forbidden and sid not in allowed:
+            unsafe('Another account can modify or replace the Python namespace')
 
 
 @contextmanager
 def _guarded_mapping(approval, api, *, write):
     """Hold non-following handles against writes/deletion for the entire check.
 
-    Ancestor ACLs may permit creation of unrelated siblings (e.g. C:\\Users).
-    Their existing directory objects are locked and must be ordinary. Strict
-    owner/DACL checks apply to the approved junction, target, interpreter and DLL.
+    Every component must remain protected after these handles close. Ancestor
+    ACLs may permit creation of unrelated siblings (e.g. C:\\Users), but must not
+    grant another account deletion, child replacement or security/reparse edits.
+    The junction, target, interpreter and DLL retain the stricter write gate.
     """
     if not isinstance(approval, ApprovedPythonRelocation):
         raise ValueError('A validated explicit approval is required.')
@@ -201,8 +245,9 @@ def _guarded_mapping(approval, api, *, write):
         handles = {}
         paths = _path_chain(approval.source) + _path_chain(approval.target)
         paths += [str(PureWindowsPath(approval.target_dll).parent), approval.target_dll]
-        strict = {p.casefold() for p in (approval.source, approval.target,
-                  str(PureWindowsPath(approval.target_dll).parent), approval.target_dll)}
+        roles = {approval.source.casefold(): 'junction', approval.target.casefold(): 'target',
+                 str(PureWindowsPath(approval.target_dll).parent).casefold(): 'interpreter',
+                 approval.target_dll.casefold(): 'dll'}
         for path in paths:
             key = path.casefold()
             if key in handles:
@@ -216,8 +261,12 @@ def _guarded_mapping(approval, api, *, write):
                 raise ValueError('Additional reparse points are not permitted in the approved mapping.')
             if key == approval.source.casefold() and not info['attributes'] & _REPARSE:
                 raise ValueError('The approved source is no longer a junction.')
-            if key in strict:
-                _check_security(api.security(handle), owner)
+            role = roles.get(key, 'ancestor')
+            try:
+                security = api.security(handle)
+            except (OSError, ValueError, TypeError) as error:
+                raise _UnsafeNamespaceError('The namespace access-control information is unavailable', path, role) from error
+            _check_security(security, owner, role=role, path=path)
             handles[key] = handle
         source = handles[approval.source.casefold()]
         raw = api.get_reparse(source)
@@ -249,6 +298,9 @@ def preflight_python_relocation(approval, *, api=None):
             return _result('ready', 'untrusted_approved_junction', 'The exact approved junction reproduces native error 448.', probe_error=448)
     except NotImplementedError:
         return _result('unsupported', 'windows_only', 'Python relocation repair is available on Windows only.')
+    except _UnsafeNamespaceError as error:
+        return dict(_result('review_required', 'unsafe_namespace', str(error)[:240]),
+                    unsafe_path=error.path, path_role=error.role)
     except (OSError, ValueError, TypeError, KeyError) as error:
         return _result('review_required', 'mapping_validation_failed', str(error)[:240])
 
@@ -281,6 +333,9 @@ def repair_python_relocation(approval, *, api=None):
         return _result('repaired', 'verified_trusted_junction', 'The unchanged Python junction now passes an enforced RedirectionGuard security read.', mutated=True, probe_error=0)
     except NotImplementedError:
         return _result('unsupported', 'windows_only', 'Python relocation repair is available on Windows only.')
+    except _UnsafeNamespaceError as error:
+        return dict(_result('failed' if mutated else 'review_required', 'unsafe_namespace', str(error)[:240], mutated=mutated),
+                    unsafe_path=error.path, path_role=error.role)
     except (OSError, ValueError, TypeError, KeyError) as error:
         return _result('failed' if mutated else 'review_required', 'native_repair_failed', str(error)[:240], mutated=mutated)
 

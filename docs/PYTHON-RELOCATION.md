@@ -15,7 +15,12 @@ can revoke automatic repair without deleting its evidence.
 Before an update, Optimus requires matching failed-installer evidence in its
 owned, exact-offer verification directory. It locks and checks the source,
 physical target and their ancestors, confirms ordinary local NTFS paths and
-expected security descriptors, and reproduces error 448 in an isolated process
+expected security descriptors, and rejects a namespace another account can
+replace or change after the temporary handles close. Parent permissions are a
+separate, durable prerequisite: approving a junction does not approve changes
+to drive-root or shared-folder permissions. Ordinary creation of unrelated
+siblings is considered separately from replacement and reparse-point rights.
+The check reproduces error 448 in an isolated process
 with RedirectionGuard enabled. A genuinely elevated process re-applies the
 identical reparse buffer on the same source handle. It then verifies unchanged
 identity/bytes and a successful enforced security read. Only then does the
