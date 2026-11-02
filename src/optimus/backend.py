@@ -330,7 +330,20 @@ class Backend(ExtendedMaintenanceBackend):
         self._last_legacy_patch_review = report
         return report
 
-    def apply_security_recommendation(self, recommendation_id, cancel_event=None, *, remediation_consent=None):
+    def apply_security_recommendation(self, recommendation_id, cancel_event=None, *, remediation_consent=None,
+                                      allow_saved_update_install=False):
+        if recommendation_id == 'review_windows_update' and type(allow_saved_update_install) is not bool:
+            raise ValueError('The recommendation must explicitly choose the install or manual review action.')
+        if recommendation_id == 'review_windows_update' and allow_saved_update_install is True:
+            from .post_run_fixes import _authorized, _settings, apply_saved_windows_security_recommendation
+            configuration = _settings(self, self.preferences())
+            if _authorized(configuration, 'windows_security_updates'):
+                from .emergency_stop import controller_for
+                controller = controller_for(self)
+                controller.check()
+                cancel_event = controller.bind_cancel(cancel_event)
+                return self._speed_maintenance(lambda: apply_saved_windows_security_recommendation(
+                    self, configuration, cancel_event=cancel_event))
         if recommendation_id == 'review_legacy_patches':
             if cancel_event is not None and cancel_event.is_set():
                 return {'cancelled': True, 'review_only': True}

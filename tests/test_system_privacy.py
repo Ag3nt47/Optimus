@@ -413,6 +413,53 @@ def test_native_success_without_observable_security_change_is_not_reported_fixed
     assert tool.apply_recommendation('enable_defender_realtime')['status'] == 'failed'
 
 
+@pytest.mark.parametrize('outcome', [
+    {'ok': False, 'timed_out': True, 'may_continue': True, 'outcomeKnown': False, 'running': True},
+    {'ok': True, 'may_continue': True},
+    {'ok': False, 'outcomeKnown': False},
+    {'ok': True, 'running': 'false'},
+])
+def test_security_action_preserves_unresolved_native_lifecycle(fixture, outcome):
+    tool, runner = fixture
+    runner.state['firewall']['profiles'][0]['enabled'] = False
+    tool.runner = lambda operation, payload, **options: (
+        copy.deepcopy(outcome) if operation == 'enable_firewall' else runner(operation, payload, **options))
+    result = tool.apply_recommendation('enable_firewall')
+    assert result['status'] == 'uncertain' and result['failed_items'] == 1
+    for key in ('may_continue', 'outcomeKnown', 'running', 'timed_out'):
+        if key in outcome:
+            assert result[key] == (outcome[key] if type(outcome[key]) is bool else None)
+    records = list(tool.directory.glob('*.json'))
+    saved = json.loads(records[0].read_text())
+    assert saved['result']['status'] == 'uncertain'
+
+
+def test_known_terminal_control_failure_retains_local_scope(fixture):
+    tool, runner = fixture
+    runner.state['firewall']['profiles'][0]['enabled'] = False
+    outcome = {'ok': False, 'outcomeKnown': True, 'running': False, 'may_continue': False}
+    tool.runner = lambda operation, payload, **options: (
+        dict(outcome) if operation == 'enable_firewall' else runner(operation, payload, **options))
+    result = tool.apply_recommendation('enable_firewall')
+    assert result['status'] == 'failed' and result['failure_scope'] == 'security_control'
+    assert result['operation_started'] is True
+    assert result['outcomeKnown'] is True and result['running'] is False and result['may_continue'] is False
+
+
+def test_security_action_call_exception_does_not_invent_terminal_lifecycle(fixture):
+    tool, runner = fixture
+    runner.state['firewall']['profiles'][0]['enabled'] = False
+    def failed(operation, payload, **options):
+        if operation == 'enable_firewall':
+            raise RuntimeError('private payload')
+        return runner(operation, payload, **options)
+    tool.runner = failed
+    result = tool.apply_recommendation('enable_firewall')
+    assert result['status'] == 'uncertain' and result['outcomeKnown'] is False
+    assert result['running'] is None and result['may_continue'] is True
+    assert 'private payload' not in json.dumps(result)
+
+
 def test_restart_recommendation_opens_settings_without_reboot(fixture):
     tool, runner = fixture
     runner.state['reboot_required'] = True

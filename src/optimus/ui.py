@@ -3950,6 +3950,7 @@ class SecurityReviewDialog(QDialog):
         self._review_data = dict(report) if isinstance(report, dict) else {}
         self._remediation_approvals = {}
         self._recommendations = {}
+        self._presentations = {}
         self._selection_controls = {}
         self._selection_fit_timer = QTimer(self)
         self._selection_fit_timer.setSingleShot(True)
@@ -3957,10 +3958,10 @@ class SecurityReviewDialog(QDialog):
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         layout = QVBoxLayout(self)
-        intro = QLabel('Review the Windows security findings below. Nothing is selected automatically. '
-                       'Choose recommendations to consider, then answer Yes or No for each one. '
-                       'Windows security policy and administrator access can prevent a change. '
-                       'Restart recommendations open Windows controls; Optimus does not restart the PC.')
+        intro = QLabel('Supported automatic fixes run before this review when enabled in Settings. '
+                       'Apply changes a supported control; Open launches Windows controls; View shows a report. '
+                       'Select remaining actions and approve each one. Installation uses your saved update approvals. '
+                       'Threat removal needs its own approval, and Optimus does not restart the PC.')
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.table = QTableWidget(0, 4)
@@ -3968,9 +3969,18 @@ class SecurityReviewDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)
+        self.table.setColumnWidth(3, 230)
         self.table.setColumnWidth(0, 112)
         self.table.setColumnWidth(1, 230)
+        from .recommendation_presentation import recommendation_presentation
+        try:
+            choices = backend.preferences()
+            windows_install_approved = isinstance(choices, dict) and all(choices.get(key) is True for key in (
+                'windows_security_updates_enabled', 'windows_security_updates_install_approved',
+                'windows_security_update_agreements_accepted'))
+        except Exception:
+            windows_install_approved = False
         for recommendation in report.get('recommendations', []) if isinstance(report, dict) else []:
             if not isinstance(recommendation, dict):
                 continue
@@ -3978,6 +3988,9 @@ class SecurityReviewDialog(QDialog):
             if not isinstance(identifier, str) or not identifier or identifier in self._recommendations:
                 continue
             self._recommendations[identifier] = dict(recommendation)
+            presentation = recommendation_presentation(recommendation,
+                windows_install_approved=windows_install_approved)
+            self._presentations[identifier] = presentation
             row = self.table.rowCount()
             self.table.insertRow(row)
             selection = QTableWidgetItem()
@@ -3986,11 +3999,11 @@ class SecurityReviewDialog(QDialog):
             # looking like a second unlabeled checkbox on Windows.
             selection.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 0, selection)
-            choice = QCheckBox('Review', self.table)
-            choice.setMinimumWidth(choice.fontMetrics().horizontalAdvance('Review') + 28)
+            choice = QCheckBox(presentation['selection_label'], self.table)
+            choice.setMinimumWidth(choice.fontMetrics().horizontalAdvance(choice.text()) + 28)
             self.table.setColumnWidth(0, max(self.table.columnWidth(0), choice.minimumWidth() + 16))
             choice.setAccessibleName('Review recommendation: ' + str(recommendation.get('title', identifier)))
-            choice.setToolTip('Select for review. A separate Yes or No prompt is required before applying this recommendation.')
+            choice.setToolTip(presentation['description'] + ' A separate Yes or No prompt is required before this action.')
             choice.toggled.connect(self._selection_changed)
             self._selection_controls[identifier] = choice
             choice.installEventFilter(self)
@@ -4008,6 +4021,23 @@ class SecurityReviewDialog(QDialog):
                 item.setToolTip(str(value))
                 self.table.setItem(row, column, item)
         layout.addWidget(self.table, 1)
+        selection_bar = QHBoxLayout()
+        self.select_fixes_button = QPushButton('Select supported fixes')
+        self.select_fixes_button.setToolTip('Select available Apply or Install actions. Opening reports, restarting Windows and removing threats are excluded. This does not run an action.')
+        self.select_fixes_button.clicked.connect(self._select_supported_fixes)
+        selection_bar.addWidget(self.select_fixes_button)
+        self.clear_selection_button = QPushButton('Clear selections')
+        self.clear_selection_button.setToolTip('Clear all selected actions without changing the computer.')
+        self.clear_selection_button.clicked.connect(lambda: self._select_supported_fixes(clear=True))
+        selection_bar.addWidget(self.clear_selection_button)
+        selection_bar.addStretch()
+        layout.addLayout(selection_bar)
+        self.outcome = WorkflowSummaryLabel(max_lines=3)
+        self.outcome.setText('Apply and Install perform supported changes. Open and View leave the finding for your review.')
+        self.outcome.setTextFormat(Qt.PlainText)
+        self.outcome.setWordWrap(True)
+        self.outcome.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.outcome)
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
         self.details.setMaximumHeight(170)
@@ -4017,7 +4047,8 @@ class SecurityReviewDialog(QDialog):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         bar = QHBoxLayout()
-        self.apply_button = QPushButton('Review selected recommendations')
+        self.apply_button = QPushButton('Run selected actions')
+        self.apply_button.setToolTip('Confirm each selected action, then run approved actions in sequence. Each result explains whether a change was verified or a manual step remains.')
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_selected)
         bar.addWidget(self.apply_button)
@@ -4032,7 +4063,7 @@ class SecurityReviewDialog(QDialog):
         for identifier, choice in self._selection_controls.items():
             # A theme or desktop font can be polished after construction.
             # Recompute from the current metrics rather than an earlier font.
-            choice.setMinimumWidth(choice.fontMetrics().horizontalAdvance('Review') + 28)
+            choice.setMinimumWidth(choice.fontMetrics().horizontalAdvance(choice.text()) + 28)
             width = max(width, choice.minimumWidth() + 16)
             row = self._row(identifier)
             if row is not None:
@@ -4060,6 +4091,13 @@ class SecurityReviewDialog(QDialog):
         chosen = any(self.selection_control(row).isChecked() for row in range(self.table.rowCount()))
         self.apply_button.setEnabled(chosen and self._worker is None and callable(getattr(self.backend, 'apply_security_recommendation', None)))
 
+    def _select_supported_fixes(self, checked=False, *, clear=False):
+        if self._worker is not None:
+            return
+        for identifier, choice in self._selection_controls.items():
+            presentation = self._presentations[identifier]
+            choice.setChecked(not clear and presentation['selection_label'] in ('Apply', 'Install'))
+
     def _render_details(self):
         self.details.setPlainText(json.dumps({'security_review': self._review_data,
                                              'approved_action_results': self._results}, indent=2, ensure_ascii=False, default=str))
@@ -4077,8 +4115,9 @@ class SecurityReviewDialog(QDialog):
             self.table.item(row, 3).setToolTip(str(text))
 
     def _ask_recommendation(self, recommendation):
+        presentation = self._presentations[recommendation['id']]
         text = str(recommendation.get('title') or recommendation['id']) + '\n\n' + str(recommendation.get('reason') or '')
-        text += '\n\nAction: ' + str(recommendation.get('action') or 'Apply this supported Windows security recommendation.')
+        text += '\n\nAction: ' + presentation['description']
         if recommendation['id'] == 'remediate_defender_threats':
             consent = self._remediation_scope()
             if consent is None:
@@ -4089,8 +4128,10 @@ class SecurityReviewDialog(QDialog):
                   'A changed active-threat list requires a new review. Quarantined items are reviewed in Windows Security.')
         if recommendation.get('requires_admin'):
             text += '\nAdministrator access may be required; a refused or policy-blocked change is reported.'
-        text += '\n\nApply this recommendation now? No leaves this item unchanged.'
-        return ask_yes_no(self, 'Approve one security recommendation', text)
+        text += '\n\n' + presentation['confirmation_question'] + ' No leaves this item unchanged.'
+        label = presentation['selection_label'].lower()
+        yes_label = 'Yes — ' + label if label in ('open', 'view', 'install') else 'Yes — apply'
+        return ask_yes_no(self, presentation['confirmation_title'], text, yes_label=yes_label)
 
     def _remediation_scope(self):
         threats = self._review_data.get('threats')
@@ -4142,6 +4183,8 @@ class SecurityReviewDialog(QDialog):
             self._worker = None
             self._active = None
             self.table.setEnabled(True)
+            self.select_fixes_button.setEnabled(True)
+            self.clear_selection_button.setEnabled(True)
             self.close_button.setEnabled(True)
             self.close_button.setText('Close review')
             self._selection_changed()
@@ -4149,10 +4192,16 @@ class SecurityReviewDialog(QDialog):
             return
         self._active = self._queue.pop(0)
         self.table.setEnabled(False)
+        self.select_fixes_button.setEnabled(False)
+        self.clear_selection_button.setEnabled(False)
         self.apply_button.setEnabled(False)
         self.status.setText('Working on: ' + str(self._recommendations[self._active].get('title') or self._active))
         self._set_result(self._active, 'Running')
         arguments = {'cancel_event': self._cancel}
+        if self._active == 'review_windows_update':
+            # Bind the confirmed Open/Install route. A later settings change
+            # cannot turn an Open confirmation into installation authority.
+            arguments['allow_saved_update_install'] = self._presentations[self._active]['selection_label'] == 'Install'
         if self._active == 'remediate_defender_threats':
             arguments['remediation_consent'] = self._remediation_approvals.pop(self._active, None)
         worker = BackendWorker(self.backend.apply_security_recommendation, (self._active,), arguments)
@@ -4164,15 +4213,36 @@ class SecurityReviewDialog(QDialog):
 
     @Slot(object)
     def _item_result(self, result):
+        from .recommendation_presentation import recommendation_continuation_reason, recommendation_result_text
         self._results.append({'id': self._active, 'result': result})
-        status = result.get('status', 'Returned result') if isinstance(result, dict) else 'Returned result'
+        status = recommendation_result_text(result)
         self._set_result(self._active, status)
+        title = str(self._recommendations[self._active].get('title') or self._active)
+        parts = status.split(' · ')
+        summary = title + '\n' + ' · '.join(parts[:2])
+        if len(parts) > 2:
+            summary += '\n' + parts[-1]
+        self.outcome.set_summary(summary, title + ': ' + status)
+        self._defer_recommendations(recommendation_continuation_reason(result))
         self._render_details()
+
+    def _defer_recommendations(self, reason):
+        if not reason or not self._queue:
+            return
+        for identifier in self._queue:
+            self._set_result(identifier, 'Deferred: ' + reason)
+            self._results.append({'id': identifier, 'result': {'status': 'deferred',
+                'operation_started': False, 'reason': reason}})
+        self._queue.clear()
+        self.outcome.set_summary('Remaining actions deferred after the current result.\n' + reason,
+            self.outcome.text() + '\nRemaining actions deferred: ' + reason)
 
     @Slot(str)
     def _item_error(self, error):
         self._set_result(self._active, 'Failed: ' + str(error))
+        self.outcome.setText('Failed: ' + str(error))
         self._results.append({'id': self._active, 'error': str(error)})
+        self._defer_recommendations('The previous action returned no verified operation outcome. Review its result before another change.')
         self._render_details()
 
     @Slot()
@@ -4230,6 +4300,7 @@ class OptimusWindow(QMainWindow):
         self._pending_post_review = None
         self._pending_auto_fixes = None
         self._auto_continue_attempted = False
+        self._auto_continue_parent_review = None
         self._post_review_generation = 0
         self._post_review_active = False
         self._security_review_dialog = None
@@ -5104,6 +5175,7 @@ class OptimusWindow(QMainWindow):
         self._pending_post_review = None
         self._pending_auto_fixes = None
         self._auto_continue_attempted = False
+        self._auto_continue_parent_review = None
         self._post_review_generation += 1
         if self._progress_window is not None:
             previous, self._progress_window = self._progress_window, None
@@ -5249,6 +5321,7 @@ class OptimusWindow(QMainWindow):
         if not plan.get('actions') or not callable(getattr(self.backend, 'apply_available_fixes', None)):
             return
         self._auto_continue_attempted = True
+        self._auto_continue_parent_review = (report, settings)
         self._post_review_generation += 1
         self._pending_auto_fixes = None
         self._pending_post_review = None
@@ -5268,6 +5341,7 @@ class OptimusWindow(QMainWindow):
 
     @Slot(object)
     def _auto_fixes_result(self, result):
+        self._auto_continue_parent_review = None
         self._progress_window.finish_auto_continue(result)
         if self._close_when_idle:
             self._pending_post_review = None
@@ -5280,8 +5354,15 @@ class OptimusWindow(QMainWindow):
     @Slot(str)
     def _auto_fixes_error(self, error):
         self._pending_post_review = None
+        parent, self._auto_continue_parent_review = self._auto_continue_parent_review, None
+        if parent is not None and not (self._close_when_idle or self._quitting or self._emergency_stopping
+                or self._cancel.is_set()):
+            # A failed batch is never replayed. Keep the original findings
+            # reachable; their action services still require fresh validation.
+            self._prepare_post_reviews(*parent)
         self._progress_window.finish_auto_continue(None, error=error)
-        self.status.setText('Available fixes stopped: ' + error)
+        self.status.setText('Available fixes stopped: ' + error
+            + (' Original recommendations remain available for review.' if self._pending_post_review else ''))
 
     @Slot()
     def _auto_fixes_finished(self):

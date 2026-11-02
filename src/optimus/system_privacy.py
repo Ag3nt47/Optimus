@@ -533,6 +533,12 @@ def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, p
                 ticket.finish()
             if process.returncode != 0 and value.get('ok') is not False:
                 return {'ok': False, 'error': 'Windows returned an unsuccessful native status.'}
+            if operation in ('enable_defender_realtime', 'enable_firewall',
+                             'update_defender_signatures', 'remediate_defender_threats'):
+                # These native commands are synchronous. Preserve the observed
+                # host exit separately from whether Windows accepted the change.
+                # A timeout returns above with the original child still observed.
+                value.update(outcomeKnown=True, running=False, may_continue=False)
             return value
         except subprocess.TimeoutExpired:
             continue
@@ -1029,6 +1035,12 @@ class SystemPrivacy:
         if recommendation_id not in _ACTIONS:
             raise ValueError('Choose a supported security recommendation.')
         report = {'id': recommendation_id, 'status': 'running', 'failed_items': 0}
+        local_control = recommendation_id in ('enable_defender_realtime', 'enable_firewall',
+                                               'update_defender_signatures')
+        def no_change(reason):
+            return dict(report, status='blocked', failed_items=1, reason=reason,
+                        operation_started=False, outcomeKnown=True, running=False,
+                        may_continue=False, failure_scope='security_control' if local_control else 'security')
         if _cancelled(cancel_event):
             return dict(report, status='cancelled', cancelled=True)
         current = self.security_status()
@@ -1041,18 +1053,34 @@ class SystemPrivacy:
             payload = {'remediation_consent': consent}
         permitted = {item['id'] for item in current['recommendations']}
         if recommendation_id not in permitted and recommendation_id != 'review_windows_update':
-            return dict(report, status='blocked', failed_items=1, reason='The recommendation no longer matches current Windows security state; no change was requested.')
+            return no_change('The recommendation no longer matches current Windows security state; no change was requested.')
         manual = recommendation_id in ('review_security', 'review_windows_update', 'restart_required')
         if not manual and (not isinstance(current.get('context'), dict) or current['context'].get('is_admin') is not True):
-            return dict(report, status='blocked', failed_items=1, reason='Administrator access is required. No elevation or permission bypass was requested.')
+            return no_change('Administrator access is required. No elevation or permission bypass was requested.')
         journal = {'id': uuid.uuid4().hex, 'kind': 'security-recommendation', 'recommendation_id': recommendation_id,
                    'status': 'prepared', 'before': current, 'items': [], 'failed_items': 0}
         with self.lock:
             self._journal(journal)
+            outcome = None
             try:
                 outcome = self._call(recommendation_id, payload, timeout=300, cancel_event=cancel_event)
+                # Never turn a timed-out security operation into an ordinary
+                # failed control: its original native child may still be live.
+                for key in ('may_continue', 'outcomeKnown', 'running', 'timed_out'):
+                    if key in outcome:
+                        report[key] = outcome[key] if type(outcome[key]) is bool else None
+                report['operation_started'] = True
+                if local_control:
+                    report['failure_scope'] = 'security_control'
+                unresolved = (outcome.get('may_continue') is True or outcome.get('running') is True
+                              or outcome.get('outcomeKnown') is False or outcome.get('timed_out') is True
+                              or any(key in outcome and type(outcome[key]) is not bool
+                                     for key in ('may_continue', 'outcomeKnown', 'running', 'timed_out')))
                 if outcome.get('cancelled') or _cancelled(cancel_event):
                     report.update(status='cancelled', cancelled=True, may_continue=outcome.get('may_continue') is True)
+                elif unresolved:
+                    report.update(status='uncertain', failed_items=1,
+                                  reason='The Windows security operation has not returned a verified terminal outcome. Its original process remains observed; no automatic retry was requested.')
                 elif outcome.get('ok') is not True:
                     report.update(status='failed', failed_items=1, reason='Windows declined or could not verify the selected action; policy or tamper protection may apply.')
                 elif manual:
@@ -1066,6 +1094,8 @@ class SystemPrivacy:
                         report.update(status='completed', after=after)
             except Exception as error:
                 report.update(status='failed', failed_items=1, error_type=type(error).__name__, reason='Windows could not complete the selected security action.')
+                if outcome is None:
+                    report.update(status='uncertain', outcomeKnown=False, running=None, may_continue=True)
             journal.update(status=report['status'], result=report, failed_items=report['failed_items'])
             report['log_path'] = str(self._journal(journal))
             return report

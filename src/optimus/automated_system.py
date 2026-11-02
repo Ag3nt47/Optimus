@@ -404,8 +404,14 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
                 allowed.append(value)
             else:
                 reason=str(blocked.get(key,{}).get('reason') or 'This exact offered driver has no verified matching installed-package backup.')
+                prerequisite = ({'failureKind': 'present_device_unmatched',
+                    'retry_when': 'matching_device_present', 'automatic_recheck': True}
+                    if blocked.get(key,{}).get('failureKind') == 'present_device_unmatched'
+                    and blocked.get(key,{}).get('retry_when') == 'matching_device_present' else {})
                 items.append({'binding':value,'status':'skipped','reason':reason,
-                    'result':{'installer_started':False,'outcomeKnown':True,'running':False,'skipped':True,'note':reason}})
+                    'result':{'installer_started':False,'outcomeKnown':True,'running':False,'skipped':True,
+                        'note':reason + (' Connect the matching device; its saved approval is rechecked automatically on the next approved run.' if prerequisite else ''),
+                        **prerequisite}})
         eligible=allowed
         # A complete exact per-offer refusal is a known no-install outcome.
         # Do not invent an additional failed driver when every real offer was

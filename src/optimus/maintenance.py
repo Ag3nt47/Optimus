@@ -381,12 +381,18 @@ class Maintenance:
         return self._read_only_winget(arguments, cancel_event, **options)
 
     @staticmethod
-    def _read_only_winget(arguments, cancel_event, *, stop_controller=None):
+    def _read_only_winget(arguments, cancel_event, *, stop_controller=None, timeout=120):
         """Retire only an explicitly read-only child, then prove its exit."""
-        if (not isinstance(arguments, list) or len(arguments) < 2 or arguments[1:] not in (
+        exact_version_query = (isinstance(arguments, list) and len(arguments) == 9
+            and arguments[1:3] == ['list', '--id']
+            and isinstance(arguments[3], str) and _PACKAGE_ID.fullmatch(arguments[3]) is not None
+            and arguments[4:] == ['--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity'])
+        if (not isinstance(arguments, list) or len(arguments) < 2 or not exact_version_query and arguments[1:] not in (
                 ['upgrade', '--source', 'winget', '--disable-interactivity'],
                 ['pin', 'list', '--disable-interactivity'])):
             raise ValueError('Only exact read-only WinGet queries support process cancellation.')
+        if type(timeout) not in (int, float) or not 0 < timeout <= 120:
+            raise ValueError('A bounded positive read-only query timeout is required.')
         if stop_controller is not None:
             stop_controller.check()
             cancel_event = stop_controller.bind_cancel(cancel_event)
@@ -396,12 +402,12 @@ class Maintenance:
         child = launch(arguments, shell=False, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        deadline = time.monotonic() + 120
+        deadline = time.monotonic() + timeout
         requested = False
         stop_deadline = None
         while True:
             try:
-                output, errors = child.communicate(timeout=0.1)
+                output, errors = child.communicate(timeout=min(0.1, max(0.001, deadline - time.monotonic())) if not requested else 0.1)
                 return subprocess.CompletedProcess(arguments, 130 if requested else child.returncode,
                     output, errors or ('Read-only update search cancelled.' if requested else ''))
             except subprocess.TimeoutExpired:
@@ -759,12 +765,45 @@ class Maintenance:
                     pass
             try:
                 from .app_presence import parse_installed
-                after = parse_installed(self._run([executable, 'list', '--id', package_id, '--exact',
-                    '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']), package_id)
+                readback_arguments = [executable, 'list', '--id', package_id, '--exact',
+                    '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']
+                receipt['verification_attempts'] = 1
+                after = parse_installed(self._run(readback_arguments), package_id)
+                # Some completed installers publish their ARP version just
+                # after WinGet exits. A short read-only grace period prevents
+                # that lag from becoming an unchanged-offer hold until reboot.
+                # Never rerun an installer, tolerate an unhealthy inventory,
+                # poll a running child, or wait for an application to close.
+                if (after is not None and not target_installed(current['available'], after['version'], package_id)
+                        and quiescent and native_code == 0 and not receipt['application_restart_required']):
+                    import threading
+                    retry_cancel = cancel_event if cancel_event is not None else threading.Event()
+                    controller = getattr(self, 'stop_controller', None)
+                    if controller is not None:
+                        retry_cancel = controller.bind_cancel(retry_cancel)
+                    deadline = time.monotonic() + 4
+                    for delay in (0.2, 0.4):
+                        if deadline - time.monotonic() <= delay or retry_cancel.is_set() or retry_cancel.wait(delay):
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        if controller is not None:
+                            controller.check()
+                        receipt['verification_attempts'] += 1
+                        retry = self._read_only_winget(readback_arguments, retry_cancel,
+                            stop_controller=controller, timeout=remaining)
+                        after = parse_installed(retry, package_id)
+                        if (after is None or retry_cancel.is_set()
+                                or target_installed(current['available'], after['version'], package_id)):
+                            break
                 verified = after is not None and target_installed(current['available'], after['version'], package_id)
                 receipt['installed_version'] = after['version'] if after else None
                 receipt['verified'] = verified
                 receipt['verification_status'] = 'verified' if verified else 'version_unchanged'
+                receipt['verified_after_readback'] = verified and receipt['verification_attempts'] > 1
+                if receipt['verified_after_readback']:
+                    receipt['note'] += ' The installed version appeared during the automatic read-only verification grace period; no installer was repeated.'
                 if verified and progress_callback is not None:
                     try:
                         progress_callback({'phase': 'verify', 'percent': 100.0})

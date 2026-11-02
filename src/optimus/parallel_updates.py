@@ -583,6 +583,15 @@ def _journal_result(result):
                 compact['result'][key] = outcome[key][:128]
         if type(outcome.get('application_restart_required')) is bool:
             compact['result']['application_restart_required'] = outcome['application_restart_required']
+        if type(outcome.get('verification_attempts')) is int and 1 <= outcome['verification_attempts'] <= 3:
+            compact['result']['verification_attempts'] = outcome['verification_attempts']
+        if type(outcome.get('verified_after_readback')) is bool:
+            compact['result']['verified_after_readback'] = outcome['verified_after_readback']
+        if (outcome.get('failureKind') == 'present_device_unmatched'
+                and outcome.get('retry_when') == 'matching_device_present'
+                and type(outcome.get('automatic_recheck')) is bool):
+            compact['result']['retry_when'] = 'matching_device_present'
+            compact['result']['automatic_recheck'] = outcome['automatic_recheck']
         if isinstance(outcome.get('blocking_package_families'), list):
             compact['result']['blocking_package_families'] = [value[:256] for value in outcome['blocking_package_families'][:20]
                 if isinstance(value, str)]

@@ -603,6 +603,73 @@ def test_windows_security_channel_uses_existing_service_with_saved_agreements(tm
     assert result['stages'][0]['title'] == 'Check or install Windows security updates'
 
 
+def test_approved_windows_update_recommendation_uses_installer_without_prior_channel_result(tmp_path):
+    settings = configuration(windows_security_updates_enabled=True,
+                             windows_security_updates_install_approved=True,
+                             windows_security_update_agreements_accepted=True)
+    source = parent(settings, security=['review_windows_update'])
+    service = backend(tmp_path, settings, source)
+    preview = service.available_fixes(source, settings)
+    assert [row['id'] for row in preview['actions']] == ['windows_security_updates']
+    assert preview['manual_items'] == []
+    result = service.apply_available_fixes(source, settings)
+    service.windows_security_updates.assert_called_once()
+    service.apply_security_recommendation.assert_not_called()
+    assert result['counts']['skipped'] == 1
+
+
+@pytest.mark.parametrize('revoked', ['windows_security_updates_enabled',
+    'windows_security_updates_install_approved', 'windows_security_update_agreements_accepted'])
+def test_unapproved_windows_update_recommendation_remains_manual(tmp_path, revoked):
+    settings = configuration(windows_security_updates_enabled=True,
+                             windows_security_updates_install_approved=True,
+                             windows_security_update_agreements_accepted=True)
+    settings[revoked] = False
+    if revoked == 'windows_security_update_agreements_accepted':
+        settings['windows_security_updates_install_approved'] = False
+    source = parent(settings, security=['review_windows_update'])
+    service = backend(tmp_path, settings, source)
+    preview = service.available_fixes(source, settings)
+    assert preview['actions'] == []
+    assert [row['id'] for row in preview['manual_items']] == ['review_windows_update']
+
+
+@pytest.mark.parametrize('started', [False, True])
+def test_terminal_security_control_failure_continues_remaining_control_and_app_updates(tmp_path, started):
+    settings = software_settings()
+    source = parent(settings, security=['enable_firewall', 'update_defender_signatures'], software=software_report())
+    service = backend(tmp_path, settings, source)
+    service.apply_security_recommendation.side_effect = [
+        {'id': 'enable_firewall', 'status': 'failed', 'failed_items': 1,
+         'failure_scope': 'security_control', 'operation_started': started,
+         'outcomeKnown': True, 'running': False, 'may_continue': False},
+        {'id': 'update_defender_signatures', 'status': 'completed', 'failed_items': 0}]
+    result = service.apply_available_fixes(source, settings)
+    assert service.apply_security_recommendation.call_count == 2
+    service.update_app_unattended.assert_called_once()
+    assert result['counts']['failed'] == 1 and result['counts']['completed'] == 2
+    assert result['counts']['deferred'] == 0 and not result.get('stop_reason')
+    assert result['final_verification']['status'] == 'needs_review'
+
+
+@pytest.mark.parametrize('unsafe', [
+    {'outcomeKnown': False}, {'running': True}, {'may_continue': True},
+    {'outcomeKnown': None}, {'operation_started': None}, {'reboot_required': True},
+    {'shared_barrier': True}, {'id': 'different-control'}, {'timed_out': True}, {'timed_out': None},
+])
+def test_security_control_failure_with_unresolved_or_shared_state_still_defers_updates(tmp_path, unsafe):
+    settings = software_settings()
+    source = parent(settings, security=['enable_firewall'], software=software_report())
+    service = backend(tmp_path, settings, source)
+    service.apply_security_recommendation.return_value = dict(
+        {'id': 'enable_firewall', 'status': 'failed', 'failed_items': 1,
+         'failure_scope': 'security_control', 'operation_started': True,
+         'outcomeKnown': True, 'running': False, 'may_continue': False}, **unsafe)
+    result = service.apply_available_fixes(source, settings)
+    service.updates_scan.assert_not_called()
+    assert result['counts']['deferred'] == 1 and result['stop_reason']
+
+
 def test_driver_channel_keeps_exact_approval_fresh_scan_and_required_backup(tmp_path):
     offered = {'id': '00000000-0000-0000-0000-000000000001', 'revision': 1,
                'title': 'Fixture device driver', 'hardwareId': 'FIXTURE\\DEVICE',

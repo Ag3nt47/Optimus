@@ -71,6 +71,33 @@ def exact(rows):
     return [{'id': row['id'], 'revision': row['revision']} for row in rows]
 
 
+@pytest.mark.parametrize('presence', [None, 'missing'])
+def test_unknown_presence_does_not_claim_a_matching_device_connection_is_enough(tool, presence):
+    service, adapter, _ = tool
+    if presence == 'missing':
+        adapter.devices[0].pop('present')
+    else:
+        adapter.devices[0]['present'] = presence
+    result = service.backup([offer()])
+    assert result['backed_updates'] == [] and result['blocked_updates']
+    assert all('failureKind' not in row and 'retry_when' not in row for row in result['blocked_updates'])
+    assert not any(call[0] == 'export' for call in adapter.calls)
+
+
+@pytest.mark.parametrize('hardware', [None, ''])
+def test_missing_offer_hardware_identity_never_emits_a_device_connection_prerequisite(tool, hardware):
+    service, adapter, _ = tool
+    row = offer()
+    if hardware is None:
+        row.pop('hardwareId')
+    else:
+        row['hardwareId'] = hardware
+    result = service.backup([row])
+    assert result['backed_updates'] == [] and result['blocked_updates']
+    assert all('failureKind' not in item and 'retry_when' not in item for item in result['blocked_updates'])
+    assert not any(call[0] == 'export' for call in adapter.calls)
+
+
 def test_constructor_and_unsupported_cancelled_nonadmin_do_no_native_work(tool):
     service, adapter, backend = tool
     assert not adapter.calls and not backend.data_dir.exists()

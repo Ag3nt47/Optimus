@@ -245,8 +245,11 @@ def test_followup_worker_error_cannot_be_retried(window, app):
     wait_until(app, lambda: not window.busy)
     assert 'Fixture follow-up failure' in progress.description.text()
     assert progress.auto_continue_button.isHidden()
-    assert window._pending_post_review is None and window._pending_auto_fixes is None
-    assert not window._post_review_active
+    assert window._pending_post_review is not None and window._pending_auto_fixes is None
+    assert window._post_review_active
+    assert window._auto_continue_parent_review is None
+    assert 'Original recommendations remain available' in window.status.text()
+    assert progress.cancel_button.text() == 'Continue to recommendations'
     progress.autoContinueRequested.emit()
     window.backend.apply_available_fixes.assert_called_once()
 

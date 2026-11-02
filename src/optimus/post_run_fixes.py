@@ -206,10 +206,17 @@ def _preview(backend, report, settings):
             actions.append({'id': identity, 'title': title, 'kind': 'security'})
     for identity, (title, reason) in MANUAL_SECURITY.items():
         if identity in identifiers:
+            if (identity == 'review_windows_update' and not _native(backend)
+                    and _authorized(settings, 'windows_security_updates')):
+                # This finding has a native install path when that exact saved
+                # update scope is already approved. Do not send it to Settings.
+                continue
             manual.append({'id': identity, 'title': title, 'reason': reason})
     for channel, (title, _) in CHANNELS.items():
         outcomes = _channel_results(report, channel)
-        if not any(_remaining(value, failed) for value, failed in outcomes):
+        requested_security = (channel == 'windows_security_updates' and 'review_windows_update' in identifiers
+                              and _authorized(settings, channel) and not _native(backend))
+        if not requested_security and not any(_remaining(value, failed) for value, failed in outcomes):
             continue
         if any(_navigation_skipped(value) for value, failed in outcomes):
             manual.append({'id': channel, 'title': title,
@@ -449,6 +456,29 @@ def _blocked_installer(channel, reason, *, prior=False):
         outcome[scan_key] = {'schema': 1, 'complete': False, 'status': 'not_started',
             'offers_count': None, 'summary': 'This follow-up search was not started because installation is blocked. ' + reason}
     return outcome
+
+
+def _local_security_stop_reason(action, outcome):
+    """A proven terminal control failure need not poison unrelated work.
+
+    A native error, timeout, missing lifecycle record, restart or shared refusal
+    remains a barrier. Only the three fixed non-removal controls can be local.
+    """
+    known_local = (action.get('id') in SECURITY_FIXES and isinstance(outcome, dict)
+        and outcome.get('id') == action['id'] and outcome.get('status') in ('failed', 'blocked')
+        and outcome.get('failure_scope') == 'security_control'
+        and outcome.get('outcomeKnown') is True and outcome.get('running') is False
+        and outcome.get('may_continue') is False and type(outcome.get('operation_started')) is bool
+        and all(key not in outcome or outcome[key] is False for key in (
+            'timed_out', 'cancelled', 'uncertain', 'restartNeeded', 'reboot_required',
+            'rebootRequired', 'shared_barrier')))
+    if not known_local:
+        return _stop_reason(outcome)
+    observed = dict(outcome)
+    for key in ('status', 'failed_items', 'requiresReview'):
+        observed.pop(key, None)
+    # Keep every nested outcome and restart/shared indicator binding.
+    return _stop_reason(observed)
 
 
 def _action_status(value):
@@ -719,7 +749,7 @@ class PostRunFixes:
                     stage.update(result=outcome, action_status=status,
                                  status='failed' if status in ('failed', 'blocked', 'uncertain') else 'cancelled' if status == 'cancelled' else 'completed')
                     result['counts'][status if status in result['counts'] else 'blocked'] += 1
-                    reason = _stop_reason(outcome)
+                    reason = _local_security_stop_reason(action, outcome)
                     if reason:
                         halted = True
                         result['stop_reason'] = reason
@@ -829,3 +859,124 @@ def apply_available_fixes(backend, report, settings, *, progress_callback=None, 
     if service is None:
         service = backend._post_run_fixes_service = PostRunFixes(backend)
     return service.apply(report, settings, progress_callback=progress_callback, cancel_event=cancel_event)
+
+
+def apply_saved_windows_security_recommendation(backend, approved, *, cancel_event=None):
+    """Use an already-approved native update scope from the recommendation UI.
+
+    Backend owns the global maintenance lease before entering. The native
+    service repeats its catalog, agreement, reboot and exact-revision checks.
+    Merely opening Settings is never reported as an installed update.
+    """
+    identifier = uuid.uuid4().hex
+    directory = Path(backend.data_dir) / 'security-recommendations'
+    path = directory / (identifier + '.json')
+    result = {'schema': 1, 'id': identifier, 'kind': 'security-recommendation',
+              'recommendation_id': 'review_windows_update', 'status': 'prepared',
+              'started_at': time.time(), 'stages': [], 'installed_count': 0,
+              'verified_installs': 0, 'verified': False,
+              'operation_started': False, 'preferences_saved': False, 'log_path': str(path)}
+
+    def journal():
+        _ordinary_data_path(directory)
+        _ordinary_data_path(path, file=True)
+        _bounded(result)
+        atomic_json(path, result)
+
+    journal()  # A durable owned identity precedes the native service call.
+    service_requested = False
+    try:
+        current = _settings(backend, backend.preferences())
+        settings = _narrow_settings(backend, approved, current)
+        from .parallel_updates import pending_updates_barrier
+        prior_barrier = pending_updates_barrier(backend)
+        result['settings'] = {key: settings[key] for key in (
+            'windows_security_updates_enabled', 'windows_security_updates_install_approved',
+            'windows_security_update_agreements_accepted')}
+        if cancel_event is not None and cancel_event.is_set():
+            result.update(status='cancelled', cancelled=True, reason='Cancellation requested before updating.')
+        elif not _authorized(settings, 'windows_security_updates'):
+            result.update(status='blocked', reason='Saved Windows security-update approval was revoked. No installation was requested.')
+        elif prior_barrier:
+            result.update(status='blocked', reason=str(prior_barrier), installation_blocked=True,
+                          outcomeKnown=True, running=False, may_continue=False)
+        else:
+            stage = {'title': CHANNELS['windows_security_updates'][1],
+                     'started_at': time.time(), 'status': 'prepared'}
+            result['stages'].append(stage)
+            result['status'] = 'running'
+            journal()
+            service_requested = True
+            result['operation_started'] = True
+            outcome = backend.windows_security_updates(settings, cancel_event=cancel_event)
+            _bounded(outcome)
+            if not isinstance(outcome, dict):
+                raise ValueError('The Windows security update service returned invalid metadata.')
+            action_status = _action_status(outcome)
+            stage.update(result=copy.deepcopy(outcome), finished_at=time.time(),
+                         status='completed' if action_status == 'completed' else
+                                'cancelled' if action_status == 'cancelled' else
+                                'skipped' if action_status in ('skipped', 'deferred') else 'failed')
+            result.update(status=action_status, result=copy.deepcopy(outcome))
+            for key in ('cancelled', 'may_continue', 'outcomeKnown', 'running', 'reboot_required'):
+                if key in outcome:
+                    result[key] = copy.deepcopy(outcome[key])
+            journal()
+            verification_report = dict(result, settings=settings)
+            try:
+                verified = backend.verify_optimization(verification_report, cancel_event=cancel_event, timeout=30)
+                _bounded(verified)
+                if not _valid_verification(verified) or verified.get('run_id') != identifier:
+                    raise ValueError('The security update verifier returned invalid metadata.')
+                result['final_verification'] = copy.deepcopy(verified)
+            except Exception as error:
+                result['final_verification'] = _unavailable_verification(
+                    'The native installation history could not be verified (' + type(error).__name__ + ').')
+            completed = [row for row in outcome.get('items', []) if isinstance(row, dict)
+                         and row.get('status') in ('completed', 'applied')]
+            result['installed_count'] = len(completed)  # Native installer claims; separate readback below.
+            checks = [check for entry in result['final_verification'].get('stages', [])
+                      if isinstance(entry, dict) and entry.get('title') == stage['title']
+                      for check in entry.get('checks', [])
+                      if isinstance(check, dict) and check.get('kind') == 'local_update_history']
+            offers = outcome.get('scan', {}).get('updates', []) if isinstance(outcome.get('scan'), dict) else []
+            expected = set()
+            for row in completed:
+                identity = row.get('id')
+                matching = [offer for offer in offers if isinstance(offer, dict)
+                            and isinstance(offer.get('id'), str) and isinstance(identity, str)
+                            and offer['id'].casefold() == identity.casefold()]
+                if len(matching) == 1 and type(matching[0].get('revision')) is int and matching[0]['revision'] > 0:
+                    expected.add((identity.casefold(), matching[0]['revision']))
+            confirmed = set()
+            for check in checks:
+                evidence = check.get('evidence')
+                if (check.get('status') == 'confirmed' and isinstance(check.get('target'), str)
+                        and isinstance(evidence, dict) and type(evidence.get('revision')) is int):
+                    confirmed.add((check['target'].casefold(), evidence['revision']))
+            result['verified_installs'] = len(expected & confirmed)
+            verified = result['final_verification']
+            result['verified'] = (bool(completed) and len(expected) == len(completed)
+                and len(checks) == len(confirmed) == result['verified_installs'] == len(completed)
+                and verified.get('status') == 'confirmed' and verified.get('coverage_complete') is True
+                and verified.get('cancelled') is False and verified.get('deadline_reached') is False
+                and verified.get('failed_items') == 0 and verified.get('errors') == []
+                and verified['counts']['confirmed'] == len(completed) and verified['counts']['not_applicable'] == 0
+                and verified['counts']['needs_review'] == 0 and verified['counts']['unverified'] == 0)
+            if completed and action_status == 'completed':
+                if not result['verified']:
+                    result.update(status='needs_review', reason='Windows returned installation results, but fresh exact-revision history did not verify every update.')
+                else:
+                    result['reason'] = 'Fresh Windows installation history verified the installed exact update revisions.'
+            elif action_status == 'skipped':
+                result['reason'] = outcome.get('note') or 'No applicable approved update was installed.'
+    except Exception as error:
+        if service_requested:
+            result.update(status='uncertain', outcomeKnown=False, running=None, may_continue=True,
+                          reason='The recommendation outcome could not be verified (' + type(error).__name__ + '). No automatic retry was started.')
+        else:
+            result.update(status='blocked', outcomeKnown=True, running=False, may_continue=False,
+                          reason='The recommendation preflight could not be verified (' + type(error).__name__ + '). No update service or installer was started.')
+    result['finished_at'] = time.time()
+    journal()
+    return result

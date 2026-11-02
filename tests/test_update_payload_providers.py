@@ -64,6 +64,7 @@ def provider(tmp_path):
             (folder / 'renamed-repair.exe').write_bytes(b'keep repair runtime')
         return terminal(value.fixture_code, quiescent=value.fixture_quiescent)
     value._run = Mock(side_effect=run)
+    value._read_only_winget = Mock(side_effect=lambda arguments, cancel_event, **options: run(arguments, **options))
     return value
 
 

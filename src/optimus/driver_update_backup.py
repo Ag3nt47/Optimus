@@ -49,6 +49,7 @@ def _cancelled(event):
 
 def _mapping(inventory, offers):
     normalized = {row['device_id'].casefold(): row for row in _devices(inventory)}
+    presence_complete = all(type(row.get('present')) is bool for row in inventory['devices'])
     candidates = {}
     for raw in inventory['devices']:
         if raw.get('present') is not True:
@@ -70,6 +71,10 @@ def _mapping(inventory, offers):
         matches = candidates.get(str(offer.get('hardwareId', '')).casefold(), [])
         if not matches:
             result[key] = {'reason': 'No exact present-device hardware/compatible ID match was available.'}
+            identity = offer.get('hardwareId')
+            if (presence_complete and isinstance(identity, str) and 0 < len(identity) <= 4096
+                    and identity.strip() == identity and not any(char in identity for char in '*?\r\n\x00')):
+                result[key]['failureKind'] = 'present_device_unmatched'
             continue
         if any(not device['drivers'] for device in matches):
             result[key] = {'reason': 'A matching present device has no complete installed-driver package identity.'}
@@ -353,7 +358,12 @@ class DriverUpdateBackup:
                     reason = reason or final_packages[inf]
                 item = {'id': row['id'], 'revision': row['revision']}
                 if reason or _cancelled(cancel_event):
-                    result['blocked_updates'].append(dict(item, reason=reason or 'Driver backup was cancelled.'))
+                    refused = dict(item, reason=reason or 'Driver backup was cancelled.')
+                    if (not stop_reason and not _cancelled(cancel_event) and fresh is not None
+                            and original.get('failureKind') == 'present_device_unmatched'
+                            and fresh[key].get('failureKind') == 'present_device_unmatched'):
+                        refused.update(failureKind='present_device_unmatched', retry_when='matching_device_present')
+                    result['blocked_updates'].append(refused)
                 else:
                     result['backed_updates'].append(item)
             result['packages'] = list(packages.values())

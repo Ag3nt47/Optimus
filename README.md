@@ -34,6 +34,7 @@ These demos show the actual Qt interface with sample data. No host maintenance r
 - **Updates:** Manage supported app offers, package rules and Windows Update drivers with scoped approval and backup checks.
 - **Security:** Run Defender quick scans and review threats, supported corrections and eligible Windows Security/Critical updates.
 - **Automatic efficiency:** Avoid repeated inventory queries and redundant eligible Defender scans, with lighter live monitoring and adjustable settings. [How it works](docs/automatic-efficiency.md)
+- **Automatic follow-through:** Apply supported fixes, verify late app-version registration and continue past known local failures. Recommendations distinguish installation from opening Windows controls or coverage reports. [What runs automatically](docs/automatic-remediation.md)
 - **Processes/startup:** Inspect CPU/RAM/I/O and ownership; control eligible priorities, affinity, pause/resume, startup entries and Windows services.
 - **Storage:** Find large files, track folder growth, verify SHA256 duplicates and optimize eligible Windows SSDs/HDDs.
 - **Cloud:** Review personal OneDrive duplicates on Windows with your own connected account and approved folders.

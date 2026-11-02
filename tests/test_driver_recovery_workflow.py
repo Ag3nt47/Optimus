@@ -106,3 +106,26 @@ def test_device_switch_during_final_backup_readback_never_starts_installer(tmp_p
     assert result['skipped_items'] == 1 and result['backup_unavailable'] is True
     assert 'identity changed' in result['items'][0]['reason']
     value.driver_update_apply_unattended.assert_not_called()
+
+
+def test_unmatched_present_device_has_a_typed_next_run_prerequisite(tmp_path):
+    value, adapter, _ = inbox_service(tmp_path)
+    adapter.devices = []
+    result = run_drivers(value, driver_config())
+    row = result['items'][0]['result']
+    assert row['failureKind'] == 'present_device_unmatched'
+    assert row['retry_when'] == 'matching_device_present' and row['automatic_recheck'] is True
+    assert row['installer_started'] is False and row['outcomeKnown'] is True and row['running'] is False
+    assert result['failed_items'] == 0 and result['skipped_items'] == 1
+    assert 'saved approval is rechecked automatically' in row['note']
+    assert adapter.calls == [('inventory',), ('inventory',)]
+    value.driver_update_apply_unattended.assert_not_called()
+
+
+def test_unknown_device_inventory_does_not_claim_a_connection_fixes_the_problem(tmp_path):
+    value, adapter, _ = inbox_service(tmp_path)
+    adapter.complete = False
+    result = run_drivers(value, driver_config())
+    assert result['failed_items'] == 1
+    assert all(row.get('result', {}).get('failureKind') != 'present_device_unmatched' for row in result['items'])
+    value.driver_update_apply_unattended.assert_not_called()

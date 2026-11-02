@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.31
+
+- Continue unrelated automatic fixes after a proven finished security-control failure; preserve running, unknown and restart barriers.
+- Install saved-approved Windows Security/Critical update recommendations through the native updater and verify exact installation history, with durable results.
+- Recheck a healthy unchanged app version briefly after a successful finished installer, avoiding unnecessary pending-verification holds without replaying the installer.
+- Retain approval and explain automatic future rechecks for drivers with no matching present device.
+- Distinguish Apply, Install, Open and View recommendation actions, show readable outcome reasons and add supported-fix selection controls.
+- Keep original recommendations accessible after an automatic follow-up exception without repeating the failed batch. Preserve saved preferences and approval scopes.
+
 ## 0.12.19
 
 - Compare the explicitly approved effective settings at update handoff and resume while preserving the original saved-preference bytes. Older files can omit existing defaults without causing a false mismatch; changed effective choices or defaults still pause cleanup for review.
