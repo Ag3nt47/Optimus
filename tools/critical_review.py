@@ -1677,6 +1677,12 @@ class CriticalReview:
                 counts={'completed': 0, 'deferred': 1}, summary='0 action/check completed; 1 deferred.')
 
         backend.optimize.side_effect, backend.apply_available_fixes.side_effect = optimize, apply
+        # Real workflow dispatch needs smoke_test=False, while every backend
+        # operation remains an in-memory fixture. Keep its optional live sampler
+        # inert as well; this review supplies observations explicitly elsewhere.
+        sampler_patch = patch('optimus.live_metrics.LiveMetrics.start', return_value=False)
+        inert_sampler_start = sampler_patch.start()
+        previous_smoke_test = window.smoke_test
         window.smoke_test = False
         window._offer_post_optimization_reviews = Mock()
         try:
@@ -1744,11 +1750,21 @@ class CriticalReview:
             drain(self.app, lambda: window._offer_post_optimization_reviews.called)
             self.check(prefix + '.workflow.manual-continue', window._offer_post_optimization_reviews.call_count == 1,
                 'Manual recommendations must open only once after explicit Continue.')
+            sampler = progress._live_metrics_service
+            self.check(prefix + '.workflow.no-live-sampler', inert_sampler_start.called
+                and sampler is not None and sampler._thread is None,
+                'The in-memory workflow uses an inert metrics start and creates no machine-sampling thread.',
+                evidence={'inert_start_calls': inert_sampler_start.call_count,
+                    'sampler_thread_created': sampler is not None and sampler._thread is not None})
         finally:
-            release.set()
-            release_batch.set()
-            window.pool.waitForDone(5000)
-            drain(self.app)
+            try:
+                release.set()
+                release_batch.set()
+                window.pool.waitForDone(5000)
+                drain(self.app)
+            finally:
+                window.smoke_test = previous_smoke_test
+                sampler_patch.stop()
 
     def review_startup_update(self, window, backend, dimensions, prefix):
         """Offline prompt/progress views; no checker, download or Backend runs."""

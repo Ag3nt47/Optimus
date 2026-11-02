@@ -146,10 +146,150 @@ def test_linux_smart_health_is_exact_device_bound_and_failures_are_not_command_e
 
 def test_linux_nvme_uses_native_percentage_used_even_over_100(tmp_path):
     batteries, blocks = sysfs(tmp_path)
-    commands = Commands(disks=[disk('nvme0n1', tran='nvme')], smart={'/dev/nvme0n1': smart('/dev/nvme0n1',
+    commands = Commands(disks=[disk('nvme0n1', tran='nvme', rota=False)], smart={'/dev/nvme0n1': smart('/dev/nvme0n1',
         nvme_smart_health_information_log={'percentage_used': 127}, power_on_time={'hours': 8400})})
     row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
     assert row['wear_percent_used'] == 127 and row['power_on_hours'] == 8400
+
+
+@pytest.mark.parametrize('wear', [0, 1, 100, 254, 255])
+def test_nvme_wear_is_an_explicit_provider_estimate_not_remaining_lifetime(tmp_path, wear):
+    batteries, blocks = sysfs(tmp_path)
+    commands = Commands(disks=[disk('nvme0n1', tran='nvme', rota=0)], smart={'/dev/nvme0n1': smart('/dev/nvme0n1',
+        nvme_smart_health_information_log={'percentage_used': wear}, power_on_time={'hours': 19000})})
+    row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
+    assert row['media_type'] == 'SSD' and row['media_type_source'] == 'lsblk ROTA'
+    assert row['wear_percent_used'] == wear and row['wear_counter_kind'] == 'nvme_percentage_used'
+    assert 'percentage_used' in row['wear_percent_used_source']
+    assert 'not a failure probability' in row['wear_percent_used_note']
+    if wear == 0:
+        assert 'does not prove an unused drive' in row['wear_percent_used_note']
+        assert row['power_on_hours'] == 19000  # An old drive can report integer zero.
+    assert not any('remaining' in key for key in row)
+
+
+@pytest.mark.parametrize('name,transport', [('sda', 'sata'), ('nvme0n1', 'nvme')])
+def test_rotational_device_never_receives_an_ssd_endurance_metric(tmp_path, name, transport):
+    batteries, blocks = sysfs(tmp_path)
+    commands = Commands(disks=[disk(name, tran=transport, rota=True)], smart={'/dev/' + name: smart('/dev/' + name,
+        nvme_smart_health_information_log={'percentage_used': 0}, endurance_used={'current_percent': 12})})
+    row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
+    assert row['media_type'] == 'HDD' and row['wear_percent_used'] is None
+    assert row['wear_counter_kind'] is None and row['wear_percent_used_source'] is None
+    assert 'not applicable to rotational' in row['wear_percent_used_note']
+
+
+@pytest.mark.parametrize('rotational', [None, '0', 'false', 2, 0.0])
+def test_missing_or_malformed_media_flag_cannot_promote_nvme_wear(tmp_path, rotational):
+    batteries, blocks = sysfs(tmp_path)
+    commands = Commands(disks=[disk('nvme0n1', tran='nvme', rota=rotational)], smart={'/dev/nvme0n1': smart('/dev/nvme0n1',
+        nvme_smart_health_information_log={'percentage_used': 5})})
+    row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
+    assert row['media_type'] is None and row['wear_percent_used'] is None
+    assert row['wear_counter_kind'] is None
+
+
+def test_ata_vendor_normalized_endurance_is_not_promoted_even_on_ssd(tmp_path):
+    batteries, blocks = sysfs(tmp_path)
+    commands = Commands(disks=[disk(rota=False)], smart={'/dev/sda': smart(
+        endurance_used={'current_percent': 0}, nvme_smart_health_information_log={'percentage_used': 20},
+        ata_smart_attributes={'table': [{'id': 177, 'name': 'Wear_Leveling_Count', 'value': 100, 'raw': {'value': 500}}]})})
+    row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
+    assert row['smart_passed'] is True and row['media_type'] == 'SSD'
+    assert row['wear_percent_used'] is None and row['wear_counter_kind'] is None
+    assert row['smart_evidence']['protocol'] == 'ATA'
+    assert 'raw' not in json.dumps(row['smart_evidence'])
+
+
+def test_nvme_evidence_keeps_units_missing_counters_and_scope_honest(tmp_path):
+    batteries, blocks = sysfs(tmp_path)
+    commands = Commands(disks=[disk('nvme0n1', tran='nvme', rota=False)], smart={'/dev/nvme0n1': smart('/dev/nvme0n1',
+        nvme_smart_health_information_log={'nsid': -1, 'percentage_used': 0, 'critical_warning': 0,
+            'available_spare': 99, 'available_spare_threshold': 10, 'data_units_read': 0,
+            'data_units_written': 892812, 'power_cycles': 623, 'unsafe_shutdowns': 3,
+            'media_errors': 0, 'num_err_log_entries': 5, 'serial_number': 'PRIVATE-IN-LOG'})})
+    result = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)
+    evidence = result['storage'][0]['smart_evidence']
+    assert evidence['protocol'] == 'NVMe' and evidence['scope'] == 'controller' and evidence['namespace_id'] == -1
+    assert evidence['power_cycle_count'] == 623 and evidence['media_data_integrity_errors'] == 0
+    assert evidence['unsafe_shutdowns'] == 3 and evidence['error_information_log_entries'] == 5
+    assert evidence['data_units_read'] is None and evidence['data_units_written'] == 892812
+    assert evidence['data_unit_bytes'] == 512000 and 'rounded-up' in evidence['data_units_note']
+    assert evidence['available_spare_percent'] == 99 and evidence['critical_warning'] == 0
+    assert 'PRIVATE-IN-LOG' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('invalid', [None, True, -1, 2**63, float('nan'), 0.5, {}, []])
+def test_invalid_nvme_counters_are_unknown_without_losing_valid_health(tmp_path, invalid):
+    batteries, blocks = sysfs(tmp_path)
+    # Non-finite JSON itself is refused before parsing; other malformed
+    # individual counters stay unknown without inventing a zero measurement.
+    commands = Commands(disks=[disk('nvme0n1', tran='nvme', rota=False)], smart={'/dev/nvme0n1': smart('/dev/nvme0n1',
+        nvme_smart_health_information_log={'percentage_used': invalid, 'data_units_written': invalid,
+            'media_errors': invalid, 'available_spare': invalid})})
+    row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
+    assert row['wear_percent_used'] is None
+    if type(invalid) is float and invalid != invalid:
+        assert row['smart_evidence'] is None
+    else:
+        assert row['smart_passed'] is True
+        evidence = row['smart_evidence']
+        assert evidence['data_units_written'] is None and evidence['media_data_integrity_errors'] is None
+        assert evidence['available_spare_percent'] is None
+
+
+@pytest.mark.parametrize('change', [
+    {'device': {'name': '/dev/nvme0n1', 'protocol': 'ATA'}},
+    {'nvme_smart_health_information_log': {'critical_warning': 1, 'percentage_used': 0}},
+])
+def test_nvme_protocol_or_warning_contradiction_cannot_claim_healthy(tmp_path, change):
+    batteries, blocks = sysfs(tmp_path)
+    value = smart('/dev/nvme0n1')
+    value.update(change)
+    commands = Commands(disks=[disk('nvme0n1', tran='nvme', rota=False)],
+        smart={'/dev/nvme0n1': value})
+    row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
+    assert row['smart_passed'] is None and row['smart_evidence'] is None and row['wear_percent_used'] is None
+
+
+def test_ata_threshold_flags_are_reported_without_guessing_wear(tmp_path):
+    batteries, blocks = sysfs(tmp_path)
+    commands = Commands(disks=[disk()], smart={'/dev/sda': smart(smartctl={'exit_status': 48}, power_cycle_count=1234)})
+    row = health.collect_native_hardware_health('Linux', command=commands, battery_root=batteries, block_root=blocks)['storage'][0]
+    evidence = row['smart_evidence']
+    assert evidence['native_exit_status'] == 48 and evidence['power_cycle_count'] == 1234
+    assert evidence['current_attribute_threshold_failure'] is True and evidence['past_attribute_threshold_failure'] is True
+    assert row['wear_percent_used'] is None
+
+
+@pytest.mark.parametrize('solid_state,expected', [(True, 'SSD'), (False, 'HDD'), (None, None), (0, None), ('true', None)])
+def test_mac_media_type_uses_explicit_native_boolean_without_inventing_endurance(solid_state, expected):
+    info = {'DeviceIdentifier': 'disk0', 'Whole': True, 'SMARTStatus': 'Verified'}
+    if solid_state is not None:
+        info['SolidState'] = solid_state
+    command = Commands(mac_disks=[{'DeviceIdentifier': 'disk0'}], info={'disk0': info})
+    row = health.collect_native_hardware_health('Darwin', command=command)['storage'][0]
+    assert row['media_type'] == expected and row['wear_percent_used'] is None
+    assert row['media_type_source'] == ('diskutil SolidState' if expected else None)
+    assert row['smart_evidence'] is None
+
+
+@pytest.mark.parametrize('force_refresh', [False, True])
+def test_explicit_refresh_is_one_fresh_bounded_snapshot_not_extra_work(tmp_path, force_refresh):
+    batteries, blocks = sysfs(tmp_path)
+    commands = Commands(disks=[disk('sda', tran='usb')])
+    result = health.collect_native_hardware_health('Linux', command=commands,
+        battery_root=batteries, block_root=blocks, force_refresh=force_refresh)
+    assert len(commands.calls) == 1 and len(result['storage']) == 1
+    assert result['read_only'] is True
+
+
+@pytest.mark.parametrize('force_refresh', [None, 0, 1, 'true'])
+def test_refresh_request_requires_a_strict_boolean_before_any_command(force_refresh):
+    commands = Mock(side_effect=AssertionError('Malformed refresh must not run a provider.'))
+    with pytest.raises(ValueError, match='explicit boolean'):
+        health.collect_native_hardware_health('Linux', command=commands, force_refresh=force_refresh)
+    commands.assert_not_called()
 
 
 @pytest.mark.parametrize('change', [

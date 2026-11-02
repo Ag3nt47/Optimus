@@ -1,6 +1,6 @@
 """A small live-item ring for the pinned worker panel; progress stays native."""
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .live_activity import WorkerActivityRing
@@ -53,6 +53,32 @@ class CompactWorkerActivityRing(WorkerActivityRing):
         self.setFixedSize(round(48 * scale), round(54 * scale))
         self.update()
 
+    def caption_presentation(self):
+        """Fit a complete short caption; the full phase stays accessible."""
+        caption = 'Item' if self.phase_caption == 'Current item' else self.phase_caption
+        aliases = {'Download': 'Get', 'Uninstall': 'Remove', 'Optimize': 'Tune',
+            'Working': 'Work', 'Waiting': 'Wait', 'Devices': 'Device', 'Drivers': 'Driver'}
+        rectangle = QRectF(0, 44, 48, 10)
+        font = QFont(self.font())
+        font.setBold(False)
+        for text in (caption, aliases.get(caption, 'Item')):
+            for pixels in (9, 8, 7):
+                font.setPixelSize(pixels)
+                bounds = QFontMetricsF(font).tightBoundingRect(text)
+                if bounds.width() <= rectangle.width() and bounds.height() <= rectangle.height():
+                    baseline = QPointF(rectangle.center().x() - bounds.center().x(),
+                        rectangle.center().y() - bounds.center().y())
+                    return {'text': text, 'font': font, 'baseline': baseline,
+                        'bounds': bounds.translated(baseline), 'rectangle': rectangle}
+        # All native phase captions have a short alternative; retain a bounded
+        # meaningful fallback for an unexpected font or externally supplied text.
+        font.setPixelSize(7)
+        bounds = QFontMetricsF(font).tightBoundingRect('Item')
+        baseline = QPointF(rectangle.center().x() - bounds.center().x(),
+            rectangle.center().y() - bounds.center().y())
+        return {'text': 'Item', 'font': font, 'baseline': baseline,
+            'bounds': bounds.translated(baseline), 'rectangle': rectangle}
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -76,8 +102,6 @@ class CompactWorkerActivityRing(WorkerActivityRing):
         painter.setFont(font)
         painter.setPen(QColor('#edf6ff'))
         painter.drawText(ellipse, Qt.AlignCenter, self.value_text())
-        font.setPixelSize(9)
-        font.setBold(False)
-        painter.setFont(font)
-        caption = painter.fontMetrics().elidedText(self.phase_caption, Qt.ElideRight, 48)
-        painter.drawText(QRectF(0, 44, 48, 10), Qt.AlignCenter, caption)
+        caption = self.caption_presentation()
+        painter.setFont(caption['font'])
+        painter.drawText(caption['baseline'], caption['text'])

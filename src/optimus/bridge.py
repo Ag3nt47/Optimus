@@ -39,6 +39,7 @@ class PowerShellBridge:
         self._errors: list[str] = []
         self.stop_controller = None
         self._stop_operations = {}
+        self._retire_when_idle = False
 
     def _bind_emergency_stop(self, controller):
         if self.stop_controller is not controller:
@@ -86,6 +87,7 @@ class PowerShellBridge:
                                        bufsize=1, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), env=child_environment)
             self._process = process
             self._closing_process = None
+            self._retire_when_idle = False
         target_queue = self._replies
         def read_output():
             try:
@@ -118,6 +120,7 @@ class PowerShellBridge:
                                 self._pending.pop(identity, None)
                             self._complete_stop_operation(identity, value)
                             target_queue.put(value)
+                            self._retire_idle_host()
                     except json.JSONDecodeError:
                         continue
             finally:
@@ -272,6 +275,7 @@ class PowerShellBridge:
                     # Never remove an in-flight request marker on a timeout:
                     # its native worker still needs to observe the request.
                     self._clear_cancellation_marker(request_id)
+                self._retire_idle_host()
 
     def _clear_cancellation_marker(self, request_id):
         with self._pending_lock:
@@ -306,6 +310,29 @@ class PowerShellBridge:
         info = directory.lstat()
         if (info.st_dev, info.st_ino) != record['identity']:
             raise ValueError('The owned native cancellation directory changed.')
+
+    def close_when_idle(self):
+        """Retire a disposable reader after its exact outstanding reply arrives."""
+        with self._pending_lock:
+            self._retire_when_idle = True
+        self._retire_idle_host()
+
+    def _retire_idle_host(self):
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            with self._pending_lock:
+                ready = (self._retire_when_idle and not self._busy
+                    and not self._pending and not self._stop_operations)
+            if not ready:
+                return False
+            try:
+                self.close()
+                return True
+            except (OSError, ValueError, RuntimeError):
+                return False  # Preserve a known observation; retry at next idle boundary.
+        finally:
+            self._lock.release()
 
     def close(self):
         with self._pending_lock:

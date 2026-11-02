@@ -51,7 +51,8 @@ def no_native_operations(monkeypatch):
 
 def backend(operation=None):
     return SimpleNamespace(hardware_health_history=operation or Mock(return_value=history()),
-        hardware_health_scan=Mock(side_effect=AssertionError('No fresh native hardware scan.')))
+        hardware_health_scan=Mock(side_effect=AssertionError('No fresh native hardware scan.')),
+        hardware_health_details=Mock(side_effect=AssertionError('Refresh requires an explicit fixture click.')))
 
 
 def wait_until(app, predicate, seconds=3):
@@ -70,17 +71,17 @@ def dispose(app, dialog):
     app.processEvents()
 
 
-def test_prepared_history_is_passive_and_refresh_remains_disabled(app):
+def test_prepared_history_is_passive_and_explicit_refresh_is_available(app):
     service = backend()
     dialog = dialogs.SnapshotHealthDialog(service, report(), history=history())
     try:
         dialog.show()
         app.processEvents()
         assert dialog.panel.report['batteries'][0]['capacity_retained_percent'] == 82
-        assert not dialog.panel.refresh_button.isEnabled()
-        dialog.panel.refresh_button.click()
+        assert dialog.panel.refresh_button.isEnabled()
         service.hardware_health_scan.assert_not_called()
         service.hardware_health_history.assert_not_called()
+        service.hardware_health_details.assert_not_called()
         assert 'Saved scan snapshot' in dialog.snapshot_note.text()
         assert 'Local history loaded' in dialog.history_status.text()
         assert 'saved snapshot' in dialog.panel.status.text()
@@ -122,7 +123,7 @@ def test_constructor_queues_only_the_local_history_read_on_a_worker(app):
         wait_until(app, lambda: operation.call_count == 1 and dialog._worker is None)
         assert called_on and called_on[0] != main_thread
         assert 'Local history loaded' in dialog.history_status.text()
-        assert not dialog.panel.refresh_button.isEnabled()
+        assert dialog.panel.refresh_button.isEnabled()
         assert not dialog.findChildren(QThreadPool)
         service.hardware_health_scan.assert_not_called()
     finally:
@@ -136,7 +137,7 @@ def test_invalid_or_unavailable_prepared_history_shows_visible_failure(app, payl
     try:
         assert 'History unavailable' in dialog.history_status.text()
         assert len(dialog.panel.cards) == 2
-        assert not dialog.panel.refresh_button.isEnabled()
+        assert dialog.panel.refresh_button.isEnabled()
         service.hardware_health_history.assert_not_called()
     finally:
         dispose(app, dialog)
@@ -150,7 +151,7 @@ def test_failed_local_history_reader_keeps_snapshot_and_does_not_show_private_ex
         wait_until(app, lambda: dialog._worker is None and service.hardware_health_history.called)
         assert 'History unavailable' in dialog.history_status.text()
         assert 'PRIVATE-FILE-CONTENT' not in dialog.history_status.text()
-        assert len(dialog.panel.cards) == 2 and not dialog.panel.refresh_button.isEnabled()
+        assert len(dialog.panel.cards) == 2 and dialog.panel.refresh_button.isEnabled()
     finally:
         dispose(app, dialog)
 
@@ -199,7 +200,7 @@ def test_deleting_closed_dialog_while_file_read_runs_keeps_global_worker_alive(a
         app.processEvents()
 
 
-def test_later_snapshot_update_does_not_reenable_refresh_or_query_history(app):
+def test_later_snapshot_update_keeps_refresh_available_without_querying(app):
     service = backend()
     dialog = dialogs.SnapshotHealthDialog(service, report(), history=history())
     try:
@@ -209,7 +210,191 @@ def test_later_snapshot_update_does_not_reenable_refresh_or_query_history(app):
         dialog.set_report(new)
         assert dialog.panel.report['batteries'][0]['capacity_retained_percent'] == 75
         assert 'partial' in dialog.panel.status.text() and 'snapshot' in dialog.panel.status.text()
-        assert not dialog.panel.refresh_button.isEnabled()
+        assert dialog.panel.refresh_button.isEnabled()
         service.hardware_health_history.assert_not_called()
+        service.hardware_health_details.assert_not_called()
+    finally:
+        dispose(app, dialog)
+
+
+def test_explicit_refresh_is_async_forced_and_updates_report_history_while_owner_busy(app):
+    service = backend()
+    fresh = report()
+    fresh['captured_at'] += 60
+    fresh['batteries'][0]['capacity_retained_percent'] = 81
+    called_on = []
+    def details(**kwargs):
+        called_on.append(threading.get_ident())
+        return {'report': fresh, 'history': history()}
+    service.hardware_health_details.side_effect = details
+    owner = QWidget()
+    owner.busy = True
+    dialog = dialogs.SnapshotHealthDialog(service, report(), owner, history=history())
+    changed = Mock()
+    dialog.reportRefreshed.connect(changed)
+    try:
+        service.hardware_health_details.assert_not_called()
+        dialog.panel.refresh_button.click()
+        wait_until(app, lambda: changed.called and dialog._worker is None)
+        assert len(called_on) == 1 and called_on[0] != threading.get_ident()
+        kwargs = service.hardware_health_details.call_args.kwargs
+        assert kwargs == {'refresh': True, 'force_refresh': True, 'cancel_event': dialog._refresh_cancel}
+        assert not kwargs['cancel_event'].is_set()
+        assert dialog.panel.report == fresh and changed.call_args.args[0] == fresh
+        assert 'fresh read-only observation' in dialog.panel.status.text()
+        assert 'Fresh hardware readings and local history loaded' in dialog.history_status.text()
+        assert dialog.panel.refresh_button.isEnabled() and owner.busy is True
+        service.hardware_health_scan.assert_not_called()
+        service.hardware_health_history.assert_not_called()
+    finally:
+        dispose(app, dialog)
+        owner.deleteLater()
+        app.processEvents()
+
+
+def test_refresh_before_initial_history_timer_runs_replaces_that_read(app):
+    service = backend()
+    service.hardware_health_details.side_effect = None
+    service.hardware_health_details.return_value = {'report': report(), 'history': history()}
+    dialog = dialogs.SnapshotHealthDialog(service, report())
+    try:
+        dialog.panel.refresh_button.click()
+        wait_until(app, lambda: service.hardware_health_details.called and dialog._worker is None)
+        service.hardware_health_details.assert_called_once()
+        service.hardware_health_history.assert_not_called()
+        assert dialog.panel.refresh_button.isEnabled()
+    finally:
+        dispose(app, dialog)
+
+
+def test_refresh_queues_once_behind_inflight_local_history_without_blocking(app):
+    entered, release = threading.Event(), threading.Event()
+    def read_local():
+        entered.set()
+        release.wait(3)
+        return history()
+    service = backend(Mock(side_effect=read_local))
+    service.hardware_health_details.side_effect = None
+    service.hardware_health_details.return_value = {'report': report(), 'history': history()}
+    dialog = dialogs.SnapshotHealthDialog(service, report())
+    try:
+        wait_until(app, entered.is_set)
+        dialog.panel.refresh_button.click()
+        dialog.panel.refresh_button.click()
+        assert dialog._refresh_pending is True and not dialog.panel.refresh_button.isEnabled()
+        service.hardware_health_details.assert_not_called()
+        release.set()
+        wait_until(app, lambda: service.hardware_health_details.called and dialog._worker is None)
+        service.hardware_health_details.assert_called_once()
+        assert dialog.panel.refresh_button.isEnabled()
+    finally:
+        release.set()
+        dispose(app, dialog)
+
+
+def test_close_cancels_refresh_without_destroying_worker_or_emitting_stale_result(app):
+    entered, release = threading.Event(), threading.Event()
+    def details(**kwargs):
+        entered.set()
+        release.wait(3)
+        return {'report': report(), 'history': history()}
+    service = backend()
+    service.hardware_health_details.side_effect = details
+    dialog = dialogs.SnapshotHealthDialog(service, report(), history=history())
+    changed = Mock()
+    dialog.reportRefreshed.connect(changed)
+    try:
+        dialog.panel.refresh_button.click()
+        wait_until(app, entered.is_set)
+        token = id(dialog._worker)
+        assert token in dialogs._HISTORY_WORKERS
+        dialog._refresh_hardware()  # A repeated request cannot queue another scan.
+        assert not dialog._refresh_pending
+        started = time.monotonic()
+        dialog.close()
+        assert time.monotonic() - started < 1
+        assert service.hardware_health_details.call_args.kwargs['cancel_event'].is_set()
+        assert token in dialogs._HISTORY_WORKERS
+        dialog.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        assert not isValid(dialog)
+        release.set()
+        wait_until(app, lambda: token not in dialogs._HISTORY_WORKERS)
+        service.hardware_health_details.assert_called_once()
+        changed.assert_not_called()
+    finally:
+        release.set()
+        if isValid(dialog):
+            dispose(app, dialog)
+
+
+def test_close_discards_pending_refresh_after_local_history(app):
+    entered, release = threading.Event(), threading.Event()
+    def read_local():
+        entered.set()
+        release.wait(3)
+        return history()
+    service = backend(Mock(side_effect=read_local))
+    dialog = dialogs.SnapshotHealthDialog(service, report())
+    try:
+        wait_until(app, entered.is_set)
+        token = id(dialog._worker)
+        dialog.panel.refresh_button.click()
+        assert dialog._refresh_pending
+        dialog.close()
+        release.set()
+        wait_until(app, lambda: token not in dialogs._HISTORY_WORKERS)
+        service.hardware_health_details.assert_not_called()
+    finally:
+        release.set()
+        dispose(app, dialog)
+
+
+@pytest.mark.parametrize('invalid', [None, {}, {'report': {}}, {'report': {'read_only': False}}])
+def test_malformed_refresh_keeps_previous_readings_and_allows_retry(app, invalid):
+    service = backend()
+    service.hardware_health_details.side_effect = None
+    service.hardware_health_details.return_value = invalid
+    dialog = dialogs.SnapshotHealthDialog(service, report(), history=history())
+    try:
+        before = dialog.panel.report
+        dialog.panel.refresh_button.click()
+        wait_until(app, lambda: service.hardware_health_details.called and dialog._worker is None)
+        assert dialog.panel.report == before
+        assert 'refresh unavailable' in dialog.panel.status.text()
+        assert 'saved readings remain visible' in dialog.history_status.text()
+        assert dialog.panel.refresh_button.isEnabled()
+    finally:
+        dispose(app, dialog)
+
+
+def test_failed_refresh_hides_private_exception_and_preserves_copyable_report(app):
+    service = backend()
+    service.hardware_health_details.side_effect = OSError('PRIVATE-DEVICE-PATH')
+    dialog = dialogs.SnapshotHealthDialog(service, report(), history=history())
+    try:
+        dialog.panel.refresh_button.click()
+        wait_until(app, lambda: service.hardware_health_details.called and dialog._worker is None)
+        assert 'PRIVATE-DEVICE-PATH' not in dialog.panel.report_text() + dialog.history_status.text()
+        assert '82.0%' in dialog.panel.report_text()
+        assert dialog.panel.refresh_button.isEnabled()
+    finally:
+        dispose(app, dialog)
+
+
+def test_fresh_report_with_unavailable_history_keeps_prior_graph(app):
+    service = backend()
+    service.hardware_health_details.side_effect = None
+    fresh = report()
+    fresh['batteries'][0]['capacity_retained_percent'] = 79
+    service.hardware_health_details.return_value = {'report': fresh, 'history': {'status': 'unavailable'}}
+    dialog = dialogs.SnapshotHealthDialog(service, report(), history=history())
+    dialog.panel.history_plot.note.setText('Fixture prior history remains available.')
+    try:
+        dialog.panel.refresh_button.click()
+        wait_until(app, lambda: service.hardware_health_details.called and dialog._worker is None)
+        assert dialog.panel.report == fresh
+        assert dialog.panel.history_plot.note.text() == 'Fixture prior history remains available.'
+        assert 'prior graph data remains visible' in dialog.history_status.text()
     finally:
         dispose(app, dialog)

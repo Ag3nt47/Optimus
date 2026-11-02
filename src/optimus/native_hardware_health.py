@@ -8,6 +8,13 @@ Native contracts: https://docs.kernel.org/power/power_supply_class.html
 https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-class-power
 https://man7.org/linux/man-pages/man8/lsblk.8.html (upstream util-linux manual)
 https://github.com/smartmontools/smartmontools/blob/main/src/smartctl.8.in
+https://github.com/smartmontools/smartmontools/blob/main/src/nvmeprint.cpp
+https://github.com/smartmontools/smartmontools/blob/main/src/ataprint.cpp
+NVMe SMART/Health semantics: NVM Express Base Specification 2.0c, Figure 207
+(https://www.nvmexpress.org/wp-content/uploads/NVM-Express-Base-Specification-2.0c-2022.10.04-Ratified.pdf;
+copyright 2008-2022 NVM Express, Inc.). Endurance used is a vendor estimate,
+not failure probability or remaining calendar life. Its integer zero does not
+prove an unused drive. ATA vendor-normalized attributes are not converted.
 https://support.apple.com/en-us/102589
 https://support.apple.com/en-ie/guide/mac-help/mchlp2548/27/mac/27
 Apple utility plist/JSON keys are version-dependent and used only when present.
@@ -271,6 +278,56 @@ def _identity(row, value=None, source=None):
                identity_quality='stable' if value else 'unavailable')
 
 
+def _media_type(rotational):
+    # lsblk ROTA is a boolean (older versions also emit integer 0/1). Neither
+    # an NVMe bus label nor a missing/malformed flag establishes physical media.
+    if type(rotational) is bool or type(rotational) is int and rotational in (0, 1):
+        return 'HDD' if rotational else 'SSD'
+    return None
+
+
+def _endurance_fields(media_type=None, source=None):
+    return {'media_type': media_type, 'media_type_source': source if media_type else None,
+        'wear_counter_kind': None, 'wear_percent_used_source': None,
+        'wear_percent_used_note': ('SSD endurance is not applicable to rotational media.' if media_type == 'HDD'
+            else 'No verified SSD endurance estimate is exposed.' if media_type == 'SSD'
+            else 'Physical media type is unconfirmed; no SSD endurance estimate is assigned.'),
+        'smart_evidence': None}
+
+
+def _smart_evidence(smart, kind, native_code, passed):
+    count = lambda value, minimum=0: _number(value, minimum=minimum, maximum=2**63 - 1, integer=True)
+    result = {'source': 'Existing trusted smartctl read-only -H -A JSON',
+        'protocol': 'NVMe' if kind == 'nvme' else 'ATA', 'native_exit_status': native_code,
+        'power_cycle_count': count(smart.get('power_cycle_count'))}
+    if kind != 'nvme':
+        # These are actual smartctl status flags, not guessed vendor attribute
+        # counts, a wear percentage or a prediction of remaining lifetime.
+        result.update(current_attribute_threshold_failure=bool(native_code & 16),
+            past_attribute_threshold_failure=bool(native_code & 32))
+        return result
+    nvme = _mapping(smart.get('nvme_smart_health_information_log'))
+    warning = _number(nvme.get('critical_warning'), maximum=255, integer=True)
+    if warning is not None and bool(warning) != (not passed):
+        raise ValueError('NVMe warning flags contradict the reported SMART health.')
+    namespace = _number(nvme.get('nsid'), minimum=-1, maximum=2**32 - 1, integer=True)
+    result.update(scope='controller' if namespace == -1 else 'namespace' if namespace is not None and namespace > 0 else 'unspecified',
+        namespace_id=namespace, critical_warning=warning,
+        available_spare_percent=_number(nvme.get('available_spare'), maximum=100, integer=True),
+        available_spare_threshold_percent=_number(nvme.get('available_spare_threshold'), maximum=100, integer=True),
+        power_cycle_count=count(nvme.get('power_cycles')),
+        media_data_integrity_errors=count(nvme.get('media_errors')),
+        error_information_log_entries=count(nvme.get('num_err_log_entries')),
+        unsafe_shutdowns=count(nvme.get('unsafe_shutdowns')),
+        # Figure 207 defines zero here as not reported, unlike a genuine
+        # zero-valued error count. Counts are rounded-up groups, not exact bytes.
+        data_units_read=count(nvme.get('data_units_read'), minimum=1),
+        data_units_written=count(nvme.get('data_units_written'), minimum=1),
+        data_unit_bytes=512000,
+        data_units_note='Reported counts are rounded-up groups of 1,000 x 512 bytes, excluding metadata. Zero means not reported; counts are not exact transferred byte totals.')
+    return result
+
+
 def _sysfs_device(path, root):
     resolved = path.resolve(strict=True)
     boundary = Path('/sys') if root == Path('/sys/class/power_supply') or root == Path('/sys/class/block') else root.resolve(strict=True)
@@ -367,6 +424,7 @@ def _linux_storage(result, tools, block_root, budget, command):
                'health_status': None, 'smart_passed': None, 'operational_status': None,
                'wear_percent_used': None, 'temp_c': None, 'power_on_hours': None,
                'uncorrected_read_errors': None, 'uncorrected_write_errors': None}
+        row.update(_endurance_fields(_media_type(source.get('rota')), 'lsblk ROTA'))
         _identity(row)
         try:
             device = _sysfs_device(block_root / name, block_root)
@@ -387,21 +445,31 @@ def _linux_storage(result, tools, block_root, budget, command):
             continue
         try:
             value = _invoke(tools['smartctl'], ['-j', '-H', '-A', '-q', 'noserial', '-n', 'standby,3', '-d', kind, '--', '/dev/' + name], budget, command, seconds=2)
-            smart = json.loads(value['stdout'], parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Non-finite SMART metadata.')))
+            smart = _mapping(json.loads(value['stdout'], parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Non-finite SMART metadata.'))))
             metadata = _mapping(_mapping(smart).get('smartctl'))
             native_code = metadata.get('exit_status')
+            device_metadata = _mapping(smart.get('device'))
             if (type(native_code) is not int or native_code != value['exit_code'] or not 0 <= native_code <= 255
-                    or native_code & 7 or _mapping(smart.get('device')).get('name') != '/dev/' + name):
+                    or native_code & 7 or device_metadata.get('name') != '/dev/' + name
+                    or device_metadata.get('protocol') not in (None, 'NVMe' if kind == 'nvme' else 'ATA')):
                 raise ValueError('SMART device, power state or read completion was unavailable.')
             passed = _mapping(smart.get('smart_status')).get('passed')
             if type(passed) is not bool or bool(native_code & 8) != (not passed):
                 raise ValueError('SMART health status was contradictory or unavailable.')
-            row.update(smart_passed=passed, health_status='Passed' if passed else 'Failed', health_source='Existing trusted smartctl read-only health')
+            evidence = _smart_evidence(smart, kind, native_code, passed)
+            row.update(smart_passed=passed, health_status='Passed' if passed else 'Failed', health_source='Existing trusted smartctl read-only health',
+                smart_evidence=evidence)
             row['temp_c'] = _number(_mapping(smart.get('temperature')).get('current'), minimum=-40, maximum=150)
             row['power_on_hours'] = _number(_mapping(smart.get('power_on_time')).get('hours'), maximum=10 ** 9, integer=True)
-            nvme = smart.get('nvme_smart_health_information_log', {})
-            if isinstance(nvme, dict):
-                row['wear_percent_used'] = _number(nvme.get('percentage_used'), maximum=255, integer=True)
+            nvme = _mapping(smart.get('nvme_smart_health_information_log'))
+            if kind == 'nvme' and row['media_type'] == 'SSD':
+                wear = _number(nvme.get('percentage_used'), maximum=255, integer=True)
+                if wear is not None:
+                    row.update(wear_percent_used=wear, wear_counter_kind='nvme_percentage_used',
+                        wear_percent_used_source='smartctl NVMe SMART/Health Information log percentage_used',
+                        wear_percent_used_note=('Provider reports 0% estimated endurance used; this does not prove an unused drive.' if wear == 0
+                            else 'Provider estimate of rated endurance used; values may exceed 100%, and 255 means more than 254%.')
+                            + ' It is not a failure probability or a prediction of remaining years.')
         except (OSError, ValueError, json.JSONDecodeError):
             row['health_unavailable_reason'] = 'SMART health could not be read without extra permissions, waking a sleeping device or changing device state.'
     result['capabilities']['storage_health'] = ('unavailable' if invalid_disk and not result['storage'] else 'not_present' if not result['storage'] else 'available'
@@ -474,6 +542,7 @@ def _mac_storage(result, tools, budget, command):
                'model': None, 'size_bytes': None, 'bus_type': None, 'health_status': None,
                'smart_passed': None, 'temp_c': None, 'wear_percent_used': None, 'power_on_hours': None,
                'uncorrected_read_errors': None, 'uncorrected_write_errors': None}
+        row.update(_endurance_fields())
         _identity(row)  # diskN and filesystem UUIDs cannot identify physical hardware across scans.
         result['storage'].append(row)
         try:
@@ -487,6 +556,9 @@ def _mac_storage(result, tools, budget, command):
             row.update(name=_text(data.get('MediaName')) or name, model=_text(data.get('MediaName')),
                        size_bytes=_number(data.get('TotalSize'), maximum=10 ** 18, integer=True),
                        bus_type=_text(data.get('BusProtocol')))
+            solid_state = data.get('SolidState')
+            media_type = 'SSD' if solid_state is True else 'HDD' if solid_state is False else None
+            row.update(_endurance_fields(media_type, 'diskutil SolidState'))
             status = data.get('SMARTStatus')
             row['smart_passed'] = True if status == 'Verified' else False if status == 'Failing' else None
             row['health_status'] = status if status in ('Verified', 'Failing') else None
@@ -500,13 +572,18 @@ def _mac_storage(result, tools, budget, command):
 
 def collect_native_hardware_health(platform_name, cancel_event=None, *, command=None,
                                   battery_root=Path('/sys/class/power_supply'),
-                                  block_root=Path('/sys/class/block'), max_seconds=12, clock=time.monotonic):
+                                  block_root=Path('/sys/class/block'), max_seconds=12, clock=time.monotonic,
+                                  force_refresh=False):
     """Collect one native snapshot; injected commands are fixture-only byte results.
 
     Command contract: ``(argv, timeout=..., cancel_event=...)`` returns an object
     with integer ``exit_code`` and bounded byte ``stdout``/``stderr``. Actual
     commands always use fixed root-trusted executables and exact read-only args.
+    Every invocation already obtains a fresh snapshot. ``force_refresh`` is a
+    strict boolean accepted for controller parity; it adds no query or caching.
     """
+    if type(force_refresh) is not bool:
+        raise ValueError('Native hardware refresh must be an explicit boolean.')
     if type(max_seconds) not in (int, float) or not math.isfinite(max_seconds) or not 1 <= max_seconds <= 30:
         raise ValueError('Native hardware health collection requires a 1 to 30 second budget.')
     result = {'schema': 1, 'platform': platform_name, 'captured_at': time.time(), 'read_only': True,

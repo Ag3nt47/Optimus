@@ -1,6 +1,7 @@
 """Battery and physical-drive presentation never queries or changes hardware."""
 import copy
 import os
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -8,7 +9,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QProgressBar, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QProgressBar, QWidget
 
 from optimus.widgets.hardware_health_panel import HardwareHealthPanel, hardware_health_summary
 from optimus.widgets.theme import build_qss
@@ -22,6 +23,7 @@ def fixture_report():
             'source': 'Fixture battery provider', 'note': 'Fixture telemetry only.'}],
         'drives': [{'name': 'Fixture SSD', 'device_id': 'fixture-drive-0', 'volumes': ['C:', 'D:'],
             'media_type': 'SSD', 'health_status': 'Healthy', 'wear_percent_used': 14,
+            'wear_evidence': 'provider_estimate',
             'temperature_c': 42.5, 'power_on_hours': 12000, 'uncorrected_read_errors': 0,
             'uncorrected_write_errors': 0, 'source': 'Fixture storage provider', 'note': 'Fixture telemetry only.'}],
         'errors': []}
@@ -94,7 +96,7 @@ def test_battery_retention_is_full_charge_vs_design_not_current_charge(panel):
 def test_drive_wear_is_life_used_and_errors_preserve_valid_zero(panel):
     panel.set_report(fixture_report())
     drive = panel.cards[1]
-    assert drive.labels['wear'].text() == 'SSD life used: 14.0%'
+    assert drive.labels['wear'].text() == 'Estimated SSD endurance used: 14.0%'
     assert 'not life remaining or a health score' in drive.labels['wear'].toolTip()
     assert drive.labels['read_errors'].text() == 'Uncorrected read errors: 0'
     assert drive.labels['write_errors'].text() == 'Uncorrected write errors: 0'
@@ -266,3 +268,116 @@ def test_compact_summary_has_evidence_and_never_invents_health_score():
     assert 'health score' not in text and '86%' not in text and 'charge level' not in text
     assert hardware_health_summary(None).endswith('unavailable.')
     assert value == before
+
+
+def test_all_current_and_history_labels_support_mouse_and_keyboard_selection(panel):
+    panel.set_report(fixture_report())
+    panel.set_history({'schema': 1, 'series': [], 'note': 'Fixture history note.'})
+    for label in panel.findChildren(QLabel):
+        assert label.textInteractionFlags() & Qt.TextSelectableByMouse
+        assert label.textInteractionFlags() & Qt.TextSelectableByKeyboard
+    label = panel.cards[0].labels['full_charge']
+    label.setSelection(0, len(label.text()))
+    assert label.selectedText() == label.text()
+
+
+def test_copy_report_is_explicit_complete_plain_text_and_excludes_raw_identifiers(panel, monkeypatch):
+    value = fixture_report()
+    value['warnings'] = ['Fixture full provider warning.']
+    value['drives'][0]['name'] = '<b>Plain fixture drive name</b>'
+    value['drives'][0]['device_id'] = 'PRIVATE-RAW-ID-EXCLUDED'
+    panel.set_report(value)
+    clipboard = SimpleNamespace(setText=Mock())
+    monkeypatch.setattr(QApplication, 'clipboard', lambda: clipboard)
+    clipboard.setText.assert_not_called()
+    panel.copy_button.click()
+    clipboard.setText.assert_called_once_with(panel.report_text())
+    text = clipboard.setText.call_args.args[0]
+    assert 'Captured 2026-' in text and 'UTC' in text
+    assert all(fragment in text for fragment in ('82.5%', '41,250 mWh', '50,000 mWh',
+        'Estimated SSD endurance used: 14.0%', 'Uncorrected read errors: 0',
+        'Fixture full provider warning.', '<b>Plain fixture drive name</b>'))
+    assert 'PRIVATE-RAW-ID-EXCLUDED' not in text
+
+
+def test_additional_readings_assessment_and_analysis_are_visible_and_copied(panel):
+    value = fixture_report()
+    value['drives'][0].update(assessment={'status': 'review', 'summary': 'Provider counter needs context.'},
+        additional_readings=[{'label': 'Reported wear counter (unverified)', 'value': '0', 'unit': '%',
+            'source': 'Fixture generic storage provider', 'confidence': 'unverified_zero'},
+            {'label': 'Available spare', 'value': '99 %', 'unit': '%', 'source': 'Fixture NVMe provider',
+             'confidence': 'provider_estimate'}],
+        analysis_notes=['A generic zero is not proof of unused endurance.'])
+    panel.set_report(value)
+    labels = panel.cards[1].labels
+    assert labels['assessment'].text() == 'Assessment: Provider counter needs context.'
+    assert labels['additional_0'].text() == 'Reported wear counter (unverified): 0 %'
+    assert 'Confidence: unverified zero' in labels['additional_0'].toolTip()
+    assert 'Fixture generic storage provider' in labels['additional_0'].toolTip()
+    assert labels['additional_1'].text() == 'Available spare: 99 %'
+    assert 'A generic zero' in labels['analysis_0'].text()
+    assert all(label.text() in panel.report_text() for label in labels.values())
+    assert 'Source: Fixture generic storage provider' in panel.report_text()
+    assert 'Confidence: unverified zero' in panel.report_text()
+
+
+def test_hdd_does_not_present_ssd_endurance_even_if_raw_counter_is_zero(panel):
+    value = fixture_report()
+    value['drives'][0].update(media_type='HDD', wear_percent_used=0, reported_wear_percent_used=0,
+        wear_evidence='not_applicable', wear_percent_used_note='Endurance does not apply to an HDD.')
+    panel.set_report(value)
+    label = panel.cards[1].labels['wear']
+    assert label.text() == 'Estimated SSD endurance used: Not applicable (HDD)'
+    assert 'does not apply' in label.toolTip()
+
+
+@pytest.mark.parametrize('counter', [0, 14, 112])
+def test_legacy_wear_without_provenance_is_unverified_and_requests_fresh_check(panel, counter):
+    value = fixture_report()
+    value['drives'][0].pop('wear_evidence')
+    value['drives'][0]['wear_percent_used'] = counter
+    panel.set_report(value)
+    labels = panel.cards[1].labels
+    assert labels['wear'].text().endswith('Unavailable (saved reading needs refresh)')
+    assert 'Refresh hardware check' in labels['wear'].toolTip()
+    assert labels['legacy_wear'].text() == f'Saved wear counter (unverified): {counter:.1f}%'
+    assert labels['legacy_wear'].text() in panel.report_text()
+
+
+@pytest.mark.parametrize('media,evidence,counter,expected', [
+    ('SSD', 'provider_estimate', 0, 'Unavailable'),
+    ('SSD', 'provider_estimate', 255, 'Unavailable'),
+    ('SSD', 'nvme_estimate', 0, '0.0%'),
+    ('SSD', 'nvme_estimate', 255, '255.0%'),
+    ('SSD', 'nvme_estimate', 256, 'Unavailable'),
+    ('Unknown', 'nvme_estimate', 12, 'Unavailable'),
+    ('HDD', 'provider_estimate', 12, 'Not applicable (HDD)'),
+    ('SSD', 'unverified_zero', 12, 'Unavailable'),
+])
+def test_endurance_display_requires_matching_media_and_verified_counter_evidence(panel, media, evidence, counter, expected):
+    value = fixture_report()
+    value['drives'][0].update(media_type=media, wear_evidence=evidence, wear_percent_used=counter)
+    panel.set_report(value)
+    assert panel.cards[1].labels['wear'].text() == 'Estimated SSD endurance used: ' + expected
+
+
+@pytest.mark.parametrize('evidence', ['provider_estimate', 'nvme_estimate', None])
+@pytest.mark.parametrize('counter', [None, '12', True, False, float('nan'), float('inf'), {}, [], 10**1000])
+def test_malformed_saved_endurance_never_reaches_numeric_comparison(panel, evidence, counter):
+    value = fixture_report()
+    value['drives'][0].update(wear_evidence=evidence, wear_percent_used=counter)
+    panel.set_report(value)
+    labels = panel.cards[1].labels
+    assert labels['wear'].text() == 'Estimated SSD endurance used: Unavailable'
+    assert 'legacy_wear' not in labels
+
+
+def test_copy_and_refresh_buttons_remain_reachable_with_late_large_font(panel, app):
+    panel.set_report(fixture_report())
+    panel.resize(450, 650)
+    panel.setStyleSheet('QWidget {font-size:24px;}')
+    settle(app)
+    for button in (panel.copy_button, panel.refresh_button):
+        assert panel.rect().contains(button.rect().translated(button.mapTo(panel, QPoint())))
+        assert button.width() >= button.fontMetrics().horizontalAdvance(button.text()) + 8
+    assert panel.scroll.horizontalScrollBar().maximum() == 0

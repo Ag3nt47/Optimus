@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QComboBox, QFormLayout, QLabel, QSizePolicy,
 METRICS = {
     'capacity_retained_percent': 'Battery capacity retained',
     'cycle_count': 'Charge cycles',
-    'wear_percent_used': 'SSD life used',
+    'wear_percent_used': 'Estimated SSD endurance used',
     'temperature_c': 'Temperature', 'temp_c': 'Temperature',
     'power_on_hours': 'Power-on hours',
     'uncorrected_read_errors': 'Uncorrected read errors',
@@ -356,8 +356,12 @@ class HardwareHealthPlotWidget(QWidget):
         self.device_combo.setToolTip(self.device_combo.currentText())
         self.metric_combo.setToolTip(self.metric_combo.currentText())
         if row is not None:
+            meaning = {
+                'provider_condition_code': 'Provider conditions are categorical markers, not a calculated health score. ',
+                'wear_percent_used': 'SSD endurance is a provider estimate of life used, not remaining life or a failure probability. ',
+                'capacity_retained_percent': 'Battery capacity compares reported full-charge capacity with design capacity; it is not current charge. ',
+            }.get(row['metric'], 'Reported counters are observations, not a prediction of remaining service life. ')
             self.description.setText(('First analysis is marked as the baseline. Missing measurements create gaps. '
                 if row['stable'] else 'Hardware identity is unverified. Samples are isolated; no line joins them. ')
-                + ('Provider conditions are categorical markers, not a calculated health score. '
-                   if row['metric'] == 'provider_condition_code' else 'SSD wear means life used, not life remaining. ')
+                + meaning
                 + 'Hover a point for its timestamp and value.')

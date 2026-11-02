@@ -20,6 +20,8 @@ _MAX_BYTES = 32 * 1024 * 1024
 _MAX_SCANS = 20000
 _MAX_DEVICES = 256
 _SCAN = re.compile(r'[a-f0-9]{32}\Z')
+_MEDIA = frozenset(('HDD', 'SSD', 'SCM', 'Unspecified', 'Unknown'))
+_WEAR_EVIDENCE = frozenset(('not_applicable', 'unavailable', 'unverified_zero', 'provider_estimate', 'nvme_estimate'))
 
 
 def _metric(kind, key, value):
@@ -34,7 +36,7 @@ def _metric(kind, key, value):
     elif key == 'capacity_retained_percent':
         valid = _number(value, 0, 200)
     elif key == 'wear_percent_used':
-        valid = _number(value, 0, 254)
+        valid = _number(value, 0, 255)
     else:
         valid = value if type(value) is int and 0 <= value <= 2**63 - 1 else None
     if valid is None:
@@ -50,13 +52,19 @@ def _validated(value):
         raise ValueError('The local hardware history is invalid or exceeds its bound.')
     for identity, device in value['devices'].items():
         if (not isinstance(identity, str) or not _DIGEST.fullmatch(identity)
-                or type(device) is not dict or set(device) != {'label', 'kind', 'identity_quality'} or device.get('kind') not in _METRICS
+                or type(device) is not dict or set(device) not in (
+                    {'label', 'kind', 'identity_quality'}, {'label', 'kind', 'identity_quality', 'media_type'})
+                or device.get('kind') not in _METRICS
                 or device.get('identity_quality') not in ('stable', 'weak')
                 or not isinstance(device.get('label'), str) or not 0 < len(device['label']) <= 300):
             raise ValueError('Invalid historical device identity.')
+        if 'media_type' in device and (device['kind'] != 'drive' or type(device['media_type']) is not str
+                or device['media_type'] not in _MEDIA):
+            raise ValueError('Invalid historical media type.')
     seen = set()
     for scan in value['scans']:
-        if (type(scan) is not dict or set(scan) != {'id', 'captured_at', 'measurements'}
+        if (type(scan) is not dict or set(scan) not in (
+                    {'id', 'captured_at', 'measurements'}, {'id', 'captured_at', 'measurements', 'evidence'})
                 or not isinstance(scan.get('id'), str) or not _SCAN.fullmatch(scan['id'])
                 or scan['id'] in seen or _stamp(scan.get('captured_at')) is None
                 or type(scan.get('measurements')) is not dict or len(scan['measurements']) > 96):
@@ -68,6 +76,31 @@ def _validated(value):
             kind = value['devices'][identity]['kind']
             for key, reading in measurements.items():
                 _metric(kind, key, reading)
+        if 'evidence' in scan:
+            if type(scan['evidence']) is not dict or len(scan['evidence']) > 64:
+                raise ValueError('Invalid historical evidence scope.')
+            for identity, evidence in scan['evidence'].items():
+                if (identity not in scan['measurements'] or value['devices'][identity]['kind'] != 'drive'
+                        or type(evidence) is not dict or set(evidence) != {'media_type', 'wear_evidence'}
+                        or type(evidence.get('media_type')) is not str or evidence['media_type'] not in _MEDIA
+                        or type(evidence.get('wear_evidence')) is not str or evidence['wear_evidence'] not in _WEAR_EVIDENCE):
+                    raise ValueError('Invalid historical endurance evidence.')
+    return value
+
+
+def _wear_value(scan, identity, metric, known_hdd):
+    value = scan['measurements'].get(identity, {}).get(metric)
+    if metric != 'wear_percent_used':
+        return value
+    evidence = scan.get('evidence', {}).get(identity, {})
+    kind = evidence.get('wear_evidence')
+    if (known_hdd or evidence.get('media_type') != 'SSD'
+            or kind not in ('provider_estimate', 'nvme_estimate')):
+        return None
+    # Generic zero may be a default/unsupported counter. The NVMe-specific
+    # estimate explicitly supports genuine zero and its >254 saturation value.
+    if kind != 'nvme_estimate' and value in (0, 255):
+        return None
     return value
 
 
@@ -121,7 +154,7 @@ class HardwareHealthHistory:
                 if len(value['scans']) >= _MAX_SCANS:
                     return {'status': 'limit_reached', 'saved': False, 'scan_count': len(value['scans']),
                             'note': 'Existing scans, including the baseline, were retained. New readings are displayed but history is full.'}
-                measurements = {}
+                measurements, evidence = {}, {}
                 for section, kind in (('batteries', 'battery'), ('drives', 'drive')):
                     rows = report.get(section)
                     if not isinstance(rows, list) or len(rows) > (32 if kind == 'battery' else 64):
@@ -142,10 +175,24 @@ class HardwareHealthHistory:
                         if identity not in value['devices'] and len(value['devices']) >= _MAX_DEVICES:
                             raise ValueError('The retained historical device limit was reached; prior history was preserved.')
                         label = name + (' · device ' + _text(row.get('device_id'), 80) if row.get('device_id') else '')
+                        previous = value['devices'].get(identity, {})
                         value['devices'][identity] = {'label': label[:300], 'kind': kind,
                             'identity_quality': 'stable' if stable else 'weak'}
+                        if kind == 'drive':
+                            media = row.get('media_type')
+                            media = media if type(media) is str and media in _MEDIA else 'Unknown'
+                            wear = row.get('wear_evidence')
+                            wear = wear if type(wear) is str and wear in _WEAR_EVIDENCE else 'unavailable'
+                            # Once explicitly known as rotational, preserve that
+                            # caution even if later provider metadata conflicts.
+                            prior_media = previous.get('media_type')
+                            value['devices'][identity]['media_type'] = ('HDD' if prior_media == 'HDD'
+                                else media if media in ('HDD', 'SSD', 'SCM')
+                                else prior_media if prior_media in _MEDIA else media)
+                            evidence[identity] = {'media_type': media, 'wear_evidence': wear}
                         measurements[identity] = {metric: _metric(kind, metric, row.get(metric)) for metric in _METRICS[kind]}
-                value['scans'].append({'id': report['scan_id'], 'captured_at': report['captured_at'], 'measurements': measurements})
+                value['scans'].append({'id': report['scan_id'], 'captured_at': report['captured_at'],
+                    'measurements': measurements, 'evidence': evidence})
                 _validated(value)
                 # Check the encoded bound before replacing the existing history.
                 raw = json.dumps(value, ensure_ascii=True, indent=2, allow_nan=False).encode('ascii')
@@ -173,6 +220,8 @@ class HardwareHealthHistory:
                 value = self._read()
             scans, result = value['scans'], []
             for identity, device in value['devices'].items():
+                known_hdd = device.get('media_type') == 'HDD' or any(
+                    scan.get('evidence', {}).get(identity, {}).get('media_type') == 'HDD' for scan in scans)
                 first = next((index for index, scan in enumerate(scans) if identity in scan['measurements']), None)
                 if first is None:
                     continue
@@ -194,14 +243,15 @@ class HardwareHealthHistory:
                     for index in indexes:
                         scan = scans[index]
                         points.append({'scan_id': scan['id'], 'scan_index': index + 1,
-                            'captured_at': scan['captured_at'], 'value': scan['measurements'].get(identity, {}).get(metric),
+                            'captured_at': scan['captured_at'], 'value': _wear_value(scan, identity, metric, known_hdd),
                             'baseline': index == first,
                             'gap_before': index > first and index - 1 not in index_set})
                     result.append({'id': identity, 'label': device['label'], 'kind': device['kind'],
                         'identity_quality': device['identity_quality'], 'metric': metric, 'unit': unit, 'points': points})
             return {'schema': 1, 'status': 'available', 'scan_count': len(scans), 'series': result,
                 'note': 'First observation and subsequent scans are retained locally. Missing readings are gaps. '
-                        'Unverified identities show isolated observations. Large graphs show the baseline and recent readings without joining the omitted interval.'}
+                        'Unverified identities show isolated observations. HDD wear and legacy endurance values without per-scan SSD evidence are shown as gaps; original measurements are retained. '
+                        'Large graphs show the baseline and recent readings without joining the omitted interval.'}
         except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
             return {'schema': 1, 'status': 'unavailable', 'series': [],
                     'note': 'Local health history is unavailable; existing files were preserved.'}

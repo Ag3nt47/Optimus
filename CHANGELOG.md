@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.34
+
+- Make hardware snapshot text selectable and add Copy report with source and confidence information.
+- Allow explicit asynchronous hardware refresh during maintenance, with an isolated read-only worker, safe cancellation and fresh local history.
+- Correct generic zero wear and HDD endurance interpretation; keep raw counters as evidence and preserve older records while unverified graph values become gaps.
+- Expand available reliability counters, rated temperature limits, usage conversions, manufacture-week age estimates and bounded inbox battery-report fallback.
+- Preserve genuine NVMe endurance estimates, including reported zero and over-100 values, separately from remaining-life predictions.
+- Fit complete worker ring captions without ellipsis, including small windows and scaled fonts.
+
 ## 0.12.33
 
 - Add automatic read-only battery and physical-drive health checks to maintenance, with worker summaries and a snapshot/history view.

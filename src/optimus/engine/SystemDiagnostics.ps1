@@ -34,12 +34,136 @@ function Get-OptimusHealthIdentityHash {
     } finally {$sha.Dispose()}
 }
 
+function ConvertFrom-OptimusBatteryReport {
+    param([Parameter(Mandatory=$true)][string]$Xml)
+    if($Xml.Length -gt 2097152){throw [IO.InvalidDataException]::new('Battery report exceeds its bound.')}
+    $settings=[Xml.XmlReaderSettings]::new();$settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver=$null;$settings.MaxCharactersInDocument=2097152
+    $reader=[Xml.XmlReader]::Create([IO.StringReader]::new($Xml),$settings)
+    $document=[Xml.XmlDocument]::new();$document.XmlResolver=$null
+    try {$document.Load($reader)} finally {$reader.Dispose()}
+    if($document.DocumentElement.LocalName -cne 'BatteryReport'){throw [IO.InvalidDataException]::new('Unexpected battery report root.')}
+    $nodes=@($document.DocumentElement.SelectNodes("./*[local-name()='Batteries']/*[local-name()='Battery']"))
+    if($nodes.Count -gt 16){throw [IO.InvalidDataException]::new('Battery report inventory exceeds its bound.')}
+    $records=@(foreach($node in $nodes){
+        $fields=@{}
+        foreach($key in @('DesignCapacity','FullChargeCapacity','CycleCount','RelativeCapacity','SerialNumber','Manufacturer','Id')){
+            $values=@($node.SelectNodes("./*[local-name()='$key']"))
+            if($values.Count -gt 1){throw [IO.InvalidDataException]::new('Ambiguous battery report field.')}
+            if($values.Count -eq 1){$fields[$key]=$values[0].InnerText}
+        }
+        $row=[ordered]@{name='Battery (inbox report)';source='powercfg_batteryreport';capacity_units='native provider units';
+            identity_quality='unavailable';identity_source='unavailable';counter_capabilities=[ordered]@{}}
+        if($fields.RelativeCapacity -in @('false','0')){$row.capacity_units='mWh'}
+        elseif($fields.RelativeCapacity -in @('true','1')){$row.capacity_units='relative provider units'}
+        foreach($entry in @(@('DesignCapacity','design_capacity'),@('FullChargeCapacity','full_charge_capacity'),@('CycleCount','cycle_count'))){
+            $value=[uint32]0;$text=$fields[$entry[0]]
+            $valid=$text -is [string] -and $text.Length -le 10 -and $text -cmatch '^[0-9]+$' -and
+                [uint32]::TryParse($text,[ref]$value) -and $value -gt 0 -and $value -lt [uint32]::MaxValue
+            $row.counter_capabilities[$entry[1]]=if($valid){'reported'}elseif($null -eq $text){'not_reported'}else{'invalid_or_sentinel'}
+            if($valid){$row[$entry[1]]=$value;$row[$entry[1]+'_source']='powercfg installed battery.'+$entry[0]}
+        }
+        if($row.Contains('design_capacity') -and $row.Contains('full_charge_capacity')){
+            $row.full_charge_vs_design_percent=[Math]::Round(100.0*[double]$row.full_charge_capacity/[double]$row.design_capacity,2)
+        }
+        $row.note='Current installed-battery capacity fields from an inbox report, not charge level or historical usage. Unsupported or relative units remain explicit. The private report is deleted after parsing.'
+        [pscustomobject]@{row=$row;serial=$fields.SerialNumber;manufacturer=$fields.Manufacturer;id=$fields.Id}
+    })
+    foreach($record in $records){
+        $peers=@($records | Where-Object {$_.serial -is [string] -and $record.serial -is [string] -and $_.serial.Trim() -ceq $record.serial.Trim()})
+        if((Test-OptimusHealthIdentity $record.serial) -and (Test-OptimusHealthIdentity $record.id) -and
+            (Test-OptimusHealthIdentity $record.manufacturer) -and $peers.Count -eq 1){
+            $record.row.identity_hash=Get-OptimusHealthIdentityHash 'windows:battery:powercfg-firmware-identity' @($record.serial.Trim(),$record.manufacturer.Trim(),$record.id.Trim())
+            $record.row.identity_quality='stable';$record.row.identity_source='powercfg installed battery firmware serial+manufacturer+id'
+        }
+        [pscustomobject]$record.row
+    }
+}
+
+function New-OptimusBatteryReportProcess {
+    param([string]$ReportPath)
+    $system=[Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    $executable=[IO.Path]::Combine($system,'powercfg.exe')
+    if(-not [IO.File]::Exists($executable) -or ([IO.File]::GetAttributes($executable) -band [IO.FileAttributes]::ReparsePoint)){
+        throw [IO.InvalidDataException]::new('The inbox battery report executable is unavailable.')
+    }
+    $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$executable
+    $info.Arguments='/batteryreport /xml /duration 1 /output "'+$ReportPath+'"'
+    $info.UseShellExecute=$false;$info.CreateNoWindow=$true
+    $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
+    $process=[Diagnostics.Process]::new();$process.StartInfo=$info
+    return $process
+}
+
+function Get-OptimusInboxBatteryReport {
+    param([scriptblock]$CancelRequested,[ValidateRange(1,20)][double]$TimeoutSeconds=5)
+    $directory=$null;$report=$null;$process=$null;$started=$false;$created=$false
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $cancelled={if($null -eq $CancelRequested){return $false};$value=& $CancelRequested;return ($value -isnot [bool] -or $value)}
+    try {
+        if(& $cancelled){throw [OperationCanceledException]::new('Battery report cancelled.')}
+        $base=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        if($base -match '["\x00-\x1f]'){throw [IO.InvalidDataException]::new('Invalid private report directory.')}
+        for($part=$base;$part;$part=[IO.Path]::GetDirectoryName($part.TrimEnd('\'))){
+            if(([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint)){throw [IO.InvalidDataException]::new('Indirect report ancestry is refused.')}
+            if($part -eq [IO.Path]::GetPathRoot($part)){break}
+        }
+        $directory=[IO.Path]::Combine($base,'Optimus-battery-'+[Guid]::NewGuid().ToString('N'))
+        if([IO.Directory]::Exists($directory) -or [IO.File]::Exists($directory)){throw [IO.IOException]::new('Private report directory already exists.')}
+        $security=[Security.AccessControl.DirectorySecurity]::new();$security.SetAccessRuleProtection($true,$false)
+        $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User;$security.SetOwner($owner)
+        foreach($sid in @($owner,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'))){
+            $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
+            [void]$security.AddAccessRule($rule)
+        }
+        [void][IO.Directory]::CreateDirectory($directory,$security)
+        $created=$true
+        $report=[IO.Path]::Combine($directory,'battery.xml')
+        if([IO.File]::Exists($report) -or [IO.Directory]::Exists($report)){
+            $report=$null
+            throw [IO.IOException]::new('A private report target must be new.')
+        }
+        $process=New-OptimusBatteryReportProcess $report
+        if(-not $process.Start()){throw [IO.IOException]::new('Battery report process did not start.')}
+        $started=$true
+        while(-not $process.WaitForExit(50)){
+            if(& $cancelled){throw [OperationCanceledException]::new('Battery report cancelled.')}
+            if($clock.Elapsed.TotalSeconds -ge $TimeoutSeconds){throw [TimeoutException]::new('Battery report time budget reached.')}
+        }
+        if(& $cancelled){throw [OperationCanceledException]::new('Battery report cancelled.')}
+        if($process.ExitCode -ne 0){throw [IO.InvalidDataException]::new('The inbox battery report was not successful.')}
+        $item=Get-Item -LiteralPath $report -Force -ErrorAction Stop
+        if($item.PSIsContainer -or $item.Length -gt 2097152 -or $item.Length -lt 1 -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.LinkType -eq 'HardLink'){
+            throw [IO.InvalidDataException]::new('The private battery report is invalid.')
+        }
+        $stream=[IO.FileStream]::new($report,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        try {
+            if($stream.Length -ne $item.Length){throw [IO.InvalidDataException]::new('Battery report changed while opening.')}
+            $reader=[IO.StreamReader]::new($stream,$true)
+            try {$xml=$reader.ReadToEnd()} finally {$reader.Dispose()}
+        } finally {$stream.Dispose()}
+        return @(ConvertFrom-OptimusBatteryReport $xml)
+    } finally {
+        if($null -ne $process){
+            if($started){try {if(-not $process.HasExited){$process.Kill();[void]$process.WaitForExit(250)}}catch{}}
+            $process.Dispose()
+        }
+        # Only the exact new private report and an empty directory are removed;
+        # this never recurses, deletes a user report, or follows a report link.
+        if($report){try {[IO.File]::Delete($report)}catch{}}
+        if($created -and $directory){try {[IO.Directory]::Delete($directory,$false)}catch{}}
+    }
+}
+
 function Get-OptimusHardwareHealth {
-    param([scriptblock]$CancelRequested,[ValidateRange(2,30)][double]$BudgetSeconds=30)
+    param([scriptblock]$CancelRequested,[switch]$ForceRefresh,[ValidateRange(2,60)][double]$BudgetSeconds=30)
+    if($ForceRefresh -and -not $PSBoundParameters.ContainsKey('BudgetSeconds')){$BudgetSeconds=60}
+    if(-not $ForceRefresh -and $BudgetSeconds -gt 30){$BudgetSeconds=30}
     $errors=New-Object 'System.Collections.Generic.List[string]'
     $storage=New-Object 'System.Collections.Generic.List[object]'
     $batteries=New-Object 'System.Collections.Generic.List[object]'
-    $capabilities=[ordered]@{storage_health='unavailable';battery_health='unavailable';volume_mapping='unavailable'}
+    $capabilities=[ordered]@{storage_health='unavailable';battery_health='unavailable';volume_mapping='unavailable';battery_inbox_report='not_needed'}
     $state=@{cancelled=$false}
     $clock=[Diagnostics.Stopwatch]::StartNew()
     $stopped={
@@ -48,12 +172,12 @@ function Get-OptimusHardwareHealth {
             catch {$state.cancelled=$true}
         }
         return $state.cancelled
-    }
+    }.GetNewClosure()
     $timeout={param([double]$Until)
         if(& $stopped){throw [OperationCanceledException]::new('Hardware health observation cancelled.')}
         $remaining=$Until-$clock.Elapsed.TotalSeconds
         if($remaining -lt 1){throw [TimeoutException]::new('Hardware health observation budget reached.')}
-        return [uint32][Math]::Min(5,[Math]::Floor($remaining))
+        return [uint32][Math]::Min($(if($ForceRefresh){8}else{5}),[Math]::Floor($remaining))
     }
     $query={param([string]$Class,[string]$Namespace,[int]$Limit,[double]$Until)
         $seconds=& $timeout $Until
@@ -64,7 +188,7 @@ function Get-OptimusHardwareHealth {
         return $rows
     }
     $namespace='root/Microsoft/Windows/Storage'
-    $storageUntil=[Math]::Max(0,[Math]::Min(20,$BudgetSeconds-10))
+    $storageUntil=[Math]::Max(0,[Math]::Min($(if($ForceRefresh){40}else{20}),$BudgetSeconds-$(if($ForceRefresh){20}else{10})))
     $disks=@();$mappedDisks=@();$partitions=@();$mappingAvailable=$false
     try {
         $disks=@(& $query 'MSFT_PhysicalDisk' $namespace 32 $storageUntil)
@@ -79,9 +203,15 @@ function Get-OptimusHardwareHealth {
     }
     foreach($disk in $disks){
         $device=Get-OptimusHealthText $disk.DeviceId 128
-        $row=[ordered]@{name=(Get-OptimusHealthText $disk.FriendlyName);device_id=$device;
+        $row=[ordered]@{name=(Get-OptimusHealthText $disk.FriendlyName);device_id=$device;source='MSFT_PhysicalDisk';counter_capabilities=[ordered]@{};
             operational_status=@();reliability_available=$false;volumes=@();volume_mapping='unavailable';
             identity_quality='unavailable';identity_source='unavailable'}
+        foreach($key in @('temperature_c','maximum_operating_temperature_c','wear_percent_used','power_on_hours',
+            'read_errors_total','corrected_read_errors','uncorrected_read_errors','write_errors_total','corrected_write_errors','uncorrected_write_errors',
+            'start_stop_cycles','rated_start_stop_cycles','load_unload_cycles','rated_load_unload_cycles',
+            'maximum_read_latency_ms','maximum_write_latency_ms','maximum_flush_latency_ms','manufacture_year_week')){
+            $row.counter_capabilities[$key]='unavailable'
+        }
         foreach($entry in @(@('MediaType','media_type',65534),@('BusType','bus_type',65534),
                 @('HealthStatus','health_status',65534),@('Size','size_bytes',[decimal]'18446744073709551614'))){
             $value=Get-OptimusHealthInteger $disk.($entry[0]) $entry[2] -Positive:($entry[0] -ceq 'Size')
@@ -124,10 +254,32 @@ function Get-OptimusHardwareHealth {
                 $counter=$counters[0]
                 foreach($entry in @(@('Temperature','temperature_c',254,$true),@('TemperatureMax','maximum_operating_temperature_c',254,$true),
                     @('Wear','wear_percent_used',254,$false),@('PowerOnHours','power_on_hours',65534,$false),
+                    @('ReadErrorsTotal','read_errors_total',[decimal]'18446744073709551614',$false),
+                    @('ReadErrorsCorrected','corrected_read_errors',[decimal]'18446744073709551614',$false),
+                    @('WriteErrorsTotal','write_errors_total',[decimal]'18446744073709551614',$false),
+                    @('WriteErrorsCorrected','corrected_write_errors',[decimal]'18446744073709551614',$false),
+                    @('StartStopCycleCount','start_stop_cycles',4294967294,$false),@('StartStopCycleCountMax','rated_start_stop_cycles',4294967294,$true),
+                    @('LoadUnloadCycleCount','load_unload_cycles',4294967294,$false),@('LoadUnloadCycleCountMax','rated_load_unload_cycles',4294967294,$true),
+                    @('ReadLatencyMax','maximum_read_latency_ms',[decimal]'18446744073709551614',$false),
+                    @('WriteLatencyMax','maximum_write_latency_ms',[decimal]'18446744073709551614',$false),
+                    @('FlushLatencyMax','maximum_flush_latency_ms',[decimal]'18446744073709551614',$false),
                     @('ReadErrorsUncorrected','uncorrected_read_errors',[decimal]'18446744073709551614',$false),
                     @('WriteErrorsUncorrected','uncorrected_write_errors',[decimal]'18446744073709551614',$false))){
                     $value=Get-OptimusHealthInteger $counter.($entry[0]) $entry[2] -Positive:($entry[3])
-                    if($null -ne $value){$row[$entry[1]]=$value;$row.reliability_available=$true}
+                    $row.counter_capabilities[$entry[1]]=if($null -ne $value){'reported'}elseif($null -eq $counter.($entry[0])){'not_reported'}else{'invalid_or_sentinel'}
+                    if($null -ne $value){
+                        $row[$entry[1]]=$value;$row[$entry[1]+'_source']='MSFT_PhysicalDiskToStorageReliabilityCounter.'+$entry[0]
+                        $row.reliability_available=$true
+                    }
+                }
+                if($row.media_type -eq 3){$row.counter_capabilities.wear_percent_used='not_applicable'}
+                $row.wear_percent_used_note='Raw provider wear counter; not a verified life estimate. HDD wear is not applicable; an unconfirmed zero may be a provider default.'
+                $manufacture=$counter.ManufactureDate
+                $row.counter_capabilities.manufacture_year_week=if($null -eq $manufacture){'not_reported'}else{'invalid_or_sentinel'}
+                if($manufacture -is [string] -and $manufacture.Length -gt 0 -and $manufacture.Length -le 32 -and $manufacture -notmatch '[\x00-\x1f\x7f]'){
+                    $row.manufacture_year_week=$manufacture
+                    $row.manufacture_year_week_source='MSFT_PhysicalDiskToStorageReliabilityCounter.ManufactureDate'
+                    $row.counter_capabilities.manufacture_year_week='reported'
                 }
                 $row.reliability_source='MSFT_PhysicalDiskToStorageReliabilityCounter'
             }
@@ -150,11 +302,11 @@ function Get-OptimusHardwareHealth {
     }
     foreach($battery in $static){
         if($battery.Active -is [bool] -and -not $battery.Active){continue}
-        $row=[ordered]@{name='Battery';capacity_units='native provider units';identity_quality='unavailable';identity_source='unavailable'}
+        $row=[ordered]@{name='Battery';source='BatteryStaticData';capacity_units='native provider units';identity_quality='unavailable';identity_source='unavailable'}
         $name=Get-OptimusHealthText $battery.DeviceName
         if($name){$row.name=$name}
         $design=Get-OptimusHealthInteger $battery.DesignedCapacity 4294967294 -Positive
-        if($null -ne $design){$row.design_capacity=$design}
+        if($null -ne $design){$row.design_capacity=$design;$row.design_capacity_source='BatteryStaticData.DesignedCapacity'}
         $flags=Get-OptimusHealthInteger $battery.Capabilities 4294967294
         if($null -ne $flags){$row.capacity_units=if(([long]$flags -band 1073741824) -ne 0){'relative provider units'}else{'mWh'}}
         $instance=$battery.InstanceName
@@ -163,13 +315,13 @@ function Get-OptimusHardwareHealth {
             $matches=@($full | Where-Object {$_.InstanceName -is [string] -and $_.InstanceName -ceq $instance})
             if($matches.Count -eq 1){
                 $charged=Get-OptimusHealthInteger $matches[0].FullChargedCapacity 4294967294 -Positive
-                if($null -ne $charged){$row.full_charge_capacity=$charged}
+                if($null -ne $charged){$row.full_charge_capacity=$charged;$row.full_charge_capacity_source='BatteryFullChargedCapacity.FullChargedCapacity (exact InstanceName)'}
                 if($null -ne $design -and $null -ne $charged){$row.full_charge_vs_design_percent=[Math]::Round(100.0*[double]$charged/[double]$design,2)}
             }
             $cycle=@($cycles | Where-Object {$_.InstanceName -is [string] -and $_.InstanceName -ceq $instance})
             if($cycle.Count -eq 1){
                 $count=Get-OptimusHealthInteger $cycle[0].CycleCount 4294967294 -Positive
-                if($null -ne $count){$row.cycle_count=$count}
+                if($null -ne $count){$row.cycle_count=$count;$row.cycle_count_source='BatteryCycleCount.CycleCount (exact InstanceName)'}
             }
             $serial=$battery.SerialNumber
             $serialPeers=@($static | Where-Object {$_.SerialNumber -is [string] -and $serial -is [string] -and $_.SerialNumber.Trim() -ceq $serial.Trim()})
@@ -194,8 +346,8 @@ function Get-OptimusHardwareHealth {
                     identity_quality='unavailable';identity_source='unavailable'}
                 $design=Get-OptimusHealthInteger $battery.DesignCapacity 4294967294 -Positive
                 $charged=Get-OptimusHealthInteger $battery.FullChargeCapacity 4294967294 -Positive
-                if($null -ne $design){$row.design_capacity=$design}
-                if($null -ne $charged){$row.full_charge_capacity=$charged}
+                if($null -ne $design){$row.design_capacity=$design;$row.design_capacity_source='Win32_Battery.DesignCapacity'}
+                if($null -ne $charged){$row.full_charge_capacity=$charged;$row.full_charge_capacity_source='Win32_Battery.FullChargeCapacity'}
                 if($null -ne $design -and $null -ne $charged){$row.full_charge_vs_design_percent=[Math]::Round(100.0*[double]$charged/[double]$design,2)}
                 $row.note='CIM_Battery fallback observations. Zero or unsupported capacities stay unknown; current charge is not battery health. No stable physical battery identity is claimed.'
                 $batteries.Add([pscustomobject]$row)
@@ -203,9 +355,30 @@ function Get-OptimusHardwareHealth {
             if($fallback.Count){$capabilities.battery_health='available_provider_dependent'}
         } catch {$errors.Add('CIM battery fallback unavailable ('+$_.Exception.GetType().Name+').')}
     }
+    $needsInbox=(($batteries.Count -eq 0 -and ($ForceRefresh -or $capabilities.battery_health -ceq 'unavailable')) -or @($batteries | Where-Object {
+        $null -eq (Get-OptimusHealthInteger $_.design_capacity 4294967294 -Positive) -or
+        $null -eq (Get-OptimusHealthInteger $_.full_charge_capacity 4294967294 -Positive)
+    }).Count -gt 0)
+    if($needsInbox -and -not (& $stopped)){
+        try {
+            $remaining=$BudgetSeconds-$clock.Elapsed.TotalSeconds
+            if($remaining -lt 1){throw [TimeoutException]::new('Battery report budget unavailable.')}
+            $seconds=[Math]::Min($(if($ForceRefresh){20}else{12}),$remaining)
+            $inbox=@(Get-OptimusInboxBatteryReport -CancelRequested $stopped -TimeoutSeconds $seconds)
+            if($inbox.Count){
+                # Complete source inventories replace each other; never join a
+                # report battery to a WMI/CIM slot, name or current charge.
+                $batteries.Clear();foreach($battery in $inbox){$batteries.Add($battery)}
+                $capabilities.battery_health='available_provider_dependent';$capabilities.battery_inbox_report='used'
+            }else{$capabilities.battery_inbox_report='not_reported'}
+        } catch {
+            $capabilities.battery_inbox_report=if($state.cancelled){'cancelled'}else{'unavailable'}
+            $errors.Add('Inbox battery report unavailable ('+$_.Exception.GetType().Name+').')
+        }
+    }
     $status=if($state.cancelled){'cancelled'}elseif($errors.Count){if($storage.Count -or $batteries.Count){'partial'}else{'unavailable'}}else{'completed'}
     [pscustomobject]@{schema=1;platform='Windows';read_only=$true;captured_at=[DateTime]::UtcNow.ToString('o');status=$status;
-        cancelled=$state.cancelled;storage=@($storage.ToArray());batteries=@($batteries.ToArray());
+        cancelled=$state.cancelled;force_refresh=[bool]$ForceRefresh;storage=@($storage.ToArray());batteries=@($batteries.ToArray());
         capabilities=[pscustomobject]$capabilities;errors=@($errors.ToArray());
         duration_seconds=[Math]::Round($clock.Elapsed.TotalSeconds,3)}
 }

@@ -206,6 +206,7 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
             'speed.unsaved-approval', 'speed.single-worker', 'speed.close-guard',
             'speed.cancel-completes', 'speed.deferred-honesty', 'workflow.single-initial-worker',
             'workflow.explicit-auto-continue', 'workflow.unverified-honesty',
+            'workflow.no-live-sampler',
             'workflow.single-follow-up-worker', 'workflow.follow-up-deferred',
             'workflow.visible-completion-scope', 'workflow.scope-outside-details',
             'workflow.stale-request', 'workflow.manual-continue',
@@ -285,6 +286,54 @@ def test_end_to_end_fixture_review_covers_flow_and_exports_honest_gaps(reviewer,
     summary = bot.github_summary(report)
     assert 'not AI review' in markdown and 'No host maintenance was applied' in summary
     assert 'critical-review.json' in summary and 'Manual review remains required' in summary
+
+
+@pytest.mark.parametrize('system', ['win32', 'darwin', 'linux'])
+def test_workflow_fixture_suppresses_live_sampling_and_restores_scoped_start(reviewer, monkeypatch, system):
+    from optimus import live_metrics, runtime_priority
+    # A missing fixture guard must fail this assertion without starting a real
+    # sampler or raising from a Qt virtual callback.
+    unguarded_start = Mock(return_value=False)
+    sampler_run = Mock()
+    monkeypatch.setattr(live_metrics.LiveMetrics, 'start', unguarded_start)
+    monkeypatch.setattr(live_metrics.LiveMetrics, '_run', sampler_run)
+    monkeypatch.setattr(runtime_priority, 'lower_worker_priority', lambda: lambda: None)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', system)
+    factory = bot.OptimusWindow if system == 'win32' else bot.NativeOptimusWindow
+    window = factory(backend, smoke_test=True)
+    try:
+        reviewer.viewport(window, bot.VIEWPORTS[0], 'inert-metrics-main')
+        reviewer.review_workflow(window, backend, bot.VIEWPORTS[0], 'inert-metrics')
+        by_id = {row['id']: row for row in reviewer.report['checks']}
+        finding = by_id['inert-metrics.workflow.no-live-sampler']
+        assert finding['status'] == 'passed'
+        assert finding['evidence']['inert_start_calls'] > 0
+        assert finding['evidence']['sampler_thread_created'] is False
+        unguarded_start.assert_not_called()
+        sampler_run.assert_not_called()
+        assert live_metrics.LiveMetrics.start is unguarded_start
+        assert window.smoke_test is True
+    finally:
+        reviewer.dispose(window)
+
+
+def test_workflow_fixture_restores_sampler_guard_after_check_error(reviewer, monkeypatch):
+    from optimus import live_metrics, runtime_priority
+    unguarded_start = Mock(return_value=False)
+    monkeypatch.setattr(live_metrics.LiveMetrics, 'start', unguarded_start)
+    monkeypatch.setattr(runtime_priority, 'lower_worker_priority', lambda: lambda: None)
+    backend = bot.FixtureBackend(reviewer.output / 'fixture-state', 'win32')
+    window = bot.OptimusWindow(backend, smoke_test=True)
+    try:
+        reviewer.viewport(window, bot.VIEWPORTS[0], 'inert-error-main')
+        monkeypatch.setattr(reviewer, 'buttons', Mock(side_effect=ValueError('Fixture review failure.')))
+        with pytest.raises(ValueError, match='Fixture review failure'):
+            reviewer.review_workflow(window, backend, bot.VIEWPORTS[0], 'inert-error')
+        assert live_metrics.LiveMetrics.start is unguarded_start
+        assert window.smoke_test is True
+        unguarded_start.assert_not_called()
+    finally:
+        reviewer.dispose(window)
 
 
 def test_launch_warning_review_detects_a_missing_irreversible_recall_disclosure(reviewer, monkeypatch):

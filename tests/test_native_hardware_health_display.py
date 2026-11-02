@@ -84,7 +84,8 @@ def no_native_operations(monkeypatch):
 @pytest.fixture
 def progress(app):
     backend = SimpleNamespace(hardware_health_history=Mock(return_value=history()),
-        hardware_health_scan=Mock(side_effect=AssertionError('No native hardware scan.')))
+        hardware_health_scan=Mock(side_effect=AssertionError('No native hardware scan.')),
+        hardware_health_details=Mock(side_effect=AssertionError('Only explicit fixture refresh may run.')))
     owner = QWidget()
     owner.smoke_test, owner.busy, owner.backend = True, True, backend
     owner.setStyleSheet(build_qss('cyber'))
@@ -138,7 +139,7 @@ def test_health_summary_stays_in_the_existing_maintenance_card(progress):
     before = copy.deepcopy(observed)
     window.update_progress({'stage': HEALTH_STAGE, 'percentage': 10, 'hardware_health': observed})
     assert '82.5%' in maintenance.battery_health.text()
-    assert 'Healthy' in maintenance.drive_health.text() and '12% life used' in maintenance.drive_health.text()
+    assert 'Healthy' in maintenance.drive_health.text() and '12% endurance used (estimate)' in maintenance.drive_health.text()
     assert 'snapshot' in maintenance.health_details_button.toolTip()
     assert all(not window.worker_cards[key].hardware_health_box.isVisibleTo(window) for key in CORE[1:])
     assert observed == before
@@ -194,13 +195,63 @@ def test_snapshot_button_opens_readonly_while_main_worker_is_busy(progress, app)
     window.worker_cards['maintenance'].health_details_button.click()
     dialog = window._hardware_health_dialog
     assert isinstance(dialog, SnapshotHealthDialog) and dialog.isVisible()
-    assert dialog.panel.report == observed and not dialog.panel.refresh_button.isEnabled()
+    assert dialog.panel.report == observed and dialog.panel.refresh_button.isEnabled()
     wait_until(app, lambda: backend.hardware_health_history.call_count == 1 and dialog._worker is None)
     assert 'Local history loaded' in dialog.history_status.text()
     window.worker_cards['maintenance'].health_details_button.click()
     assert window._hardware_health_dialog is dialog
     backend.hardware_health_history.assert_called_once_with()
     backend.hardware_health_scan.assert_not_called()
+    backend.hardware_health_details.assert_not_called()
+
+
+def test_explicit_snapshot_refresh_updates_maintenance_without_changing_saved_scope(progress, app):
+    window, backend, owner = progress
+    observed = report()
+    window.update_progress({'stage': HEALTH_STAGE, 'percentage': 10, 'hardware_health': observed})
+    window.worker_cards['maintenance'].health_details_button.click()
+    dialog = window._hardware_health_dialog
+    wait_until(app, lambda: backend.hardware_health_history.called and dialog._worker is None)
+    fresh = copy.deepcopy(observed)
+    fresh['captured_at'] += 60
+    fresh['batteries'][0]['capacity_retained_percent'] = 78.5
+    backend.hardware_health_details.side_effect = None
+    backend.hardware_health_details.return_value = {'report': fresh, 'history': history()}
+    before = dict(window._worker_selection)
+    dialog.panel.refresh_button.click()
+    wait_until(app, lambda: backend.hardware_health_details.called and dialog._worker is None)
+    assert owner.busy is True and not window.completed
+    assert window.worker_cards['maintenance']._hardware_health_report == fresh
+    assert '78.5%' in window.worker_cards['maintenance'].battery_health.text()
+    assert window._worker_selection == before
+    assert backend.hardware_health_details.call_args.kwargs['force_refresh'] is True
+    backend.hardware_health_scan.assert_not_called()
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_newer_manual_snapshot_survives_older_stage_and_final_reports(progress, app, enabled):
+    window, backend, _ = progress
+    window.configure_workers({'hardware_health_enabled': enabled})
+    previous = report()
+    window.update_progress({'stage': HEALTH_STAGE, 'percentage': 10, 'hardware_health': previous})
+    window.show_hardware_health_details()
+    dialog = window._hardware_health_dialog
+    wait_until(app, lambda: backend.hardware_health_history.called and dialog._worker is None)
+    fresh = copy.deepcopy(previous)
+    fresh['captured_at'] += 60
+    fresh['batteries'][0]['capacity_retained_percent'] = 77.5
+    dialog.reportRefreshed.emit(fresh)
+    card = window.worker_cards['maintenance']
+    assert card._hardware_health_report == fresh
+    assert card.hardware_health_box.isHidden() is not enabled
+    window.update_progress({'stage': 'Continue approved fixture maintenance', 'percentage': 80,
+        'hardware_health': previous})
+    window.finish(completed(hardware_health=previous))
+    assert card._hardware_health_report == fresh
+    assert card.hardware_health_box.isHidden() is not enabled
+    if enabled:
+        assert '77.5%' in card.battery_health.text()
+    assert window._worker_selection['hardware_health_enabled'] is enabled
 
 
 def test_settings_reads_cached_metadata_until_explicit_refresh(settings, app):

@@ -32,12 +32,14 @@ def test_physical_drive_identifiers_and_volume_partitions_are_separate(collector
     assert disks[0]['volumes'] == ['C:', 'D:']
     assert disks[1]['volumes'] == ['F:']
     assert disks[0]['reliability_source'] == 'MSFT_PhysicalDiskToStorageReliabilityCounter'
+    assert disks[0]['read_errors_total_source'].endswith('.ReadErrorsTotal')
 
 
 def test_provider_counters_preserve_real_zero_and_wear_beyond_estimated_life(collector_receipts):
     disks = collector_receipts['good']['storage']
     assert disks[0]['wear_percent_used'] == disks[0]['uncorrected_read_errors'] == 0
     assert disks[1]['wear_percent_used'] == 120
+    assert disks[1]['counter_capabilities']['wear_percent_used'] == 'not_applicable'
     assert all('health_percent' not in disk and 'remaining_life_percent' not in disk for disk in disks)
 
 
@@ -72,7 +74,12 @@ def test_health_native_source_keeps_inbox_queries_read_only_and_bounded():
     assert 'Get-CimInstance' in collector and 'Get-CimAssociatedInstance' in collector
     assert "'MSFT_PhysicalDiskToStorageReliabilityCounter'" in collector or '-Association MSFT_PhysicalDiskToStorageReliabilityCounter' in collector
     assert not any(command in collector for command in ('Set-CimInstance', 'Invoke-CimMethod',
-        'Remove-CimInstance', 'Reset-PhysicalDisk', 'Repair-Volume', 'Start-Process', 'powercfg', 'smartctl'))
+        'Remove-CimInstance', 'Reset-PhysicalDisk', 'Repair-Volume', 'Start-Process', 'smartctl'))
+    assert "'/batteryreport /xml /duration 1 /output" in collector
+    assert "[IO.Directory]::Delete($directory,$false)" in collector
+    assert 'DtdProcessing]::Prohibit' in collector
+    assert 'UseShellExecute=$false' in collector
+    assert '$process.Kill()' in collector and '$process.WaitForExit(50)' in collector
     assert 'OperationTimeoutSec $seconds' in collector and 'Select-Object -First ($Limit+1)' in collector
 
 
@@ -82,3 +89,23 @@ def test_physical_hardware_identity_is_only_an_opaque_local_hash(collector_recei
     for row in collector_receipts['good']['storage'] + collector_receipts['good']['batteries']:
         assert row['identity_quality'] == 'stable' and len(row['identity_hash']) == 64
         assert all(character in '0123456789abcdef' for character in row['identity_hash'])
+
+
+def test_expanded_native_drive_counters_keep_units_provenance_and_missing_values(collector_receipts):
+    disk = collector_receipts['good']['storage'][0]
+    assert disk['read_errors_total'] == disk['corrected_read_errors'] == 2
+    assert disk['maximum_read_latency_ms'] == 300 and disk['maximum_write_latency_ms'] == 0
+    assert disk['start_stop_cycles'] == 20 and disk['rated_start_stop_cycles'] == 600000
+    assert disk['manufacture_year_week'] == '2018-W42'
+    assert disk['manufacture_year_week_source'].endswith('.ManufactureDate')
+    assert collector_receipts['good']['storage'][1]['counter_capabilities']['uncorrected_write_errors'] == 'not_reported'
+
+
+def test_inbox_battery_fallback_excludes_raw_report_identity_and_usage(collector_receipts):
+    report = collector_receipts['inbox_fallback']
+    assert report['capabilities']['battery_inbox_report'] == 'used'
+    assert report['batteries'][0]['source'] == 'powercfg_batteryreport'
+    assert report['batteries'][0]['full_charge_vs_design_percent'] == 70
+    assert report['batteries'][0]['cycle_count'] == 30
+    payload = json.dumps(report)
+    assert not any(value in payload for value in ('private-report-serial', 'private-computer-name', 'Fixture battery model'))

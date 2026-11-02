@@ -3413,7 +3413,22 @@ class OptimizationProgressWindow(QDialog):
         from .widgets.hardware_health_dialog import SnapshotHealthDialog
         report = self.worker_cards['maintenance']._hardware_health_report
         self._hardware_health_dialog = SnapshotHealthDialog(backend, report, self)
+        self._hardware_health_dialog.reportRefreshed.connect(self._accept_hardware_health)
         self._hardware_health_dialog.show()
+
+    def _accept_hardware_health(self, report):
+        if not isinstance(report, dict) or report.get('read_only') is not True:
+            return
+        card = self.worker_cards['maintenance']
+        previous = card._hardware_health_report
+        from .hardware_health import _number
+        current_time = _number(previous.get('captured_at')) if isinstance(previous, dict) else None
+        incoming_time = _number(report.get('captured_at'))
+        # A forced manual read may be newer than the maintenance snapshot
+        # carried by subsequent progress ticks or the final run report.
+        if current_time is not None and (incoming_time is None or incoming_time < current_time):
+            return
+        card.set_hardware_health(report, enabled=self._worker_selection.get('hardware_health_enabled', True) is True)
 
     def _update_scan_card(self, state):
         card = self.worker_grid.ensure('security_scan', 'Virus & malware scan')
@@ -3480,8 +3495,7 @@ class OptimizationProgressWindow(QDialog):
             self.log.appendPlainText(display(state))
             return
         if isinstance(state.get('hardware_health'), dict):
-            self.worker_cards['maintenance'].set_hardware_health(state['hardware_health'],
-                enabled=self._worker_selection.get('hardware_health_enabled', True) is True)
+            self._accept_hardware_health(state['hardware_health'])
         stage = display(field(state, 'stage', default='Working'))
         if stage == 'Scan for spyware and malware':
             self._update_scan_card(state)
@@ -3652,8 +3666,7 @@ class OptimizationProgressWindow(QDialog):
     def finish(self, result, error=None):
         self._update_space_guard(field(result, 'space_guard', default=None))
         if isinstance(field(result, 'hardware_health'), dict):
-            self.worker_cards['maintenance'].set_hardware_health(result['hardware_health'],
-                enabled=self._worker_selection.get('hardware_health_enabled', True) is True)
+            self._accept_hardware_health(result['hardware_health'])
         elif (self._worker_selection.get('hardware_health_enabled', True) is True
                 and self.worker_cards['maintenance']._hardware_health_report is None):
             from .hardware_health import normalize_hardware_health

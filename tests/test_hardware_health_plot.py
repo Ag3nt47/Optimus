@@ -243,3 +243,19 @@ def test_health_panel_accepts_history_without_collecting_or_replacing_current_re
     finally:
         panel.deleteLater()
         app.processEvents()
+
+
+def test_endurance_caption_explains_provider_estimate_and_keeps_legacy_gaps_visible(plot):
+    row = dict(series('fixture-ssd', metric='wear_percent_used', values=(None, None, 12)), kind='drive')
+    plot.set_history({'series': [row], 'note': 'Legacy unverified wear counters remain gaps.'})
+    assert plot.metric_combo.currentText() == 'Estimated SSD endurance used (%)'
+    assert 'provider estimate' in plot.description.text() and 'not remaining life' in plot.description.text()
+    assert 'Legacy unverified' in plot.note.text()
+    assert [point['value'] for point in plot.canvas.series['points']] == [None, None, 12]
+
+
+def test_battery_graph_description_does_not_describe_ssd_endurance(plot):
+    plot.set_history({'series': [series()]})
+    assert 'full-charge capacity with design capacity' in plot.description.text()
+    assert 'not current charge' in plot.description.text()
+    assert 'SSD' not in plot.description.text()

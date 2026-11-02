@@ -80,7 +80,14 @@ function Invoke-OptimusRequest {
     switch ([string]$Request.operation) {
         'update_recovery_probe' { Get-OptimusUpdateRecoveryProbe }
         'system_diagnostics' { Get-OptimusSystemDiagnostics }
-        'hardware_health' { Get-OptimusHardwareHealth -CancelRequested (New-OptimusCancellationCallback -Request $Request) }
+        'hardware_health' {
+            $forceRefresh=$false
+            if($null -ne $arg -and $null -ne $arg.PSObject.Properties['force_refresh']){
+                if($arg.force_refresh -isnot [bool]){throw 'Choose an explicit Boolean hardware refresh option.'}
+                $forceRefresh=$arg.force_refresh
+            }
+            Get-OptimusHardwareHealth -CancelRequested (New-OptimusCancellationCallback -Request $Request) -ForceRefresh:$forceRefresh
+        }
         'adaptive_network' { Get-OptimusAdaptiveNetwork }
         'windows_integrity' {
             if($arg.repair -isnot [bool] -or $arg.approved -isnot [bool]){throw 'Explicit Boolean integrity choices are required.'}

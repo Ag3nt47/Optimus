@@ -22,6 +22,7 @@ def raw(**changes):
 
 def test_real_health_units_not_charge_or_a_fabricated_disk_score():
     source = raw(); before = copy.deepcopy(source)
+    source['storage'][0]['media_type'] = 'SSD'
     source['batteries'][0]['charge_percent'] = 5
     result = module.normalize_hardware_health(source)
     assert result['batteries'][0]['capacity_retained_percent'] == 80
@@ -95,7 +96,7 @@ def test_duplicate_identity_never_connects_two_devices():
 
 
 def test_physical_warnings_remain_observations_not_repair_or_failure_predictions():
-    result = module.normalize_hardware_health(raw(storage=[{'health_status': 'Failing',
+    result = module.normalize_hardware_health(raw(storage=[{'health_status': 'Failing', 'media_type': 'SSD',
         'wear_percent_used': 100, 'uncorrected_read_errors': 1}]))
     assert len(result['warnings']) == 3
     assert result['drives'][0]['provider_condition_code'] == 2

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import math
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QApplication, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLayout, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .hardware_health_plot import HardwareHealthPlotWidget
@@ -60,7 +60,7 @@ def _label(text='', *, bold=False):
     label = QLabel(text)
     label.setTextFormat(Qt.PlainText)
     label.setWordWrap(True)
-    label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
     label.setMinimumWidth(0)
     label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     if bold:
@@ -119,9 +119,35 @@ class _DeviceCard(QGroupBox):
         else:
             add('condition', 'Provider condition', _condition(row.get('health_status')))
             add('media', 'Media type', _condition(row.get('media_type')))
-            add('wear', 'SSD life used', _percent(row.get('wear_percent_used')))
-            self.labels['wear'].setToolTip('Wear is the provider-reported percentage of rated SSD life used, not life remaining or a health score. '
-                'A missing or unsupported counter stays unavailable.\nSource: ' + source + '\n' + captured)
+            media_type = _condition(row.get('media_type'))
+            evidence = _text(row.get('wear_evidence'), 100)
+            counter = row.get('wear_percent_used')
+            counter_text = _percent(counter)
+            legacy = not evidence and counter_text != _UNAVAILABLE
+            verified = False
+            # _percent validates exact numeric type, finiteness and its range
+            # before either provider-specific numeric comparison can execute.
+            if media_type.casefold() == 'ssd' and counter_text != _UNAVAILABLE:
+                if evidence == 'nvme_estimate':
+                    verified = counter <= 255
+                elif evidence == 'provider_estimate':
+                    verified = 0 < counter <= 254
+            wear = ('Not applicable (HDD)' if media_type.casefold() == 'hdd'
+                else counter_text if verified else
+                'Unavailable (saved reading needs refresh)' if legacy else _UNAVAILABLE)
+            add('wear', 'Estimated SSD endurance used', wear)
+            wear_source = _text(row.get('wear_percent_used_source')) or source
+            wear_note = _text(row.get('wear_percent_used_note'), 1000)
+            if legacy and media_type.casefold() != 'hdd':
+                wear_note = ('This saved report lacks verified endurance provenance. Choose Refresh hardware check '
+                    'for a new observation; the saved counter is not a reliable endurance estimate. '
+                    + wear_note).strip()
+                add('legacy_wear', 'Saved wear counter (unverified)', counter_text)
+                self.labels['legacy_wear'].setToolTip(wear_note + '\nSource: ' + source + '\n' + captured)
+            self.labels['wear'].setToolTip('This is a provider estimate of rated SSD endurance used, not life remaining or a health score. '
+                'A missing or unverified counter stays unavailable; SSD endurance does not apply to HDDs.\n'
+                + ('Evidence: ' + evidence.replace('_', ' ') + '\n' if evidence else '')
+                + (wear_note + '\n' if wear_note else '') + 'Source: ' + wear_source + '\n' + captured)
             add('temperature', 'Temperature', _number(row.get('temperature_c'), ' °C', digits=1))
             add('power_on', 'Power-on time', _number(row.get('power_on_hours'), ' hours'))
             add('read_errors', 'Uncorrected read errors', _number(row.get('uncorrected_read_errors'), integer=True))
@@ -135,6 +161,35 @@ class _DeviceCard(QGroupBox):
         note = _text(row.get('note'), 1000)
         if note:
             add('note', 'Note', note)
+        assessment = row.get('assessment')
+        if isinstance(assessment, dict):
+            summary = _text(assessment.get('summary'), 1500)
+            state = _text(assessment.get('status'), 100).replace('_', ' ')
+            if summary or state:
+                add('assessment', 'Assessment', summary or state)
+                self.labels['assessment'].setToolTip((state + '\n' if state else '')
+                    + (summary + '\n' if summary else '') + 'Source: ' + source + '\n' + captured)
+        readings = row.get('additional_readings')
+        if isinstance(readings, list):
+            for index, reading in enumerate(readings[:32]):
+                if not isinstance(reading, dict):
+                    continue
+                title = _text(reading.get('label'), 160) or 'Additional reading'
+                value = _text(reading.get('value'), 1500) or _UNAVAILABLE
+                unit = _text(reading.get('unit'), 40)
+                if unit and value != _UNAVAILABLE and not value.casefold().endswith(unit.casefold()):
+                    value += ' ' + unit
+                key = 'additional_' + str(index)
+                add(key, title, value)
+                confidence = _text(reading.get('confidence'), 120).replace('_', ' ')
+                reading_source = _text(reading.get('source')) or source
+                self.labels[key].setToolTip(title + ': ' + value + '\nSource: ' + reading_source
+                    + ('\nConfidence: ' + confidence if confidence else '') + '\n' + captured)
+        analysis = row.get('analysis_notes')
+        if isinstance(analysis, list):
+            for index, text in enumerate(analysis[:32]):
+                if (text := _text(text, 1500)):
+                    add('analysis_' + str(index), 'Analysis note', text)
         layout.addStretch(1)
 
 
@@ -207,14 +262,28 @@ class HardwareHealthPanel(QWidget):
         self.setMinimumWidth(0)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        top = QHBoxLayout()
+        top = QGridLayout()
+        self._header_layout = top
+        self._actions_key = None
+        self._actions_timer = QTimer(self)
+        self._actions_timer.setSingleShot(True)
+        self._actions_timer.timeout.connect(self._fit_actions)
         self.title = _label('Battery and physical-drive health', bold=True)
-        top.addWidget(self.title, 1)
+        top.addWidget(self.title, 0, 0, 1, 2)
+        self.copy_button = QPushButton('Copy report')
+        self.copy_button.setAutoDefault(False)
+        self.copy_button.setToolTip('Copy all displayed current battery and physical-drive readings, capture time and provider notes as plain text. This does not run another check or copy raw hardware identifiers.')
+        self.copy_button.clicked.connect(self.copy_report)
+        self.copy_button.setAccessibleName('Copy hardware report')
+        top.addWidget(self.copy_button, 1, 0)
         self.refresh_button = QPushButton('Refresh hardware check')
         self.refresh_button.setAutoDefault(False)
+        self.refresh_button.setAccessibleName('Refresh hardware check')
         self.refresh_button.setToolTip('Request a new read-only hardware report. This does not change battery settings, repair disks, optimize volumes or install drivers.')
         self.refresh_button.clicked.connect(self.refreshRequested.emit)
-        top.addWidget(self.refresh_button)
+        top.addWidget(self.refresh_button, 1, 1)
+        top.setColumnStretch(0, 1)
+        top.setColumnStretch(1, 1)
         layout.addLayout(top)
         self.scope = _label('Read-only provider measurements. Battery retention compares full-charge capacity with design capacity; '
             'SSD wear is life used. Missing telemetry stays unavailable.')
@@ -241,6 +310,48 @@ class HardwareHealthPanel(QWidget):
         body.addWidget(self.history_plot, 1)
         self.scroll.setWidget(self.content)
         layout.addWidget(self.scroll, 1)
+        for button in (self.copy_button, self.refresh_button):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            button.installEventFilter(self)
+        self._make_labels_selectable()
+        self._fit_actions()
+
+    def _fit_actions(self):
+        available = max(1, self.width())
+        captions = ('Copy report', 'Refresh hardware check')
+        buttons = (self.copy_button, self.refresh_button)
+        widths = [button.fontMetrics().horizontalAdvance(text) + 24
+            for button, text in zip(buttons, captions)]
+        texts = tuple(text if width <= available else short
+            for text, width, short in zip(captions, widths, ('Copy', 'Refresh')))
+        widths = [button.fontMetrics().horizontalAdvance(text) + 24
+            for button, text in zip(buttons, texts)]
+        stacked = sum(widths) + max(0, self._header_layout.horizontalSpacing()) > available
+        key = texts, tuple(widths), stacked
+        if self._actions_key == key:
+            return
+        self._actions_key = key
+        for button, text in zip(buttons, texts):
+            button.setText(text)
+            self._header_layout.removeWidget(button)
+        if stacked:
+            self._header_layout.addWidget(self.copy_button, 1, 0, 1, 2)
+            self._header_layout.addWidget(self.refresh_button, 2, 0, 1, 2)
+        else:
+            self._header_layout.addWidget(self.copy_button, 1, 0)
+            self._header_layout.addWidget(self.refresh_button, 1, 1)
+        for index, width in enumerate(widths):
+            self._header_layout.setColumnMinimumWidth(index, 0 if stacked else width)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_actions()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange) and not self._actions_timer.isActive():
+            self._actions_timer.start(0)
+        return super().eventFilter(watched, event)
 
     @property
     def report(self):
@@ -257,6 +368,32 @@ class HardwareHealthPanel(QWidget):
 
     def set_history(self, history):
         self.history_plot.set_history(history)
+        self._make_labels_selectable()
+
+    def _make_labels_selectable(self):
+        for label in self.findChildren(QLabel):
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+
+    def report_text(self):
+        """Full current display text, without truncation or raw report identities."""
+        parts = [self.title.text(), self.scope.text(), self.status.text(), self.captured.text()]
+        if self.errors.isVisibleTo(self.content) and self.errors.text():
+            parts.append(self.errors.text())
+        if self.empty.text():
+            parts.append(self.empty.text())
+        for card in self.cards:
+            parts.append('\n' + card.title() + ': ' + card.name.text())
+            for key, label in card.labels.items():
+                parts.append(label.text())
+                if key.startswith('additional_'):
+                    parts.extend('  ' + line for line in label.toolTip().splitlines()
+                        if line.startswith(('Source:', 'Confidence:')))
+        return '\n'.join(parts)
+
+    def copy_report(self):
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self.report_text())
 
     def set_report(self, report):
         if not isinstance(report, dict) or report.get('read_only') is not True:
@@ -310,4 +447,5 @@ class HardwareHealthPanel(QWidget):
             for kind, rows in (('battery', batteries), ('drive', drives)) for row in rows[:64]
             if isinstance(row, dict)]
         self.device_grid.replace(cards)
+        self._make_labels_selectable()
         self.refresh_button.setEnabled(True)

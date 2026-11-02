@@ -1,6 +1,7 @@
 #requires -Version 5.1
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot '../src/optimus/engine/SystemDiagnostics.ps1')
+function New-OptimusBatteryReportProcess {throw 'A native inbox process is forbidden in system diagnostic fixtures.'}
 function Assert-True {param($Value,[string]$Message) if(-not $Value){throw $Message}}
 function Get-CimInstance {
     param($ClassName,$Namespace,$OperationTimeoutSec,$ErrorAction)
