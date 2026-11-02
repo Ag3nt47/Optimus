@@ -6,13 +6,13 @@
 
 | Your computer | One-click download |
 | --- | --- |
-| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.72 MiB compressed</sub> |
-| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.95 MiB compressed</sub> |
-| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.15 MiB compressed</sub> |
-| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.13 MiB compressed</sub> |
-| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.08 MiB compressed</sub> |
+| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>65.16 MiB compressed</sub> |
+| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>48.32 MiB compressed</sub> |
+| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.53 MiB compressed</sub> |
+| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.49 MiB compressed</sub> |
+| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.34 MiB compressed</sub> |
 
-Download sizes shown are for **v0.12.31**.
+Download sizes shown are for **v0.12.33**.
 
 [Release notes and SHA256 checksums](https://github.com/Ag3nt47/Optimus/releases/latest) · [Platform capabilities and installation](docs/PLATFORMS.md)
 
@@ -25,6 +25,10 @@ These demos show the actual Qt interface with sample data. No host maintenance r
 [![Watch the Optimus sample-data walkthrough; four worker cards with separate progress and status](docs/media/optimus-workers.png)](docs/media/optimus-walkthrough.mp4)
 
 [Watch/download the MP4 walkthrough](docs/media/optimus-walkthrough.mp4) · [Full screenshot gallery and capture details](docs/DEMOS.md)
+
+![Illustrative battery and physical-drive readings with local per-device history](docs/media/optimus-hardware-health.png)
+
+Sample health readings and trend graphs retain the first baseline and leave unavailable measurements as gaps. Battery capacity retained and SSD life used remain separate measurements. [Health and history details](docs/hardware-health.md)
 
 ## What Optimus can do
 

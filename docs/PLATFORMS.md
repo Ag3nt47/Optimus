@@ -1,16 +1,16 @@
 # Native platforms and downloads
 
-Optimus 0.12.31 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
+Optimus 0.12.33 runs as a native Qt desktop application on Windows, macOS and Linux. Each download contains its own Python runtime, the public editable source for Sandbox, and dependency licenses. Python is only needed when building from source.
 
 | Platform | Direct download | Tested build environment |
 | --- | --- | --- |
-| Windows, Intel/AMD 64-bit | [Windows ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.72 MiB compressed</sub> | Windows Server 2025 GitHub runner; Windows 10/11 desktop target |
-| macOS, Apple Silicon | [Apple Silicon app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.95 MiB compressed</sub> | macOS 15, arm64 |
-| macOS, Intel | [Intel app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.15 MiB compressed</sub> | macOS 15, x86_64 |
-| Linux, Intel/AMD 64-bit | [Linux tar.gz](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.13 MiB compressed</sub> | Ubuntu 22.04, x86_64; glibc 2.35 or newer |
-| Every platform | [Editable source ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.08 MiB compressed</sub> | Source archive, not an executable |
+| Windows, Intel/AMD 64-bit | [Windows ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>65.16 MiB compressed</sub> | Windows Server 2025 GitHub runner; Windows 10/11 desktop target |
+| macOS, Apple Silicon | [Apple Silicon app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>48.32 MiB compressed</sub> | macOS 15, arm64 |
+| macOS, Intel | [Intel app ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.53 MiB compressed</sub> | macOS 15, x86_64 |
+| Linux, Intel/AMD 64-bit | [Linux tar.gz](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.49 MiB compressed</sub> | Ubuntu 22.04, x86_64; glibc 2.35 or newer |
+| Every platform | [Editable source ZIP](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.34 MiB compressed</sub> | Source archive, not an executable |
 
-Download sizes shown are for **v0.12.31**.
+Download sizes shown are for **v0.12.33**.
 
 [SHA256SUMS.txt](https://github.com/Ag3nt47/Optimus/releases/latest/download/SHA256SUMS.txt) covers all five downloadable archives. The [release page](https://github.com/Ag3nt47/Optimus/releases/latest) also lists each file separately. Downloading starts with one click; extracting and the normal platform security review are still required.
 
@@ -31,7 +31,8 @@ Native startup registration uses the application's current location. Move the ap
 | Optional application-cache recipes | Selected Discord/Spotify/Steam/Teams web-cache leaves with complete process checks | Supported native recipe paths; Teams is not offered by the Linux recipe set. Active or unknown applications are skipped |
 | Folder-growth tracking and recovery retention | Selected local metadata scans; bounded report/browser-backup expiry with separate undo-loss approval | Same scoped local mechanisms and native path/ownership checks; remote/cloud/junction roots are excluded |
 | Performance observations/history | Time-weighted CPU/RAM and observed disk/network rates; bounded local comparison summaries | Same available psutil counters; missing metrics remain unknown, and no universal speed score is claimed |
-| Native hardware, boot and memory evidence | Inbox storage/battery providers, recent Diagnostics-Performance events and pagefile facts when accessible | Native memory/swap and available battery facts; Linux current boot summary through existing systemd-analyze. No inbox storage-wear/temperature or Windows boot-event parity is claimed |
+| Native hardware, boot and memory evidence | Inbox storage/battery providers, recent Diagnostics-Performance events and pagefile facts when accessible | Native memory/swap and available battery facts; Linux current boot summary through existing systemd-analyze. Windows boot-event parity is unavailable |
+| Automatic battery/physical-drive health and local per-device history | Available native battery capacity, reported storage condition and reliability counters; first baseline and later observations retained locally | Available macOS native battery/storage facts and Linux native providers; an already-installed trusted SMART tool can supply supported Linux drive readings. Unsupported metrics remain unavailable; no equal provider coverage or universal health score is claimed. [Readings and history](hardware-health.md) |
 | Adaptive readiness and installer headroom | Native idle/foreground/power/network-cost evidence plus real-volume space estimates | Available resource/battery facts and volume estimates; unsupported interaction/network-cost evidence stays unknown and required conditions defer work |
 | Additional Chocolatey updates and experimental Ollama resident completion | Optional existing standard Chocolatey with conservative one-provider ownership; separately enabled exact Ollama proof with a retained passive observer | Unavailable; existing native-manager updates keep their normal boundaries |
 | Explicit integrity checks and separately approved repair | Supported inbox DISM/SFC, tracked native outcomes, no automatic reboot or uncertain retry | Windows servicing is unavailable; no Windows repair tool is invoked |
