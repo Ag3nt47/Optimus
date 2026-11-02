@@ -14,6 +14,10 @@ Optimus runs the maintenance and update choices you saved. With **Automatically 
 
 The review labels state the action: **Apply** changes a supported security control, **Install** uses saved update approval, **Open** launches Windows controls, and **View** displays a coverage report. Selecting supported fixes excludes report links, restart controls and threat-removal decisions. Results show the reason, installation evidence and any remaining manual step.
 
+![Recommendation actions and visible outcomes](media/optimus-recommendation-actions.png)
+
+Fixture demonstration at 850 × 650. No host changes or installations were performed for this image.
+
 An exception in automatic follow-up leaves the original recommendations available for review. It does not start the batch again. Action services still check current state before changing anything.
 
 Historical Defender detections and vendor/legacy coverage are reports, not proof that something needs installing or deleting. Current threat removal requires its own exact-scope approval. Known failed publisher offers, unresolved installers, Windows policy, disconnected hardware and restart requirements can still prevent installation; each remains visible in the saved results.

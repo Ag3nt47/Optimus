@@ -6,13 +6,13 @@
 
 | Your computer | One-click download |
 | --- | --- |
-| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.70 MiB compressed</sub> |
-| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.89 MiB compressed</sub> |
-| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.10 MiB compressed</sub> |
-| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.09 MiB compressed</sub> |
-| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.05 MiB compressed</sub> |
+| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>64.72 MiB compressed</sub> |
+| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>47.95 MiB compressed</sub> |
+| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.15 MiB compressed</sub> |
+| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.13 MiB compressed</sub> |
+| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.08 MiB compressed</sub> |
 
-Download sizes shown are for **v0.12.30**.
+Download sizes shown are for **v0.12.31**.
 
 [Release notes and SHA256 checksums](https://github.com/Ag3nt47/Optimus/releases/latest) · [Platform capabilities and installation](docs/PLATFORMS.md)
 
@@ -92,7 +92,7 @@ Review and save the first-start choices, then choose **Auto Clean** at the launc
 
 ### Current release
 
-Version **0.12.30** reduces repeated maintenance work: short-lived complete review inventories, lighter live worker monitoring, and an adjustable recent-Defender-scan window for Auto Clean. These efficiency defaults are enabled on Windows; saved cleanup, removal and update scopes stay unchanged. Manual scans always request a new scan, and unknown protection or scan evidence falls back to a fresh scan. [Automatic efficiency and settings](docs/automatic-efficiency.md).
+Version **0.12.31** follows through on saved automation: it continues past proven local control failures, rechecks late app-version registration without reinstalling, and applies approved Windows security update recommendations with fresh installation-history verification. Remaining recommendations show **Apply / Install / Open / View** and the actual outcome. Existing preferences and approvals stay unchanged. [Automatic fixes and installation](docs/automatic-remediation.md).
 
 The **0.12.27** release introduced an opt-in repair for [explicitly approved Python relocations](docs/PYTHON-RELOCATION.md) rejected by Windows Installer with error 448. It checks the exact package, owned installer evidence, saved source/target and junction fingerprint, then uses administrator access to re-apply identical junction metadata. All path components must also resist replacement or security changes by other accounts; unsafe parent permissions require a separate review. A separate process verifies the path with RedirectionGuard enforced before the normal updater can proceed. Files stay on their existing drive; permissions and security protections are preserved. A failed repair skips that package while other eligible updates continue. Existing saved choices remain unchanged; new repair authority requires an exact approved mapping.
 
