@@ -6,13 +6,13 @@
 
 | Your computer | One-click download |
 | --- | --- |
-| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>65.16 MiB compressed</sub> |
-| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>48.32 MiB compressed</sub> |
-| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.53 MiB compressed</sub> |
-| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.49 MiB compressed</sub> |
-| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.34 MiB compressed</sub> |
+| Windows 10/11, Intel/AMD 64-bit | [Download for Windows](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Windows-x64.zip)<br><sub>65.30 MiB compressed</sub> |
+| macOS, Apple Silicon (M-series) | [Download for Mac — Apple Silicon](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-arm64.zip)<br><sub>48.44 MiB compressed</sub> |
+| macOS, Intel | [Download for Mac — Intel](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-macOS-x64.zip)<br><sub>52.64 MiB compressed</sub> |
+| Linux, Intel/AMD 64-bit | [Download for Linux](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Linux-x86_64.tar.gz)<br><sub>92.59 MiB compressed</sub> |
+| Editable source, every platform | [Download source](https://github.com/Ag3nt47/Optimus/releases/latest/download/Optimus-Source.zip)<br><sub>5.42 MiB compressed</sub> |
 
-Download sizes shown are for **v0.12.33**.
+Download sizes shown are for **v0.12.34**.
 
 [Release notes and SHA256 checksums](https://github.com/Ag3nt47/Optimus/releases/latest) · [Platform capabilities and installation](docs/PLATFORMS.md)
 
@@ -28,7 +28,7 @@ These demos show the actual Qt interface with sample data. No host maintenance r
 
 ![Illustrative battery and physical-drive readings with local per-device history](docs/media/optimus-hardware-health.png)
 
-Sample health readings and trend graphs retain the first baseline and leave unavailable measurements as gaps. Battery capacity retained and SSD life used remain separate measurements. [Health and history details](docs/hardware-health.md)
+Select or copy the current readings, and refresh them while maintenance continues. Local per-device graphs retain the first baseline and leave unavailable measurements as gaps. [Health and history details](docs/hardware-health.md)
 
 ## What Optimus can do
 
@@ -41,7 +41,7 @@ Sample health readings and trend graphs retain the first baseline and leave unav
 - **Automatic follow-through:** Apply supported fixes, verify late app-version registration and continue past known local failures. Recommendations distinguish installation from opening Windows controls or coverage reports. [What runs automatically](docs/automatic-remediation.md)
 - **Processes/startup:** Inspect CPU/RAM/I/O and ownership; control eligible priorities, affinity, pause/resume, startup entries and Windows services.
 - **Storage:** Find large files, track folder growth, verify SHA256 duplicates and optimize eligible Windows SSDs/HDDs.
-- **Hardware health:** Automatically check reported battery capacity and physical-drive condition; compare the first baseline and subsequent scans in local per-device graphs. [Available readings and history](docs/hardware-health.md)
+- **Hardware health:** Automatically check battery capacity, drive condition and available temperature, error and SSD endurance readings. Select/copy the report, refresh it while maintenance runs, and compare local per-device baseline graphs. [Readings, sources and limits](docs/hardware-health.md)
 - **Cloud:** Review personal OneDrive duplicates on Windows with your own connected account and approved folders.
 - **Automation:** Schedule maintenance while open; add Smart Cleaning, browser-exit, low-space, workload and retention options.
 - **Recovery:** Inspect verified outcomes, supported undo, browser backups, driver rollback and Windows restore-point tools.
