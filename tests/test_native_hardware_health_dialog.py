@@ -8,12 +8,13 @@ from unittest.mock import Mock
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, QThreadPool, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QWidget
 from shiboken6 import isValid
 
 from optimus.widgets import hardware_health_dialog as dialogs
+from optimus.widgets import window_geometry as geometry
 
 
 def report():
@@ -84,8 +85,24 @@ def test_prepared_history_is_passive_and_refresh_remains_disabled(app):
         assert 'Local history loaded' in dialog.history_status.text()
         assert 'saved snapshot' in dialog.panel.status.text()
         assert dialog.panel.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
-        assert dialog.buttons.button(QDialogButtonBox.Close).isEnabled()
-        assert dialog.size().width() == 850 and dialog.size().height() == 650
+        close = dialog.buttons.button(QDialogButtonBox.Close)
+        assert close.isEnabled()
+        # The preferred 850x650 size is capped by the shared fitter on small
+        # work areas, including Linux's offscreen CI display. Test reachability
+        # rather than requiring the desktop preference to exceed the screen.
+        for bounds in (geometry.available_screen_geometry(dialog),
+                       QRect(0, 0, 800, 600), QRect(0, 0, 640, 480)):
+            geometry.fit_window_to_screen(dialog, available=bounds)
+            app.processEvents()
+            assert bounds.contains(dialog.frameGeometry())
+            assert dialog.rect().contains(close.rect().translated(close.mapTo(dialog, QPoint())))
+            assert dialog.childAt(close.mapTo(dialog, close.rect().center())) is close
+            viewport = dialog.panel.scroll.viewport()
+            assert viewport.isVisibleTo(dialog) and viewport.width() > 0 and viewport.height() > 0
+            name = dialog.panel.cards[-1].name
+            dialog.panel.scroll.ensureWidgetVisible(name, 0, 0)
+            app.processEvents()
+            assert viewport.rect().contains(name.rect().translated(name.mapTo(viewport, QPoint())))
     finally:
         dispose(app, dialog)
 
