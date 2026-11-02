@@ -26,6 +26,26 @@ class _Cancellation:
 
 
 class ExtendedMaintenanceBackend:
+    def _hardware_health_service(self):
+        from .hardware_health import HardwareHealth
+        return self._optional_service('_hardware_health', HardwareHealth)
+
+    def hardware_health(self, *, cancel_event=None):
+        return self._hardware_health_service().scan(cancel_event=cancel_event)
+
+    def hardware_health_cached(self):
+        return self._hardware_health_service().cached()
+
+    def hardware_health_history(self):
+        from .hardware_health_history import HardwareHealthHistory
+        return HardwareHealthHistory(self.data_dir).series()
+
+    def hardware_health_details(self, *, refresh=False, cancel_event=None):
+        if type(refresh) is not bool:
+            raise ValueError('Choose whether to refresh the hardware observation.')
+        report = self.hardware_health(cancel_event=cancel_event) if refresh else self.hardware_health_cached()
+        return {'report': report, 'history': self.hardware_health_history()}
+
     def _toolkit(self):
         from .maintenance_toolkit import MaintenanceToolkit
         return self._optional_service('_maintenance_toolkit', lambda _: MaintenanceToolkit(self))

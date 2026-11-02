@@ -37,6 +37,7 @@ These demos show the actual Qt interface with sample data. No host maintenance r
 - **Automatic follow-through:** Apply supported fixes, verify late app-version registration and continue past known local failures. Recommendations distinguish installation from opening Windows controls or coverage reports. [What runs automatically](docs/automatic-remediation.md)
 - **Processes/startup:** Inspect CPU/RAM/I/O and ownership; control eligible priorities, affinity, pause/resume, startup entries and Windows services.
 - **Storage:** Find large files, track folder growth, verify SHA256 duplicates and optimize eligible Windows SSDs/HDDs.
+- **Hardware health:** Automatically check reported battery capacity and physical-drive condition; compare the first baseline and subsequent scans in local per-device graphs. [Available readings and history](docs/hardware-health.md)
 - **Cloud:** Review personal OneDrive duplicates on Windows with your own connected account and approved folders.
 - **Automation:** Schedule maintenance while open; add Smart Cleaning, browser-exit, low-space, workload and retention options.
 - **Recovery:** Inspect verified outcomes, supported undo, browser backups, driver rollback and Windows restore-point tools.

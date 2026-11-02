@@ -7,22 +7,31 @@ from .live_activity import WorkerActivityRing
 
 
 class CompactWorkerHeader(QWidget):
-    """Two measured text rows beside one fixed ring, with no cached row hints."""
-    def __init__(self, heading, status, ring, parent=None):
+    """Measured text and an optional compact footer beside one fixed ring."""
+    def __init__(self, heading, status, ring, parent=None, *, footer=None):
         super().__init__(parent)
         self.heading, self.status, self.ring = heading, status, ring
+        self.footer = footer
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         for widget in (heading, status, ring):
             widget.setParent(self)
+        if footer is not None:
+            footer.setParent(self)
+
+    def required_height(self):
+        footer = self.footer.sizeHint().height() if self.footer is not None and not self.footer.isHidden() else 0
+        return max(self.ring.height(), self.heading.height() + self.status.height() + footer)
 
     def fit(self):
-        height = max(self.ring.height(), self.heading.height() + self.status.height())
+        height = self.required_height()
         if self.minimumHeight() != height:
             self.setFixedHeight(height)
         width = max(1, self.width() - self.ring.width() - 4)
         self.heading.setGeometry(0, 0, width, self.heading.height())
         self.status.setGeometry(0, self.heading.height(), width, self.status.height())
+        if self.footer is not None and not self.footer.isHidden():
+            self.footer.setGeometry(0, self.heading.height() + self.status.height(), width, self.footer.sizeHint().height())
         self.ring.move(max(0, self.width() - self.ring.width()), 0)
 
     def resizeEvent(self, event):

@@ -80,6 +80,7 @@ function Invoke-OptimusRequest {
     switch ([string]$Request.operation) {
         'update_recovery_probe' { Get-OptimusUpdateRecoveryProbe }
         'system_diagnostics' { Get-OptimusSystemDiagnostics }
+        'hardware_health' { Get-OptimusHardwareHealth -CancelRequested (New-OptimusCancellationCallback -Request $Request) }
         'adaptive_network' { Get-OptimusAdaptiveNetwork }
         'windows_integrity' {
             if($arg.repair -isnot [bool] -or $arg.approved -isnot [bool]){throw 'Explicit Boolean integrity choices are required.'}

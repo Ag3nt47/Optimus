@@ -514,12 +514,17 @@ class DetailedSettingsWindow(QMainWindow):
                 callback(result)
         except Exception as exc:
             self._error(str(exc))
+        self._resume_hardware_health_tab()
 
     @Slot(str)
     def _worker_error(self, message):
         self.busy, self._callback = False, None
         self.activity.hide()
+        if getattr(self, '_operation_name', '') == 'hardware_health_details':
+            self.hardware_health_panel.set_busy(False)
+            self.hardware_health_panel.status.setText('Hardware details unavailable. The saved view can be refreshed again.')
         self._error(message)
+        self._resume_hardware_health_tab()
 
     def _error(self, message):
         self.status.setText("Action could not complete: " + str(message))
@@ -585,10 +590,50 @@ class DetailedSettingsWindow(QMainWindow):
         self._button(bar, "Run health review", self.refresh_audit, primary=True)
         self._button(bar, "Review cleanup", lambda: self.select_page("Cleaner"))
         self._button(bar, "Review memory", lambda: self.select_page("Performance"))
+        self._button(bar, "Battery / drive health", self.show_hardware_health)
         bar.addStretch()
         self.health = DataTable([("Area", "area"), ("Finding", "finding"), ("Next step", "recommendation")])
-        layout.addWidget(self.health, 1)
+        self.dashboard_tabs = QTabWidget()
+        self.dashboard_tabs.addTab(self.health, 'Resources')
+        from .widgets.hardware_health_panel import HardwareHealthPanel
+        self.hardware_health_panel = HardwareHealthPanel()
+        self.hardware_health_panel.refreshRequested.connect(lambda: self.show_hardware_health(refresh=True))
+        self.dashboard_tabs.addTab(self.hardware_health_panel, 'Battery / drive health & history')
+        self.dashboard_tabs.currentChanged.connect(self._hardware_health_tab_changed)
+        layout.addWidget(self.dashboard_tabs, 1)
         self._note(layout, "Source: Windows resource, process and startup APIs. A long-running process is not automatically obsolete. Shared working-set pages can appear in several processes.")
+
+    def show_hardware_health(self, checked=False, *, refresh=False):
+        if self.busy:
+            self.status.setText('Wait for the active settings task before loading another health view.')
+            return
+        blocked = self.dashboard_tabs.blockSignals(True)
+        try:
+            self.dashboard_tabs.setCurrentWidget(self.hardware_health_panel)
+        finally:
+            self.dashboard_tabs.blockSignals(blocked)
+        if not callable(getattr(self.backend, 'hardware_health_details', None)):
+            return
+        def ready(value):
+            self.hardware_health_panel.set_busy(False)
+            if isinstance(value, dict):
+                self.hardware_health_panel.set_report(value.get('report') or {})
+                self.hardware_health_panel.set_history(value.get('history') or {})
+        self.hardware_health_panel.set_busy(True)
+        self._run('hardware_health_details', refresh=refresh, done=ready)
+
+    def _hardware_health_tab_changed(self, index):
+        if self.dashboard_tabs.currentWidget() is self.hardware_health_panel:
+            if self.busy:
+                self._hardware_health_load_pending = True
+            else:
+                self.show_hardware_health()
+
+    def _resume_hardware_health_tab(self):
+        if getattr(self, '_hardware_health_load_pending', False) and not self.busy:
+            self._hardware_health_load_pending = False
+            if self.dashboard_tabs.currentWidget() is self.hardware_health_panel:
+                QTimer.singleShot(0, self.show_hardware_health)
 
     def refresh_audit(self):
         self._run("audit", done=self._audit_ready)
@@ -2060,6 +2105,7 @@ def _worker_bytes(value):
 class WorkflowWorkerCard(QFrame):
     """A persistent worker status, with observed item counts and no invented ETA."""
     navigationRequested = Signal(str, object)
+    healthDetailsRequested = Signal()
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -2119,6 +2165,28 @@ class WorkflowWorkerCard(QFrame):
         self._resource_scope = ''
         self._maintenance = False
         layout.addWidget(self.totals)
+        self.hardware_health_box = QWidget(self)
+        health_layout = QHBoxLayout(self.hardware_health_box)
+        health_layout.setContentsMargins(0, 0, 0, 0)
+        health_layout.setSpacing(4)
+        health_labels = QHBoxLayout()
+        health_labels.setSpacing(4)
+        self.battery_health = WorkflowSummaryLabel(max_lines=1)
+        self.drive_health = WorkflowSummaryLabel(max_lines=1)
+        health_labels.addWidget(self.battery_health)
+        health_labels.addWidget(self.drive_health)
+        health_layout.addLayout(health_labels, 1)
+        self.health_details_button = QPushButton('Health')
+        self.health_details_button.setAccessibleName('Battery and drive health history')
+        self.health_details_button.setAutoDefault(False)
+        self.health_details_button.setDefault(False)
+        self.health_details_button.setStyleSheet('padding:1px 5px;min-height:0;min-width:0;')
+        self.health_details_button.setToolTip('View each battery and physical drive, available measurements and their local per-scan history. Opening this snapshot starts no new hardware scan.')
+        self.health_details_button.clicked.connect(self.healthDetailsRequested.emit)
+        health_layout.addWidget(self.health_details_button)
+        layout.addWidget(self.hardware_health_box)
+        self.hardware_health_box.hide()
+        self._hardware_health_report = None
         self.reset_resource_totals()
         self.elapsed = WorkflowSummaryLabel('Elapsed: —', max_lines=1)
         self._elapsed_base = None
@@ -2177,7 +2245,8 @@ class WorkflowWorkerCard(QFrame):
         self.totals.set_max_lines(1)
         self.completion.hide()
         from .widgets.compact_worker_ring import CompactWorkerHeader
-        self._compact_header = CompactWorkerHeader(self.heading, self.status, self.activity_ring, self)
+        self._compact_header = CompactWorkerHeader(self.heading, self.status, self.activity_ring, self,
+            footer=self.hardware_health_box)
         for label in (self.details, self.elapsed, self.activity_state, self.navigation_note):
             label.hide()
         self._rebuild_compact_layout()
@@ -2232,7 +2301,8 @@ class WorkflowWorkerCard(QFrame):
         if force or scale != self._presentation_scale:
             for widget in (self.heading, self.completion, self.status, self.details,
                     self.progress, self.totals, self.elapsed, self.activity_state,
-                    self.navigation_note, *self.navigation_buttons.values()):
+                    self.navigation_note, self.battery_health, self.drive_health,
+                    self.health_details_button, *self.navigation_buttons.values()):
                 scale_text(widget, scale, force=force)
         self._presentation_scale = scale
         resize_ring = getattr(self.activity_ring, 'set_presentation_scale', None)
@@ -2240,6 +2310,7 @@ class WorkflowWorkerCard(QFrame):
             resize_ring(scale * (7 / 6 if self._spacious else 1))
         for button in self.navigation_buttons.values():
             button.setFixedHeight(max(round(30 * scale), button.fontMetrics().height() + 6))
+        self.health_details_button.setFixedHeight(max(22, self.health_details_button.fontMetrics().height() + 4))
         self._fit_status()
 
     def spacious_minimum_height(self):
@@ -2247,7 +2318,9 @@ class WorkflowWorkerCard(QFrame):
         line = lambda label, count: label.fontMetrics().lineSpacing() * count + 4
         status_lines, detail_lines, total_lines = self._spacious_line_counts()
         ring = round(54 * min(1.6, self._presentation_scale * 7 / 6))
-        header = max(ring, line(self.heading, 1) + line(self.status, status_lines))
+        health_height = (max(line(self.battery_health, 1), line(self.drive_health, 1),
+            self.health_details_button.height()) if not self.hardware_health_box.isHidden() else 0)
+        header = max(ring, line(self.heading, 1) + line(self.status, status_lines) + health_height)
         return (header + line(self.completion, 1) + line(self.details, detail_lines)
             + self.progress.height() + line(self.totals, total_lines) + line(self.elapsed, 1)
             + max(button.height() for button in self.navigation_buttons.values()) + 48)
@@ -2342,6 +2415,14 @@ class WorkflowWorkerCard(QFrame):
         self.status.setWhatsThis(summary)
 
     def _fit_status(self):
+        for label in (self.battery_health, self.drive_health):
+            # The compact header has three measured text rows beside the ring.
+            # Use their full line height without extra inter-row padding so
+            # the dashboard still fits when drive-buffer warnings add rows.
+            height = label.fontMetrics().lineSpacing() + (0 if self._compact and not self._spacious else 4)
+            if label.height() != height:
+                label.setFixedHeight(height)
+            label._fit_summary()
         if self._spacious:
             counts = self._spacious_line_counts()
             for label, lines in zip((self.status, self.details, self.totals), counts):
@@ -2354,12 +2435,13 @@ class WorkflowWorkerCard(QFrame):
             changed = metrics != getattr(self, '_compact_layout_metrics', None)
             self._compact_layout_metrics = metrics
             for label in (self.heading, self.status, self.totals):
-                height = label.fontMetrics().lineSpacing() * label._max_lines + 4
+                padding = 0 if not self._spacious and label in (self.heading, self.status) else 4
+                height = label.fontMetrics().lineSpacing() * label._max_lines + padding
                 if label.height() != height:
                     label.setFixedHeight(height)
                     changed = True
                 label._fit_summary()
-            height = max(self.activity_ring.height(), self.heading.height() + self.status.height())
+            height = self._compact_header.required_height()
             if self._compact_header.height() != height:
                 self._compact_header.setFixedHeight(height)
                 changed = True
@@ -2407,6 +2489,21 @@ class WorkflowWorkerCard(QFrame):
             + margins.left() + margins.right() + 12,
             metrics.horizontalAdvance('Downloaded: size not reported') + margins.left() + margins.right(),
             metrics.horizontalAdvance('Completed installs: 999 apps') + margins.left() + margins.right())
+
+    def set_hardware_health(self, report=None, *, enabled=True):
+        self.hardware_health_box.setVisible(enabled)
+        self._hardware_health_report = report
+        if not enabled:
+            return
+        if report is None:
+            battery, drives = 'Battery health: queued', 'Drive health: queued'
+        else:
+            from .hardware_health import health_summaries
+            battery, drives = health_summaries(report)
+        for label, text in ((self.battery_health, battery), (self.drive_health, drives)):
+            label.setText(text)
+            label._fit_summary()
+        self.layout().invalidate()
 
     def reset_resource_totals(self):
         self._resource_scope = ''
@@ -2866,6 +2963,8 @@ class OptimizationProgressWindow(QDialog):
         for identity, title in (('maintenance', 'Maintenance'), ('software_updates', 'App updates'),
                                 ('driver_updates', 'Driver updates'), ('security_scan', 'Virus & malware scan')):
             self.worker_grid.ensure(identity, title)
+        self.worker_cards['maintenance'].healthDetailsRequested.connect(self.show_hardware_health_details)
+        self._hardware_health_dialog = None
         self.worker_cards['security_scan'].update_state({'status': 'not_selected',
             'description': 'The virus, malware and spyware scan is disabled for this run.'})
         body_layout.addWidget(self.worker_grid, 1)
@@ -3284,6 +3383,7 @@ class OptimizationProgressWindow(QDialog):
         self._followup_baseline_totals = None
         self._followup_latest_totals = {}
         self._worker_selection = dict(settings) if isinstance(settings, dict) else {}
+        self.worker_cards['maintenance'].set_hardware_health(enabled=self._worker_selection.get('hardware_health_enabled', True) is True)
         for card in self.worker_cards.values():
             card.reset_resource_totals()
         self._refresh_resource_comparison()
@@ -3298,6 +3398,22 @@ class OptimizationProgressWindow(QDialog):
             self._update_scan_card({'stage_status': 'not_started' if selected else 'not_selected',
                 'description': 'Waiting for the saved virus, malware and spyware scan.' if selected else
                     'The virus, malware and spyware scan is disabled for this run.'})
+
+    def show_hardware_health_details(self):
+        backend = getattr(self.parentWidget(), 'backend', None)
+        if backend is None:
+            return
+        previous = self._hardware_health_dialog
+        if previous is not None and previous.isVisible():
+            previous.raise_()
+            previous.activateWindow()
+            return
+        if previous is not None:
+            previous.deleteLater()
+        from .widgets.hardware_health_dialog import SnapshotHealthDialog
+        report = self.worker_cards['maintenance']._hardware_health_report
+        self._hardware_health_dialog = SnapshotHealthDialog(backend, report, self)
+        self._hardware_health_dialog.show()
 
     def _update_scan_card(self, state):
         card = self.worker_grid.ensure('security_scan', 'Virus & malware scan')
@@ -3363,6 +3479,9 @@ class OptimizationProgressWindow(QDialog):
         if not isinstance(state, dict):
             self.log.appendPlainText(display(state))
             return
+        if isinstance(state.get('hardware_health'), dict):
+            self.worker_cards['maintenance'].set_hardware_health(state['hardware_health'],
+                enabled=self._worker_selection.get('hardware_health_enabled', True) is True)
         stage = display(field(state, 'stage', default='Working'))
         if stage == 'Scan for spyware and malware':
             self._update_scan_card(state)
@@ -3532,6 +3651,16 @@ class OptimizationProgressWindow(QDialog):
 
     def finish(self, result, error=None):
         self._update_space_guard(field(result, 'space_guard', default=None))
+        if isinstance(field(result, 'hardware_health'), dict):
+            self.worker_cards['maintenance'].set_hardware_health(result['hardware_health'],
+                enabled=self._worker_selection.get('hardware_health_enabled', True) is True)
+        elif (self._worker_selection.get('hardware_health_enabled', True) is True
+                and self.worker_cards['maintenance']._hardware_health_report is None):
+            from .hardware_health import normalize_hardware_health
+            status = 'cancelled' if field(result, 'cancelled') is True else 'unavailable'
+            self.worker_cards['maintenance'].set_hardware_health(normalize_hardware_health({
+                'schema': 1, 'read_only': True, 'status': status, 'storage': [], 'batteries': [],
+                'errors': ['This run did not return a hardware-health observation.']}))
         self.completed = True
         self._sync_live_metrics(False)
         self.worker_navigation.refresh(enabled=False)
@@ -4789,6 +4918,7 @@ class OptimusWindow(QMainWindow):
             ('spyware_scan_enabled','Run a quick virus, malware and spyware scan with Microsoft Defender'),
             ('defender_scan_reuse_enabled','Avoid repeating a recent healthy Defender quick scan during Auto Clean'),
             ('review_inventory_reuse_enabled','Reuse complete application/startup review metadata briefly within this run'),
+            ('hardware_health_enabled','Automatically check battery and physical-drive health; keep local per-scan graphs'),
             ('privacy_advertising_enabled','Apply selected Windows advertising/suggestion privacy preferences'),
             ('privacy_diagnostics_enabled','Apply selected optional Windows diagnostic preferences'),
             ('codex_priority_enabled','Apply optional Codex priority profile'),('background_analysis_enabled','Enable background resource analysis'),

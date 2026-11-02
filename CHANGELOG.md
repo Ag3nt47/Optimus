@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.32
+
+- Add automatic read-only battery and physical-drive health checks to maintenance, with worker summaries and a snapshot/history view.
+- Show reported capacity retained, native condition and available wear, temperature, cycle, power-on and error measurements; unavailable values remain unknown.
+- Record local per-scan trends, retain the first baseline and identify device replacements using opaque hardware hashes. Unknown readings create gaps and unidentified devices are not line-joined.
+- Add scalable graphs with metric selection, baseline markers, per-scan tooltips and categorical condition charts without a fabricated health percentage.
+- Bound queries and history storage; failures do not stop unrelated maintenance, and no repair, SMART self-test, firmware change or new monitoring service is started.
+
 ## 0.12.31
 
 - Continue unrelated automatic fixes after a proven finished security-control failure; preserve running, unknown and restart barriers.

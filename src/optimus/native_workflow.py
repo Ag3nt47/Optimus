@@ -382,6 +382,14 @@ class NativeWorkflow:
                             description=str(state.get('description') or value['label'])))
 
             stages = [('Inspect native resources and process identities', self.backend.audit)]
+            if configuration.get('hardware_health_enabled', True) and callable(getattr(self.backend, 'hardware_health', None)):
+                from .hardware_health import HEALTH_STAGE
+                def hardware_health():
+                    result = self.backend.hardware_health(cancel_event=cancel_event)
+                    report['hardware_health'] = result
+                    progress_callback.update_hardware_health(result)
+                    return result
+                stages.append((HEALTH_STAGE, hardware_health))
             has_space_guard = configuration.get('drive_space_guard_enabled') is True and callable(getattr(self.backend, 'space_guard_check', None))
             if has_space_guard:
                 stages.append(('Check drive space buffers', lambda: space_guard(initial=True)))

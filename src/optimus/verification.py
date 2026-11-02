@@ -29,6 +29,7 @@ _STATES = ('confirmed', 'needs_review', 'unverified', 'not_applicable')
 _MAX_FILES = 20000
 _TOOLKIT_FILE_STAGES = frozenset(('Clean selected application caches', 'Expire selected recovery and report data'))
 _TOOLKIT_READ_ONLY_STAGES = frozenset(('Observe sustained resources before maintenance',
+    'Check battery and physical drive health',
     'Observe sustained resources after maintenance', 'Review hardware, boot and memory health',
     'Check installer volume headroom', 'Compare selected folder growth'))
 _NATIVE = r'''

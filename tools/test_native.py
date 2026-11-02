@@ -27,6 +27,8 @@ PORTABLE_SUITES = (
     'test_scan_cadence.py',
     'test_recommendation_presentation.py', 'test_recommendation_continuation.py',
     'test_update_readback_receipts.py',
+    'test_hardware_health_model.py', 'test_hardware_health_history.py',
+    'test_hardware_health_panel.py', 'test_hardware_health_plot.py',
     'test_software_app_rules.py',
     'test_codex_archives.py', 'test_retention_cleanup.py', 'test_retention_choices_ui.py',
     'test_worker_resource_totals.py',

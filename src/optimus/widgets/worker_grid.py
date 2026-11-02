@@ -74,6 +74,13 @@ class WorkerGrid(QWidget):
                 self.grid.setColumnStretch(index, 1 if index < columns else 0)
             for index in range(12):
                 self.grid.setRowStretch(index, 1 if self.pinned and index < (len(cards) + columns - 1) // columns else 0)
+        if self.pinned:
+            # Equal stretch alone preserves unequal row minima at a compact
+            # viewport. Share the largest measured card minimum across rows.
+            rows = (len(cards) + columns - 1) // columns
+            row_height = max((card.minimumHeight() for card in cards), default=0)
+            for index in range(12):
+                self.grid.setRowMinimumHeight(index, row_height if index < rows else 0)
         # SetNoConstraint keeps the width responsive, but also prevents Qt from
         # propagating taller card minima to the scroll content. Synchronize
         # height even when a font or navigation note leaves columns unchanged.

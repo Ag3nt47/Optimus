@@ -438,7 +438,7 @@ class WorkflowTests(unittest.TestCase):
                 backend.cleaner = Cleaner(backend.data_dir, categories=[Category('fixture-cache', 'Test cache', cache, 'Owned fixture only.')])
                 configuration = NativePreferences.safe_defaults()
                 configuration.update(setup_version=2, cleanup_enabled=True, cleanup_age_days=0,
-                                     cleanup_category_ids=['fixture-cache'])
+                                     cleanup_category_ids=['fixture-cache'], hardware_health_enabled=False)
                 events = []
                 report = backend.optimize(configuration, events.append)
                 self.assertEqual(report['status'], 'completed', report)

@@ -34,6 +34,7 @@ BEFORE_UPDATES = frozenset({
     'Clean selected application caches', 'Expire selected recovery and report data',
 })
 INDEPENDENT = frozenset({
+    'Check battery and physical drive health',
     'Review installed applications', 'Identify programs contributing to slowdowns',
     'Apply supported speed enhancements', 'Prepare approved Windows CPU upgrade workaround',
     'Apply Codex performance profile', 'Enable resource analysis', 'Apply saved privacy controls',
@@ -112,12 +113,15 @@ class ProgressMux:
         self.maintenance_totals = WorkerResourceTotals()
         self.job_totals = {}
         self.space_guard = None
+        self.hardware_health = None
 
     def _event(self):
         event = dict(self.foreground)
         event['resource_totals'] = self.maintenance_totals.snapshot()
         if isinstance(self.space_guard, dict):
             event['space_guard'] = copy.deepcopy(self.space_guard)
+        if isinstance(self.hardware_health, dict):
+            event['hardware_health'] = copy.deepcopy(self.hardware_health)
         event['item_progress'] = normalize_item_progress(event.get('item_progress'))
         if self.jobs:
             event['jobs'] = []
@@ -170,6 +174,10 @@ class ProgressMux:
     def update_space_guard(self, result):
         with self.lock:
             self.space_guard = copy.deepcopy(result) if isinstance(result, dict) else None
+
+    def update_hardware_health(self, result):
+        with self.lock:
+            self.hardware_health = copy.deepcopy(result) if isinstance(result, dict) else None
 
     def worker_resource_snapshots(self):
         with self.lock:

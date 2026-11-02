@@ -16,7 +16,7 @@ from .filesystem import _ordinary_data_path
 # These bounded bridge handlers execute synchronously and cannot launch an
 # installer or Windows asynchronous mutator. Their exact terminal error is not
 # an unknown installation. Everything else keeps the conservative native guard.
-_SYNCHRONOUS_TERMINAL = frozenset({'update_recovery_probe', 'system_diagnostics', 'adaptive_network',
+_SYNCHRONOUS_TERMINAL = frozenset({'update_recovery_probe', 'system_diagnostics', 'hardware_health', 'adaptive_network',
     'audit', 'process_details', 'startup_list', 'installed_apps', 'services', 'storage_scan',
     'duplicate_scan', 'drivers_list', 'changes', 'registry_scan', 'power_plans', 'registry_audit',
     'driver_device_inventory', 'startup_set', 'startup_remove', 'service_set', 'duplicate_recycle',
@@ -152,12 +152,12 @@ class PowerShellBridge:
     def request(self, operation: str, timeout: float = 180, *, progress_callback=None, cancel_event=None, **arguments):
         if progress_callback is not None and not callable(progress_callback):
             raise ValueError('An optional progress callback must be callable.')
-        if cancel_event is not None and operation not in ('driver_updates_scan', 'driver_update_apply'):
+        if cancel_event is not None and operation not in ('driver_updates_scan', 'driver_update_apply', 'hardware_health'):
             raise ValueError('This native operation has no supported cooperative cancellation contract.')
         controller = self.stop_controller
         if controller is not None:
             controller.check()
-            if operation in ('driver_updates_scan', 'driver_update_apply'):
+            if operation in ('driver_updates_scan', 'driver_update_apply', 'hardware_health'):
                 cancel_event = controller.bind_cancel(cancel_event)
         with self._lock:
             if controller is not None:

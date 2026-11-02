@@ -46,6 +46,7 @@ DEFAULTS = {
     'applications_review_enabled': False, 'performance_review_enabled': False,
     'speed_enhancements_enabled': False,
     'review_inventory_reuse_enabled': True,
+    'hardware_health_enabled': True,
     'defender_scan_reuse_enabled': True, 'defender_scan_reuse_hours': 6,
     'drive_optimization_enabled': False, 'auto_continue_fixes_enabled': False,
     'parallel_app_updates_enabled': False,
@@ -394,6 +395,14 @@ class Workflow:
 
             serial_job = None
             stages = [('Inspect current resource usage', 'Reading running programs, memory, storage, startup entries and services.', self.backend.audit)]
+            if configuration['hardware_health_enabled'] and callable(getattr(self.backend, 'hardware_health', None)):
+                from .hardware_health import HEALTH_STAGE
+                def hardware_health():
+                    result = self.backend.hardware_health(cancel_event=cancel_event)
+                    report['hardware_health'] = result
+                    progress_callback.update_hardware_health(result)
+                    return result
+                stages.append((HEALTH_STAGE, 'Reading battery capacity and physical-drive health where exposed; saving local per-scan history without repairs or self-tests.', hardware_health))
             has_space_guard = configuration['drive_space_guard_enabled'] and callable(getattr(self.backend, 'space_guard_check', None))
             if has_space_guard:
                 stages.append(('Check drive space buffers', 'Checking the saved temporary-space target before cleanup and installers; no reserve file or disk setting is changed.', lambda: space_guard(initial=True)))

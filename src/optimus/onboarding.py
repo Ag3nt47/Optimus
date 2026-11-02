@@ -550,7 +550,7 @@ class InitialSetupWizard(QWizard):
     def _build_performance(self):
         body = self._page('performance', '7. Performance Optimizer',
             'Review process CPU/memory and priority/affinity information without closing applications. Optional Codex priority and background sampling are separate choices. Existing external priority watchers are preserved.')
-        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'interface_priority_boost_enabled', 'codex_priority_enabled', 'background_analysis_enabled', 'review_inventory_reuse_enabled')])
+        self._checkbox_actions(body, 'performance', lambda: [self.controls[key] for key in ('performance_review_enabled', 'speed_enhancements_enabled', 'drive_optimization_enabled', 'interface_priority_boost_enabled', 'codex_priority_enabled', 'background_analysis_enabled', 'review_inventory_reuse_enabled', 'hardware_health_enabled')])
         self._check(body, 'performance_review_enabled', 'Include a detailed process/resource review report')
         self._check(body, 'interface_priority_boost_enabled', 'Prioritize Optimus interface (Above Normal CPU; takes effect the next time Optimus opens)')
         self._check(body, 'speed_enhancements_enabled', 'Automatically apply supported reversible speed enhancements during Optimize')
@@ -564,6 +564,7 @@ class InitialSetupWizard(QWizard):
         body.addWidget(priority)
         self._check(body, 'background_analysis_enabled', 'Keep background resource analysis on while Optimus is running')
         self._check(body, 'review_inventory_reuse_enabled', 'Avoid duplicate complete application/startup metadata queries within a maintenance run')
+        self._check(body, 'hardware_health_enabled', 'Automatically check battery and physical-drive health and retain local per-scan graphs')
         interval = QSpinBox()
         interval.setRange(2, 60)
         interval.setSuffix(' seconds between samples')

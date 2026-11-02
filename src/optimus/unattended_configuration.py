@@ -14,6 +14,7 @@ UNATTENDED_SETUP_VERSION = 2
 _EXCLUDED = frozenset(('unattended_scope_hash', 'reduce_motion', 'theme', 'motion',
                        'ui_theme', 'ui_motion_enabled',
                        'review_inventory_reuse_enabled',
+                       'hardware_health_enabled',
                        'drive_space_guard_enabled', 'drive_space_guard_target_gib'))
 _LOW_SPACE_GUARD_KEYS = frozenset(('drive_space_guard_enabled', 'drive_space_guard_target_gib'))
 

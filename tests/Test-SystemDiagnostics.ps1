@@ -10,12 +10,18 @@ function Get-CimInstance {
         'Win32_PageFileUsage' {[pscustomobject]@{AllocatedBaseSize=2048;CurrentUsage=512;PeakUsage=1024}}
         'Win32_PageFileSetting' {[pscustomobject]@{InitialSize=2048;MaximumSize=4096}}
         'MSFT_PhysicalDisk' {[pscustomobject]@{FriendlyName='Test SSD';DeviceId='0';MediaType=4;BusType=17;HealthStatus=0;OperationalStatus=@(2);Size=10000}}
+        'MSFT_Disk' {return @()}
+        'MSFT_Partition' {return @()}
         'MSFT_StorageReliabilityCounter' {[pscustomobject]@{DeviceId='0';Wear=0;Temperature=$null;ReadErrorsUncorrected=0}}
         'BatteryStaticData' {[pscustomobject]@{InstanceName='TestBattery';DesignedCapacity=1000}}
         'BatteryFullChargedCapacity' {[pscustomobject]@{InstanceName='TestBattery';FullChargedCapacity=800}}
         'BatteryCycleCount' {[pscustomobject]@{InstanceName='TestBattery';CycleCount=20}}
         default {throw 'Unexpected CIM class.'}
     }
+}
+function Get-CimAssociatedInstance {
+    param($InputObject,$Association,$ResultClassName,$OperationTimeoutSec,$ErrorAction)
+    [pscustomobject]@{DeviceId=$InputObject.DeviceId;Wear=0;Temperature=$null;ReadErrorsUncorrected=0}
 }
 function Get-WinEvent {param($FilterHashtable,$MaxEvents,$ErrorAction) throw 'No accessible matching events.'}
 $result=Get-OptimusSystemDiagnostics
