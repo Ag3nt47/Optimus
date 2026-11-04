@@ -16,6 +16,14 @@ function Get-OptimusUpdateRecoveryProbe {
                            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
             if(Test-Path -LiteralPath $key -ErrorAction Stop){$reboot=$true}
         }
+        $bootUtc=$null
+        $bootEventUtc=$null
+        try {
+            $operatingSystem=Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop
+            $bootUtc=Get-SCMUtcTimeString $operatingSystem.LastBootUpTime
+            $bootEvent=Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-General';Id=12} -MaxEvents 1 -ErrorAction Stop
+            $bootEventUtc=Get-SCMUtcTimeString $bootEvent.TimeCreated
+        } catch {} # Older completion recovery can still use the other evidence.
         $processes=@(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 10 -ErrorAction Stop)
         if($processes.Count -lt 1 -or $processes.Count -gt 10000){throw 'The process inventory exceeds its bound.'}
         $rows=@(foreach($process in $processes) {
@@ -40,7 +48,8 @@ function Get-OptimusUpdateRecoveryProbe {
             owner=('sid:'+ [Security.Principal.WindowsIdentity]::GetCurrent().User.Value);
             windows_directory=[Environment]::GetFolderPath('Windows');
             captured_at=([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()/1000.0);
-            wua_busy=$busy;reboot_required=$reboot;processes=$rows;applications=@($apps.ToArray())}
+            wua_busy=$busy;reboot_required=$reboot;boot_utc=$bootUtc;boot_event_utc=$bootEventUtc;
+            processes=$rows;applications=@($apps.ToArray())}
     } finally {
         foreach($native in @($installer,$system,$session)) {
             if($null -ne $native -and [Runtime.InteropServices.Marshal]::IsComObject($native)) {

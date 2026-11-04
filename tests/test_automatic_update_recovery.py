@@ -486,3 +486,210 @@ def test_maintenance_recovers_before_first_pending_snapshot_and_audit(completed)
     assert calls[0] == 'snapshot' and 'audit' in calls
     assert report['automatic_update_reconciliation']['status'] == 'reconciled'
     assert not original_barrier(f.backend)
+
+@pytest.fixture
+def console_lost(completed, monkeypatch):
+    f = completed
+    from datetime import datetime, timezone
+    def utc(stamp):
+        return datetime.fromtimestamp(stamp, timezone.utc).isoformat()
+    finished = f.record['package_attempt']['prepared_at'] + 9
+    boot = round(finished + 90)
+    note = recovery._CONSOLE_EXIT
+    row = {'id': 'Fixture.App', 'status': 'failed', 'uncertain': False, 'presence': '', 'source': '',
+           'reason': '', 'binding': {}, 'error': note,
+           'result': {'installer_started': True, 'outcomeKnown': False, 'running': True,
+               'uncertain': True, 'requiresReview': True, 'failure_scope': 'app_batch',
+               'failureKind': 'preflight_failed', 'note': note, 'status': 'failed'}}
+    executed = f.record['started_at'] + 1
+    parent = json.loads(f.parent_path.read_text())
+    audit = parent['stages'][0]
+    audit.update(started_at=executed, finished_at=executed + 1)
+    audit['result']['System'] = {'LastBootUtc': utc(f.record['started_at'] - 3600)}
+    parent['stages'].append({'title': f.record['title'], 'started_at': executed, 'finished_at': finished})
+    f.parent_path.write_text(json.dumps(parent))
+    f.record.update(status='uncertain', execution_started_at=executed, finished_at=finished, terminal_items=[row],
+        runtime_owner={'schema': 1, 'kind': recovery.RUNTIME_OWNER_KIND, 'owner': f.record['owner'],
+                       'journal_id': f.record['id'], 'parent_run_id': f.record['parent_run_id'],
+                       'pid': 44, 'name': 'Optimus.exe', 'executable': r'D:\Optimus\0.12.34\Optimus.exe',
+                       'created_at': f.record['started_at'] - 30, 'created_utc': utc(f.record['started_at'] - 30),
+                       'captured_at': f.record['started_at'], 'frozen': True},
+        result={'items': [copy.deepcopy(row)], 'installer_started': True, 'running': True, 'outcomeKnown': False,
+                'failed_items': 2, 'cancelled': False, 'restartNeeded': False,
+                'stop_reason': 'The updater raised an error; verify installer state before continuing.',
+                'deferred_ids': ['Other.App']})
+    f.path.write_bytes(json.dumps(f.record, indent=2).encode())
+    f.probe.update(boot_utc=utc(boot), boot_event_utc=utc(boot + 1))
+    f.boot = Mock(return_value=boot)
+    monkeypatch.setattr('optimus.update_resume.boot_identity', f.boot)
+    return f
+
+
+def test_captured_console_loss_retires_liveness_after_reboot_without_completion(console_lost):
+    from optimus.update_holds import load_update_holds, matching_update_hold
+    f = console_lost
+    original, original_parent = f.path.read_bytes(), f.parent_path.read_bytes()
+    assert recovery.is_restart_recovery_candidate(f.record)
+    assert pending_updates_barrier(f.backend)
+    receipt = run(f)
+    assert receipt['status'] == 'reconciled'
+    assert receipt['reconciled'] == []
+    assert receipt['reconciled_after_reboot'] == [{'id': f.record['id'], 'package_id': 'Fixture.App', 'version': '2.0'}]
+    assert receipt['installers_started'] == receipt['retries_started'] == 0
+    assert f.path.read_bytes() == original and f.parent_path.read_bytes() == original_parent
+    assert not pending_updates_barrier(f.backend)
+    hold, = load_update_holds(f.data)
+    assert matching_update_hold({'id': 'Fixture.App', 'available': '2.0'}, [hold]) == hold
+    assert matching_update_hold({'id': 'Fixture.App', 'available': '3.0'}, [hold]) is None
+    assert matching_update_hold({'id': 'Other.App', 'available': '2.0'}, [hold]) is None
+    path = recovery._restart_marker(f.data, f.record['id'])
+    marker = json.loads(path.read_text())
+    assert marker['historical_outcome_known'] is False
+    assert marker['original_sha256'] == hashlib.sha256(original).hexdigest()
+    assert marker['proof']['boot_event_utc'] == f.probe['boot_event_utc']
+    assert marker['prior_boot']['parent_sha256'] == hashlib.sha256(original_parent).hexdigest()
+    f.backend.automatic_update_recovery_probe.reset_mock()
+    assert run(f)['reconciled_after_reboot'] == []
+    f.backend.automatic_update_recovery_probe.assert_not_called()
+
+
+@pytest.mark.parametrize('new', [False, True])
+def test_new_console_failure_kind_remains_strictly_tied_to_native_message(console_lost, new):
+    f = console_lost
+    row = f.record['terminal_items'][0]
+    row['error'] = row['result']['note'] = recovery._CONSOLE_START
+    if new:
+        row['result']['failureKind'] = 'console_outcome_unknown'
+    f.record['result']['items'] = [copy.deepcopy(row)]
+    f.path.write_text(json.dumps(f.record))
+    assert bool(run(f)['reconciled_after_reboot']) is new
+
+
+@pytest.mark.parametrize('failure', ['old_boot', 'wrong_event', 'missing_event', 'independent_boot_mismatch',
+    'stale', 'busy', 'restart_pending', 'old_owner_still_present', 'other_installer', 'other_helper'])
+def test_recovery_requires_new_boot_and_fresh_idle_native_probe(console_lost, failure):
+    f = console_lost
+    if failure == 'old_boot':
+        f.probe.update(boot_utc='2026-01-02T02:00:00+00:00', boot_event_utc='2026-01-02T02:00:01+00:00')
+        f.boot.return_value = int(recovery._utc_epoch(f.probe['boot_utc']))
+    elif failure == 'wrong_event':
+        f.probe['boot_event_utc'] = '2026-01-01T02:00:00+00:00'
+    elif failure == 'missing_event':
+        f.probe.pop('boot_event_utc')
+    elif failure == 'independent_boot_mismatch':
+        f.boot.return_value -= 999
+    elif failure == 'stale':
+        f.probe['captured_at'] -= 40
+    elif failure == 'busy':
+        f.probe['wua_busy'] = True
+    elif failure == 'restart_pending':
+        f.probe['reboot_required'] = True
+    elif failure == 'old_owner_still_present':
+        f.probe['processes'].append({'pid': 44, 'name': 'Optimus.exe',
+                                     'started_utc': f.record['runtime_owner']['created_utc']})
+    elif failure == 'other_installer':
+        f.probe['processes'].append({'pid': 99, 'name': 'VendorSetup.exe'})
+    else:
+        f.probe['processes'].append({'pid': 99, 'name': 'OptimusConsole.exe'})
+    original = f.path.read_bytes()
+    assert not run(f)['reconciled_after_reboot']
+    assert f.path.read_bytes() == original
+    assert pending_updates_barrier(f.backend)
+    assert not (f.data / 'update-holds.json').exists()
+    assert not recovery._restart_marker(f.data, f.record['id']).exists()
+
+
+@pytest.mark.parametrize('failure', ['driver', 'bad_message', 'detached_other', 'restart_result', 'wrapper_restart',
+    'nested_unknown', 'unbound_version', 'mismatched_copy', 'unknown_runtime', 'foreign_owner', 'malformed_hold'])
+def test_only_exact_captured_application_failure_shape_is_eligible(console_lost, failure):
+    f = console_lost
+    row = f.record['terminal_items'][0]
+    if failure == 'driver':
+        f.record['title'] = 'Install approved driver updates'
+    elif failure == 'bad_message':
+        row['error'] = row['result']['note'] = recovery._CONSOLE_EXIT + ' extra'
+    elif failure == 'detached_other':
+        row['result']['failureKind'] = 'timeout'
+    elif failure == 'restart_result':
+        row['result']['restartNeeded'] = True
+    elif failure == 'wrapper_restart':
+        row['restartNeeded'] = True
+    elif failure == 'nested_unknown':
+        f.record['result']['app_presence'] = {'items': [{'id': 'Other.App', 'result': {'running': True}}]}
+    elif failure == 'unbound_version':
+        f.record['current_item']['description'] = 'Updating approved package 1/2: Fixture.App (1.0 to v)'
+    elif failure == 'unknown_runtime':
+        del f.record['runtime_owner']
+    elif failure == 'foreign_owner':
+        f.record['owner'] = 'sid:S-1-5-23'
+    elif failure == 'malformed_hold':
+        (f.data / 'update-holds.json').write_text('{"holds":[]}')
+    if failure == 'mismatched_copy':
+        f.record['result']['items'][0]['id'] = 'Other.App'
+    else:
+        f.record['result']['items'] = [copy.deepcopy(row)]
+    f.path.write_text(json.dumps(f.record))
+    original = f.path.read_bytes()
+    assert not run(f)['reconciled_after_reboot']
+    assert f.path.read_bytes() == original and pending_updates_barrier(f.backend)
+    if failure != 'malformed_hold':
+        f.backend.automatic_update_recovery_probe.assert_not_called()
+
+
+def test_exact_hold_and_journal_bytes_remain_required_after_receipt(console_lost):
+    f = console_lost
+    assert run(f)['reconciled_after_reboot']
+    hold = f.data / 'update-holds.json'
+    original = hold.read_bytes()
+    hold.write_text(json.dumps({'schema': 1, 'owner': f.record['owner'], 'holds': []}))
+    assert pending_updates_barrier(f.backend)
+    hold.write_bytes(original)
+    assert not pending_updates_barrier(f.backend)
+    # Same parsed object, different original bytes must still block.
+    f.path.write_bytes(f.path.read_bytes() + b'\n')
+    assert pending_updates_barrier(f.backend)
+
+
+def test_existing_hold_survives_interrupted_companion_write_and_resume(console_lost, monkeypatch):
+    from optimus.update_holds import load_update_holds
+    f = console_lost
+    original_hold = {'id': 'Different.App', 'available_version': '3.4', 'reason': 'Keep this user reason.'}
+    write = recovery._private_json
+    write(f.data / 'update-holds.json', {'schema': 1, 'owner': f.record['owner'], 'holds': [original_hold]})
+    def fail_companion(path, value):
+        if path.parent.name == recovery._RESTART_DIR:
+            raise OSError('fixture partial state before committed marker')
+        return write(path, value)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(recovery, '_private_json', fail_companion)
+        assert not run(f)['reconciled_after_reboot']
+        assert pending_updates_barrier(f.backend)
+    before = (f.data / 'update-holds.json').read_bytes()
+    assert load_update_holds(f.data)[0] == original_hold
+    assert run(f)['reconciled_after_reboot']
+    assert (f.data / 'update-holds.json').read_bytes() == before
+    assert not pending_updates_barrier(f.backend)
+
+@pytest.mark.parametrize('failure', ['missing_native_prior_boot', 'wrong_worker_time', 'later_boot_than_original_owner'])
+def test_prior_native_boot_is_bound_to_exact_old_parent_before_probing(console_lost, failure):
+    f = console_lost
+    parent = json.loads(f.parent_path.read_text())
+    if failure == 'missing_native_prior_boot':
+        parent['stages'][0]['result'].pop('System')
+    elif failure == 'wrong_worker_time':
+        parent['stages'][1]['finished_at'] += 1
+    else:
+        parent['stages'][0]['result']['System']['LastBootUtc'] = f.probe['boot_utc']
+    f.parent_path.write_text(json.dumps(parent))
+    assert not run(f)['reconciled_after_reboot']
+    f.backend.automatic_update_recovery_probe.assert_not_called()
+    assert pending_updates_barrier(f.backend)
+    assert not (f.data / 'update-holds.json').exists()
+
+
+def test_changed_prior_boot_audit_invalidates_committed_companion(console_lost):
+    f = console_lost
+    assert run(f)['reconciled_after_reboot']
+    assert not pending_updates_barrier(f.backend)
+    f.parent_path.write_bytes(f.parent_path.read_bytes() + b'\n')
+    assert pending_updates_barrier(f.backend)

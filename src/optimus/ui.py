@@ -1984,6 +1984,8 @@ class AvailableFixesWorker(QRunnable):
 def _compact_worker_reason(text):
     """Use a short factual caption for the recurring unresolved-installer guard."""
     lowered = text.casefold()
+    if 'earlier app update needs restart recovery' in lowered:
+        return 'Earlier app update needs recovery.\nOptimus checks again after a Windows restart.'
     if ('previous update installer' in lowered and 'unresolved outcome' in lowered
             and 'no automatic retry was started' in lowered):
         return 'Previous installer needs review.\nNo automatic retry started.'
@@ -2674,8 +2676,11 @@ class WorkflowWorkerCard(QFrame):
         else:
             self.completion.setText('Overall: —')
         installation_blocked = state.get('installation_blocked') is True
+        block_reason = state.get('installation_block_reason')
+        restart_recovery = installation_blocked and any('earlier app update needs restart recovery' in value.casefold()
+            for value in (block_reason, state.get('description')) if isinstance(value, str))
         if installation_blocked:
-            self.completion.setText('Overall: blocked')
+            self.completion.setText('Overall: waiting for restart' if restart_recovery else 'Overall: blocked')
         scan_complete = state.get('scan_complete') is True
         offers = state.get('offers_count')
         scan_label = state.get('scan_label')
@@ -2719,7 +2724,8 @@ class WorkflowWorkerCard(QFrame):
             self.status.setText('Checked; needs approval')
         set_scaled_style(self.status, 'color:#e8b34b;' if self._finished_with_skips else '', self._presentation_scale)
         if installation_blocked and raw_status in ('deferred', 'needs_review', 'completed', 'completed_with_errors', 'not_run', 'failed'):
-            self.status.setText('Search not started; install blocked' if scan_not_started else
+            self.status.setText('Windows restart required' if restart_recovery else
+                'Search not started; install blocked' if scan_not_started else
                 'Updates found; install blocked' if scan_complete and type(offers) is int and offers > 0 else
                 'Search complete; install blocked' if scan_complete else 'Search needs review; install blocked')
         self._status_text = self.status.text()
@@ -2735,14 +2741,13 @@ class WorkflowWorkerCard(QFrame):
         if isinstance(reason, str) and reason.strip() and reason not in description:
             description = (reason + ' — ' + description if raw_status.startswith('waiting_for_')
                            else description + ' — ' + reason)
-        block_reason = state.get('installation_block_reason')
         if isinstance(block_reason, str) and block_reason.strip() and block_reason not in description:
             description += ' — ' + block_reason
         package = state.get('current_package')
         if isinstance(package, str) and package.strip() and package not in description:
             description += ' — ' + package
         summary = _compact_worker_reason(description)
-        if installation_blocked and scan_complete:
+        if installation_blocked and scan_complete and not restart_recovery:
             summary = (str(scan_label) + '\n' if isinstance(scan_label, str) and scan_label else '') + (
                 'Previous installer needs review.' if state.get('blocked_by_prior_installer') is True else
                 'Installation blocked. Review the saved reason.')

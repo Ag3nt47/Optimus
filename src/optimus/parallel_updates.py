@@ -1158,13 +1158,20 @@ class ParallelAppUpdates:
                 return 'Application update history ownership is unknown; verify installer state first.'
             if (value.get('status') in ('prepared', 'running', 'uncertain')
                     and value.get('installer_prepared', True) is not False):
-                    from .update_recovery import finished_package_attempt
-                    outcome = value.get('result')
-                    if (value.get('status') == 'running' and finished_package_attempt(value)
-                            and (outcome is None or isinstance(outcome, dict)
-                                 and not _uncertain(outcome) and installer_barrier(outcome) is None)):
-                        continue  # Exact native receipt, never a time/PID heuristic.
-                    return ('A previous update installer has an unresolved outcome; no automatic retry was started. '
+                from .update_recovery import finished_package_attempt
+                outcome = value.get('result')
+                if (value.get('status') == 'running' and finished_package_attempt(value)
+                        and (outcome is None or isinstance(outcome, dict)
+                             and not _uncertain(outcome) and installer_barrier(outcome) is None)):
+                    continue  # Exact native receipt, never a time/PID heuristic.
+                if value.get('status') == 'uncertain':
+                    from .automatic_update_recovery import is_restart_recovery_candidate, reconciled_console_outcome
+                    if reconciled_console_outcome(self.backend.data_dir, path, value, owner=self.owner):
+                        continue
+                    if is_restart_recovery_candidate(value):
+                        return ('Earlier app update needs restart recovery. Optimus checks installer state after a Windows restart '
+                                'before continuing with other updates. Saved record ' + str(path))
+                return ('A previous update installer has an unresolved outcome; no automatic retry was started. '
                         'Review installer state and the saved record before continuing: ' + str(path))
             if value.get('status') == 'needs_review' and isinstance(value.get('result'), dict) and value['result'].get('restartNeeded'):
                 if not restart_checked:

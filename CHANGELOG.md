@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.37
+
+- Reconcile eligible unresolved WinGet attempts after a verified Windows restart and idle check. Hold the affected offer and allow the remaining updates to proceed.
+- Use GitHub's macOS 26 Apple Silicon runner image for native builds.
+
 ## 0.12.36
 
 - Add searchable Protected apps checkboxes to Windows Settings. Saved protections override Optimus debloat selections and per-app removal rules.

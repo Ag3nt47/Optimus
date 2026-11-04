@@ -99,6 +99,19 @@ def test_blocked_offer_counts_are_distinct_from_installer_counts(progress):
     assert 'processed' not in card.progress.text() and card.progress.maximum() == 1
 
 
+def test_restart_recovery_instructions_survive_partial_app_discovery(progress):
+    reason = 'Earlier app update needs restart recovery. Saved record ' + JOURNAL
+    progress.update_progress({'stage': 'Continue maintenance', 'percentage': 50,
+        'jobs': [blocked_job('software_updates', None, scan_complete=False, scan_status='incomplete',
+            scan_label='7 recognized; incomplete', installation_block_reason=reason)]})
+    card = progress.worker_cards['software_updates']
+    assert card.progress.format() == '7 recognized; incomplete'
+    assert card.status.text() == 'Windows restart required'
+    assert card.completion.text() == 'Overall: waiting for restart'
+    assert 'Optimus checks again after a Windows restart.' in card.details._summary
+    assert JOURNAL in card.details.toolTip()
+
+
 def test_long_blocked_status_reflows_without_overlapping_the_count(progress, app):
     progress.resize(640, 480)
     progress.update_progress({'stage': 'Continue maintenance', 'percentage': 50,
