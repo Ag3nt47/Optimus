@@ -160,9 +160,28 @@ class FixtureBackend:
         return verification()
 
 
-def test_three_workers_start_together_then_cleanup_precedes_exclusive_installers(tmp_path):
+def test_three_workers_start_together_then_cleanup_precedes_exclusive_installers(tmp_path, monkeypatch):
     backend = FixtureBackend(tmp_path)
     cancel, result, errors = threading.Event(), [], []
+    prepared = threading.Event()
+    prepare_job, audit_backend = ParallelInstallerQueue._prepared, backend.audit
+
+    def observe_preparation(queue, job, state):
+        prepare_job(queue, job, state)
+        if all(other.prepared.is_set() for other in queue.jobs):
+            prepared.set()
+
+    def audit_after_preparation():
+        report = audit_backend()
+        if backend.shared['audit'] == 1:
+            # This fixture's app review waits for an active installer. Release
+            # the audit when both discoveries are ready so that review runs
+            # after cleanup, where the installer can actually start.
+            assert prepared.wait(8), 'Both fixture searches must finish preparation.'
+        return report
+
+    monkeypatch.setattr(ParallelInstallerQueue, '_prepared', observe_preparation)
+    monkeypatch.setattr(backend, 'audit', audit_after_preparation)
     workflow = Workflow(backend)
     def run():
         try:
@@ -176,6 +195,7 @@ def test_three_workers_start_together_then_cleanup_precedes_exclusive_installers
         assert all(event.wait(5) for event in backend.entered.values())
         assert not backend.cleanup_started.is_set() and not backend.installer_started.is_set()
         backend.discovery_release.set()
+        assert prepared.wait(8), 'Both fixture searches must finish preparation.'
         assert backend.cleanup_started.wait(5)
         assert not backend.installer_started.is_set()
         backend.cleanup_release.set()
