@@ -28,7 +28,7 @@ MISSING_DEFAULT_KEYS = {
     'update_payload_cleanup_enabled', 'toolkit_settings',
     'python_relocation_repair_enabled', 'python_relocation_approvals',
     'review_inventory_reuse_enabled', 'defender_scan_reuse_enabled', 'defender_scan_reuse_hours',
-    'hardware_health_enabled',
+    'hardware_health_enabled', 'app_removal_exclusions',
 }
 
 
@@ -61,6 +61,8 @@ def test_sparse_saved_file_uses_explicit_effective_approval_and_preserves_all_by
     assert module.canonical_approval_scope(p.preferences) == effective
     assert module.canonical_approval_scope(effective) == effective
     assert len(p.preferences) == 91
+    assert 'app_removal_exclusions' not in p.preferences
+    assert effective['app_removal_exclusions'] == []
     identity = handoff(p)
     prepared, _ = p.service._load(identity, 'handoff.json')
     assert prepared['binding']['preferences_sha256'] == hashlib.sha256(p.raw).hexdigest()

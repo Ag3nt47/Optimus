@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.38
+
+- Fix the native self-update regression fixture for settings saved before Protected apps was added.
+
 ## 0.12.37
 
 - Reconcile eligible unresolved WinGet attempts after a verified Windows restart and idle check. Hold the affected offer and allow the remaining updates to proceed.
