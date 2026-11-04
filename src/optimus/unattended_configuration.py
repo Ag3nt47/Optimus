@@ -71,6 +71,10 @@ def _scope_hash(settings):
             and settings.get('python_relocation_approvals', []) == []):
         value.pop('python_relocation_repair_enabled', None)
         value.pop('python_relocation_approvals', None)
+    # Existing approval hashes predate this option. Nonempty protections stay
+    # bound to approval because removing one can expand the removal scope.
+    if settings.get('app_removal_exclusions', []) == []:
+        value.pop('app_removal_exclusions', None)
     try:
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'),
                              ensure_ascii=True, allow_nan=False).encode('ascii')

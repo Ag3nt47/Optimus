@@ -33,7 +33,8 @@ class Backend(ExtendedMaintenanceBackend):
         from .cloud_drive import CloudDrive
         self.cloud = CloudDrive(self.data_dir)
         from .maintenance import Maintenance
-        self.maintenance = Maintenance(self.bridge, self.data_dir, restart_reader=self.security_status)
+        self.maintenance = Maintenance(self.bridge, self.data_dir, restart_reader=self.security_status,
+                                       removal_exclusions_reader=self.app_removal_exclusions)
         self.last_audit = None
         from .process_harness import ProcessHarness
         self.process_harness = ProcessHarness(self)
@@ -466,11 +467,65 @@ class Backend(ExtendedMaintenanceBackend):
     def installed_apps(self):
         return self._list(self.bridge.request('installed_apps'))
 
+    def _saved_app_settings(self):
+        from .filesystem import _ordinary_data_path
+        from .self_update import _read
+        path = self.preference_store.path
+        if _ordinary_data_path(path, file=True) is None:
+            return self.preferences()
+        value = json.loads(_read(path, 4 * 1024 ** 2).decode('utf-8'))
+        if not isinstance(value, dict):
+            raise ValueError('Saved application protection settings need review.')
+        return value
+
+    def app_removal_exclusions(self):
+        from .app_removal_protection import EXCLUSIONS_KEY, validate_app_removal_exclusions
+        return validate_app_removal_exclusions(self._saved_app_settings().get(EXCLUSIONS_KEY, []))
+
+    def app_protection_inventory(self):
+        from .app_removal_protection import removal_app_record
+        saved = self.app_removal_exclusions()
+        installed = {}
+        for raw in self._list(self.bridge.request('installed_apps', friendlyNames=True)):
+            row = removal_app_record(raw)
+            if row is not None:
+                installed.setdefault((row['kind'], row['id'].casefold()), row)
+        return {'saved': saved, 'installed': list(installed.values())}
+
+    def save_app_removal_exclusions(self, rows, baseline):
+        from .app_removal_protection import EXCLUSIONS_KEY, validate_app_removal_exclusions
+        from .automation import RunLease
+        from .unattended_configuration import approve_unattended_settings, matches_unattended
+        from .workflow import atomic_json
+        desired = validate_app_removal_exclusions(rows)
+        expected = validate_app_removal_exclusions(baseline)
+        with RunLease(self.data_dir), self.preference_store.lock:
+            raw = self._saved_app_settings()
+            current = self.preference_store.validate(raw)
+            if current[EXCLUSIONS_KEY] != expected:
+                raise ValueError('Saved app protections changed. Refresh the list before saving.')
+            value = dict(raw, **{EXCLUSIONS_KEY: desired})
+            candidate = self.preference_store.validate(value)
+            # Only a strict narrowing of an already approved scope may retain
+            # unattended approval. Unchecking a protection requires review.
+            if all(row in desired for row in expected) and matches_unattended(current):
+                approved = approve_unattended_settings(candidate)
+                value['unattended_scope_hash'] = approved['unattended_scope_hash']
+            atomic_json(self.preference_store.path, value)
+        return {'saved': desired}
+
     @invalidate_on_mutation
     def uninstall(self, record):
+        from .app_removal_protection import is_removal_protected, removal_app_record
         current = self.installed_apps()
-        if not any(item.get('Identity') == record.get('Identity') and item.get('Name') == record.get('Name') for item in current):
+        matched = next((item for item in current if item.get('Identity') == record.get('Identity')
+                        and item.get('Name') == record.get('Name')), None)
+        if matched is None:
             raise ValueError('The installed-program selection changed. Refresh first.')
+        exact = removal_app_record(matched)
+        if exact is not None and is_removal_protected(self.app_removal_exclusions(),
+                identity=exact['id'], names=(exact['name'],), kind=exact['kind']):
+            raise ValueError('This application is protected from removal in Optimus Settings.')
         os.startfile('ms-settings:appsfeatures')
         return {'opened': 'Windows Installed apps', 'search': record.get('Name'), 'note': 'Use the registered Windows uninstall action for this application.'}
 

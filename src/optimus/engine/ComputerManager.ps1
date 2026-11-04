@@ -144,6 +144,17 @@ function Restore-SCMChange {
     Set-SCMChangeStatus $Change 'Restored'
 }
 function Get-SCMInstalledApps {
+    param([switch]$FriendlyNames)
+    $startNames=@{}
+    if ($FriendlyNames) {
+        try {
+            foreach ($app in @(Get-StartApps -ErrorAction Stop)) {
+                if ($app.Name -and $app.AppID -match '^([^!]+)!.+$' -and -not $startNames.ContainsKey($Matches[1])) {
+                    $startNames[$Matches[1]]=[string]$app.Name
+                }
+            }
+        } catch {} # Package identities remain usable when Start labels are unavailable.
+    }
     $locations=@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
     $result=@(foreach ($location in $locations) {
         Get-ItemProperty -Path $location -ErrorAction SilentlyContinue | Where-Object DisplayName | ForEach-Object {
@@ -152,9 +163,14 @@ function Get-SCMInstalledApps {
     })
     try {
         $result+=@(Get-AppxPackage -ErrorAction Stop | Where-Object { -not $_.IsFramework -and -not $_.NonRemovable } | ForEach-Object {
-            [pscustomobject]@{Name=$_.Name;Publisher=$_.Publisher;Version=$_.Version.ToString();InstallLocation=$_.InstallLocation;Type='Store';Identity=$_.PackageFamilyName}
+            $record=[pscustomobject]@{Name=$_.Name;Publisher=$_.Publisher;Version=$_.Version.ToString();InstallLocation=$_.InstallLocation;Type='Store';Identity=$_.PackageFamilyName}
+            if ($FriendlyNames -and $startNames.ContainsKey([string]$_.PackageFamilyName)) {
+                $record | Add-Member -NotePropertyName DisplayName -NotePropertyValue $startNames[[string]$_.PackageFamilyName]
+            }
+            $record
         })
     } catch {}
+    if ($FriendlyNames) { return @($result | Sort-Object Name,Type,Identity,Version -Unique) }
     @($result | Sort-Object Name,Version -Unique)
 }
 function Add-SCMProcessEvidence {

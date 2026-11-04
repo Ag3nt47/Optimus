@@ -32,6 +32,38 @@ function Test-OptimusOptionalPackage {
         'MicrosoftCorporationII.MicrosoftFamily','Clipchamp.Clipchamp','MicrosoftTeams','MSTeams','Microsoft.Copilot'
     )
 }
+function Test-OptimusExcludedRemovalTarget {
+    param($Target,[array]$Exclusions)
+    $kind=[string]$Target.kind
+    $identity=[string]$Target.appIdentity
+    $recordKind=switch($kind){
+        {$_ -in @('appx','provisioned')} {'store'}
+        'office-dialog' {'desktop'}
+        {$_ -in @('edge','desktop-edge-script')} {'edge'}
+    }
+    if(-not $recordKind){return $false}
+    if($recordKind -eq 'store' -and -not $identity){
+        $parts=([string]$Target.packageFullName).Split('_')
+        if($parts.Count -eq 5 -and $parts[0] -ieq $Target.name -and $parts[-1] -cmatch '^[A-Za-z0-9]{13}$'){
+            $identity=$parts[0]+'_'+$parts[-1]
+        }
+    }
+    foreach($row in $Exclusions){
+        if($recordKind -eq 'edge'){
+            if(($row.kind -ceq 'desktop' -and ($row.id -ieq 'Microsoft.Edge' -or $row.name -iin @('Microsoft Edge','Microsoft Edge browser'))) -or
+                ($row.kind -ceq 'store' -and $row.name -ieq 'Microsoft.MicrosoftEdge.Stable')){return $true}
+            continue
+        }
+        if($row.kind -cne $recordKind){continue}
+        if($identity -and $row.id -ieq $identity){return $true}
+        if(($recordKind -ne 'store' -or -not $identity) -and $row.name -ieq $Target.name){return $true}
+    }
+    return $false
+}
+function New-OptimusProtectedRemovalResult {
+    param($Target)
+    return [pscustomobject]@{id=$Target.id;name=$Target.name;status='Protected from removal in Settings';reason='app_removal_excluded';removed=$false;protected=$true;skipped=$true;restartNeeded=$false}
+}
 function Get-OptimusEdgeTarget {
     $browserLocations=@()
     $setups=@()
@@ -66,14 +98,14 @@ function Get-OptimusMaintenanceTargets {
     if ($Action -eq 'office-desktop') {
         return @(Get-SCMInstalledApps | Where-Object { $_.Type -eq 'Desktop' -and $_.Publisher -match '(?i)Microsoft' -and $_.Name -match '(?i)^(Microsoft 365|Microsoft Office)' -and $_.Name -notmatch '(?i)update|proof|language|extensibility|runtime|access database' } | ForEach-Object {
             $fingerprint=Get-OptimusMaintenanceHash ($_.Identity+'|'+$_.Name+'|'+$_.Version)
-            [pscustomobject]@{id=('office-'+$fingerprint.Substring(0,16));name=$_.Name;version=$_.Version;scope='desktop';kind='office-dialog';fingerprint=$fingerprint;selected=$false;admin=$false;recovery='Reinstall Office from its original Microsoft account or organization deployment. This action opens Windows uninstall controls.'}
+            [pscustomobject]@{id=('office-'+$fingerprint.Substring(0,16));name=$_.Name;version=$_.Version;scope='desktop';kind='office-dialog';appIdentity=$_.Identity;fingerprint=$fingerprint;selected=$false;admin=$false;recovery='Reinstall Office from its original Microsoft account or organization deployment. This action opens Windows uninstall controls.'}
         })
     }
     $targets=@()
     foreach ($package in @(Get-AppxPackage -ErrorAction Stop)) {
         if ((Test-OptimusPreservedPackage -Name ($package.Name+'|'+$package.PackageFullName)) -or -not (Test-OptimusOptionalPackage -Name $package.Name -Action $Action) -or $package.NonRemovable -or $package.IsFramework -or $package.IsResourcePackage) { continue }
         $fingerprint=Get-OptimusMaintenanceHash ($package.Name+'|'+$package.PackageFullName+'|current-user')
-        $targets += [pscustomobject]@{id=('appx-'+$fingerprint.Substring(0,20));name=$package.Name;version=[string]$package.Version;scope='current-user';kind='appx';packageFullName=$package.PackageFullName;fingerprint=$fingerprint;selected=$false;admin=$false;recovery='Reinstall this app from Microsoft Store. Removed app-local data is not restored by Optimus.'}
+        $targets += [pscustomobject]@{id=('appx-'+$fingerprint.Substring(0,20));name=$package.Name;version=[string]$package.Version;scope='current-user';kind='appx';appIdentity=$package.PackageFamilyName;packageFullName=$package.PackageFullName;fingerprint=$fingerprint;selected=$false;admin=$false;recovery='Reinstall this app from Microsoft Store. Removed app-local data is not restored by Optimus.'}
     }
     if ($IncludeProvisioned) {
         if (-not (Test-OptimusMaintenanceAdmin)) { throw 'Administrator rights are required to review and remove provisioning for future new accounts.' }
@@ -173,17 +205,23 @@ function Invoke-OptimusMaintenanceRequest {
     $includeProvisioned=($Arguments.includeProvisioned -eq $true)
     if ($includeProvisioned -and $action -in @('edge','office-desktop','desktop-edge-script')) { throw 'Provisioned-package removal is only available for optional Store apps.' }
     $fresh=@(Get-OptimusMaintenanceTargets -Action $action -IncludeProvisioned $includeProvisioned)
+    $exclusions=@($Arguments.removalExclusions | Where-Object { $null -ne $_ })
+    if ($exclusions.Count -gt 500) { throw 'Too many saved application removal exclusions.' }
     if ($Operation -eq 'maintenance_preview') {
+        $available=@($fresh | Where-Object { -not (Test-OptimusExcludedRemovalTarget -Target $_ -Exclusions $exclusions) })
+        $protectedCount=$fresh.Count-$available.Count
+        $fresh=$available
         if ($action -eq 'desktop-edge-script') {
             $external=if($fresh.Count){Get-OptimusDesktopEdgePreview -Target $fresh[0]}else{$null}
-            return [pscustomobject]@{action=$action;targets=$fresh;summary='Review the original external script and its effects. Applying opens its own visible typed confirmation; removal has no complete automatic undo.';externalPreview=$external;restartNeeded=$true;commands=@('Run original Remove-Edge.ps1 -Preview; apply launches it visibly without optional flags.');recovery=if($fresh.Count){$fresh[0].recovery}else{'External script not installed in the known Desktop location.'}}
+            return [pscustomobject]@{action=$action;targets=$fresh;protectedCount=$protectedCount;summary=if($protectedCount){'The external Edge removal script is blocked because Microsoft Edge is protected in Settings.'}else{'Review the original external script and its effects. Applying opens its own visible typed confirmation; removal has no complete automatic undo.'};externalPreview=$external;restartNeeded=$true;commands=@('Run original Remove-Edge.ps1 -Preview; apply launches it visibly without optional flags.');recovery=if($fresh.Count){$fresh[0].recovery}else{'External script not installed in the known Desktop location.'}}
         }
-        return [pscustomobject]@{action=$action;targets=$fresh;summary=('{0} matching targets; select only the apps and scopes you want to remove.' -f $fresh.Count);restartNeeded=$false;commands=@('Only selected, revalidated targets are processed.');recovery='Uninstallation is not a data backup. Reinstall through Microsoft Store, Microsoft Edge or the original Office deployment. App-local data may be removed.'}
+        return [pscustomobject]@{action=$action;targets=$fresh;protectedCount=$protectedCount;summary=('{0} available targets; {1} protected in Settings. Select only the apps and scopes you want to remove.' -f $fresh.Count,$protectedCount);restartNeeded=$false;commands=@('Only selected, revalidated targets are processed.');recovery='Uninstallation is not a data backup. Reinstall through Microsoft Store, Microsoft Edge or the original Office deployment. App-local data may be removed.'}
     }
     if ([string]$Arguments.confirmation -cne 'REMOVE') { throw 'An explicit user removal confirmation is required.' }
     $requested=@($Arguments.targets)
     if (-not $requested.Count -or $requested.Count -gt 100) { throw 'Select between 1 and 100 reviewed targets.' }
     $selected=@()
+    $protected=@()
     $seen=@{}
     foreach ($expected in $requested) {
         $id=[string]$expected.id
@@ -191,12 +229,16 @@ function Invoke-OptimusMaintenanceRequest {
         $seen[$id]=$true
         $current=@($fresh | Where-Object { $_.id -ceq $id -and $_.fingerprint -ceq [string]$expected.fingerprint })
         if ($current.Count -ne 1) { throw 'An installed package, publisher, version or uninstall method changed. Preview again; nothing was removed.' }
+        if (Test-OptimusExcludedRemovalTarget -Target $current[0] -Exclusions $exclusions) {
+            $protected+=New-OptimusProtectedRemovalResult -Target $current[0]
+            continue
+        }
         if ($current[0].admin -and -not (Test-OptimusMaintenanceAdmin)) { throw 'Administrator rights are required for the selected target.' }
         if (Test-OptimusPreservedPackage -Name ($current[0].name+'|'+$current[0].packageFullName)) { throw 'Bing Wallpaper is protected and will not be removed.' }
         $selected+=$current[0]
     }
     # Revalidation for every selected target completes before the first mutation.
-    $results=@()
+    $results=@($protected)
     foreach ($target in $selected) {
         $progressPhase=if($target.kind -in @('office-dialog','desktop-edge-script') -or
             ($target.kind -eq 'edge' -and $target.method -eq 'windows-dialog')){'review'}else{'uninstall'}

@@ -709,3 +709,32 @@ def test_incomplete_or_untrusted_catalog_metadata_fails_closed(change):
     elif change == 'exe': text = text.replace('Type: msi', 'Type: exe')
     elif change == 'version': text = text.replace('Version: 2.0', 'Version: Unknown')
     with pytest.raises(PresencePreflightError): parse_catalog(result(text), IDENTITY)
+
+def test_desktop_removal_protection_wins_over_saved_uninstall_and_keeps_unrelated_work(backend):
+    config = settings(desired='keep_uninstalled')
+    config['app_removal_exclusions'] = [{'kind': 'desktop', 'id': '{EXAMPLE-READER}',
+                                       'name': 'Example Reader', 'label': 'Example Reader'}]
+    config['software_app_rules'].append({'id': 'Another.App', 'source': 'winget',
+                                        'update_policy': 'follow_global', 'presence': 'keep_installed'})
+    backend.maintenance.installed[IDENTITY] = '2.0'
+    report = apply(backend, config)
+    protected, installed = report['items']
+    assert protected['status'] == 'skipped' and protected['result']['protected'] is True
+    assert protected['result']['installer_started'] is False and protected['result']['outcomeKnown'] is True
+    assert installed['status'] == 'completed' and report['failed_items'] == 0
+    command, = backend.maintenance.actions
+    assert command[1] == 'install' and 'Another.App' in command
+    assert backend.maintenance.installed[IDENTITY] == '2.0'
+
+
+def test_protection_added_between_presence_preflight_and_launch_prevents_uninstall(backend):
+    config = settings(desired='keep_uninstalled')
+    backend.maintenance.installed[IDENTITY] = '2.0'
+    def grant_lane(_):
+        backend.saved['app_removal_exclusions'] = [{'kind': 'desktop', 'id': IDENTITY,
+                                                    'name': 'Example Reader', 'label': 'Example Reader'}]
+        return True
+    report = apply(backend, config, before_install=grant_lane)
+    assert report['items'][0]['result']['protected'] is True
+    assert report['outcomeKnown'] is True and report['installer_started'] is False
+    assert backend.maintenance.actions == []

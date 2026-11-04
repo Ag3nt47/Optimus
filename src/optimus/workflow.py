@@ -16,6 +16,8 @@ from .approval_policy import APPROVAL_DEFAULTS, validate_approvals
 from .smart_configuration import SMART_DEFAULTS, validate_smart_configuration
 from .unattended_configuration import UNATTENDED_DEFAULTS, validate_unattended_configuration
 from .software_app_rules import APP_RULE_DEFAULTS, validate_app_rules
+from .app_removal_protection import (debloat_target_protected, protected_debloat_result,
+                                     validate_app_removal_exclusions)
 from .toolkit_configuration import DEFAULTS as TOOLKIT_DEFAULTS, validate_configuration as validate_toolkit
 
 CONSUMER_PACKAGE_NAMES = (
@@ -34,6 +36,7 @@ DEFAULTS = {
     'intensity': 'Standard', 'cleanup_enabled': True, 'cleanup_age_days': 7,
     'browser_cache_enabled': True, 'consumer_debloat_enabled': False,
     'consumer_debloat_package_names': list(CONSUMER_PACKAGE_NAMES),
+    'app_removal_exclusions': [],
     'browser_history_enabled': False, 'browser_cookies_enabled': False,
     'browser_download_history_enabled': False,
     'browser_cleanup_browsers': ['edge', 'chrome', 'brave', 'vivaldi', 'firefox'],
@@ -214,6 +217,7 @@ class Preferences:
         result.update(validate_smart_configuration(result))
         result.update(validate_unattended_configuration(result))
         result['software_app_rules'] = validate_app_rules(result['software_app_rules'])
+        result['app_removal_exclusions'] = validate_app_removal_exclusions(result['app_removal_exclusions'])
         from .python_relocation import ApprovedPythonRelocation
         relocations = result['python_relocation_approvals']
         if type(relocations) is not list or len(relocations) > 20:
@@ -581,14 +585,25 @@ class Workflow:
                             targets = [item for item in targets if item.get('name') in names
                                        and item.get('kind') == 'appx' and item.get('scope') == 'current-user'
                                        and 'bingwallpaper' not in re.sub(r'[^a-z0-9]', '', str(item.get('name', '')).casefold())]
-                        ids = [item['id'] for item in targets if item.get('id')]
+                        protected = [protected_debloat_result(item) for item in targets if item.get('id')
+                                     and debloat_target_protected(configuration['app_removal_exclusions'], item)]
+                        protected_ids = {item['id'] for item in protected}
+                        ids = [item['id'] for item in targets if item.get('id') and item['id'] not in protected_ids]
                         if not ids:
-                            return {'skipped': True, 'reason': 'No eligible installed targets found.'}
+                            any_protected = bool(protected or plan.get('protectedCount'))
+                            return {'skipped': True, 'reason': ('Saved removal exclusions preserved installed apps.'
+                                    if any_protected else 'No eligible installed targets found.'),
+                                    'results': protected, 'protected_count': len(protected) + plan.get('protectedCount', 0)}
                         from .item_progress import accepts_progress_callback
                         options = {'progress_callback': item_progress(label)} if accepts_progress_callback(self.backend.debloat_apply) else {}
                         outcome = self.backend.debloat_apply({'planId': plan['planId'], 'selectedIds': ids, 'confirmed': True}, **options)
                         if isinstance(outcome, dict) and isinstance(outcome.get('results'), list):
-                            refused = sum(not isinstance(item, dict) or bool(item.get('error')) or item.get('removed') is False for item in outcome['results'])
+                            rows = protected + outcome['results']
+                            refused = sum(not isinstance(item, dict) or bool(item.get('error')) or
+                                          (item.get('removed') is False and item.get('protected') is not True) for item in rows)
+                            outcome = dict(outcome, results=rows,
+                                           protected_count=sum(isinstance(item, dict) and item.get('protected') is True
+                                                               for item in rows) + plan.get('protectedCount', 0))
                             if refused:
                                 outcome = dict(outcome, failed_items=refused)
                         return outcome

@@ -93,12 +93,22 @@ def launch_warning(settings):
                 actions.append('Cookie cleaning can sign you out. Kept cookie domains: ' + _listed(settings.get('browser_keep_domains') or []) + '.')
         else:
             checks.append('Browser cleanup has no selected browser; no browser family is authorized.')
+    from .app_removal_protection import is_removal_protected, validate_app_removal_exclusions
+    removal_exclusions = validate_app_removal_exclusions(settings.get('app_removal_exclusions', []))
+    if removal_exclusions:
+        rule_scope['keep_uninstalled'] = [
+            row['id'] + ' [' + row['source'] + ']' for row in settings.get('software_app_rules', [])
+            if row['presence'] == 'keep_uninstalled' and not is_removal_protected(removal_exclusions, identity=row['id'])
+        ]
+        checks.append('Preserve applications protected from removal in Settings: '
+                      + _listed([row['label'] for row in removal_exclusions]) + '.')
     if settings.get('consumer_debloat_enabled') is True:
-        packages = settings.get('consumer_debloat_package_names') or []
+        packages = [name for name in settings.get('consumer_debloat_package_names') or []
+                    if not is_removal_protected(removal_exclusions, names=(name,), kind='store')]
         if packages:
             actions.append('Uninstall selected optional Windows consumer apps if installed: ' + _listed(packages) + '. App-local data may be removed.')
         else:
-            checks.append('Consumer-app removal has no selected package names.')
+            checks.append('Consumer-app removal has no selected unprotected package names.')
     for key, description in (
         ('m365_debloat_enabled', 'Uninstall Microsoft 365 hub/companion Store apps if installed; app-local data may be removed.'),
         ('outlook_debloat_enabled', 'Uninstall the new Outlook Store app if installed; app-local data may be removed.'),
@@ -137,7 +147,7 @@ def launch_warning(settings):
                 actions.append(text + ', '.join(rule_scope[key]) + '.')
         if rule_scope['automatic_actions']:
             actions.append('Saved per-app rules apply on each maintenance run. Reinstalling an app does not restore app-local data removed by uninstalling it. '
-                           'Per-app actions require saved package agreements, fresh identity/source checks and protected-app/installer checks. Saved update exclusions and pins still win over Always update. '
+                           'Per-app actions require saved package agreements, fresh identity/source checks and protected-app/installer checks. Saved update exclusions and pins still win over Always update; removal protections override uninstall rules. '
                            'Install/uninstall rules currently run only on Windows with WinGet; other platforms report unsupported actions.')
     if settings.get('driver_updates_enabled') is True:
         if (settings.get('driver_policy') in ('install_approved', 'install_matching')

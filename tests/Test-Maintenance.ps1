@@ -84,6 +84,23 @@ $legacy=[pscustomobject]@{id=('appx-'+$legacyFingerprint.Substring(0,20));finger
 $beforeCalls=$script:Calls.Count;$blocked=$false
 try{Invoke-OptimusMaintenanceRequest -Operation maintenance_apply -Arguments @{action='consumer-apps';targets=@($legacy);confirmation='REMOVE'}|Out-Null}catch{$blocked=$true}
 Assert-OptimusTest ($blocked -and $script:Calls.Count -eq $beforeCalls) 'stale pre-protection Bing plan cannot remove retained package'
+# Saved exclusions are applied to fresh AppX inventory at the native boundary.
+$windowsApp=[pscustomobject]@{Name='MicrosoftCorporationII.Windows365';PackageFullName='MicrosoftCorporationII.Windows365_7.5.9.0_x64__8wekyb3d8bbwe';PackageFamilyName='MicrosoftCorporationII.Windows365_8wekyb3d8bbwe';Version='7.5.9.0';NonRemovable=$false;IsFramework=$false;IsResourcePackage=$false}
+$weather=[pscustomobject]@{Name='Microsoft.BingWeather';PackageFullName='Microsoft.BingWeather_1.0.0.0_x64__8wekyb3d8bbwe';Version='1.0.0.0';NonRemovable=$false;IsFramework=$false;IsResourcePackage=$false}
+$script:Packages=@($windowsApp,$weather)
+$exclusion=[pscustomobject]@{kind='store';id=$windowsApp.PackageFamilyName;name=$windowsApp.Name;label='Microsoft Windows App'}
+$unprotectedPreview=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='consumer-apps'}
+$protectedPreview=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='consumer-apps';removalExclusions=@($exclusion)}
+Assert-OptimusTest ($protectedPreview.protectedCount -eq 1 -and $protectedPreview.targets.Count -eq 1 -and $protectedPreview.targets[0].name -ceq $weather.Name) 'preview protects exact Windows App family only'
+$beforeCalls=$script:Calls.Count
+$protectedResult=Invoke-OptimusMaintenanceRequest maintenance_apply @{action='consumer-apps';targets=$unprotectedPreview.targets;confirmation='REMOVE';removalExclusions=@($exclusion)}
+Assert-OptimusTest ($script:Calls.Count -eq ($beforeCalls+1) -and $script:Calls[-1].package -ceq $weather.PackageFullName) 'stale mixed plan removes only the unprotected fixture'
+Assert-OptimusTest ($protectedResult.results.Count -eq 2 -and $protectedResult.results[0].protected -eq $true -and $protectedResult.results[0].removed -eq $false -and $protectedResult.results[1].removed -eq $true) 'protection skip and unrelated removal remain distinguishable'
+Assert-OptimusTest ($script:Packages.Count -eq 1 -and $script:Packages[0].PackageFamilyName -ceq $windowsApp.PackageFamilyName) 'Windows App survives native apply'
+$provisioned=[pscustomobject]@{kind='provisioned';name=$windowsApp.Name;packageFullName='MicrosoftCorporationII.Windows365_8.0.0.0_neutral_~_8wekyb3d8bbwe'}
+Assert-OptimusTest (Test-OptimusExcludedRemovalTarget $provisioned @($exclusion)) 'provisioned release matches the same stable family'
+$provisioned.packageFullName='MicrosoftCorporationII.Windows365_8.0.0.0_neutral_~_otherpub00000'
+Assert-OptimusTest (-not(Test-OptimusExcludedRemovalTarget $provisioned @($exclusion))) 'different publisher is not protected by similar package name'
 # Native Edge regression fixtures: every process launch and installed-state
 # query is mocked. These checks never run WinGet or the Microsoft installer.
 $script:EdgeExitCode=-1978335212

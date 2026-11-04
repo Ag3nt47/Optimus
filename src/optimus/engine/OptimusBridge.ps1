@@ -106,7 +106,7 @@ function Invoke-OptimusRequest {
         'startup_list' { @(Get-SCMStartupEntries) }
         'startup_set' { $undo=Set-SCMStartupState -Entry $arg.record -Enabled ([bool]$arg.enabled);New-SCMChange -Kind Startup -Target $arg.record.Name -Undo $undo }
         'startup_remove' { $undo=Remove-SCMStartupEntry -Entry $arg.record;New-SCMChange -Kind Startup -Target $arg.record.Name -Undo $undo }
-        'installed_apps' { @(Get-SCMInstalledApps) }
+        'installed_apps' { @(Get-SCMInstalledApps -FriendlyNames:($arg.friendlyNames -is [bool] -and $arg.friendlyNames)) }
         'services' { @(Get-SCMServiceEntries) }
         'service_set' { $undo=Set-SCMServiceState -Entry $arg.record -Action ([string]$arg.action);New-SCMChange -Kind Service -Target $arg.record.Name -Undo $undo }
         'storage_scan' { Get-SCMStorageAnalysis -Root ([string]$arg.root) -MaxFiles 100000 -MaxSeconds 45 }

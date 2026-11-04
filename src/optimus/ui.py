@@ -204,7 +204,7 @@ class MetricCard(QFrame):
 class DetailedSettingsWindow(QMainWindow):
     appearanceChanged = Signal(dict)
     PAGE_NAMES = ("Dashboard", "Cleaner", "Browser privacy", "Performance", "Startup",
-                  "Applications", "Updates", "Drivers", "Disk analyzer", "Duplicate finder",
+                  "Applications", "Protected apps", "Updates", "Drivers", "Disk analyzer", "Duplicate finder",
                   "Debloat", "Cloud drive", "Schedules", "Smart cleaning", "Maintenance toolkit", "Workers", "File utilities", "Recovery", "Registry review", "Restore/history", "Settings")
     DESCRIPTIONS = {
         "Dashboard": "Measured resource use and practical next steps. Review each change before applying it.",
@@ -213,6 +213,7 @@ class DetailedSettingsWindow(QMainWindow):
         "Performance": "Identify the program behind each process and manage selected application priorities.",
         "Startup": "Review sign-in registrations while keeping applications installed.",
         "Applications": "Review installed programs and use their supported uninstall workflow.",
+        "Protected apps": "Choose installed applications for Optimus to keep.",
         "Updates": "Check available application updates with Windows Package Manager.",
         "Drivers": "Inspect installed versions; update through Windows or the device manufacturer.",
         "Disk analyzer": "Measure a selected local folder without following junctions or downloading placeholders.",
@@ -259,7 +260,7 @@ class DetailedSettingsWindow(QMainWindow):
         self.setStyleSheet(self._qss())
         self.setProperty('_optimus_surface_style', self.styleSheet())
         self._build_shell()
-        for builder in ("dashboard", "cleaner", "browser", "performance", "startup", "applications",
+        for builder in ("dashboard", "cleaner", "browser", "performance", "startup", "applications", "app_protection",
                         "updates", "drivers", "storage", "duplicates", "debloat", "cloud", "schedules", "registry", "history", "settings", "extended_tools"):
             getattr(self, "_build_" + builder)()
         self.tray = None
@@ -477,7 +478,8 @@ class DetailedSettingsWindow(QMainWindow):
         self.page_description.setText(self.DESCRIPTIONS[name])
         if load and name not in self.loaded_pages and not self.busy:
             loaders = {"Cleaner": self.load_cleanup_categories, "Startup": self.load_startup,
-                       "Applications": self.load_apps, "Drivers": self.load_drivers, "Browser privacy": self.privacy_panel.refresh,
+                       "Applications": self.load_apps, "Protected apps": self.load_app_protection,
+                       "Drivers": self.load_drivers, "Browser privacy": self.privacy_panel.refresh,
                        "Debloat": self.load_debloat_actions, "Cloud drive": self.cloud_panel.refresh, "Schedules": self.load_schedules,
                        "Restore/history": self.load_changes}
             if name in loaders:
@@ -1061,6 +1063,78 @@ class DetailedSettingsWindow(QMainWindow):
         r = self._selected(self.apps_table)
         if r and self._confirm('Review uninstall', 'Open the supported uninstall workflow for ' + display(field(r, 'Name')) + '? Review the uninstaller options before approving removal.', details=r):
             self._run('uninstall', r, done=self._show_result)
+
+    def _build_app_protection(self):
+        layout = self.layouts['Protected apps']
+        self._note(layout, 'Check apps to keep and save. Protection takes priority over Optimus debloat presets and uninstall rules. Update choices are managed on the Updates page.')
+        bar = self._toolbar(layout)
+        self.protected_app_search = QLineEdit()
+        self.protected_app_search.setPlaceholderText('Search installed apps or package IDs')
+        bar.addWidget(self.protected_app_search, 1)
+        self.protected_app_refresh = self._button(bar, 'Refresh apps', self.load_app_protection)
+        self.protected_apps_list = QListWidget()
+        self.protected_apps_list.setWordWrap(True)
+        layout.addWidget(self.protected_apps_list, 1)
+        self.protected_app_save = self._button(layout, 'Save app protections', self._save_app_protection, primary=True)
+        self._protection_baseline = None
+        self.protected_app_save.setEnabled(False)
+        self.protected_app_search.textChanged.connect(self._filter_app_protection)
+        self.protected_apps_list.itemChanged.connect(self._app_protection_changed)
+
+    def load_app_protection(self):
+        if self.protected_app_refresh.isEnabled():
+            self._run('app_protection_inventory', done=self._app_protection_ready)
+
+    def _app_protection_ready(self, data):
+        from .app_removal_protection import validate_app_removal_exclusions
+        saved = validate_app_removal_exclusions(data['saved'])
+        key = lambda row: (row['kind'], row['id'].casefold())
+        installed = {key(row): row for row in data['installed']}
+        saved_by_key = {key(row): row for row in saved}
+        records = {**installed, **saved_by_key}
+        self._protection_baseline = saved
+        self.protected_apps_list.blockSignals(True)
+        self.protected_apps_list.clear()
+        for identity, row in sorted(records.items(), key=lambda item: (item[1]['label'].casefold(), item[0])):
+            suffix = ('Store app' if row['kind'] == 'store' else 'Desktop app') if identity in installed else 'Saved protection'
+            item = QListWidgetItem(row['label'] + ' · ' + suffix)
+            item.setToolTip(row['name'] + '\n' + row['id'])
+            item.setData(Qt.UserRole, row)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if identity in saved_by_key else Qt.Unchecked)
+            self.protected_apps_list.addItem(item)
+        self.protected_apps_list.blockSignals(False)
+        self._filter_app_protection(self.protected_app_search.text())
+        self._app_protection_changed()
+        self.loaded_pages.add('Protected apps')
+        self.status.setText(f'{len(installed)} installed apps found. {len(saved)} saved protections.')
+
+    def _filter_app_protection(self, text):
+        terms = text.casefold().split()
+        for index in range(self.protected_apps_list.count()):
+            item = self.protected_apps_list.item(index)
+            haystack = (item.text() + ' ' + item.toolTip()).casefold()
+            item.setHidden(not all(term in haystack for term in terms))
+
+    def _checked_app_protections(self):
+        values = [self.protected_apps_list.item(index) for index in range(self.protected_apps_list.count())]
+        return [item.data(Qt.UserRole) for item in values if item.checkState() == Qt.Checked]
+
+    def _app_protection_changed(self, *_):
+        checked, baseline = self._checked_app_protections(), self._protection_baseline
+        changed = baseline is not None and (len(checked) != len(baseline) or any(row not in baseline for row in checked))
+        self.protected_app_save.setEnabled(changed)
+        self.protected_app_refresh.setEnabled(not changed)
+
+    def _save_app_protection(self):
+        if self.smoke_test or not self.protected_app_save.isEnabled():
+            return
+        def saved(result):
+            self._protection_baseline = result['saved']
+            self._app_protection_changed()
+            self._invalidate_debloat()
+            self.status.setText(f'{len(result["saved"])} app protections saved.')
+        self._run('save_app_removal_exclusions', self._checked_app_protections(), self._protection_baseline, done=saved)
 
     def _build_updates(self):
         layout = self.layouts['Updates']
@@ -4828,6 +4902,7 @@ class OptimusWindow(QMainWindow):
         description = QLabel('The main Optimize button uses the saved mode and individual choices below. Full includes your selected consumer packages; other application removals follow their separate choices. Existing Codex priority and its watcher stay unchanged unless its optional profile is enabled.')
         description.setWordWrap(True)
         layout.addWidget(description)
+        window._button(layout, 'Choose apps to keep', lambda: window.select_page('Protected apps'))
         try:
             settings = self._settings()
         except Exception as exc:

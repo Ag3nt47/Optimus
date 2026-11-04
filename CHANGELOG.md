@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.36
+
+- Add searchable Protected apps checkboxes to Windows Settings. Saved protections override Optimus debloat selections and per-app removal rules.
+
 ## 0.12.35
 
 - Record verified WinGet launch refusals and download failures per package so eligible updates can continue.

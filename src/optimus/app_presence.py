@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 
+from .app_removal_protection import is_removal_protected, validate_app_removal_exclusions
 from .automation import CURRENT_SETUP_VERSION
 from .filesystem import _ordinary_data_path
 from .speed_enhancements import _current_owner, _private_json
@@ -236,7 +237,26 @@ class WindowsAppPresence:
         value['fingerprint'] = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         return value
 
-    def readiness(self, snapshot, action):
+    def _check_removal_exclusions(self, snapshot, action, exclusions):
+        if action != 'uninstall':
+            return
+        try:
+            reader = getattr(self.backend, 'app_removal_exclusions', None)
+            if callable(reader):
+                current_exclusions = reader()
+            else:
+                loader = getattr(self.backend, 'preferences', None)
+                current = loader() if callable(loader) else {}
+                current_exclusions = validate_app_removal_exclusions(current.get('app_removal_exclusions', []))
+        except Exception as error:
+            raise PresencePreflightError('Saved application removal exclusions could not be verified.') from error
+        aliases = (snapshot['catalog']['name'], (snapshot['installed'] or {}).get('name'))
+        _require(not is_removal_protected([*exclusions, *current_exclusions], identity=snapshot['id'], names=aliases),
+                 'This application is protected from removal in Settings.',
+                 failure_kind='app_removal_excluded', failure_scope='package')
+
+    def readiness(self, snapshot, action, *, removal_exclusions=()):
+        self._check_removal_exclusions(snapshot, action, removal_exclusions)
         _require(snapshot.get('protected') is False, 'Windows, security, frameworks, Bing Wallpaper, Codex and Optimus are preserved.',
                  failure_kind='protected_application', failure_scope='package')
         _require(self.backend.is_admin() is True, 'Administrator access is required; no elevation was requested.', failure_kind='admin_required')
@@ -258,7 +278,7 @@ class WindowsAppPresence:
                  failure_kind='update_hold', failure_scope='package')
 
     def execute(self, snapshot, action, cancel_event=None, *, navigation=None, approval_callback=None,
-                progress_callback=None):
+                progress_callback=None, removal_exclusions=()):
         """Internal: caller saved durable intent and still owns the installer lane."""
         _require(action in ('install', 'uninstall'), 'Unsupported application presence action.')
         if progress_callback is not None and not callable(progress_callback):
@@ -268,7 +288,7 @@ class WindowsAppPresence:
         try:
             fresh = self.inspect(snapshot['id'], snapshot['source'], cancel_event)
             _require(fresh == snapshot, 'The exact application identity, version or catalog changed before launch.')
-            self.readiness(fresh, action)
+            self.readiness(fresh, action, removal_exclusions=removal_exclusions)
         except PresencePreflightError:
             raise
         except Exception as error:
@@ -293,6 +313,7 @@ class WindowsAppPresence:
                              message='The quiet application operation must return before this worker continues.')
         if cancel_event is not None and cancel_event.is_set():
             return _known('Cancelled before the application installer started.', cancelled=True, skipped=True)
+        self._check_removal_exclusions(fresh, action, removal_exclusions)
         from .update_payload_lifecycle import PayloadAttempt, console_quiescent, accepts_child_environment
         attempt = PayloadAttempt(self.backend.data_dir, 'winget', fresh['id'],
             environment_supported=accepts_child_environment(self.maintenance._run)) if action == 'install' else None
@@ -399,6 +420,7 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
         return _finish([], skipped=True, note='Software Updater is off; saved application presence rules are inactive and no query was started.')
     rules = validate_app_rules(settings.get('software_app_rules', []), native=getattr(backend, 'system', 'win32') != 'win32')
     rules = [rule for rule in rules if rule['presence'] != 'keep_current']
+    removal_exclusions = validate_app_removal_exclusions(settings.get('app_removal_exclusions', []))
     if not rules:
         return _finish([], skipped=True, note='No application presence rule requested a change.')
     cancelled = lambda: cancel_event is not None and cancel_event.is_set()
@@ -455,7 +477,7 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
                 continue
             row.update(catalog_version=snapshot['catalog']['version'],
                        catalog_fingerprint=snapshot['fingerprint'])
-            provider.readiness(snapshot, action)
+            provider.readiness(snapshot, action, removal_exclusions=removal_exclusions)
             _check_cancel(item_cancel)
             if not gate_open and before_install is not None:
                 if before_install({'operation': 'software', 'candidate_count': len(rules) - index,
@@ -489,7 +511,8 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
             save()  # Durable intent before any package-manager mutation.
             launched = True
             outcome = provider.execute(snapshot, action, item_cancel, navigation=navigation,
-                                       approval_callback=approvals_current, progress_callback=reporter)
+                                       approval_callback=approvals_current, progress_callback=reporter,
+                                       removal_exclusions=removal_exclusions)
             if navigation is not None and navigation.local_requested() and not cancelled() and outcome.get('cancelled') is True:
                 outcome = dict(outcome, cancelled=False, navigation_skipped=True, skipped=True)
             row.update(status='completed' if outcome.get('verified') is True else 'cancelled' if outcome.get('cancelled') is True
@@ -510,15 +533,24 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
                 break
         except Exception as error:
             known = isinstance(error, PresencePreflightError) or not launched
-            skipped = isinstance(error, PresenceCancelled)
-            row.update(status='skipped' if skipped else 'needs_review', result=_known(str(error)[:2000], requiresReview=not skipped,
-                skipped=True, navigation_skipped=skipped and navigation is not None and navigation.local_requested() and not cancelled(),
-                cancelled=cancelled(), **({} if skipped else {
+            item_cancelled = isinstance(error, PresenceCancelled)
+            protected = isinstance(error, PresencePreflightError) and error.failureKind == 'app_removal_excluded'
+            if protected:
+                row.update(status='skipped', result=_known(str(error), skipped=True, protected=True,
+                    failureKind='app_removal_excluded', failure_scope='package'))
+            elif known:
+                failure = {} if item_cancelled else {
                     'failureKind': getattr(error, 'failureKind', 'preflight_unverified'),
                     'failure_scope': getattr(error, 'failure_scope', 'shared'),
-                    'shared_barrier': getattr(error, 'shared_barrier', True)})) if known else
-                {'installer_started': True, 'outcomeKnown': False, 'running': False, 'uncertain': True,
-                 'requiresReview': True, 'error': str(error)[:2000], 'note': 'The application outcome receipt could not be established; automatic retry is blocked.'})
+                    'shared_barrier': getattr(error, 'shared_barrier', True)}
+                row.update(status='skipped' if item_cancelled else 'needs_review', result=_known(str(error)[:2000],
+                    requiresReview=not item_cancelled, skipped=True, cancelled=cancelled(),
+                    navigation_skipped=item_cancelled and navigation is not None and navigation.local_requested() and not cancelled(),
+                    **failure))
+            else:
+                row.update(status='needs_review', result={'installer_started': True, 'outcomeKnown': False,
+                    'running': False, 'uncertain': True, 'requiresReview': True, 'error': str(error)[:2000],
+                    'note': 'The application outcome receipt could not be established; automatic retry is blocked.'})
             if not any(item is row for item in items):
                 items.append(row)
             if journal is not None:

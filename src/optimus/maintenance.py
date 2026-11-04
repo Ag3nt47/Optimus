@@ -18,6 +18,8 @@ import tempfile
 import time
 import uuid
 from typing import Any
+from .app_removal_protection import (debloat_target_protected, protected_debloat_result,
+                                     validate_app_removal_exclusions)
 from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING, is_newer_version, valid_update_version
 
 
@@ -119,7 +121,7 @@ class Maintenance:
     Caller-supplied command strings, target payloads and action changes are ignored.
     """
 
-    def __init__(self, bridge: Any, data_dir: str | Path, *, restart_reader=None):
+    def __init__(self, bridge: Any, data_dir: str | Path, *, restart_reader=None, removal_exclusions_reader=None):
         self.bridge = bridge
         self.data_dir = Path(data_dir)
         self.plan_dir = self.data_dir / "MaintenancePlans"
@@ -129,6 +131,11 @@ class Maintenance:
         self._last_update_scan = 0.0
         self._payload_restart_reader = restart_reader
         self.stop_controller = None
+        self._removal_exclusions_reader = removal_exclusions_reader
+
+    def _removal_exclusions(self):
+        reader = self._removal_exclusions_reader
+        return validate_app_removal_exclusions(reader() if reader is not None else [])
 
     @staticmethod
     def debloat_actions() -> list[dict[str, Any]]:
@@ -162,7 +169,9 @@ class Maintenance:
             raise ValueError("includeProvisioned must be true or false.")
         if provisioned and action_id in {"edge", "office-desktop", "desktop-edge-script"}:
             raise ValueError("Provisioning applies only to optional Store-app actions.")
-        response = self._request("maintenance_preview", action=action_id, includeProvisioned=provisioned)
+        exclusions = self._removal_exclusions()
+        response = self._request("maintenance_preview", action=action_id, includeProvisioned=provisioned,
+                                 removalExclusions=exclusions)
         if not isinstance(response, dict):
             raise RuntimeError("The maintenance preview returned an invalid response.")
         targets = response.get("targets") or []
@@ -176,11 +185,17 @@ class Maintenance:
                 raise RuntimeError("A maintenance target has an invalid or repeated fingerprint.")
             identifiers.add(target["id"])
             target["selected"] = False
+        protected = [target for target in targets if debloat_target_protected(exclusions, target)]
+        protected_count = response.get("protectedCount", 0)
+        if type(protected_count) is not int or not 0 <= protected_count <= 100:
+            raise RuntimeError("The maintenance preview returned invalid protection metadata.")
+        targets = [target for target in targets if target not in protected]
         plan = {
             "planId": uuid.uuid4().hex,
             "action": action_id,
             "summary": response.get("summary", "Review the optional apps before selecting any removal."),
             "targets": targets,
+            "protectedCount": protected_count + len(protected),
             "commands": response.get("commands", []),
             "recovery": response.get("recovery", "Reinstallation does not restore deleted app-local data."),
             "restartNeeded": bool(response.get("restartNeeded", False)),
@@ -190,6 +205,8 @@ class Maintenance:
             "state": "preview",
             "canApply": bool(targets),
         }
+        if protected:
+            plan["summary"] += f" {len(protected)} saved removal exclusion(s) were protected."
         if response.get("externalPreview") is not None:
             plan["externalPreview"] = response["externalPreview"]
             if response["externalPreview"].get("exitCode") != 0:
@@ -223,6 +240,11 @@ class Maintenance:
         known = {item["id"]: item for item in saved["targets"]}
         if any(item not in known for item in selected):
             raise ValueError("The selection includes a target outside this preview.")
+        exclusions = self._removal_exclusions()
+        protected = [protected_debloat_result(known[item]) for item in selected
+                     if debloat_target_protected(exclusions, known[item])]
+        protected_ids = {item['id'] for item in protected}
+        eligible = [item for item in selected if item not in protected_ids]
         # Persist the exact reviewed inventory before the first Windows mutation.
         saved["selectedIds"] = selected
         saved["state"] = "applying"
@@ -231,7 +253,7 @@ class Maintenance:
         if progress_callback is not None:
             from .item_progress import normalize_item_progress
             identities = {'debloat:' + saved['action'] + ':' + identity: (index, known[identity])
-                          for index, identity in enumerate(selected)}
+                          for index, identity in enumerate(eligible)}
             def observe(value):
                 item = normalize_item_progress(value)
                 if item is None or item['key'] not in identities:
@@ -241,19 +263,25 @@ class Maintenance:
                 # from the saved, reviewed plan rather than arbitrary output.
                 item['label'] = ' '.join(str(target.get('name') or target['id']).split())[:512]
                 try:
-                    progress_callback({'current': index, 'total': len(selected), 'item': index + 1,
+                    progress_callback({'current': index, 'total': len(eligible), 'item': index + 1,
                         'id': target['id'], 'phase': item['phase'], 'item_progress': item,
                         'description': item['phase'].replace('_', ' ').capitalize() + ': ' + item['label']})
                 except Exception:
                     pass  # Observer failures must not abandon a removal.
             options = {'progress_callback': observe, 'reportProgress': True}
         try:
-            result = self._request(
-                "maintenance_apply", action=saved["action"],
-                includeProvisioned=bool(saved.get("includeProvisioned", False)),
-                targets=[known[item] for item in selected], confirmation="REMOVE",
-                **options,
-            )
+            if eligible:
+                result = self._request(
+                    "maintenance_apply", action=saved["action"],
+                    includeProvisioned=bool(saved.get("includeProvisioned", False)),
+                    targets=[known[item] for item in eligible], confirmation="REMOVE",
+                    removalExclusions=exclusions, **options,
+                )
+            else:
+                result = {"results": [], "restartNeeded": False, "skipped": True,
+                          "reason": "All selected apps are protected from removal in Settings."}
+            if protected:
+                result = dict(result, results=protected + result["results"])
         except Exception as error:
             saved["state"] = "failed"
             saved["error"] = str(error)
