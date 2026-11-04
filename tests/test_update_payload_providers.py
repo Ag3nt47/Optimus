@@ -87,6 +87,35 @@ def test_duplicate_preference_is_not_cleanup_authority(tmp_path):
     assert cleanup_enabled(tmp_path) is False
 
 
+@pytest.mark.parametrize('fault', ['prepare', 'finish'])
+def test_optional_payload_fault_preserves_known_install_and_keeps_payload(provider, monkeypatch, fault):
+    from optimus.update_payload_lifecycle import PayloadAttempt
+    def fail(*args, **kwargs):
+        raise OSError('Fixture optional private payload metadata unavailable')
+    monkeypatch.setattr(PayloadAttempt, '__init__' if fault == 'prepare' else 'finish', fail)
+    result = provider.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    assert result['verified'] is True and result['installer_started'] is True
+    assert result['outcomeKnown'] is True and result['running'] is False
+    cleanup = result['payload_cleanup']
+    assert cleanup['status'] == 'retained_unverified' and cleanup['removed_files'] == cleanup['removed_bytes'] == 0
+    payload, = provider.fixture_paths
+    assert payload.read_bytes() == b'fixture installer bytes'
+
+
+def test_optional_payload_failure_cannot_replace_native_timeout(provider, monkeypatch):
+    from optimus.update_payload_lifecycle import PayloadAttempt
+    monkeypatch.setattr(PayloadAttempt, 'finish', Mock(side_effect=OSError('Fixture payload write failed')))
+    original = provider._run.side_effect
+    def run(arguments, **options):
+        if arguments[1:3] == ['upgrade', '--id']:
+            raise subprocess.TimeoutExpired(arguments, 1800)
+        return original(arguments, **options)
+    provider._run.side_effect = run
+    with pytest.raises(UpdateOutcomeError) as caught:
+        provider.updates_apply('Vendor.App', confirmed=True, unattended=True)
+    assert caught.value.installer_started is True and caught.value.outcomeKnown is False and caught.value.running is True
+
+
 def test_verified_exact_update_cleans_only_its_owned_payload(provider, tmp_path):
     personal = tmp_path / 'Downloads' / 'personal-installer.exe'
     personal.parent.mkdir()

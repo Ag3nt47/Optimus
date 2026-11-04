@@ -35,6 +35,57 @@ _FINGERPRINT = re.compile(r"^[a-fA-F0-9]{64}$")
 _PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+\-]{1,127}$")
 _TASK_NAME = re.compile(r"^\\?Optimus-Audit-[A-Za-z0-9\-]{1,60}$")
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# Microsoft WinGet return codes; only exact terminal codes are classified.
+# https://github.com/microsoft/winget-cli/blob/master/doc/windows/package-manager/winget/returnCodes.md
+_DOWNLOAD_REFUSALS = {
+    0x8A150008: ('download_failed', 'WinGet could not download the installer for this offer.'),
+    0x8A15002E: ('download_size_mismatch', 'WinGet rejected a download whose size did not match the expected content.'),
+    0x8A150011: ('installer_hash_mismatch', 'WinGet rejected the downloaded installer because its hash did not match the manifest.'),
+}
+_SHARED_LAUNCH_REFUSALS = {5: 'authorization', 740: 'authorization',
+                          112: 'insufficient_disk', 1260: 'security_policy'}
+# Sharing violation, lock violation, or Windows ERROR_RETRY; none reports a
+# broken provider executable or a denied common prerequisite.
+_TRANSIENT_TARGET_REFUSALS = frozenset((32, 33, 1237))
+
+
+def _launch_refusal_scope(error):
+    code = getattr(error, 'winerror', None)
+    if type(code) is int and code in _SHARED_LAUNCH_REFUSALS:
+        return 'shared', _SHARED_LAUNCH_REFUSALS[code]
+    if isinstance(error, PermissionError):
+        return 'shared', 'authorization'
+    return 'app_batch', 'manager_unavailable'
+
+
+def _exact_read_only_winget(arguments):
+    """Only our fixed discovery and exact version/catalog queries are disposable."""
+    if not isinstance(arguments, list) or len(arguments) < 2:
+        return False
+    if arguments[1:] in (['upgrade', '--source', 'winget', '--disable-interactivity'],
+                         ['pin', 'list', '--disable-interactivity']):
+        return True
+    if len(arguments) < 9 or arguments[2] != '--id' or not isinstance(arguments[3], str) or not _PACKAGE_ID.fullmatch(arguments[3]):
+        return False
+    return (arguments[1] == 'list' and arguments[4:] == [
+                '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity']
+            or arguments[1] == 'show' and len(arguments) == 11
+                and arguments[4:8] == ['--exact', '--source', 'winget', '--version']
+                and valid_update_version(arguments[8])
+                and arguments[9:] == ['--accept-source-agreements', '--disable-interactivity'])
+
+
+def _terminal_download_refusal(result):
+    code = getattr(result, 'returncode', None)
+    reason = _DOWNLOAD_REFUSALS.get(code & 0xffffffff) if type(code) is int else None
+    proof = getattr(result, 'console_receipt', None)
+    if (reason is None or getattr(result, 'capture_complete', False) is not True or not isinstance(proof, dict)
+            or not all(proof.get(key) is True for key in ('verified', 'quiescent', 'job_verified', 'output_eof'))
+            or not all(type(proof.get(key)) is int and proof[key] == expected for key, expected in (
+                ('schema', 1), ('job_active_processes', 0), ('console_client_count', 1), ('supervisor_exit_code', 0)))
+            or type(proof.get('target_exit_code')) is not int or proof['target_exit_code'] & 0xffffffff != code & 0xffffffff):
+        return None
+    return reason
 
 
 class UpdatePreflightError(ValueError):
@@ -265,33 +316,27 @@ class Maintenance:
                 return run_winget_with_progress(arguments, timeout=timeout, progress_callback=progress_callback, **options)
         options = {'env': dict(os.environ, **environment)} if environment is not None else {}
         if controller is not None:
+            if _exact_read_only_winget(arguments):
+                import threading
+                return self._read_only_winget(arguments, threading.Event(), stop_controller=controller, timeout=timeout)
             options.update(shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-            readonly = arguments[1:] in (
-                ['upgrade', '--source', 'winget', '--disable-interactivity'],
-                ['pin', 'list', '--disable-interactivity'])
-            ticket = None
-            if readonly:
-                child = controller.spawn_disposable(arguments, label='Read-only app update query', **options)
-            else:
-                with controller.launch_gate():
-                    ticket = controller.begin_native('App package operation')
-                    try:
-                        child = subprocess.Popen(arguments, **options)
-                        ticket.started = True
-                    except Exception:
-                        ticket.finish()
-                        raise
+            with controller.launch_gate():
+                ticket = controller.begin_native('App package operation')
+                try:
+                    child = subprocess.Popen(arguments, **options)
+                    ticket.started = True
+                except Exception:
+                    ticket.finish()
+                    raise
             try:
                 output, errors = child.communicate(timeout=timeout)
             except Exception as error:
-                if ticket is not None:
-                    ticket.finish(known=False, error=error)
-                    controller.observe_native_child(child, ticket)
+                ticket.finish(known=False, error=error)
+                controller.observe_native_child(child, ticket)
                 raise  # Native commands are never killed by a timeout/STOP.
-            if ticket is not None:
-                ticket.finish()
+            ticket.finish()
             return subprocess.CompletedProcess(arguments, child.returncode, output, errors)
         return subprocess.run(arguments, shell=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options)
 
@@ -383,13 +428,7 @@ class Maintenance:
     @staticmethod
     def _read_only_winget(arguments, cancel_event, *, stop_controller=None, timeout=120):
         """Retire only an explicitly read-only child, then prove its exit."""
-        exact_version_query = (isinstance(arguments, list) and len(arguments) == 9
-            and arguments[1:3] == ['list', '--id']
-            and isinstance(arguments[3], str) and _PACKAGE_ID.fullmatch(arguments[3]) is not None
-            and arguments[4:] == ['--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity'])
-        if (not isinstance(arguments, list) or len(arguments) < 2 or not exact_version_query and arguments[1:] not in (
-                ['upgrade', '--source', 'winget', '--disable-interactivity'],
-                ['pin', 'list', '--disable-interactivity'])):
+        if not _exact_read_only_winget(arguments):
             raise ValueError('Only exact read-only WinGet queries support process cancellation.')
         if type(timeout) not in (int, float) or not 0 < timeout <= 120:
             raise ValueError('A bounded positive read-only query timeout is required.')
@@ -615,7 +654,11 @@ class Maintenance:
         except Exception as error:
             raise UpdatePreflightError("WinGet became unavailable before any installer started.", failure_scope='app_batch', failureKind='manager_unavailable') from error
         from .app_update_verification import AppUpdateVerification, deferred_receipt, target_installed
-        verification = AppUpdateVerification(self.data_dir, current)
+        try:
+            verification = AppUpdateVerification(self.data_dir, current)
+        except Exception as error:
+            raise UpdatePreflightError('Private app activation evidence could not be initialized; this application was not launched.',
+                failure_scope='package', failureKind='activation_evidence_unavailable') from error
         if unattended:
             try:
                 pending = verification.pending()
@@ -658,51 +701,89 @@ class Maintenance:
         except Exception as error:
             raise UpdatePreflightError('Private app activation diagnostics could not be prepared; no installer was started.',
                 failure_scope='package', failureKind='activation_evidence_unavailable') from error
+        from .update_payload_lifecycle import PayloadAttempt, retained_receipt
         attempt = None
+        payload_setup_failed = False
+        run_options = {'timeout': 1800}
         try:
-            if (interrupted := cancelled_result()) is not None:
-                return interrupted
-            if (held := held_result()) is not None:
-                return held
-            from .update_payload_lifecycle import PayloadAttempt
             attempt = PayloadAttempt(self.data_dir, 'winget', package_id)
-            run_options = {'timeout': 1800}
             if attempt.environment:
                 run_options['environment'] = attempt.environment
-            if progress_callback is not None:
-                run_options['progress_callback'] = progress_callback
-                # Explicit experimental opt-in. The retained safe console owner
-                # may remain resident after closing Optimus until Ollama exits.
+        except Exception:
+            attempt = None
+            payload_setup_failed = True
+        if progress_callback is not None:
+            run_options['progress_callback'] = progress_callback
+            # Failure to read the optional, package-specific experimental
+            # setting never grants a resident handoff or refuses the installer.
+            if package_id == 'Ollama.Ollama':
                 from .workflow import Preferences
-                toolkit = Preferences(self.data_dir).load().get('toolkit_settings', {})
-                resume = toolkit.get('resume', {}) if isinstance(toolkit, dict) else {}
-                if (package_id == 'Ollama.Ollama' and isinstance(resume, dict)
-                        and resume.get('resident_handoff_enabled') is True):
-                    run_options['allow_resident_handoff'] = True
-            # Configuration/owned staging setup is still prelaunch work. A
-            # local Next received here must not launch a fresh installer.
-            if (interrupted := cancelled_result()) is not None:
-                if attempt is not None:
-                    attempt.finish(interrupted)
-                return interrupted
+                try:
+                    toolkit = Preferences(self.data_dir).load().get('toolkit_settings', {})
+                    resume = toolkit.get('resume', {}) if isinstance(toolkit, dict) else {}
+                    if isinstance(resume, dict) and resume.get('resident_handoff_enabled') is True:
+                        run_options['allow_resident_handoff'] = True
+                except Exception:
+                    pass
+
+        def finish_payload(outcome, **options):
+            if payload_setup_failed:
+                return retained_receipt('winget', None,
+                    'Private payload cleanup could not be prepared. All provider payloads were retained.',
+                    status='retained_unverified')
+            try:
+                controller = getattr(self, 'stop_controller', None)
+                if (cancel_event is not None and cancel_event.is_set()
+                        or controller is not None and controller.is_set()):
+                    return retained_receipt('winget', attempt.enabled,
+                        'Cancellation was requested; remaining update payloads were retained.',
+                        status='retained_unverified')
+                return attempt.finish(outcome, **options)
+            except Exception:
+                return retained_receipt('winget', attempt.enabled,
+                    'Private payload cleanup could not be verified. Remaining payloads were retained.',
+                    status='retained_unverified')
+
+        # Staging setup did not grant a launch. Respect a local Next or STOP
+        # before entering the only try block that can start the native command.
+        if (interrupted := cancelled_result()) is not None:
+            return dict(interrupted, payload_cleanup=finish_payload(interrupted))
+        if (held := held_result()) is not None:
+            return dict(held, payload_cleanup=finish_payload(held))
+        try:
             result = self._run(arguments, **run_options)
         except subprocess.TimeoutExpired:
-            if attempt is not None:
-                attempt.finish({'installer_started': True, 'outcomeKnown': False, 'running': True})
+            finish_payload({'installer_started': True, 'outcomeKnown': False, 'running': True})
             # The vendor child can outlive WinGet. Never retry or replay here.
             raise UpdateOutcomeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
         except (FileNotFoundError, PermissionError) as error:
-            if attempt is not None:
-                attempt.finish({'installer_started': False, 'outcomeKnown': True, 'running': False})
+            finish_payload({'installer_started': False, 'outcomeKnown': True, 'running': False})
             # These launch errors occur before CreateProcess starts WinGet;
             # a missing/replaced executable is not a detached installer.
+            scope, kind = _launch_refusal_scope(error)
             raise UpdatePreflightError("WinGet could not be started; no installer was launched.",
-                failure_scope='shared' if isinstance(error, PermissionError) else 'app_batch',
-                failureKind='authorization' if isinstance(error, PermissionError) else 'manager_unavailable') from error
+                failure_scope=scope, failureKind=kind) from error
         except Exception as error:
-            if attempt is not None:
-                attempt.finish({'installer_started': getattr(error, 'installer_started', None),
-                    'outcomeKnown': False, 'running': getattr(error, 'running', None)})
+            finish_payload({'installer_started': getattr(error, 'installer_started', None),
+                'outcomeKnown': False, 'running': getattr(error, 'running', None)})
+            from .emergency_stop import StopRequested
+            if isinstance(error, (StopRequested, UpdatePreflightError)):
+                raise
+            from .winget_console import ConsolePreflightError, ConsoleTargetNotStartedError
+            if isinstance(error, ConsoleTargetNotStartedError):
+                code = error.winerror
+                if type(code) is int and code in _SHARED_LAUNCH_REFUSALS:
+                    scope, kind = 'shared', _SHARED_LAUNCH_REFUSALS[code]
+                elif error.stage == 'create_target' and type(code) is int and code in _TRANSIENT_TARGET_REFUSALS:
+                    # The supervisor authenticated no target creation. This exact item can fail
+                    # without suppressing unrelated approved offers.
+                    scope, kind = 'package', error.failureKind
+                else:
+                    scope, kind = 'app_batch', 'manager_unavailable'
+                raise UpdatePreflightError(str(error), failure_scope=scope, failureKind=kind) from error
+            if isinstance(error, ConsolePreflightError):
+                scope, kind = _launch_refusal_scope(error.__cause__)
+                raise UpdatePreflightError(str(error), failure_scope=scope, failureKind=kind) from error
             if (getattr(error, 'installer_started', None) is False and getattr(error, 'outcomeKnown', None) is True
                     and getattr(error, 'running', None) is False):
                 raise UpdatePreflightError('The progress console could not be prepared; no application installer was launched.',
@@ -711,8 +792,7 @@ class Maintenance:
         from .resident_update_completion import verified_resident_handoff
         resident_handoff = verified_resident_handoff(result, arguments)
         if getattr(result, 'capture_complete', True) is not True and not resident_handoff:
-            if attempt is not None:
-                attempt.finish({'installer_started': True, 'outcomeKnown': False, 'running': True})
+            finish_payload({'installer_started': True, 'outcomeKnown': False, 'running': True})
             raise UpdateOutcomeError('The WinGet transcript was incomplete or exceeded its bound. Restart and installer state could not be verified; no automatic retry is authorized.')
         output = _ANSI.sub("", result.stdout or "")
         stderr = _ANSI.sub("", result.stderr or "")
@@ -742,6 +822,11 @@ class Maintenance:
                           if unattended else "A vendor installer can request administrator approval or a restart. No license/source agreement was accepted automatically.")
                          + (" Saved compatibility mode adds WinGet --force for non-security issues only. Hash/signature verification and installer hard blocks remain in effect." if compatibility_mode else ""))}
         receipt['application_restart_required'] = 'restart the application to complete the upgrade' in (output + '\n' + stderr).casefold()
+        download_refusal = _terminal_download_refusal(result)
+        if download_refusal is not None and not restart and not installer_running:
+            kind, reason = download_refusal
+            receipt.update(failure_scope='package', failureKind=kind, requiresReview=True)
+            receipt['note'] += ' ' + reason + ' No retry or security bypass was requested.'
         if resident_handoff:
             receipt['console_receipt'] = result.console_receipt
             receipt['resident_runtime_handoff'] = True
@@ -837,11 +922,10 @@ class Maintenance:
             receipt['failure_scope'] = 'package'
             receipt['verification_evidence_saved'] = False
             receipt['note'] += ' The private activation record could not be saved; retain the terminal item evidence for review.'
-        if attempt is not None:
-            cleanup_outcome = (dict(receipt, restartNeeded=False) if payload_verified and quiescent
-                and restart is False and pending_restart is False else receipt)
-            receipt['payload_cleanup'] = attempt.finish(cleanup_outcome, verified=payload_verified,
-                quiescent=quiescent, restart_pending=pending_restart, download_hashes=download_hashes)
+        cleanup_outcome = (dict(receipt, restartNeeded=False) if payload_verified and quiescent
+            and restart is False and pending_restart is False else receipt)
+        receipt['payload_cleanup'] = finish_payload(cleanup_outcome, verified=payload_verified,
+            quiescent=quiescent, restart_pending=pending_restart, download_hashes=download_hashes)
         return receipt
 
     @staticmethod

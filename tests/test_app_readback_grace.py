@@ -144,11 +144,41 @@ def test_exact_version_query_is_disposable_and_cancellable_without_native_ticket
     controller.begin_native.assert_not_called()
 
 
+@pytest.mark.parametrize('query', ['list', 'show'])
+def test_installed_version_and_catalog_timeouts_retire_only_the_exact_query(tmp_path, monkeypatch, query):
+    arguments = ['fixture', query, '--id', 'Vendor.App', '--exact', '--source', 'winget']
+    if query == 'show':
+        arguments += ['--version', '2.0']
+    arguments += ['--accept-source-agreements', '--disable-interactivity']
+    clock = [100.0]
+    monkeypatch.setattr(maintenance.time, 'monotonic', lambda: clock[0])
+    child = Mock(returncode=-15)
+    def communicate(**options):
+        if not child.terminate.called:
+            clock[0] += 2
+            raise subprocess.TimeoutExpired(arguments, options['timeout'])
+        return ('partial version metadata', '')
+    child.communicate.side_effect = communicate
+    controller = Mock()
+    controller.bind_cancel.side_effect = lambda event: event
+    controller.spawn_disposable.return_value = child
+    service = Maintenance(None, tmp_path)
+    service.stop_controller = controller
+    result = service._run(arguments, timeout=1)
+    assert result.returncode == 130
+    child.terminate.assert_called_once()
+    controller.spawn_disposable.assert_called_once()
+    assert controller.spawn_disposable.call_args.args[0] == arguments
+    controller.begin_native.assert_not_called()
+    controller.observe_native_child.assert_not_called()
+
+
 @pytest.mark.parametrize('arguments', [
     ['fixture', 'list', '--id', 'Vendor.App', '--exact', '--source', 'other', '--accept-source-agreements', '--disable-interactivity'],
     ['fixture', 'list', '--id', 'Vendor.App;calc', '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity'],
     ['fixture', 'upgrade', '--id', 'Vendor.App'],
     ['fixture', 'list', '--id', 'Vendor.App', '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity', '--force'],
+    ['fixture', 'show', '--id', 'Vendor.App', '--exact', '--source', 'winget', '--version', '--force', '--accept-source-agreements', '--disable-interactivity'],
 ])
 def test_disposable_query_grammar_does_not_admit_installers_or_changed_sources(arguments):
     with pytest.raises(ValueError, match='exact read-only'):

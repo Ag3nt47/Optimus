@@ -2,6 +2,7 @@
 import copy
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -119,3 +120,61 @@ def test_new_unknown_app_outcome_keeps_later_channels_unsearched_and_block_reaso
         assert 'scan' not in receipt
     service.windows_security_updates.assert_not_called()
     service.driver_updates_scan.assert_not_called()
+
+
+def app_batch_refusal(*, prior_completed=False):
+    refusal = {'status': 'blocked', 'requiresReview': True, 'failure_scope': 'app_batch',
+               'failureKind': 'manager_unavailable', 'installer_started': False,
+               'outcomeKnown': True, 'running': False}
+    items = [{'id': 'Fixture.One', 'status': 'failed', 'result': refusal}]
+    if prior_completed:
+        items.insert(0, {'id': 'Fixture.Before', 'status': 'completed', 'result': {
+            'exitCode': 0, 'installer_started': True, 'outcomeKnown': True, 'running': False}})
+    return software_report(items=items, failed_items=1, installer_started=prior_completed,
+        outcomeKnown=True, running=False, stop_reason='The application manager became unavailable before launch.',
+        deferred_ids=['Fixture.Untried'])
+
+
+def test_prior_app_only_no_launch_defers_its_retry_but_not_unrelated_channels(tmp_path):
+    settings = all_update_settings()
+    source = source_report(settings, **app_batch_refusal())
+    service = backend(tmp_path, settings, source)
+    service.is_admin = Mock(return_value=True)
+    preview = service.available_fixes(source, settings)
+    assert _prior_installer_barrier(service, source) == ''
+    assert {row['id'] for row in preview['actions']} == {'enable_firewall', 'windows_security_updates', 'driver_updates'}
+    assert {row['id'] for row in preview['manual_items']} == {'software_updates'}
+    result = service.apply_available_fixes(source, settings)
+    assert result['counts']['deferred'] == 0
+    service.updates_scan.assert_not_called()
+    service.update_app_unattended.assert_not_called()
+    service.windows_security_updates.assert_called_once()
+    service.driver_updates_scan.assert_called_once()
+
+
+def test_live_app_batch_preflight_failure_continues_after_known_prior_app_exit(tmp_path, monkeypatch):
+    settings = all_update_settings()
+    source = source_report(settings)
+    service = backend(tmp_path, settings, source)
+    service.is_admin = Mock(return_value=True)
+    apps = Mock(return_value=app_batch_refusal(prior_completed=True))
+    monkeypatch.setattr('optimus.automated_software.run_software', apps)
+    result = service.apply_available_fixes(source, settings)
+    apps.assert_called_once()
+    assert result['counts']['failed'] == 1 and result['counts']['deferred'] == 0
+    service.windows_security_updates.assert_called_once()
+    service.driver_updates_scan.assert_called_once()
+
+
+@pytest.mark.parametrize('contradiction', [
+    {'running': True}, {'outcomeKnown': False}, {'restartNeeded': True},
+    {'may_continue': True}, {'failureKind': 'security_policy'}, {'exitCode': 0x8A150109},
+])
+def test_nested_shared_or_unresolved_evidence_overrules_app_only_preflight_scope(tmp_path, contradiction):
+    settings = all_update_settings()
+    outcome = app_batch_refusal(prior_completed=True)
+    outcome['items'][0]['result'].update(contradiction)
+    source = source_report(settings, **outcome)
+    service = backend(tmp_path, settings, source)
+    assert _prior_installer_barrier(service, source)
+    assert [row['id'] for row in service.available_fixes(source, settings)['actions']] == ['enable_firewall']

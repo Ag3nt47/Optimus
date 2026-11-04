@@ -188,3 +188,98 @@ def test_process_launch_permission_refusal_stays_shared(tmp_path):
     assert launches == [] and result['deferred_ids'] == list(IDENTITIES[1:])
     assert evidence['failure_scope'] == 'shared' and evidence['failureKind'] == 'authorization'
     assert installer_barrier(result)
+
+
+def test_parent_console_preflight_preserves_the_proven_permission_refusal(tmp_path):
+    from optimus.winget_console import ConsolePreflightError
+    backend, tool, launches = fixture_backend(tmp_path)
+    original = tool._run.side_effect
+    def native(arguments, **options):
+        if arguments[1:3] == ['upgrade', '--id']:
+            try:
+                raise PermissionError('Fixture access denied before supervisor start')
+            except PermissionError as error:
+                raise ConsolePreflightError('Fixture console launch was refused.') from error
+        return original(arguments, **options)
+    tool._run.side_effect = native
+    result = run_software(backend, configuration())
+    evidence = result['items'][0]['result']
+    assert launches == [] and result['deferred_ids'] == list(IDENTITIES[1:])
+    assert evidence['failure_scope'] == 'shared' and evidence['failureKind'] == 'authorization'
+    assert evidence['installer_started'] is False and evidence['outcomeKnown'] is True
+    assert installer_barrier(result)
+
+
+def test_activation_evidence_constructor_failure_skips_only_the_bound_package(tmp_path, monkeypatch):
+    from optimus import app_update_verification
+    original = app_update_verification.AppUpdateVerification
+    def make(data_dir, package):
+        if package['id'] == IDENTITIES[1]:
+            raise OSError('Fixture private diagnostic identity unavailable')
+        return original(data_dir, package)
+    monkeypatch.setattr(app_update_verification, 'AppUpdateVerification', make)
+    backend, tool, launches = fixture_backend(tmp_path)
+    result = run_software(backend, configuration())
+    evidence = result['items'][1]['result']
+    assert launches == [IDENTITIES[0], IDENTITIES[2]]
+    assert evidence['failure_scope'] == 'package' and evidence['failureKind'] == 'activation_evidence_unavailable'
+    assert evidence['installer_started'] is False and evidence['outcomeKnown'] is True and evidence['running'] is False
+    assert result['failed_items'] == 1 and result['deferred_ids'] == [] and installer_barrier(result) is None
+
+
+@pytest.mark.parametrize('stage,code,scope,kind', [
+    ('create_target', 1237, 'package', 'console_target_not_started'),
+    ('create_target', 32, 'package', 'console_target_not_started'),
+    ('create_target', 33, 'package', 'console_target_not_started'),
+    ('prepare', 32, 'app_batch', 'manager_unavailable'),
+    ('create_target', 87, 'app_batch', 'manager_unavailable'),
+    ('create_target', 2, 'app_batch', 'manager_unavailable'),
+    ('create_target', 3, 'app_batch', 'manager_unavailable'),
+    ('create_target', 193, 'app_batch', 'manager_unavailable'),
+    ('create_target', 5, 'shared', 'authorization'),
+    ('prepare', 740, 'shared', 'authorization'),
+    ('create_target', 112, 'shared', 'insufficient_disk'),
+    ('create_target', 1260, 'shared', 'security_policy'),
+])
+def test_authenticated_console_refusal_preserves_the_scope_of_its_native_reason(tmp_path, stage, code, scope, kind):
+    from optimus.winget_console import ConsoleTargetNotStartedError
+    backend, tool, launches = fixture_backend(tmp_path)
+    original = tool._run.side_effect
+    attempts = []
+    def native(arguments, **options):
+        if arguments[1] == 'upgrade' and '--id' in arguments:
+            identity = arguments[arguments.index('--id') + 1]
+            attempts.append(identity)
+            if identity == IDENTITIES[1]:
+                raise ConsoleTargetNotStartedError(stage, code)
+        return original(arguments, **options)
+    tool._run.side_effect = native
+    result = run_software(backend, configuration())
+    evidence = result['items'][1]['result']
+    assert evidence['failure_scope'] == scope and evidence['failureKind'] == kind
+    assert evidence['installer_started'] is False and evidence['outcomeKnown'] is True and evidence['running'] is False
+    assert attempts == list(IDENTITIES if scope == 'package' else IDENTITIES[:2])
+    assert launches == ([IDENTITIES[0], IDENTITIES[2]] if scope == 'package' else [IDENTITIES[0]])
+    assert bool(installer_barrier(result)) is (scope == 'shared')
+
+
+@pytest.mark.parametrize('code,kind', [(0x8A150008, 'download_failed'),
+    (0x8A15002E - 2**32, 'download_size_mismatch'), (0x8A150011, 'installer_hash_mismatch')])
+def test_verified_native_download_failure_keeps_reason_and_continues_exact_batch(tmp_path, code, kind):
+    from test_update_payload_providers import terminal
+    backend, tool, launches = fixture_backend(tmp_path)
+    original = tool._run.side_effect
+    def native(arguments, **options):
+        if arguments[1:4] == ['upgrade', '--id', IDENTITIES[1]]:
+            launches.append(IDENTITIES[1])
+            assert not any(flag in arguments for flag in ('--ignore-security-hash', '--ignore-local-archive-malware-scan'))
+            return terminal(code)
+        return original(arguments, **options)
+    tool._run.side_effect = native
+    result = run_software(backend, configuration())
+    evidence = result['items'][1]['result']
+    assert launches == list(IDENTITIES)
+    assert evidence['exitCode'] == code and evidence['failureKind'] == kind and evidence['failure_scope'] == 'package'
+    assert evidence['installer_started'] is True and evidence['outcomeKnown'] is True and evidence['running'] is False
+    assert evidence['verified'] is False and 'No retry or security bypass' in evidence['note']
+    assert result['failed_items'] == 1 and result['deferred_ids'] == [] and installer_barrier(result) is None

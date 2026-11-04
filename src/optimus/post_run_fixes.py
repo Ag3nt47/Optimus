@@ -226,6 +226,9 @@ def _preview(backend, report, settings):
             manual.append({'id': channel, 'title': title, 'reason': 'This Windows update channel is unavailable on this platform; use the native OS or vendor updater.'})
         elif prior_barrier:
             manual.append({'id': channel, 'title': title, 'reason': prior_barrier})
+        elif channel == 'software_updates' and any(_app_only_preflight_stop(value) for value, _ in outcomes):
+            manual.append({'id': channel, 'title': title,
+                'reason': 'An application preflight stopped this batch. Review it before a new run; other approved update channels remain available.'})
         elif _authorized(settings, channel):
             actions.append({'id': channel, 'title': title, 'kind': channel})
         else:
@@ -391,6 +394,69 @@ def _known_terminal_failure(value):
     return can_fail_forward(receipt if isinstance(receipt, dict) else value)
 
 
+def _app_only_preflight_stop(value):
+    """A stopped app batch does not imply an unresolved shared installer."""
+    from .navigation import can_fail_forward, shared_update_refusal
+    if (not isinstance(value, dict) or not isinstance(value.get('stop_reason'), str)
+            or not value['stop_reason'].strip() or type(value.get('failed_items')) is not int
+            or value['failed_items'] < 1 or type(value.get('installer_started')) is not bool
+            or value.get('outcomeKnown') is not True or value.get('running') is not False):
+        return False
+    items = value.get('items')
+    if not isinstance(items, list) or len(items) > 1000:
+        return False
+
+    def app_refusal(receipt):
+        return (isinstance(receipt, dict) and receipt.get('failure_scope') == 'app_batch'
+                and receipt.get('failureKind') in ('source_revalidation', 'cache_unavailable',
+                                                   'manager_unavailable', 'preflight_failed')
+                and receipt.get('installer_started') is False and receipt.get('outcomeKnown') is True
+                and receipt.get('running') is False and receipt.get('exitCode') is None)
+
+    if items:
+        if any(not isinstance(row, dict) or not isinstance(row.get('result'), dict) for row in items):
+            return False
+        receipts = [row['result'] for row in items]
+        if (items[-1].get('status') != 'failed' or not app_refusal(receipts[-1])
+                or not all(type(receipt.get('installer_started')) is bool for receipt in receipts[:-1])
+                or value['installer_started'] != any(receipt['installer_started'] for receipt in receipts)):
+            return False
+        for row, receipt in zip(items, receipts):
+            if any(key in row and row[key] is not receipt.get(key)
+                   for key in ('installer_started', 'outcomeKnown', 'running')):
+                return False
+    elif not app_refusal(value):
+        return False
+    else:
+        receipts = []
+    pending, count = [value], 0
+    while pending:
+        item = pending.pop()
+        count += 1
+        if count > 20000:
+            return False
+        if isinstance(item, dict):
+            if (item.get('status') in ('uncertain', 'running')
+                    or 'outcomeKnown' in item and item['outcomeKnown'] is not True
+                    or 'installer_started' in item and type(item['installer_started']) is not bool
+                    or any(key in item and item[key] is not False for key in (
+                        'running', 'uncertain', 'cancelled', 'timed_out', 'may_continue', 'reboot_required', 'rebootRequired',
+                        'shared_barrier', 'blocked_by_prior_installer', 'installation_blocked'))
+                    or item.get('restartNeeded') is not None and item['restartNeeded'] is not False
+                    or any(key in item and item[key] is not None and not isinstance(item[key], str)
+                           for key in ('failure_scope', 'failureKind'))
+                    or shared_update_refusal(item)):
+                return False
+            code = item.get('exitCode')
+            if code is not None and (type(code) is not int or code & 0xffffffff in (
+                    3010, 1641, 0x8A150109, 0x8A15010A, 0x8A15010B)):
+                return False
+            pending.extend(part for part in item.values() if isinstance(part, (list, dict)))
+        elif isinstance(item, list):
+            pending.extend(part for part in item if isinstance(part, (list, dict)))
+    return all(can_fail_forward(receipt) for receipt in receipts[:-1])
+
+
 def _stop_reason(value, *, prior=False):
     """Normalize updater-specific stop flags across the entire batch."""
     pending = [value]
@@ -433,6 +499,8 @@ def _prior_installer_barrier(backend, report):
         for value, failed in _channel_results(report, channel):
             if failed and not value:
                 return 'A previous updater stage failed without a verified operation result. Review installer state before another installer.'
+            if channel == 'software_updates' and not _native(backend) and _app_only_preflight_stop(value):
+                continue
             if _native(backend) and channel == 'software_updates' and (
                     failed or value.get('failed_items', 0)
                     or any(isinstance(item, dict) and item.get('status') == 'failed'
@@ -464,6 +532,8 @@ def _local_security_stop_reason(action, outcome):
     A native error, timeout, missing lifecycle record, restart or shared refusal
     remains a barrier. Only the three fixed non-removal controls can be local.
     """
+    if action.get('id') == 'software_updates' and _app_only_preflight_stop(outcome):
+        return ''
     known_local = (action.get('id') in SECURITY_FIXES and isinstance(outcome, dict)
         and outcome.get('id') == action['id'] and outcome.get('status') in ('failed', 'blocked')
         and outcome.get('failure_scope') == 'security_control'

@@ -226,6 +226,35 @@ class ConsoleProtocolTests(unittest.TestCase):
         self.assertEqual(FakeConsole.instances[-1].close_calls, [])
         self.assertFalse(FakeConsole.instances[-1].closed)
 
+    def test_authenticated_target_refusal_closes_console_without_relaunch(self):
+        def refused(native):
+            return [{'schema': 1, 'nonce': native.nonce, 'supervisor_pid': native.pid,
+                     'argv_sha256': console._digest(native.arguments), 'event': 'not_started',
+                     'stage': 'create_target', 'winerror': 87, 'target_created': False,
+                     'console_client_count': 1}]
+
+        with mock.patch.object(FakeConsole, 'rows', refused), self.assertRaises(console.ConsoleTargetNotStartedError) as caught:
+            console.run_winget_console(['C:/fixtures/fake.exe'], timeout=2, progress_callback=lambda _: None)
+        self.assertIs(caught.exception.installer_started, False)
+        self.assertIs(caught.exception.outcomeKnown, True)
+        self.assertEqual(caught.exception.winerror, 87)
+        self.assertEqual(len(FakeConsole.instances), 1)
+        self.assertTrue(FakeConsole.instances[0].closed)
+
+    def test_no_target_frame_cannot_override_a_started_frame(self):
+        original = FakeConsole.rows
+
+        def mixed(native):
+            started = original(native)[0]
+            refused = dict(started, event='not_started', stage='create_target', winerror=87,
+                           target_created=False, console_client_count=1)
+            del refused['target_pid']
+            return [started, refused]
+
+        with mock.patch.object(FakeConsole, 'rows', mixed), self.assertRaises(console.ConsoleOutcomeError):
+            console.run_winget_console(['C:/fixtures/fake.exe'], timeout=2, progress_callback=lambda _: None)
+        self.assertFalse(FakeConsole.instances[0].closed)
+
     def test_prelaunch_failure_is_explicitly_known_no_target(self):
         FakeConsole.launch_error = PermissionError('fixture launch refused')
         with self.assertRaises(console.ConsolePreflightError) as caught:
@@ -390,6 +419,24 @@ class NativeConsoleFixtureTests(unittest.TestCase):
     def run_child(self, source, *, timeout=5, callback=lambda _: None, extra=()):
         return console.run_winget_console([self.executable, '-I', '-u', '-c', source, *extra],
             timeout=timeout, progress_callback=callback)
+
+    def test_native_missing_target_emits_verified_no_launch_receipt(self):
+        with tempfile.TemporaryDirectory(prefix='optimus-missing-target-') as directory:
+            arguments = [str(Path(directory) / 'missing-fixture.exe')]
+            source = str(Path(console.__file__).resolve().parents[1])
+            # Keep a broken protocol's retained console inside a disposable
+            # fixture interpreter. The specified target can never start.
+            code = (f'import sys;sys.path.insert(0,{source!r})\n'
+                    'from optimus import winget_console as console\n'
+                    f'try:console.run_winget_console({arguments!r},timeout=5,progress_callback=lambda _:None)\n'
+                    'except console.ConsoleTargetNotStartedError as error:\n'
+                    ' assert error.stage == "create_target" and error.winerror in (2,3)\n'
+                    ' assert error.outcomeKnown is True and error.running is False\n'
+                    ' assert not console._RETAINED\n'
+                    'else:raise AssertionError("A missing target was reported as executed")\n')
+            result = subprocess.run([self.executable, '-I', '-B', '-c', code],
+                                    capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_native_console_reports_uninstall_percent_before_harmless_fixture_exits(self):
         callbacks = []

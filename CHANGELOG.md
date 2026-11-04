@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.35
+
+- Record verified WinGet launch refusals and download failures per package so eligible updates can continue.
+- Keep optional payload cleanup and read-only version checks separate from installer lifecycle reporting.
+- Allow independent update follow-up when an app batch stops before launch and its other installer outcomes are known.
+
 ## 0.12.34
 
 - Make hardware snapshot text selectable and add Copy report with source and confidence information.

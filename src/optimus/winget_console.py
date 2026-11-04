@@ -50,10 +50,29 @@ def _environment_block(overrides):
 
 
 class ConsolePreflightError(RuntimeError):
-    """Verified failure before any supervisor or target process was created."""
+    """Verified failure before a target process was created."""
     installer_started = False
     outcomeKnown = True
     running = False
+
+
+class ConsoleTargetNotStartedError(ConsolePreflightError):
+    """The authenticated supervisor retired without creating its target."""
+
+    failureKind = 'console_target_not_started'
+
+    def __init__(self, stage, winerror):
+        self.stage, self.winerror = stage, winerror
+        detail = f' (Windows error {winerror})' if winerror is not None else ''
+        action = 'prepare the target' if stage == 'prepare' else 'create the target process'
+        super().__init__(f'The private WinGet console could not {action}{detail}. No installer was launched.')
+
+
+class _TargetNotCreated(Exception):
+    """Child-side evidence from before CreateProcessW or its explicit refusal."""
+
+    def __init__(self, stage, winerror):
+        self.stage, self.winerror = stage, winerror
 
 
 class ConsoleOutcomeError(RuntimeError):
@@ -61,6 +80,7 @@ class ConsoleOutcomeError(RuntimeError):
     installer_started = True
     outcomeKnown = False
     running = True
+    failureKind = 'console_outcome_unknown'
 
 
 class _Coord(ctypes.Structure):
@@ -209,6 +229,7 @@ class _TargetProcess:
         import msvcrt
         self.kernel, self.job, self.process, self.thread, self.pid = kernel, None, None, None, None
         duplicates, attributes, initialized = [], None, False
+        creation_attempted = False
         try:
             self.job = kernel.CreateJobObjectW(None, None)
             if not self.job:
@@ -245,17 +266,20 @@ class _TargetProcess:
                 raise ValueError('The exact target command exceeds the Windows argument bound.')
             # Atomic job assignment occurs before the initial suspended thread
             # can execute. No assignment failure can launch an untracked target.
+            creation_attempted = True
             if not kernel.CreateProcessW(arguments[0], ctypes.create_unicode_buffer(command), None, None,
                     True, 0x00080004, None, None, ctypes.byref(startup), ctypes.byref(information)):
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise _TargetNotCreated('create_target', ctypes.get_last_error() or None)
             self.process, self.thread, self.pid = information.hProcess, information.hThread, information.dwProcessId
             member = w.BOOL()
             if not kernel.IsProcessInJob(self.process, self.job, ctypes.byref(member)) or not member.value:
                 raise RuntimeError('The suspended target job membership could not be verified.')
-        except BaseException:
+        except BaseException as error:
             # Closing these plain handles never kills a target. A created but
             # unverified target stays an unknown outcome and is not resumed.
             self.close()
+            if not creation_attempted and isinstance(error, Exception):
+                raise _TargetNotCreated('prepare', getattr(error, 'winerror', None)) from error
             raise
         finally:
             if initialized:
@@ -445,7 +469,7 @@ class _Session:
         self.provider_ready = threading.Event()
         self.lock, self.latest, self.download = threading.RLock(), [], []
         self.receipts, self.receipt_error = [], False
-        self.returncode, self.aborted = None, False
+        self.returncode, self.not_started, self.aborted = None, None, False
         self.parser = WinGetProgressParser(self._remember)
         self.reporting.set()
 
@@ -506,7 +530,7 @@ class _Session:
                     self.launch_ready.wait()
                     if not self.aborted:
                         try:
-                            if pending or len(self.receipts) not in (2, 3):
+                            if pending or len(self.receipts) not in (1, 2, 3):
                                 raise ValueError('The private console receipt is incomplete.')
                         except (ValueError, UnicodeError):
                             self.receipt_error = True
@@ -559,6 +583,22 @@ class _Session:
             return None
         return final
 
+    def _not_started(self):
+        if not self.receipt_eof.is_set() or self.receipt_error or len(self.receipts) != 1:
+            return None
+        value = self.receipts[0]
+        if (set(value) != {'schema', 'nonce', 'supervisor_pid', 'argv_sha256', 'event', 'stage',
+                           'winerror', 'target_created', 'console_client_count'}
+                or type(value['schema']) is not int or value['schema'] != 1
+                or value['nonce'] != self.nonce or value['argv_sha256'] != self.argument_digest
+                or type(value['supervisor_pid']) is not int or value['supervisor_pid'] != self.native.pid
+                or value['event'] != 'not_started' or value['target_created'] is not False
+                or value['stage'] not in ('prepare', 'create_target')
+                or type(value['console_client_count']) is not int or value['console_client_count'] != 1):
+            return None
+        error = value['winerror']
+        return value if error is None or type(error) is int and 0 < error <= 0xffffffff else None
+
     def _handoff(self):
         """A distinct authenticated receipt; never a quiescent/EOF receipt."""
         if self.receipt_error or len(self.receipts) < 2:
@@ -604,20 +644,22 @@ class _Session:
         while True:
             try:
                 exited = self.native.poll()
-                terminal = self._terminal()
+                refused = self._not_started()
+                terminal = refused if refused is not None else self._terminal()
                 if exited is not None and terminal is not None and exited == 0:
-                    # The target is finished, no attached clients remain, and
-                    # the supervisor itself has exited. Drain the final frame.
+                    # The supervisor has exited and proved that no target or
+                    # attached client remains. Drain the final frame.
                     self.native.close_quiescent()
                     self.output_eof.wait()
-                    self.returncode = terminal['exit_code']
+                    self.not_started = refused
+                    self.returncode = terminal.get('exit_code')
                     self.native.finish()
                     ticket = getattr(self, '_stop_ticket', None)
                     if ticket is not None:
                         ticket.finish()
-                    self.finished.set()
                     with _RETAINED_LOCK:
                         _RETAINED.discard(self)
+                    self.finished.set()
                     return
                 if exited is not None and self.receipt_eof.is_set() and (terminal is None or exited != 0):
                     self.fault.set()  # PID exit alone never authorizes teardown.
@@ -727,6 +769,8 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
             session.stop_reporting()
             raise subprocess.TimeoutExpired(arguments, timeout, output=session.output.value(), stderr='')
     session.stop_reporting()
+    if session.finished.is_set() and session.not_started is not None:
+        raise ConsoleTargetNotStartedError(session.not_started['stage'], session.not_started['winerror'])
     handoff = session._handoff() if not session.finished.is_set() else None
     result = subprocess.CompletedProcess(arguments, 0 if handoff is not None else session.returncode, session.output.value(), '')
     if handoff is not None:
@@ -773,6 +817,15 @@ def monitor_main(arguments):
     handle, kernel = int(handle_text), _kernel()
     if not handle or kernel.GetFileType(handle) != 3 or not kernel.SetHandleInformation(handle, 1, 0):
         return 125
+    target = None
+    creation_attempted = False
+
+    def write(value):
+        data = (json.dumps(value, ensure_ascii=True, separators=(',', ':')) + '\n').encode('ascii')
+        written = w.DWORD()
+        if not kernel.WriteFile(handle, data, len(data), ctypes.byref(written), None) or written.value != len(data):
+            raise ctypes.WinError(ctypes.get_last_error())
+
     try:
         values = json.loads(base64.b64decode(payload, validate=True).decode('ascii'))
         allow_resident_handoff = False
@@ -791,15 +844,10 @@ def monitor_main(arguments):
                     raise ctypes.WinError(ctypes.get_last_error())
             # Explicit console streams prevent inherited parent pipes from
             # suppressing WinGet's native bars. The receipt handle is excluded.
+            creation_attempted = True
             child = _TargetProcess(kernel, target, console_input, console_output)
             common = {'schema': 1, 'nonce': nonce, 'supervisor_pid': os.getpid(),
                       'target_pid': child.pid, 'argv_sha256': _digest(target)}
-
-            def write(value):
-                data = (json.dumps(value, ensure_ascii=True, separators=(',', ':')) + '\n').encode('ascii')
-                written = w.DWORD()
-                if not kernel.WriteFile(handle, data, len(data), ctypes.byref(written), None) or written.value != len(data):
-                    raise ctypes.WinError(ctypes.get_last_error())
 
             write(dict(common, event='started'))
             started_at = time.time()
@@ -843,7 +891,20 @@ def monitor_main(arguments):
                        job_verified=True, job_active_processes=0, exit_code=returncode & 0xffffffff))
             child.close()
         return 0
-    except Exception:
+    except Exception as error:
+        if target is not None and (isinstance(error, _TargetNotCreated) or not creation_attempted):
+            try:
+                clients = (w.DWORD * 2)()
+                if kernel.GetConsoleProcessList(clients, len(clients)) == 1 and clients[0] == os.getpid():
+                    stage = error.stage if isinstance(error, _TargetNotCreated) else 'prepare'
+                    code = getattr(error, 'winerror', None)
+                    write({'schema': 1, 'nonce': nonce, 'supervisor_pid': os.getpid(),
+                           'argv_sha256': _digest(target), 'event': 'not_started', 'stage': stage,
+                           'winerror': code if type(code) is int and 0 < code <= 0xffffffff else None,
+                           'target_created': False, 'console_client_count': 1})
+                    return 0
+            except Exception:
+                pass  # A refusal still needs a complete authenticated frame.
         # Missing receipt remains an unknown outcome. Never terminate a target
         # or close the console in an error handler.
         return 125
