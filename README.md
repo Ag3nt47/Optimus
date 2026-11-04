@@ -85,6 +85,8 @@ The dark blue/orange presentation and reveal animations are adapted from MIT-lic
 
 See **[all removal, cleanup and privacy options](docs/REMOVAL_OPTIONS.md)** before choosing debloat. Microsoft 365 consumer apps, Outlook and Edge have separate controls; Bing Wallpaper remains protected. Windows privacy and reinstall controls have explicit build/edition limits. Extra file tools and recovery live in Settings; irreversible overwriting is never part of Auto Clean.
 
+In Windows Settings, use **Protected apps** to keep selected applications during Optimus debloat and per-app removal. Search for **Windows App** to protect the Microsoft remote desktop client.
+
 **Unattended mode is off by default.** Enable it in initial setup or Settings to launch at sign-in and clean/update without Optimus questions. Save whether open browsers are skipped (default) or requested to close gracefully. Windows administrator consent and operating-system/vendor requirements remain in effect; interactive/unsupported work is left in results. Manual recommendations remain visible without opening questions. Changed scopes invalidate the saved approval until reviewed and saved again. No automatic reboot or forced browser termination is requested.
 
 ## Download and run
