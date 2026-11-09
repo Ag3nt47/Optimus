@@ -305,7 +305,8 @@ def test_header_reflows_for_wider_title_metrics_without_resizing(window, app, wi
     for _ in range(5):
         app.processEvents()
     assert progress.width() == width
-    assert progress.title.visible_text == progress.title.text()
+    assert '…' not in progress.title.visible_text
+    assert ' '.join(progress.title.visible_text.split()) == ' '.join(progress.title.text().split())
     assert progress.restart_button.mapTo(progress, QPoint()).y() >= progress.title.mapTo(progress, QPoint()).y() + progress.title.height()
     buttons = (progress.restart_button, progress.fullscreen.button, progress.stop_button)
     for button in buttons:

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.42
+
+- Accept a fully visible wrapped title in the header's font tests while retaining clipping and control-bound checks.
+
 ## 0.12.41
 
 - Measure the progress header's actual title and controls before arranging them, keeping the restart control and full title readable across fonts and window sizes.
