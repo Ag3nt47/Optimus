@@ -315,3 +315,55 @@ def test_header_reflows_for_wider_title_metrics_without_resizing(window, app, wi
     assert all(not left.geometry().intersects(right.geometry())
         for index, left in enumerate(buttons) for right in buttons[index + 1:])
     assert progress.title.font().stretch() == 150
+
+
+def test_wrapped_header_preserves_normal_dashboard_and_reflows_for_full_stage_text(window, app):
+    from test_native_hardware_health_display import (progress as health_fixture, settle,
+        test_normal_dashboard_fits_health_and_populated_drive_warnings_without_scroll)
+    from test_native_progress_analysis import reach
+    fixture = health_fixture.__wrapped__(app)
+    progress, backend, owner = next(fixture)
+    try:
+        wider = QFont(progress.title.font())
+        wider.setStretch(150)
+        progress.title.setFont(wider)
+        # Reuse the original strict no-scroll/health/drive/control assertions.
+        test_normal_dashboard_fits_health_and_populated_drive_warnings_without_scroll(
+            (progress, backend, owner), app)
+        assert '…' not in progress.spinner._label.visible_text
+        assert ' '.join(progress.spinner._label.visible_text.split()) == ' '.join(progress.spinner._label.text().split())
+        spinner_top = progress.spinner.mapTo(progress, QPoint()).y()
+        button_top = progress.restart_button.mapTo(progress, QPoint()).y()
+        assert spinner_top < button_top + progress.restart_button.height()
+        assert button_top < spinner_top + progress.spinner.height()
+        long_stage = 'Review approved updates'
+        while progress.spinner._label.fontMetrics().horizontalAdvance(long_stage) < progress.width() * .7:
+            long_stage += ' and devices'
+        progress.update_progress({'stage': long_stage, 'percentage': 44})
+        settle(app)
+        assert progress.spinner.mapTo(progress, QPoint()).y() > progress.restart_button.mapTo(progress, QPoint()).y()
+        assert '…' not in progress.spinner._label.visible_text
+        assert ' '.join(progress.spinner._label.visible_text.split()) == ' '.join(progress.spinner._label.text().split())
+        progress.update_progress({'stage': 'Clean temporary files', 'percentage': 44})
+        settle(app)
+        spinner_top = progress.spinner.mapTo(progress, QPoint()).y()
+        button_top = progress.restart_button.mapTo(progress, QPoint()).y()
+        assert spinner_top < button_top + progress.restart_button.height()
+        assert button_top < spinner_top + progress.spinner.height()
+        assert progress.body_scroll.verticalScrollBar().maximum() == 0
+        progress._update_space_guard({'enabled': True, 'complete': True, 'target_bytes': 2 * 2 ** 30,
+            'volumes': [dict(name=name, free_bytes=2 ** 30, target_bytes=2 * 2 ** 30,
+                shortfall_bytes=2 ** 30, below_target=True) for name in ('C:', 'D:', 'E:', 'F:')],
+            'warnings': ['Fixture warning ' + str(index) for index in range(4)]})
+        settle(app)
+        assert all(name in progress.space_guard_status.text() for name in ('C:', 'D:', 'E:', 'F:'))
+        for card in progress.worker_cards.values():
+            for button in card.navigation_buttons.values():
+                reach(progress, button, app)
+        reach(progress, progress.space_guard_status, app)
+        assert progress.body_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        try:
+            next(fixture)
+        except StopIteration:
+            pass

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.43
+
+- Fit worker cards to the actual dashboard space after header layout changes, retaining access to controls and hardware status.
+
 ## 0.12.42
 
 - Accept a fully visible wrapped title in the header's font tests while retaining clipping and control-bound checks.

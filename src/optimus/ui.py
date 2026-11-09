@@ -3005,6 +3005,7 @@ class OptimizationProgressWindow(QDialog):
         from .widgets.resource_comparison import ResourceComparison
         self.resource_comparison = ResourceComparison(self)
         self.resource_comparison.layout().setVerticalSpacing(2)
+        self.resource_comparison.layout().setContentsMargins(0, 0, 0, 0)
         # Preserve the comparison values, colours and explanation while fitting
         # one bounded line per label. Complete text remains available on hover.
         for name in ('removed', 'downloaded', 'note'):
@@ -3234,6 +3235,10 @@ class OptimizationProgressWindow(QDialog):
             self._update_responsive_layout()
 
     def _layout_progress_header(self):
+        for label in (self.resource_comparison.removed, self.resource_comparison.downloaded, self.resource_comparison.note):
+            height = max(label.fontMetrics().height(), label.fontMetrics().lineSpacing())
+            if label.height() != height:
+                label.setFixedHeight(height)
         layout = self._progress_header.layout()
         margins = layout.contentsMargins()
         available = max(0, self._progress_header.contentsRect().width() - margins.left() - margins.right())
@@ -3248,7 +3253,13 @@ class OptimizationProgressWindow(QDialog):
         compact = title_width + controls + 3 * gap > available
         tiny = controls + 2 * gap > available
         title_lines = 2 if title_width > available else 1
-        mode = (compact, tiny, title_lines)
+        spinner_layout = self.spinner.layout()
+        spinner_margins = spinner_layout.contentsMargins()
+        stage_width = (self.spinner._label.fontMetrics().horizontalAdvance(' '.join(self.spinner._label.text().split()))
+            + self.spinner._ring.width() + spinner_layout.spacing()
+            + spinner_margins.left() + spinner_margins.right())
+        shared_stage_row = compact and not tiny and controls + 3 * gap + stage_width <= available
+        mode = (compact, tiny, title_lines, shared_stage_row)
         if mode == self._header_compact:
             return
         self._header_compact = mode
@@ -3258,16 +3269,24 @@ class OptimizationProgressWindow(QDialog):
             layout.removeWidget(widget)
         if compact:
             layout.addWidget(self.title, 0, 0, 1, 4)
-            layout.addWidget(self.fullscreen.button, 1, 2)
-            layout.addWidget(self.stop_button, 1, 3)
-            layout.addWidget(self.restart_button, 2 if tiny else 1, 0, 1, 4 if tiny else 2)
+            if shared_stage_row:
+                layout.addWidget(self.spinner, 1, 0)
+                layout.addWidget(self.fullscreen.button, 1, 1)
+                layout.addWidget(self.restart_button, 1, 2)
+                layout.addWidget(self.stop_button, 1, 3)
+            else:
+                layout.addWidget(self.fullscreen.button, 1, 2)
+                layout.addWidget(self.stop_button, 1, 3)
+                layout.addWidget(self.restart_button, 2 if tiny else 1, 0, 1, 4 if tiny else 2)
         else:
             layout.addWidget(self.title, 0, 0)
             layout.addWidget(self.fullscreen.button, 0, 1)
             layout.addWidget(self.restart_button, 0, 2)
             layout.addWidget(self.stop_button, 0, 3)
         row = 3 if tiny else 2 if compact else 1
-        for offset, widget in enumerate((self.spinner, self.progress, self.resource_comparison, self.restart_status)):
+        widgets = ((self.progress, self.resource_comparison, self.restart_status) if shared_stage_row else
+                   (self.spinner, self.progress, self.resource_comparison, self.restart_status))
+        for offset, widget in enumerate(widgets):
             layout.addWidget(widget, row + offset, 0, 1, 4)
 
     def _apply_window_scale(self, scale):
