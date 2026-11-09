@@ -219,6 +219,91 @@ class ConsoleProtocolTests(unittest.TestCase):
         self.assertTrue(native.closed)
         self.assertEqual(len(native.close_calls), 1)
 
+    def test_verified_completion_at_deadline_returns_actual_target_exit(self):
+        FakeConsole.automatic = False
+        FakeConsole.exit_code = 0x8A150008
+        original_clock = time.monotonic
+        foreground = threading.get_ident()
+        calls = 0
+
+        def deadline_clock():
+            nonlocal calls
+            if threading.get_ident() != foreground:
+                return original_clock()
+            calls += 1
+            if calls == 1:
+                return 0.0
+            if calls == 2:
+                native = FakeConsole.instances[-1]
+                native.complete()
+                with console._RETAINED_LOCK:
+                    session = next(value for value in console._RETAINED if value.native is native)
+                self.assertTrue(session.finished.wait(2))
+            return 1.0
+
+        with mock.patch.object(console.time, 'monotonic', deadline_clock):
+            result = console.run_winget_console(['C:/fixtures/fake.exe'], timeout=1,
+                                               progress_callback=lambda _: None)
+        self.assertEqual(result.returncode, FakeConsole.exit_code)
+        self.assertIs(result.capture_complete, True)
+        self.assertIs(result.console_receipt['verified'], True)
+        self.assertEqual(len(FakeConsole.instances), 1)
+        self.assertTrue(FakeConsole.instances[0].closed)
+
+    def test_verified_enabled_resident_handoff_arriving_at_deadline_is_consumed(self):
+        FakeConsole.automatic = False
+        arguments = ['C:/fixtures/winget.exe', 'upgrade', '--id', 'Ollama.Ollama', '--exact',
+                     '--source', 'winget', '--version', '2.0', '--silent', '--disable-interactivity']
+
+        class ResidentConsole(FakeConsole):
+            def complete(native):
+                native.exit = 0
+                native.channels['receipt'].put((json.dumps(native.rows()[1]) + '\n').encode('ascii'))
+                native.channels['receipt'].put(b'')
+
+        original_clock = time.monotonic
+        foreground = threading.get_ident()
+        calls = 0
+
+        def deadline_clock():
+            nonlocal calls
+            if threading.get_ident() != foreground:
+                return original_clock()
+            calls += 1
+            if calls == 1:
+                return 0.0
+            if calls == 2:
+                native = ResidentConsole.instances[-1]
+                first = native.rows()[0]
+                handoff = dict(first, event='resident_handoff', exit_code=0, quiescent=False,
+                    job_verified=True, job_active_processes=1, console_client_count=1,
+                    resident_proof={'schema': 1, 'kind': 'verified-ollama-resident-runtime-v1',
+                        'package_id': 'Ollama.Ollama', 'version': '2.0', 'target_pid': 9876,
+                        'restart_required': False, 'install_location': 'D:/Ollama',
+                        'processes': [{'pid': 333, 'path': 'D:/Ollama/ollama app.exe', 'created_at': 10,
+                                       'sha256': 'c' * 64}],
+                        'winget_log_sha256': 'a' * 64, 'installer_log_sha256': 'b' * 64})
+                native.channels['receipt'].put((json.dumps(first) + '\n' + json.dumps(handoff) + '\n').encode('ascii'))
+                with console._RETAINED_LOCK:
+                    session = next(value for value in console._RETAINED if value.native is native)
+                self.assertTrue(session.provider_ready.wait(2))
+            return 1.0
+
+        with mock.patch.object(console, '_ConsoleProcess', ResidentConsole), \
+                mock.patch.object(console.time, 'monotonic', deadline_clock):
+            result = console.run_winget_console(arguments, timeout=1,
+                progress_callback=lambda _: None, allow_resident_handoff=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIs(result.native_completion_verified, True)
+        self.assertIs(result.capture_complete, False)
+        native = ResidentConsole.instances[-1]
+        self.assertFalse(native.closed)
+        with console._RETAINED_LOCK:
+            session = next(value for value in console._RETAINED if value.native is native)
+        native.complete()
+        self.assertTrue(session.finished.wait(2))
+        self.assertTrue(native.closed)
+
     def test_wrong_nonce_never_authorizes_console_close(self):
         FakeConsole.terminal_nonce = 'a' * 32
         with self.assertRaises(console.ConsoleOutcomeError):

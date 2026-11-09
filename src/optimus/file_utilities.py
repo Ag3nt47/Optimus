@@ -467,7 +467,11 @@ class FileUtilities:
         return self._run('join', apply)
 
     def _shred_allowed(self, path, *, folder):
+        from .wallpaper_preservation import protected_wallpaper_path, current_wallpaper_paths
+        current_wallpaper_paths(refresh=True)
         path = _path(path)
+        if protected_wallpaper_path(path):
+            raise ValueError('Wallpaper and Store-managed state is preserved from overwriting.')
         home = Path.home()
         if path == Path(path.anchor) or path == home:
             raise ValueError('Drive roots and the user profile cannot be selected for overwriting.')

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.39
+
+- Recover recorded application update timeouts after a verified Windows restart and idle check. Hold the affected offer while remaining approved updates continue.
+- Match Windows Update's generic hardware class against fresh signed device evidence when applying an existing exact driver approval.
+- Preserve authenticated installer completion at the timeout boundary and identify unresolved timeouts explicitly.
+- Retain the installed protection for Bing Wallpaper and the active desktop image during cleanup and duplicate scans.
+
 ## 0.12.38
 
 - Fix the native self-update regression fixture for settings saved before Protected apps was added.

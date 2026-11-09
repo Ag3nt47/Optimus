@@ -212,6 +212,7 @@ def test_timeout_is_reported_without_replaying_command(updater):
     with pytest.raises(UpdateOutcomeError,match='may still be running') as raised:
         updater.updates_apply('Vendor.App',confirmed=True,unattended=True)
     assert raised.value.installer_started is True and raised.value.outcomeKnown is False
+    assert raised.value.running is True and raised.value.failureKind == 'update_timeout'
     assert updater._run.call_count == 3
 
 

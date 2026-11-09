@@ -113,6 +113,11 @@ class UpdateOutcomeError(RuntimeError):
     running = True
 
 
+class UpdateTimeoutError(UpdateOutcomeError):
+    """The wait expired without an authenticated terminal installer receipt."""
+    failureKind = 'update_timeout'
+
+
 class Maintenance:
     """Bridge-backed optional app removals and native Windows entry points.
 
@@ -783,7 +788,7 @@ class Maintenance:
         except subprocess.TimeoutExpired:
             finish_payload({'installer_started': True, 'outcomeKnown': False, 'running': True})
             # The vendor child can outlive WinGet. Never retry or replay here.
-            raise UpdateOutcomeError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
+            raise UpdateTimeoutError("The update timed out. A vendor installer may still be running; verify its outcome before trying again.") from None
         except (FileNotFoundError, PermissionError) as error:
             finish_payload({'installer_started': False, 'outcomeKnown': True, 'running': False})
             # These launch errors occur before CreateProcess starts WinGet;

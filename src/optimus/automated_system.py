@@ -135,6 +135,88 @@ def validate_driver_devices(values):
     return result
 
 
+def _corresponding_installed_class(scan, rule):
+    """Resolve WUA OtherHardware only from this scan's exact present devices."""
+    coverage = scan.get('coverage')
+    if (not isinstance(coverage, dict) or coverage.get('inventoryComplete') is not True
+            or coverage.get('updateScanComplete') is not True or coverage.get('inventoryErrors') != []):
+        return None
+    devices = coverage.get('devices')
+    if type(devices) is not list or not 1 <= len(devices) <= 10000:
+        return None
+    hardware = rule['hardwareId'].casefold()
+    provider = rule['provider'].casefold()
+    classes, matched_devices = set(), set()
+    try:
+        for device in devices:
+            if not isinstance(device, dict):
+                return None
+            hardware_ids = device.get('hardwareIds')
+            compatible_ids = device.get('compatibleIds')
+            if type(hardware_ids) is not list or type(compatible_ids) is not list:
+                return None
+            identities = hardware_ids + compatible_ids
+            if len(identities) > 2048 or any(not isinstance(value, str) for value in identities):
+                return None
+            if hardware not in {value.strip().casefold() for value in identities}:
+                continue
+            identity = _text(device.get('deviceId'), 'present driver device identity', 4096).casefold()
+            driver_class = _text(device.get('deviceClass'), 'present driver device class', 4096).strip()
+            if (device.get('present') is not True or identity in matched_devices
+                    or not driver_class or driver_class.casefold() in ('unknown', 'otherhardware')):
+                return None
+            matched_devices.add(identity)
+            installed = device.get('installedDrivers')
+            if type(installed) is not list or not 1 <= len(installed) <= 1000:
+                return None
+            for driver in installed:
+                if (not isinstance(driver, dict) or driver.get('signed') is not True
+                        or _text(driver.get('provider'), 'installed driver provider', 4096).strip().casefold() != provider
+                        or _text(driver.get('deviceClass'), 'installed driver class', 4096).strip().casefold() != driver_class.casefold()):
+                    return None
+                _date(driver.get('date'))
+            classes.add(driver_class.casefold())
+    except ValueError:
+        return None
+    return next(iter(classes)) if matched_devices and len(classes) == 1 else None
+
+
+def validate_driver_apply_approval(record, config):
+    """Recheck the exact saved driver scope at the native launch boundary."""
+    if (config.get('setup_version') != CURRENT_SETUP_VERSION
+            or config.get('driver_updates_enabled') is not True
+            or config.get('driver_changes_approved') is not True
+            or config.get('driver_update_agreements_accepted') is not True):
+        raise ValueError('Current saved driver automation and agreement approval is required.')
+    descriptor = driver_descriptor(record)
+    mode = record.get('approvalMode')
+    if config.get('driver_policy') == 'install_approved' and mode is None:
+        approvals = validate_driver_approvals(config.get('driver_approved_updates', []))
+        if any(all(descriptor.get(key) == value for key, value in approved.items()
+                   if key not in ('eulaAccepted', 'canRequestUserInput', 'rebootBehavior')) for approved in approvals):
+            return
+    elif config.get('driver_policy') == 'install_matching' and mode in ('matching', 'matching_installed_class'):
+        rule = driver_device_rule(descriptor)
+        if mode == 'matching_installed_class':
+            binding = record.get('installedClassApproval')
+            if (type(binding) is not dict or set(binding) != {'hardwareId', 'provider', 'class'}
+                    or rule['class'].casefold() != 'otherhardware'):
+                raise ValueError('The installed-class approval binding is missing or invalid.')
+            approved_rule = _device_rule(dict(binding, notOlderThanDriverDate=record.get('notOlderThanDriverDate')))
+            if (any(approved_rule[key].casefold() != rule[key].casefold() for key in ('hardwareId', 'provider'))
+                    or approved_rule['class'].casefold() in ('unknown', 'otherhardware')):
+                raise ValueError('The installed-class approval does not match this offered driver.')
+            rule['class'] = approved_rule['class']
+        elif 'installedClassApproval' in record:
+            raise ValueError('An installed-class approval requires its matching approval mode.')
+        floor = _date(record.get('notOlderThanDriverDate'))
+        for approved in validate_driver_devices(config.get('driver_approved_devices', [])):
+            if (all(rule[key].casefold() == approved[key].casefold() for key in ('hardwareId', 'provider', 'class'))
+                    and floor == approved['notOlderThanDriverDate'] and rule['notOlderThanDriverDate'] >= floor):
+                return
+    raise ValueError('The saved driver policy, exact update or device approval changed before installation.')
+
+
 def _cancel(event):return event is not None and event.is_set()
 
 
@@ -319,17 +401,28 @@ def _run_drivers(backend,config,cancel_event,item_callback,*,prepared,before_ins
             else:selected.append(matches[0])
     else:
         for value in fresh:
+            installed_class = None
             try:rule=driver_device_rule(value)
             except ValueError:
                 items.append({'binding':value,'status':'skipped','reason':'The offered driver lacks the complete hardware/provider/class/date metadata required by saved matching rules.'})
                 continue
             matches=[approved for approved in rules if all(rule[key].casefold()==approved[key].casefold() for key in ('hardwareId','provider','class'))]
+            if not matches and rule['class'].casefold() == 'otherhardware':
+                installed_class = _corresponding_installed_class(scan, rule)
+                if installed_class is not None:
+                    matches = [approved for approved in rules
+                        if approved['hardwareId'].casefold() == rule['hardwareId'].casefold()
+                        and approved['provider'].casefold() == rule['provider'].casefold()
+                        and approved['class'].casefold() == installed_class]
             if matches:
                 floor=matches[0]['notOlderThanDriverDate']
                 if rule['notOlderThanDriverDate'] < floor:
                     items.append({'binding':value,'status':'skipped','reason':'The offered driver predates the approved device-rule date floor.'})
                 else:
                     value=dict(value,approvalMode='matching',notOlderThanDriverDate=floor)
+                    if installed_class is not None:
+                        value.update(approvalMode='matching_installed_class', installedClassApproval={
+                            key: matches[0][key] for key in ('hardwareId', 'provider', 'class')})
                     selected.append(value)
             else:
                 items.append({'binding':value,'status':'skipped','reason':'No exact saved hardware/provider/class rule approves this offered driver. New or disconnected hardware is not silently added to the approved scope.'})

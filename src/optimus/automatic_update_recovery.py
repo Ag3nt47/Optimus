@@ -1,4 +1,4 @@
-"""Reconcile proven WinGet completion or a captured console loss after reboot.
+"""Reconcile proven WinGet completion or a captured interruption after reboot.
 
 This is bookkeeping, never an updater/retry. Native logs, the exact prepared
 intent, the original owner's exit, fresh installer quiescence and the installed
@@ -35,6 +35,7 @@ _RESTART_DIR = 'update-reconciliation-after-boot'
 _CONSOLE_START = 'The console supervisor started but its target outcome is unknown; no retry was attempted.'
 _CONSOLE_EXIT = ('The console supervisor exited without a verified target outcome; '
                  'its console remains retained and no automatic retry was attempted.')
+_UPDATE_TIMEOUT = 'The update timed out. A vendor installer may still be running; verify its outcome before trying again.'
 _BOOT_SKEW = 120
 _BOOT_FENCE = 10
 _JOURNAL_BYTES = 8 * 1024 * 1024
@@ -396,8 +397,9 @@ def _captured_console_attempt(record):
     note, failure = captured.get('note'), captured.get('failureKind')
     _require(note == last.get('error') and
              ((failure == 'console_outcome_unknown' and note in (_CONSOLE_START, _CONSOLE_EXIT))
-              or (failure == 'preflight_failed' and note == _CONSOLE_EXIT)),
-             'The captured failure is not a recognized console transport loss.')
+              or (failure == 'preflight_failed' and note in (_CONSOLE_EXIT, _UPDATE_TIMEOUT))
+              or (failure == 'update_timeout' and note == _UPDATE_TIMEOUT)),
+             'The captured failure is not a recognized updater interruption.')
     expected = {'installer_started': True, 'outcomeKnown': False, 'running': True, 'uncertain': True,
                 'requiresReview': True, 'status': 'failed', 'failure_scope': 'app_batch'}
     _require(set(captured) == set(expected) | {'note', 'failureKind'}

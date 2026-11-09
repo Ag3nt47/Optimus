@@ -21,8 +21,93 @@ function Get-SCMFileToolExcludedRoots {
     return @($values.ToArray() | Sort-Object -Unique)
 }
 
+function Get-SCMFileToolCurrentWallpapers {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $script:SCMWallpaperCheckedAt -and ([datetime]::UtcNow - $script:SCMWallpaperCheckedAt).TotalSeconds -lt 1) { return @($script:SCMWallpaperFiles) }
+    if (-not ('OptimusWallpaperReadOnly' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+[ComImport, Guid("B92B56A9-8B55-4E14-9A89-0199BBB6F93B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IOptimusWallpaperReadOnly {
+    [PreserveSig] int SetWallpaper([MarshalAs(UnmanagedType.LPWStr)] string m, [MarshalAs(UnmanagedType.LPWStr)] string p);
+    [PreserveSig] int GetWallpaper([MarshalAs(UnmanagedType.LPWStr)] string m, [MarshalAs(UnmanagedType.LPWStr)] out string p);
+    [PreserveSig] int GetMonitorDevicePathAt(uint i, [MarshalAs(UnmanagedType.LPWStr)] out string m);
+    [PreserveSig] int GetMonitorDevicePathCount(out uint count);
+}
+public static class OptimusWallpaperReadOnly {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint size, uint flags);
+    public static string CanonicalPath(string path) {
+        using (var file = CreateFile(path, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+            if (file.IsInvalid) return path;
+            var result = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandle(file, result, (uint)result.Capacity, 0);
+            if (length == 0 || length >= result.Capacity) return path;
+            string value = result.ToString();
+            return value.StartsWith(@"\\?\") ? value.Substring(4) : value;
+        }
+    }
+    public static string[] Paths() {
+        var paths = new List<string>(); object com = null;
+        try {
+            com = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("C2CF3110-460E-4FC1-B9D0-8A1C0C9CC4BD")));
+            var api = (IOptimusWallpaperReadOnly)com; uint count;
+            if (api.GetMonitorDevicePathCount(out count) == 0) {
+                for (uint i = 0; i < Math.Min(count, 64); i++) {
+                    string monitor, path;
+                    if (api.GetMonitorDevicePathAt(i, out monitor) == 0 && api.GetWallpaper(monitor, out path) == 0 && !String.IsNullOrEmpty(path)) paths.Add(path);
+                }
+            }
+        } catch (COMException) { } finally { if (com != null) Marshal.FinalReleaseComObject(com); }
+        return paths.ToArray();
+    }
+}
+'@
+    }
+    $values = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($value in @($script:SCMWallpaperFiles) + @([OptimusWallpaperReadOnly]::Paths())) { if ($value) { $values.Add($value) } }
+    foreach ($keyPath in @('Control Panel\Desktop','Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers')) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
+        if ($null -eq $key) { continue }
+        try {
+            foreach ($name in $key.GetValueNames()) {
+                $value = $key.GetValue($name)
+                if (($name -eq 'Wallpaper' -or $name -like 'BackgroundHistoryPath*') -and $value -is [string] -and $value) { $values.Add([Environment]::ExpandEnvironmentVariables($value)) }
+                elseif ($name -like 'TranscodedImageCache*' -and $value -is [byte[]] -and $value.Length -gt 24) {
+                    $image = [Text.Encoding]::Unicode.GetString($value,24,$value.Length-24).Split([char]0)[0]
+                    if ($image -and [IO.Path]::IsPathRooted($image)) { $values.Add($image) }
+                }
+            }
+        } finally { $key.Dispose() }
+    }
+    # Keep both submitted and physical image paths. A known-folder junction may
+    # expose the same active image through C: and its real D: location.
+    foreach ($value in @($values.ToArray())) { $values.Add([OptimusWallpaperReadOnly]::CanonicalPath($value)) }
+    $script:SCMWallpaperFiles = @($values.ToArray() | Sort-Object -Unique)
+    $script:SCMWallpaperCheckedAt = [datetime]::UtcNow
+    return @($script:SCMWallpaperFiles)
+}
+
 function Test-SCMFileToolExcludedPath {
-    param([string]$Path, [string[]]$ExcludedRoots)
+    param([string]$Path, [string[]]$ExcludedRoots, [switch]$RefreshWallpaper)
+    # Keep this lexical check aligned with wallpaper_preservation.py. It runs
+    # during both duplicate discovery and final recycling revalidation.
+    $parts = @($Path -split '[\\/]' | Where-Object { $_ })
+    foreach ($part in $parts) {
+        if (($part -replace '[^A-Za-z0-9]','') -match '(?i)BingWallpaper') { return $true }
+        if ($part -match '^(?i:WindowsApps|WpSystem)$') { return $true }
+    }
+    $normalized = $parts -join '\'
+    if ($normalized -match '(?i)(?:^|\\)(?:Microsoft\\Windows\\Themes|Windows\\Web\\Wallpaper)(?:\\|$)') { return $true }
+    foreach ($wallpaper in @(Get-SCMFileToolCurrentWallpapers -Refresh:$RefreshWallpaper)) {
+        if ([IO.Path]::GetFullPath($Path).Equals([IO.Path]::GetFullPath($wallpaper), [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
     foreach ($excludedRoot in $ExcludedRoots) { if (Test-SCMFileToolPathWithin $Path $excludedRoot) { return $true } }
     if ($Path -match '(?i)(?:^|\\)(?:\$Recycle\.Bin|System Volume Information|Recovery|Config\.Msi|MSOCache|\.codex|\.agents|node_modules|\.git)(?:\\|$)') { return $true }
     if ($Path -match '(?i)\\(?:codex-runtimes|codex-primary-runtime|WindowsApps)(?:\\|$)') { return $true }
@@ -251,7 +336,7 @@ function Move-SCMFileToRecycleBin {
     $root = Get-SCMFileToolRoot -Root $approval.Root -ForDuplicates
     $canonicalFile = [IO.Path]::GetFullPath($approved.FilePath)
     if (-not (Test-SCMFileToolPathWithin $canonicalFile $root) -or $canonicalFile.Equals($root, [StringComparison]::OrdinalIgnoreCase)) { throw 'The selected file is outside its approved folder.' }
-    if (Test-SCMFileToolExcludedPath -Path $canonicalFile -ExcludedRoots @(Get-SCMFileToolExcludedRoots)) { throw 'This file is in an excluded system, program, or application-data path.' }
+    if (Test-SCMFileToolExcludedPath -Path $canonicalFile -ExcludedRoots @(Get-SCMFileToolExcludedRoots) -RefreshWallpaper) { throw 'This file is in an excluded system, program, or application-data path.' }
     $recycleDrive = New-Object IO.DriveInfo([IO.Path]::GetPathRoot($canonicalFile))
     if ($recycleDrive.DriveType -ne [IO.DriveType]::Fixed) { throw 'Recycling is supported only on a fixed local drive. Review this file in Explorer instead.' }
     if (([IO.File]::GetAttributes($canonicalFile) -band [IO.FileAttributes]::ReadOnly) -ne 0) { throw 'Read-only files are not recycled by this tool.' }
@@ -502,16 +587,52 @@ function Assert-SCMDriverNotOlderThanInstalled {
     if($candidate -lt $floor){throw 'The offered driver predates the approved device-rule date floor.'}
     $hardware=[string]$Fresh.hardwareId
     if(-not $hardware){throw 'The offered driver has no exact hardware match metadata.'}
+    $classCorrespondence=([string]$Record.approvalMode -eq 'matching_installed_class')
+    $classApproval=$null
+    if($classCorrespondence){
+        $classApproval=$Record.installedClassApproval
+        $fields=@($classApproval.PSObject.Properties.Name)
+        if($null -eq $classApproval -or $fields.Count -ne 3 -or
+            @($fields | Where-Object {$_ -notin @('hardwareId','provider','class')}).Count -ne 0){
+            throw 'The exact installed-class approval binding is missing or malformed.'
+        }
+        foreach($field in @('hardwareId','provider','class')){
+            if($classApproval.$field -isnot [string] -or -not $classApproval.$field.Trim() -or
+                $classApproval.$field -match '[*?\r\n]'){
+                throw 'The installed-class approval contains invalid match metadata.'
+            }
+        }
+        if([string]$Fresh.driverClass -ine 'OtherHardware' -or
+            $classApproval.hardwareId.Trim() -ine $hardware -or
+            $classApproval.provider.Trim() -ine ([string]$Fresh.provider).Trim() -or
+            $classApproval.class.Trim() -in @('Unknown','OtherHardware')){
+            throw 'The installed-class approval does not correspond to this exact Windows Update offer.'
+        }
+    }
     $devices=@(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object {
         (@($_.HardwareID)+@($_.CompatibleID)) -icontains $hardware
     })
+    if($classCorrespondence){$devices=@($devices | Where-Object {$_.Present -ne $false})}
     if(-not $devices.Count){throw 'The approved hardware/compatible ID could not be matched to current local devices.'}
     $installed=@(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop)
+    $seenDevices=@{}
     foreach($device in $devices){
         $identity=if($device.PNPDeviceID){[string]$device.PNPDeviceID}else{[string]$device.DeviceID}
+        if($classCorrespondence){
+            if($device.Present -isnot [bool] -or -not $device.Present -or $seenDevices.ContainsKey($identity) -or
+                -not [string]$device.PNPClass -or ([string]$device.PNPClass).Trim() -ine $classApproval.class.Trim()){
+                throw 'The present device class or identity changed after the installed-class approval was checked.'
+            }
+            $seenDevices[$identity]=$true
+        }
         $matches=@($installed | Where-Object {$_.DeviceID -ieq $identity})
         if(-not $identity -or -not $matches.Count){throw 'An installed matching device driver could not be verified.'}
         foreach($driver in $matches){
+            if($classCorrespondence -and ($driver.IsSigned -isnot [bool] -or -not $driver.IsSigned -or
+                ([string]$driver.DriverProviderName).Trim() -ine $classApproval.provider.Trim() -or
+                ([string]$driver.DeviceClass).Trim() -ine $classApproval.class.Trim())){
+                throw 'A matching installed driver no longer has the approved signed provider and class.'
+            }
             $date=ConvertTo-SCMDriverDate $driver.DriverDate
             if($candidate -lt $date){throw 'The offered driver is older than an installed matching device driver. Automatic downgrade was refused.'}
         }
@@ -659,7 +780,12 @@ function Invoke-SCMDriverUpdateApplyCore {
             throw 'The approved driver title, device or publisher metadata changed. Review the update again.'
         }
     }
-    if ($Unattended -and [string]$Record.approvalMode -eq 'matching') { Assert-SCMDriverNotOlderThanInstalled -Record $Record -Fresh $fresh }
+    if ($Unattended -and [string]$Record.approvalMode -in @('matching','matching_installed_class')) {
+        if([string]$Record.approvalMode -eq 'matching_installed_class'){
+            try { Assert-SCMDriverNotOlderThanInstalled -Record $Record -Fresh $fresh }
+            catch { return New-SCMDriverPreflightRefusal -Record $fresh -FailureKind version_changed -HResult (Get-SCMDriverPreflightHResult $_.Exception) -Note ('The current device no longer matches its installed-class approval. '+$_.Exception.Message) }
+        }else{Assert-SCMDriverNotOlderThanInstalled -Record $Record -Fresh $fresh}
+    }
     $observed=Get-SCMDriverInstalledObservation -Record $fresh
     if($observed.alreadyCurrent){
         return [pscustomobject]@{id=$fresh.id;revision=$fresh.revision;title=$fresh.title;resultCode=2;aggregateResultCode=2;hresult=0;aggregateHresult=0
@@ -759,6 +885,10 @@ function Invoke-SCMDriverUpdateApplyCore {
     }
     if($null -ne $CancelRequested -and (& $CancelRequested)){
         return New-SCMDriverNavigationCancellation -Record $fresh -RestartNeeded (Test-SCMWuaRebootPending)
+    }
+    if($Unattended -and [string]$Record.approvalMode -eq 'matching_installed_class'){
+        try { Assert-SCMDriverNotOlderThanInstalled -Record $Record -Fresh $fresh }
+        catch { return New-SCMDriverPreflightRefusal -Record $fresh -FailureKind version_changed -HResult (Get-SCMDriverPreflightHResult $_.Exception) -Note ('The device changed before installation; the downloaded driver was not installed. '+$_.Exception.Message) }
     }
     try {
         $installed=if($null -ne $ProgressCallback){

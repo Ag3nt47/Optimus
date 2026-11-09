@@ -766,6 +766,13 @@ def run_winget_console(arguments, *, timeout, progress_callback, allow_resident_
             raise ConsoleOutcomeError('The console supervisor exited without a verified target outcome; '
                 'its console remains retained and no automatic retry was attempted.')
         if time.monotonic() - started >= timeout:
+            # The native observer/receipt reader may have completed while the
+            # foreground checked its deadline. Consume only their already-
+            # authenticated completion; elapsed time itself proves nothing.
+            if session.finished.is_set():
+                break
+            if allow_resident_handoff and session.provider_ready.is_set() and session._handoff() is not None:
+                break
             session.stop_reporting()
             raise subprocess.TimeoutExpired(arguments, timeout, output=session.output.value(), stderr='')
     session.stop_reporting()

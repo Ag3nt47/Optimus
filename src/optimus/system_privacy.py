@@ -639,6 +639,11 @@ class SystemPrivacy:
         self.lock = threading.RLock()
 
     def _call(self, operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None):
+        if operation == 'registry_write':
+            from .wallpaper_preservation import protected_wallpaper_registry_target
+            control = _CONTROLS.get((payload or {}).get('control'), {})
+            if protected_wallpaper_registry_target(control.get('path', ''), control.get('name', '')):
+                raise ValueError('Desktop wallpaper settings are preserved from privacy changes.')
         if self.stop_controller is not None:
             self.stop_controller.check()
             cancel_event = self.stop_controller.bind_cancel(cancel_event)

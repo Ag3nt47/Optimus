@@ -75,13 +75,15 @@ def test_cached_or_percent_only_progress_does_not_invent_transfer_bytes():
 
 def test_driver_terminal_download_receipt_is_bound_to_exact_offer():
     from optimus.backend import Backend
+    from test_automated_system import driver, driver_config
     backend=Backend.__new__(Backend);backend.bridge=Mock()
-    backend.preferences=Mock(return_value={})
+    record=driver(revision=4,title='GPU')
+    backend.preferences=Mock(return_value=driver_config(driver_approved_updates=[record]))
     payload={'phase':'downloading','percent':99,'downloaded_bytes':200,
              'download_total_bytes':200,'bytes_source':'windows_update','bytes_estimated':False}
     backend.bridge.request.return_value={'resultCode':2,'download_progress':payload}
-    result=backend.driver_update_apply_unattended({'id':'driver-guid','revision':4,'title':'GPU'},accept_eula=True)
+    result=backend.driver_update_apply_unattended(record,accept_eula=True)
     observed=result['download_progress']
-    assert observed['key']=='driver:update:driver-guid:4' and observed['label']=='GPU'
+    assert observed['key']=='driver:update:'+record['id']+':4' and observed['label']=='GPU'
     assert observed['downloaded_bytes']==200
     assert 'key' not in payload

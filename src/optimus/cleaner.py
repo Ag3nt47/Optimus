@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable
 import psutil
 from .browser_paths import browser_definitions, native_locations, process_matcher
+from .wallpaper_preservation import protected_wallpaper_path, current_wallpaper_paths
 
 _PLATFORM = sys.platform
 
@@ -23,6 +24,7 @@ OFFLINE = 0x1000
 RECALL = 0x40000 | 0x400000
 SYSTEM = 0x4
 READONLY = 0x1
+ENCRYPTED = 0x4000
 
 @dataclass(frozen=True)
 class Category:
@@ -260,13 +262,15 @@ class Cleaner:
         try:
             full = Path(os.path.abspath(path))
             base = Path(os.path.abspath(root))
+            if protected_wallpaper_path(full) or protected_wallpaper_path(base):
+                return False
             if full == base or os.path.normcase(os.path.commonpath([str(full), str(base)])) != os.path.normcase(str(base)):
                 return False
             # Resolve no junctions or cloud placeholders, including any ancestor of the root.
             for component in (full, *full.parents):
                 info = component.lstat()
                 flags = getattr(info, 'st_file_attributes', 0)
-                if stat.S_ISLNK(info.st_mode) or flags & (REPARSE | OFFLINE | RECALL):
+                if stat.S_ISLNK(info.st_mode) or flags & (REPARSE | OFFLINE | RECALL | ENCRYPTED):
                     return False
             return True
         except (OSError, ValueError):
@@ -291,6 +295,7 @@ class Cleaner:
         return sorted(result)
 
     def scan(self, category_ids: list[str], min_age_days: int = 7, max_files: int = 20000, max_seconds: int = 35, *, progress_callback=None, cancel_event=None) -> dict:
+        current_wallpaper_paths(refresh=True)
         if type(min_age_days) is not int or not 0 <= min_age_days <= 3650:
             raise ValueError('Minimum age must be between 0 and 3650 whole days.')
         if cancel_event is not None and not callable(getattr(cancel_event, 'is_set', None)):
@@ -318,6 +323,9 @@ class Cleaner:
                 break
             category = choices[category_id]
             root = Path(os.path.abspath(category.path))
+            if protected_wallpaper_path(root):
+                plan['skipped'].append(f'{category.name}: wallpaper and Store-managed state is preserved.')
+                continue
             busy = self._running(category.process_names)
             if busy:
                 plan['skipped'].append(f'{category.name}: close {", ".join(busy)} first.')
@@ -349,11 +357,11 @@ class Cleaner:
                         unsafe = False
                         for part in (root, *root.parents):
                             attrs = part.lstat()
-                            if stat.S_ISLNK(attrs.st_mode) or getattr(attrs, 'st_file_attributes', 0) & (REPARSE | OFFLINE | RECALL):
+                            if stat.S_ISLNK(attrs.st_mode) or getattr(attrs, 'st_file_attributes', 0) & (REPARSE | OFFLINE | RECALL | ENCRYPTED):
                                 unsafe = True
                                 break
                         if unsafe:
-                            plan['skipped'].append(f'{category.name}: indirect/cloud folder is excluded.')
+                            plan['skipped'].append(f'{category.name}: indirect, cloud or encrypted folder is excluded.')
                             break
                     with os.scandir(directory) as entries:
                         for entry in entries:
@@ -367,7 +375,7 @@ class Cleaner:
                             try:
                                 info = entry.stat(follow_symlinks=False)
                                 flags = getattr(info, 'st_file_attributes', 0)
-                                if entry.is_symlink() or flags & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY):
+                                if entry.is_symlink() or flags & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY | ENCRYPTED):
                                     continue
                                 if entry.is_dir(follow_symlinks=False):
                                     stack.append(path)
@@ -459,14 +467,15 @@ class Cleaner:
 
     @staticmethod
     def _delete_exact(record: dict) -> None:
+        current_wallpaper_paths(refresh=True)
         path = Path(record['path'])
         info = path.lstat()
         if not Cleaner._safe_path(path, Path(record['root'])):
             raise ValueError('File moved outside its approved ordinary folder.')
         if (info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev) != (record['size'], record['modified_ns'], record['inode'], record['device']):
             raise ValueError('File changed after preview.')
-        if info.st_nlink > 1 or getattr(info, 'st_file_attributes', 0) & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY):
-            raise ValueError('Linked, cloud, system or read-only file excluded.')
+        if info.st_nlink > 1 or getattr(info, 'st_file_attributes', 0) & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY | ENCRYPTED):
+            raise ValueError('Linked, cloud, encrypted, system or read-only file excluded.')
         if os.name != 'nt':
             Cleaner._delete_posix(record)
             return
@@ -505,7 +514,7 @@ class Cleaner:
             written = ((identity.written.dwHighDateTime << 32) | identity.written.dwLowDateTime) * 100 - 11644473600000000000
             if size != record['size'] or index != record['inode'] or abs(written - record['modified_ns']) > 100 or identity.links > 1:
                 raise ValueError('Open file identity no longer matches the preview.')
-            if identity.attrs & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY):
+            if identity.attrs & (REPARSE | OFFLINE | RECALL | SYSTEM | READONLY | ENCRYPTED):
                 raise ValueError('Protected file excluded.')
             if 'expected_sha256' in record:
                 kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,

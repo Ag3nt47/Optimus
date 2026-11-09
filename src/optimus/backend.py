@@ -710,6 +710,13 @@ class Backend(ExtendedMaintenanceBackend):
     def driver_update_apply_unattended(self, record, accept_eula=False, *, progress_callback=None, cancel_event=None):
         if accept_eula is not True:
             raise ValueError('Saved driver agreement approval is required.')
+        from .automated_system import validate_driver_apply_approval
+        from .maintenance import UpdatePreflightError
+        try:
+            validate_driver_apply_approval(record, self.preferences())
+        except Exception as error:
+            raise UpdatePreflightError('Current saved driver approval could not be verified; this driver was not started.',
+                failure_scope='package', failureKind='driver_approval_changed') from error
         options = {}
         if cancel_event is not None:
             options['cancel_event'] = cancel_event

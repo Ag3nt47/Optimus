@@ -693,3 +693,97 @@ def test_changed_prior_boot_audit_invalidates_committed_companion(console_lost):
     assert not pending_updates_barrier(f.backend)
     f.parent_path.write_bytes(f.parent_path.read_bytes() + b'\n')
     assert pending_updates_barrier(f.backend)
+
+@pytest.fixture(params=['preflight_failed', 'update_timeout'], ids=['legacy-timeout', 'typed-timeout'])
+def timed_out_batch(console_lost, request):
+    """Model the saved four-item batch with one captured timeout."""
+    f = console_lost
+    prepared = f.record['package_attempt']['prepared_at']
+    finished = prepared + 1810
+    f.now = finished + 180
+    boot = round(finished + 90)
+    f.boot.return_value = boot
+    f.probe.update(captured_at=f.now, boot_utc=datetime_from_epoch(boot),
+                   boot_event_utc=datetime_from_epoch(boot + 1))
+    f.record['package_attempt']['item_id'] = 'Ollama.Ollama'
+    f.record['current_item'].update(id='Ollama.Ollama', current=3, item=4, total=10,
+        description='Updating approved package 4/10: Ollama.Ollama (0.40.13 to 0.40.15)')
+    f.record['finished_at'] = finished
+    last = f.record['terminal_items'][-1]
+    last.update(id='Ollama.Ollama', error=recovery._UPDATE_TIMEOUT)
+    last['result'].update(note=recovery._UPDATE_TIMEOUT, failureKind=request.param)
+    known = []
+    for identity, status, verified, verification_status, application_restart in (
+        ('OpenAI.ChatGPT', 'needs_review', False, 'pending_activation', True),
+        ('Google.Chrome', 'completed', True, 'verified', False),
+        ('Logitech.GHUB', 'needs_review', False, 'pending_verification', False)):
+        known.append({'id': identity, 'status': status, 'uncertain': False, 'binding': {},
+            'presence': '', 'source': '', 'error': '', 'reason': '',
+            'from_version': '1.0', 'to_version': '2.0',
+            'result': {'exitCode': 0, 'running': False, 'outcomeKnown': True, 'restartNeeded': None,
+                'installer_started': True, 'verified': verified, 'status': status,
+                'requiresReview': not verified, 'verification_status': verification_status,
+                'application_restart_required': application_restart,
+                'installation_reported': True, 'installed_version': '2.0' if verified else '1.0',
+                'note': 'The installer returned; this saved verification result must be preserved.'}})
+    f.record['terminal_items'] = known + [last]
+    f.record['result'].update(items=copy.deepcopy(f.record['terminal_items']), failed_items=4,
+        deferred_ids=['Python.Python.3.14', 'Python.Launcher', 'OpenWhisperSystems.Signal',
+                      'Unity.Unity.6000', 'Unity.UnityHub', 'NexusMods.Vortex'])
+    parent = json.loads(f.parent_path.read_text())
+    parent['stages'][-1]['finished_at'] = finished
+    f.parent_path.write_text(json.dumps(parent))
+    f.path.write_text(json.dumps(f.record))
+    return f
+
+
+def test_captured_timeout_after_reboot_preserves_prior_pending_and_verified_receipts(timed_out_batch):
+    from optimus.update_holds import load_update_holds
+    f = timed_out_batch
+    original, parent = f.path.read_bytes(), f.parent_path.read_bytes()
+    assert recovery.is_restart_recovery_candidate(f.record)
+    assert pending_updates_barrier(f.backend)
+    outcome = run(f)
+    assert outcome['reconciled_after_reboot'] == [
+        {'id': f.record['id'], 'package_id': 'Ollama.Ollama', 'version': '0.40.15'}]
+    assert outcome['reconciled'] == []
+    assert outcome['installers_started'] == outcome['retries_started'] == 0
+    assert f.path.read_bytes() == original and f.parent_path.read_bytes() == parent
+    assert not pending_updates_barrier(f.backend)
+    held, = load_update_holds(f.data)
+    assert held['id'] == 'Ollama.Ollama' and held['available_version'] == '0.40.15'
+    saved = json.loads(f.path.read_text())
+    assert [row['result']['verification_status'] for row in saved['terminal_items'][:-1]] == [
+        'pending_activation', 'verified', 'pending_verification']
+    assert saved['terminal_items'][-1]['result']['outcomeKnown'] is False
+    marker = json.loads(recovery._restart_marker(f.data, f.record['id']).read_text())
+    assert marker['historical_outcome_known'] is False
+
+
+@pytest.mark.parametrize('failure', ['same_boot', 'unknown_prior', 'restart_prior', 'live_installer',
+    'changed_timeout_note', 'no_installer_started', 'different_failure_kind'])
+def test_timeout_recovery_retains_unrelated_unknowns_and_requires_exact_prior_boot(timed_out_batch, failure):
+    f = timed_out_batch
+    row = f.record['terminal_items'][-1]
+    if failure == 'same_boot':
+        prior = json.loads(f.parent_path.read_text())['stages'][0]['result']['System']['LastBootUtc']
+        f.probe.update(boot_utc=prior, boot_event_utc=prior)
+        f.boot.return_value = round(recovery._utc_epoch(prior))
+    elif failure == 'unknown_prior':
+        f.record['terminal_items'][0]['result'].update(outcomeKnown=False, running=True)
+    elif failure == 'restart_prior':
+        f.record['terminal_items'][0]['result']['restartNeeded'] = True
+    elif failure == 'live_installer':
+        f.probe['processes'].append({'pid': 88, 'name': 'OllamaSetup.exe'})
+    elif failure == 'changed_timeout_note':
+        row['error'] = row['result']['note'] = recovery._UPDATE_TIMEOUT + ' extra'
+    elif failure == 'no_installer_started':
+        row['result']['installer_started'] = False
+    else:
+        row['result']['failureKind'] = 'different_unknown_error'
+    f.record['result']['items'] = copy.deepcopy(f.record['terminal_items'])
+    f.path.write_text(json.dumps(f.record))
+    original = f.path.read_bytes()
+    assert not run(f)['reconciled_after_reboot']
+    assert f.path.read_bytes() == original and pending_updates_barrier(f.backend)
+    assert not (f.data / 'update-holds.json').exists()

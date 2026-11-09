@@ -283,3 +283,54 @@ def test_verified_native_download_failure_keeps_reason_and_continues_exact_batch
     assert evidence['installer_started'] is True and evidence['outcomeKnown'] is True and evidence['running'] is False
     assert evidence['verified'] is False and 'No retry or security bypass' in evidence['note']
     assert result['failed_items'] == 1 and result['deferred_ids'] == [] and installer_barrier(result) is None
+
+
+@pytest.mark.parametrize('known_terminal', [True, False])
+def test_native_queue_continues_terminal_package_failure_but_persists_real_timeout_barrier(tmp_path, monkeypatch, known_terminal):
+    from optimus.automation import RunLease
+    from optimus.parallel_updates import ParallelInstallerQueue, ProgressMux, WINDOWS_SOFTWARE, pending_updates_barrier
+    from test_update_payload_providers import terminal
+
+    monkeypatch.setattr('optimus.runtime_priority.lower_worker_priority', lambda: lambda: None)
+    backend, tool, launches = fixture_backend(tmp_path)
+    backend.system = 'win32'
+    backend.bridge = SimpleNamespace(_process=None)
+    original = tool._run.side_effect
+
+    def native(arguments, **options):
+        if arguments[1:4] == ['upgrade', '--id', IDENTITIES[1]]:
+            launches.append(IDENTITIES[1])
+            if known_terminal:
+                return terminal(0x8A150008)
+            raise subprocess.TimeoutExpired(arguments, 1800)
+        return original(arguments, **options)
+
+    tool._run.side_effect = native
+    def operation(worker, callback, prepared, before):
+        return run_software(worker, configuration(), item_callback=callback,
+            prepared_callback=prepared, before_install=before)
+    queue = ParallelInstallerQueue(backend, 'a' * 32,
+        [(WINDOWS_SOFTWARE, operation)], ProgressMux(lambda _: None))
+    with RunLease(tmp_path):
+        queue.start()
+        try:
+            assert queue.wait_prepared() is None
+            queue.release_maintenance()
+            queue.join()
+        finally:
+            queue.cancel()
+            queue.join()
+    job = queue.jobs[0]
+    saved = json.loads(job.path.read_text())
+    middle = saved['result']['items'][1]['result']
+    assert launches == list(IDENTITIES if known_terminal else IDENTITIES[:2])
+    assert saved['status'] == ('needs_review' if known_terminal else 'uncertain')
+    assert middle['failureKind'] == ('download_failed' if known_terminal else 'update_timeout')
+    assert middle['outcomeKnown'] is known_terminal and middle['running'] is not known_terminal
+    assert bool(queue.barrier) is not known_terminal
+    assert bool(pending_updates_barrier(backend)) is not known_terminal
+    if known_terminal:
+        assert job.result['deferred_ids'] == []
+    else:
+        assert job.result['deferred_ids'] == [IDENTITIES[2]]
+        assert middle['note'] == 'The update timed out. A vendor installer may still be running; verify its outcome before trying again.'

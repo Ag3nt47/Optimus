@@ -39,10 +39,11 @@ def test_offline_driver_progress_bridge_keeps_preflight_and_terminal_receipts():
 
 def test_driver_backend_progress_is_opt_in_and_never_serializes_callable():
     from optimus.backend import Backend
+    from test_automated_system import driver, driver_config
     backend = Backend.__new__(Backend)
     backend.bridge = Mock()
-    backend.preferences = Mock(return_value={})
-    record = {'id': '00000000-0000-0000-0000-000000000001', 'revision': 1}
+    backend.preferences = Mock(return_value=driver_config())
+    record = driver()
     callback = Mock()
     result = backend.driver_update_apply_unattended(record, accept_eula=True, progress_callback=callback)
     assert result is backend.bridge.request.return_value
