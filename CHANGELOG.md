@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.41
+
+- Measure the progress header's actual title and controls before arranging them, keeping the restart control and full title readable across fonts and window sizes.
+
 ## 0.12.40
 
 - Add a green Restart optimization control that waits for active work to drain before starting a fresh run through the saved setup and review gates.

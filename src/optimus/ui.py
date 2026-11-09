@@ -3234,25 +3234,34 @@ class OptimizationProgressWindow(QDialog):
             self._update_responsive_layout()
 
     def _layout_progress_header(self):
-        compact = self._progress_header.width() < max(720, sum(widget.sizeHint().width()
-            for widget in (self.restart_button, self.fullscreen.button, self.stop_button)) + 240)
-        tiny = self._progress_header.width() < 480
-        mode = (compact, tiny)
+        layout = self._progress_header.layout()
+        margins = layout.contentsMargins()
+        available = max(0, self._progress_header.contentsRect().width() - margins.left() - margins.right())
+        gap = layout.horizontalSpacing()
+        if gap < 0:
+            gap = max(0, self.style().pixelMetric(QStyle.PM_LayoutHorizontalSpacing, None, self._progress_header))
+        controls = sum(max(widget.sizeHint().width(), widget.minimumSizeHint().width(), widget.minimumWidth())
+            for widget in (self.restart_button, self.fullscreen.button, self.stop_button))
+        title_margins = self.title.contentsMargins()
+        title_width = (self.title.fontMetrics().horizontalAdvance(' '.join(self.title.text().split()))
+            + title_margins.left() + title_margins.right() + 2 * self.title.margin() + 8)
+        compact = title_width + controls + 3 * gap > available
+        tiny = controls + 2 * gap > available
+        title_lines = 2 if title_width > available else 1
+        mode = (compact, tiny, title_lines)
         if mode == self._header_compact:
             return
         self._header_compact = mode
-        layout = self._progress_header.layout()
+        self.title.set_max_lines(title_lines)
         for widget in (self.title, self.restart_button, self.fullscreen.button, self.stop_button,
                        self.spinner, self.progress, self.resource_comparison, self.restart_status):
             layout.removeWidget(widget)
         if compact:
-            self.title.set_max_lines(2 if tiny else 1)
             layout.addWidget(self.title, 0, 0, 1, 4)
             layout.addWidget(self.fullscreen.button, 1, 2)
             layout.addWidget(self.stop_button, 1, 3)
             layout.addWidget(self.restart_button, 2 if tiny else 1, 0, 1, 4 if tiny else 2)
         else:
-            self.title.set_max_lines(1)
             layout.addWidget(self.title, 0, 0)
             layout.addWidget(self.fullscreen.button, 0, 1)
             layout.addWidget(self.restart_button, 0, 2)

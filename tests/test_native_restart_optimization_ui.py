@@ -11,7 +11,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -290,3 +290,27 @@ def test_header_restart_fullscreen_and_stop_fit_normal_narrow_and_fullscreen(win
     QTest.keyClick(progress, Qt.Key_Escape)
     app.processEvents()
     assert not progress.isFullScreen() and progress.isVisible()
+
+
+@pytest.mark.parametrize('width', [800, 850])
+def test_header_reflows_for_wider_title_metrics_without_resizing(window, app, width):
+    progress = finish_first(window, app)
+    progress.resize(width, 650)
+    for _ in range(5):
+        app.processEvents()
+    wider = QFont(progress.title.font())
+    wider.setStretch(150)
+    progress.title.setFont(wider)
+    progress.finish(None, error='Another Optimus process is already running maintenance.')
+    for _ in range(5):
+        app.processEvents()
+    assert progress.width() == width
+    assert progress.title.visible_text == progress.title.text()
+    assert progress.restart_button.mapTo(progress, QPoint()).y() >= progress.title.mapTo(progress, QPoint()).y() + progress.title.height()
+    buttons = (progress.restart_button, progress.fullscreen.button, progress.stop_button)
+    for button in buttons:
+        assert progress.rect().contains(QRect(button.mapTo(progress, QPoint()), button.size()))
+        assert button.visibleRegion().boundingRect() == button.rect()
+    assert all(not left.geometry().intersects(right.geometry())
+        for index, left in enumerate(buttons) for right in buttons[index + 1:])
+    assert progress.title.font().stretch() == 150
