@@ -32,6 +32,9 @@ _STAMP = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}'
 RUNTIME_OWNER_KIND = 'optimus-runtime-owner-v1'
 RESTART_RECOVERY_KIND = 'native-winget-console-quiescent-after-reboot-v1'
 _RESTART_DIR = 'update-reconciliation-after-boot'
+_CONTINUATION_BOOT_DIR = 'update-continuation-provenance'
+_CONTINUATION_BOOT_KIND = 'native-update-continuation-boot-v1'
+_CONTINUATION_BOOT_FIELD = 'continuation_boot_provenance'
 _CONSOLE_START = 'The console supervisor started but its target outcome is unknown; no retry was attempted.'
 _CONSOLE_EXIT = ('The console supervisor exited without a verified target outcome; '
                  'its console remains retained and no automatic retry was attempted.')
@@ -437,6 +440,10 @@ def is_restart_recovery_candidate(record):
 
 def _prior_boot(data_dir, record, original_owner):
     path = data_dir / 'runs' / (record['parent_run_id'] + '.json')
+    if _CONTINUATION_BOOT_FIELD in record:
+        _require(_ordinary_data_path(path, file=True) is None,
+                 'A continuation boot reference cannot override an existing GUI workflow audit.')
+        return _continuation_prior_boot(data_dir, record)
     raw = _read(path, _JOURNAL_BYTES)
     parent = _decode(raw)
     started, executed = parent.get('started_at'), record.get('execution_started_at')
@@ -463,7 +470,7 @@ def _prior_boot(data_dir, record, original_owner):
     return {'parent_sha256': hashlib.sha256(raw).hexdigest(), 'previous_boot_utc': previous}
 
 
-def _boot_evidence(probe, finish, *, observed_boot, previous_boot):
+def _boot_measurement(probe, *, observed_boot):
     _require(isinstance(probe, dict), 'Native boot provenance is unavailable.')
     boot = _utc_epoch(probe.get('boot_utc'))
     event = _utc_epoch(probe.get('boot_event_utc'))
@@ -472,10 +479,115 @@ def _boot_evidence(probe, finish, *, observed_boot, previous_boot):
              and max(observed) - min(observed) <= _BOOT_SKEW
              and max(boot, event) <= probe['captured_at'] and observed_boot <= probe['captured_at'] + 1,
              'Native OS boot time, startup event and uptime did not agree.')
-    _require(min(observed) > max(finish, _utc_epoch(previous_boot)) + _BOOT_FENCE,
-             'A Windows restart after this captured installer outcome is not verified.')
     return {'boot_utc': probe['boot_utc'], 'boot_event_utc': probe['boot_event_utc'],
             'boot_identity': observed_boot, 'captured_at': probe['captured_at']}
+
+
+def _boot_evidence(probe, finish, *, observed_boot, previous_boot):
+    evidence = _boot_measurement(probe, observed_boot=observed_boot)
+    _require(min(_utc_epoch(evidence['boot_utc']), _utc_epoch(evidence['boot_event_utc']),
+                 observed_boot) > max(finish, _utc_epoch(previous_boot)) + _BOOT_FENCE,
+             'A Windows restart after this captured installer outcome is not verified.')
+    return evidence
+
+
+def _continuation_directory(data_dir, owner, *, create=False):
+    from .self_update_permissions import (WindowsDirectoryACL, create_private_directory,
+        _identity, _principals, _sid, _ADMIN)
+    path = data_dir / _CONTINUATION_BOOT_DIR
+    _ordinary_data_path(path)
+    if create and not path.exists():
+        create_private_directory(path, owner)
+    identity = _identity(path)
+    if os.name == 'nt':
+        native = WindowsDirectoryACL()
+        sid = _sid(owner)
+        security = native.read(path)
+        _require(_sid(native.owner_sid()) == sid and security.get('owner') in (sid, _ADMIN)
+                 and _principals(security) == frozenset((sid, 'SY', 'BA')),
+                 'The continuation boot folder permissions are not owned and private.')
+    else:
+        info = path.stat()
+        _require(info.st_uid == os.getuid() and not info.st_mode & 0o077,
+                 'The continuation boot folder permissions are not owned and private.')
+    _require(_identity(path) == identity, 'The continuation boot folder changed during validation.')
+    return path
+
+
+def capture_continuation_boot(backend, parent_id, *, lease):
+    """Best-effort initial boot proof before any Windows continuation worker."""
+    from .update_resume import boot_identity
+    if getattr(backend, 'system', sys.platform) != 'win32':
+        return {'status': 'unsupported', 'reason': 'Initial native boot proof applies only to Windows.'}
+    try:
+        data = Path(backend.data_dir)
+        _require(isinstance(parent_id, str) and _ID.fullmatch(parent_id)
+                 and isinstance(lease, RunLease) and lease.handle is not None
+                 and lease.path == data / 'maintenance-run.lock', 'An owned continuation maintenance lease is required.')
+        owner = _current_owner()
+        runtime = capture_runtime_owner(owner, parent_id, parent_id)
+        native = backend.automatic_update_recovery_probe()
+        captured = time.time()
+        _require(isinstance(native, dict) and type(native.get('schema')) is int and native['schema'] == 1
+                 and native.get('owner') == owner and native.get('complete') is True
+                 and native.get('review_only') is True, 'The initial native boot probe is incomplete.')
+        boot = _boot_measurement(native, observed_boot=boot_identity())
+        _require(runtime['captured_at'] <= boot['captured_at'] <= captured
+                 and captured - runtime['captured_at'] <= 30
+                 and _utc_epoch(boot['boot_utc']) <= runtime['created_at'],
+                 'Initial boot provenance did not precede this continuation process.')
+        value = {'schema': 1, 'kind': _CONTINUATION_BOOT_KIND, 'id': parent_id, 'owner': owner,
+                 'runtime_owner': runtime, 'captured_at': captured, 'boot': boot}
+        path = _continuation_directory(data, owner, create=True) / (parent_id + '.json')
+        _require(_ordinary_data_path(path, file=True) is None, 'Initial boot provenance already exists.')
+        _private_json(path, value)
+        raw = _read(path, _HOLD_BYTES)
+        _require(_decode(raw) == value, 'Initial boot provenance readback failed.')
+        return {'status': 'captured', 'reference': {'schema': 1, 'kind': _CONTINUATION_BOOT_KIND,
+                'parent_run_id': parent_id, 'sha256': hashlib.sha256(raw).hexdigest()}}
+    except Exception as error:
+        # Missing optional provenance never grants recovery authority and does
+        # not revoke the user's current saved update approval.
+        return {'status': 'unavailable', 'reason': type(error).__name__ + ': ' + str(error)[:500]}
+
+
+def _continuation_prior_boot(data_dir, record):
+    reference = record[_CONTINUATION_BOOT_FIELD]
+    parent = record['parent_run_id']
+    _require(isinstance(reference, dict) and set(reference) == {'schema', 'kind', 'parent_run_id', 'sha256'}
+             and type(reference.get('schema')) is int and reference['schema'] == 1
+             and reference.get('kind') == _CONTINUATION_BOOT_KIND and reference.get('parent_run_id') == parent
+             and isinstance(reference.get('sha256'), str) and re.fullmatch('[a-f0-9]{64}', reference['sha256']),
+             'The captured continuation boot reference is invalid.')
+    folder = _continuation_directory(data_dir, record['owner'])
+    raw = _read(folder / (parent + '.json'), _HOLD_BYTES)
+    _require(hashlib.sha256(raw).hexdigest() == reference['sha256'], 'Initial continuation boot provenance changed.')
+    value = _decode(raw)
+    _require(set(value) == {'schema', 'kind', 'id', 'owner', 'runtime_owner', 'captured_at', 'boot'}
+             and type(value.get('schema')) is int and value['schema'] == 1
+             and value.get('kind') == _CONTINUATION_BOOT_KIND and value.get('id') == parent
+             and value.get('owner') == record['owner'] == _current_owner(),
+             'Initial continuation boot ownership differs.')
+    runtime, writer = value['runtime_owner'], record['runtime_owner']
+    _require(isinstance(runtime, dict) and set(runtime) == set(writer)
+             and runtime.get('journal_id') == runtime.get('parent_run_id') == parent
+             and all(type(runtime[key]) is type(writer[key]) and runtime[key] == writer[key]
+                     for key in writer if key not in ('journal_id', 'captured_at')),
+             'Initial continuation boot provenance belongs to another process.')
+    captured = value['captured_at']
+    boot = value['boot']
+    _require(_epoch_number(captured) and isinstance(boot, dict) and _epoch_number(boot.get('captured_at'))
+             and _epoch_number(runtime.get('captured_at'))
+             and runtime['captured_at'] <= boot['captured_at'] <= captured <= record['started_at']
+             and captured - runtime['captured_at'] <= 30
+             and _epoch_number(record.get('execution_started_at'))
+             and record['started_at'] <= record['execution_started_at'] <= record['package_attempt']['prepared_at'],
+             'Initial continuation boot provenance was not captured before these workers.')
+    measured = _boot_measurement(boot, observed_boot=boot.get('boot_identity'))
+    _require(set(boot) == set(measured) and _utc_epoch(boot['boot_utc']) <= runtime['created_at'],
+             'Initial continuation boot provenance is invalid.')
+    return {'kind': _CONTINUATION_BOOT_KIND, 'parent_sha256': reference['sha256'],
+            'previous_boot_utc': boot['boot_utc']}
 
 
 def _hold_for_console_attempt(data_dir, package, version, owner):

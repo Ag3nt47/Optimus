@@ -10,6 +10,8 @@ from unittest.mock import Mock
 import pytest
 
 from optimus.backend import Backend
+from optimus.automated_system import driver_descriptor
+from optimus.automation import CURRENT_SETUP_VERSION
 from optimus.bridge import PowerShellBridge
 from test_bridge import MockProcess
 
@@ -124,11 +126,19 @@ def test_replaced_cancel_directory_never_deletes_external_marker(tmp_path, monke
 @pytest.mark.parametrize('method', ['driver_update_apply', 'driver_update_apply_unattended'])
 def test_driver_backend_forwards_local_token_only_in_memory(method):
     backend = Backend.__new__(Backend)
-    backend.preferences = Mock(return_value={})
+    record = driver_descriptor({'id': '00000000-0000-0000-0000-000000000001',
+        'revision': 1, 'title': 'Offline cancellation fixture driver',
+        'hardwareId': r'PCI\VEN_1234&DEV_5678', 'provider': 'Fixture provider',
+        'driverClass': 'Display', 'driverDate': '2026-10-01T00:00:00Z',
+        'canRequestUserInput': False, 'rebootBehavior': 2, 'eulaAccepted': False})
+    backend.preferences = Mock(return_value={'setup_version': CURRENT_SETUP_VERSION,
+        'driver_updates_enabled': True, 'driver_policy': 'install_approved',
+        'driver_changes_approved': True, 'driver_update_agreements_accepted': True,
+        'driver_approved_updates': [dict(record)]})
     backend.bridge = Mock()
     token = threading.Event()
     options = {'accept_eula': True} if method.endswith('unattended') else {}
-    getattr(backend, method)({'id': 'fixture', 'revision': 1}, cancel_event=token, **options)
+    getattr(backend, method)(record, cancel_event=token, **options)
     assert backend.bridge.request.call_args.kwargs['cancel_event'] is token
 
 

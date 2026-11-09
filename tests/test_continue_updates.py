@@ -309,3 +309,59 @@ def test_global_cancel_does_not_start_an_installer_and_remains_visible(tmp_path)
     ('no_enabled_updates', 0), ('blocked', 2), ('needs_review', 2), ('cancelled', 2), ('error', 2)])
 def test_exit_status_distinguishes_drained_queue_from_blocked_run(status, code):
     assert continuation_exit_code({'status': status}) == code
+
+
+def test_initial_boot_proof_is_durable_and_bound_before_any_update_worker(tmp_path, monkeypatch):
+    import time
+    from datetime import datetime, timezone
+    from optimus import automatic_update_recovery as recovery
+    backend = service(tmp_path)
+    owner, boot = recovery._current_owner(), round(time.time() - 3600)
+    monkeypatch.setattr('optimus.speed_enhancements._current_owner', lambda: owner)
+    utc = datetime.fromtimestamp(boot, timezone.utc).isoformat()
+    monkeypatch.setattr(recovery, '_current_owner', lambda: owner)
+    monkeypatch.setattr('optimus.update_resume.boot_identity', lambda: boot)
+    def runtime(owner, journal_id, parent_id):
+        return {'schema': 1, 'kind': recovery.RUNTIME_OWNER_KIND, 'owner': owner,
+            'journal_id': journal_id, 'parent_run_id': parent_id, 'pid': 44,
+            'created_at': boot + 10, 'created_utc': datetime.fromtimestamp(boot + 10, timezone.utc).isoformat(),
+            'executable': r'D:\Optimus\OptimusConsole.exe', 'name': 'OptimusConsole.exe',
+            'captured_at': time.time(), 'frozen': True}
+    monkeypatch.setattr(recovery, 'capture_runtime_owner', runtime)
+    backend.automatic_update_recovery_probe = Mock(side_effect=lambda: {
+        'schema': 1, 'owner': owner, 'complete': True, 'review_only': True,
+        'captured_at': time.time(), 'boot_utc': utc, 'boot_event_utc': utc})
+    original_update = backend.update_app_unattended
+    checked = []
+    def update(identity, **options):
+        journals = list((tmp_path / 'parallel-updates').glob('*.json'))
+        assert journals
+        for path in journals:
+            record = json.loads(path.read_text())
+            reference = record['continuation_boot_provenance']
+            proof_path = tmp_path / 'update-continuation-provenance' / (record['parent_run_id'] + '.json')
+            import hashlib
+            assert hashlib.sha256(proof_path.read_bytes()).hexdigest() == reference['sha256']
+            assert json.loads(proof_path.read_text())['captured_at'] <= record['started_at']
+        with pytest.raises(RuntimeError):
+            RunLease(tmp_path).acquire()
+        checked.append(identity)
+        return original_update(identity, **options)
+    backend.update_app_unattended = update
+    report = run_saved_updates(backend, output=tmp_path / 'operator-output')
+    assert report['status'] == 'completed' and checked
+    assert report['boot_provenance']['status'] == 'captured'
+    backend.automatic_update_recovery_probe.assert_called_once()
+    assert_saved(report)
+
+
+def test_unavailable_optional_initial_boot_proof_does_not_revoke_saved_update_approval(tmp_path):
+    backend = service(tmp_path)
+    backend.automatic_update_recovery_probe = Mock(side_effect=OSError('Fixture native boot unavailable'))
+    report = run_saved_updates(backend)
+    assert report['status'] == 'completed'
+    assert report['boot_provenance']['status'] == 'unavailable'
+    assert 'update:Fixture.One' in backend.calls and 'update:Fixture.Two' in backend.calls
+    assert all('continuation_boot_provenance' not in json.loads(path.read_text())
+               for path in (tmp_path / 'parallel-updates').glob('*.json'))
+    assert_saved(report)

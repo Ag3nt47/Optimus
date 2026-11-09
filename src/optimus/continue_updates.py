@@ -124,12 +124,18 @@ def run_saved_updates(backend, *, output=None, progress_callback=None, cancel_ev
         progress_path = folder / ('continue-updates-' + identifier + '.progress.json')
         _ordinary_data_path(path, file=True)
         _ordinary_data_path(progress_path, file=True)
+        boot_provenance = None
+        if operations and not native:
+            from .automatic_update_recovery import capture_continuation_boot
+            boot_provenance = capture_continuation_boot(backend, identifier, lease=lease)
         report = {'schema': 1, 'id': identifier, 'command': 'continue-updates',
             'started_at': time.time(), 'status': 'running', 'updates_only': True,
             'preferences_saved': False, 'cleanup_actions_executed': 0,
             'presence_actions_executed': 0, 'journals_deleted': 0,
             'recovery': recovery, 'stages': [], 'report': str(path), 'progress_report': str(progress_path),
             'note': 'Saved update approvals only. Known failed or held packages are skipped; the remaining eligible queue continues. Active, unknown or restart-required native operations retain their safety gate.'}
+        if boot_provenance is not None:
+            report['boot_provenance'] = boot_provenance
         atomic_json(path, report)  # The command receipt precedes every updater.
         observed, last_saved, progress_errors = None, 0.0, []
         progress_lock = threading.RLock()
@@ -168,6 +174,9 @@ def run_saved_updates(backend, *, output=None, progress_callback=None, cancel_ev
                      'description': 'Searching saved app and driver scopes; individual held offers will be skipped.', 'processes': []})
                 queue = ParallelInstallerQueue(backend, identifier, operations, mux,
                     cancel_event=cancel_event, prior_barrier=prior_barrier)
+                if boot_provenance is not None and boot_provenance.get('status') == 'captured':
+                    for job in queue.jobs:
+                        job.record['continuation_boot_provenance'] = copy.deepcopy(boot_provenance['reference'])
                 report['stages'] = queue.start()
                 atomic_json(path, report)
                 preparation_barrier = queue.wait_prepared()

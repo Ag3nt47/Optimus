@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.40
+
+- Add a green Restart optimization control that waits for active work to drain before starting a fresh run through the saved setup and review gates.
+- Explain when another maintenance process owns the active run.
+- Record native boot provenance before update-only workers launch, allowing eligible interrupted attempts to recover after a verified restart.
+- Update driver cancellation and download-cleanup fixtures to supply current saved driver approvals.
+
 ## 0.12.39
 
 - Recover recorded application update timeouts after a verified Windows restart and idle check. Hold the affected offer while remaining approved updates continue.

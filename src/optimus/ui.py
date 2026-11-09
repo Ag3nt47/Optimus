@@ -29,6 +29,24 @@ from optimus.widgets.navigation_scroll import NavigationScrollArea
 from optimus.widgets.responsive_text import scale_text, set_scaled_style
 
 
+def _maintenance_lease_busy(error):
+    return 'another optimus process is already running maintenance' in str(error).casefold()
+
+
+def _restart_lease_available(data_dir):
+    """Probe without waiting or taking authority from an existing maintenance run."""
+    from .automation import RunLease
+    if RunLease.owned_by_current_process(data_dir):
+        return False
+    try:
+        with RunLease(data_dir):
+            return True
+    except RuntimeError as error:
+        if _maintenance_lease_busy(error):
+            return False
+        raise
+
+
 def field(record, *names, default=""):
     if not isinstance(record, dict):
         return default
@@ -2872,6 +2890,8 @@ class OptimizationProgressWindow(QDialog):
     resultsAcknowledged = Signal()
     resultsDismissed = Signal()
     autoContinueRequested = Signal()
+    restartRequested = Signal()
+    restartCancelled = Signal()
 
     def __init__(self, owner, cancel):
         super().__init__(owner)
@@ -2881,6 +2901,7 @@ class OptimizationProgressWindow(QDialog):
         self._optimus_reveal_open_only = True
         self.cancel = cancel
         self.completed = False
+        self._restart_requested = False
         self._waiting_for_updates = False
         self._title_before_update_wait = None
         self._waiting_update_kind = None
@@ -2895,6 +2916,7 @@ class OptimizationProgressWindow(QDialog):
         self._results_dismissed = False
         self._presentation_scale = 1.0
         self._responsive_text_context = None
+        self._header_compact = None
         self.setWindowTitle('Optimus - optimization progress')
         self.setWindowModality(Qt.WindowModal)
         self.resize(850, 650)
@@ -2943,9 +2965,25 @@ class OptimizationProgressWindow(QDialog):
         from .widgets.fullscreen import FullScreenControl
         self.fullscreen = FullScreenControl(self)
         header_layout.addWidget(self.fullscreen.button, 0, 1)
+        self.restart_button = QPushButton('Restart optimization', self)
+        self.restart_button.setObjectName('RestartOptimization')
+        self.restart_button.setAutoDefault(False)
+        self.restart_button.setDefault(False)
+        self.restart_button.setCursor(Qt.PointingHandCursor)
+        self.restart_button.setMinimumHeight(34)
+        self.restart_button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.restart_button.setStyleSheet('QPushButton {background:#16803d;color:white;border:1px solid #5ee19b;'
+            'border-radius:7px;padding:7px 12px;font-weight:700;}'
+            'QPushButton:hover {background:#1b9348;}QPushButton:pressed {background:#10632e;}'
+            'QPushButton:focus {border:2px solid white;}'
+            'QPushButton:disabled {background:#264d37;color:#c6dfce;border-color:#4b7860;}')
+        self.restart_button.setEnabled(callable(getattr(owner, 'request_optimization_restart', None)))
+        self.restart_button.clicked.connect(self.restartRequested.emit)
+        self.set_restart_queued(False)
+        header_layout.addWidget(self.restart_button, 0, 2)
         from .widgets.emergency_stop import EmergencyStopButton
         self.stop_button = EmergencyStopButton(owner, self)
-        header_layout.addWidget(self.stop_button, 0, 2)
+        header_layout.addWidget(self.stop_button, 0, 3)
         self.spinner = RunSpinner(self)
         old_spinner_label = self.spinner._label
         self.spinner._label = WorkflowSummaryLabel(max_lines=1)
@@ -2956,14 +2994,14 @@ class OptimizationProgressWindow(QDialog):
         self.spinner._label.setMinimumWidth(0)
         self.spinner._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.spinner.start('Preparing')
-        header_layout.addWidget(self.spinner, 1, 0, 1, 3)
+        header_layout.addWidget(self.spinner, 1, 0, 1, 4)
         self.loading_animation = LocalLoadingAnimation(self, extent=64)
         self.progress = WorkflowProgressBar()
         self.progress.setObjectName('WorkflowProgress')
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat('%p%')
-        header_layout.addWidget(self.progress, 2, 0, 1, 3)
+        header_layout.addWidget(self.progress, 2, 0, 1, 4)
         from .widgets.resource_comparison import ResourceComparison
         self.resource_comparison = ResourceComparison(self)
         self.resource_comparison.layout().setVerticalSpacing(2)
@@ -2978,7 +3016,11 @@ class OptimizationProgressWindow(QDialog):
             setattr(self.resource_comparison, name, bounded)
             previous.hide()
             previous.deleteLater()
-        header_layout.addWidget(self.resource_comparison, 3, 0, 1, 3)
+        header_layout.addWidget(self.resource_comparison, 3, 0, 1, 4)
+        self.restart_status = WorkflowSummaryLabel(max_lines=2)
+        self.restart_status.setTextFormat(Qt.PlainText)
+        self.restart_status.hide()
+        header_layout.addWidget(self.restart_status, 4, 0, 1, 4)
         self.analysis_panel = QFrame(body)
         self.analysis_panel.setObjectName('ProgressAnalysisPanel')
         self.analysis_panel.setStyleSheet('QFrame#ProgressAnalysisPanel {border:1px solid #2d4357; border-radius:7px; background:#0e1822;}')
@@ -3177,6 +3219,48 @@ class OptimizationProgressWindow(QDialog):
         self.responsive_scale = ResponsiveWindowScale(self, self._apply_window_scale)
         self._update_responsive_layout()
 
+    def set_restart_queued(self, queued, message=''):
+        self.restart_button.setEnabled(not queued and callable(getattr(self.owner, 'request_optimization_restart', None))
+            and not getattr(self.owner, '_emergency_stopping', False)
+            and not getattr(self.owner, '_close_when_idle', False))
+        tip = (message or 'Restart queued. Waiting for active work to finish safely.' if queued else
+            'Start a new optimization with your saved choices after active work finishes. '
+            'An active run in this window is cancelled at a safe boundary; vendor installers are allowed to return.')
+        self.restart_button.setToolTip(tip)
+        self.restart_button.setAccessibleDescription(tip)
+        if hasattr(self, 'restart_status'):
+            self.restart_status.setText(tip if queued else '')
+            self.restart_status.setVisible(queued)
+            self._update_responsive_layout()
+
+    def _layout_progress_header(self):
+        compact = self._progress_header.width() < max(720, sum(widget.sizeHint().width()
+            for widget in (self.restart_button, self.fullscreen.button, self.stop_button)) + 240)
+        tiny = self._progress_header.width() < 480
+        mode = (compact, tiny)
+        if mode == self._header_compact:
+            return
+        self._header_compact = mode
+        layout = self._progress_header.layout()
+        for widget in (self.title, self.restart_button, self.fullscreen.button, self.stop_button,
+                       self.spinner, self.progress, self.resource_comparison, self.restart_status):
+            layout.removeWidget(widget)
+        if compact:
+            self.title.set_max_lines(2 if tiny else 1)
+            layout.addWidget(self.title, 0, 0, 1, 4)
+            layout.addWidget(self.fullscreen.button, 1, 2)
+            layout.addWidget(self.stop_button, 1, 3)
+            layout.addWidget(self.restart_button, 2 if tiny else 1, 0, 1, 4 if tiny else 2)
+        else:
+            self.title.set_max_lines(1)
+            layout.addWidget(self.title, 0, 0)
+            layout.addWidget(self.fullscreen.button, 0, 1)
+            layout.addWidget(self.restart_button, 0, 2)
+            layout.addWidget(self.stop_button, 0, 3)
+        row = 3 if tiny else 2 if compact else 1
+        for offset, widget in enumerate((self.spinner, self.progress, self.resource_comparison, self.restart_status)):
+            layout.addWidget(widget, row + offset, 0, 1, 4)
+
     def _apply_window_scale(self, scale):
         inherited_styles = []
         ancestor = self
@@ -3197,10 +3281,12 @@ class OptimizationProgressWindow(QDialog):
                     self.auto_continue_summary, self.live_system_status.computer,
                     self.live_system_status.network, self.space_guard_status,
                     self.details_toggle, self.cancel_button, self.auto_continue_button, self.stop_button,
+                    self.restart_button, self.restart_status,
                     self.processes, self.log):
                 scale_text(widget, scale, force=True)
             self.auto_continue_button.setMinimumHeight(max(36, self.auto_continue_button.fontMetrics().height() + 16))
             self.cancel_button.setMinimumHeight(max(36, self.cancel_button.fontMetrics().height() + 16))
+            self.restart_button.setMinimumHeight(max(34, self.restart_button.fontMetrics().height() + 16))
         self._update_responsive_layout()
 
     def _toggle_details(self, visible):
@@ -3251,6 +3337,7 @@ class OptimizationProgressWindow(QDialog):
         try:
             # Let Qt assign spare height to the worker grid. Compact cards are
             # retained whenever the measured full presentation would not fit.
+            self._layout_progress_header()
             self._progress_header.layout().activate()
             self.analysis_panel.layout().activate()
             self._outer_layout.activate()
@@ -3861,6 +3948,8 @@ class OptimizationProgressWindow(QDialog):
                     card._set_resource_totals(totals, maintenance=identity == 'maintenance')
         self._apply_followup_resource_totals(result)
         self._refresh_resource_comparison()
+        if error and _maintenance_lease_busy(error):
+            self._show_external_maintenance()
         self.cancel_button.setText('Close results')
         self.cancel_button.setToolTip('Close the saved results.')
         self.cancel_button.setEnabled(True)
@@ -3869,6 +3958,22 @@ class OptimizationProgressWindow(QDialog):
         self._update_responsive_layout()
         self._reveal_completion_review()
         self._update_live_metrics()
+
+    def _show_external_maintenance(self):
+        self.title.setText('ANOTHER OPTIMIZATION IS ACTIVE')
+        self.stage.setText('WAITING FOR ACTIVE MAINTENANCE')
+        message = ('Another Optimus process is running maintenance. This window did not start a run, '
+            'and that process\'s progress is unavailable here. Choose Restart optimization to queue '
+            'one new run after the active work finishes safely.')
+        self.description.setText(message)
+        self.verification_summary.setText('This window has no completed run to verify. Active maintenance remains in the other process.')
+        self.verification_findings.setText(message)
+        self.worker_cards['maintenance'].update_state({'status': 'waiting_for_maintenance',
+            'description': message}, maintenance=True)
+        for identity, card in self.worker_cards.items():
+            if identity != 'maintenance' and card._raw_status != 'not_selected':
+                card.update_state({'status': 'not_started',
+                    'description': 'Not started in this window. Work in the other Optimus process is not monitored here.'})
 
     def _reveal_completion_review(self):
         # Completion evidence must be presented before any recommendation
@@ -4004,6 +4109,7 @@ class OptimizationProgressWindow(QDialog):
                     if self._recommendations_ready else 'Close the saved results.')
 
     def request_close(self):
+        self.restartCancelled.emit()
         if self.completed:
             if self.auto_continue_button.isVisible() and self.auto_continue_button.isEnabled():
                 # The footer is explicitly labelled as applying fixes while a
@@ -4025,6 +4131,7 @@ class OptimizationProgressWindow(QDialog):
                 'Cancellation requested. The current stage must finish before the workflow stops.')
 
     def closeEvent(self, event):
+        self.restartCancelled.emit()
         if self.completed:
             self._dismiss_results()
             event.accept()
@@ -4033,6 +4140,7 @@ class OptimizationProgressWindow(QDialog):
             event.ignore()
 
     def reject(self):
+        self.restartCancelled.emit()
         if not self.completed:
             self.request_close()
             return
@@ -4529,6 +4637,13 @@ class OptimusWindow(QMainWindow):
         self._cancel = threading.Event()
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
+        self._restart_progress = None
+        self._restart_generation = 0
+        self._restart_probe = None
+        self._restart_lease_ready = False
+        self._restart_timer = QTimer(self)
+        self._restart_timer.setInterval(750)
+        self._restart_timer.timeout.connect(self._poll_optimization_restart)
         self.preferences_path = Path(backend.data_dir) / 'ui-settings.json'
         try:
             self.appearance = json.loads(self.preferences_path.read_text(encoding='utf-8'))
@@ -5352,6 +5467,111 @@ class OptimusWindow(QMainWindow):
             if not self.smoke_test:
                 QMessageBox.warning(self, 'Optimus Sandbox', str(exc))
 
+    def request_optimization_restart(self, progress):
+        if (self.smoke_test or self._quitting or self._emergency_stopping or self._close_when_idle
+                or progress is not self._progress_window or not progress.isVisible()
+                or self._restart_progress is not None):
+            return
+        self._restart_generation += 1
+        self._restart_progress = progress
+        progress._restart_requested = True
+        self._restart_lease_ready = False
+        self._pending_post_review = self._pending_auto_fixes = None
+        self._post_review_generation += 1
+        self._post_review_active = True
+        progress.clear_auto_continue()
+        progress.set_recommendations_available(False)
+        progress.set_restart_queued(True)
+        self.main_buttons[0].setEnabled(False)
+        if self.busy or self._worker is not None:
+            self._cancel.set()
+            progress.worker_navigation.refresh(enabled=False)
+            progress.cancel_button.setEnabled(False)
+            progress.set_restart_queued(True, 'Restart queued. The current operation must return and save its outcomes before a new run can start.')
+        self.status.setText('Restart queued. Waiting for active work to finish safely; no installer is interrupted.')
+        self._restart_timer.start()
+        self._poll_optimization_restart()
+
+    def _cancel_optimization_restart(self):
+        progress, self._restart_progress = self._restart_progress, None
+        self._restart_generation += 1
+        self._restart_timer.stop()
+        self._restart_lease_ready = False
+        if progress is not None:
+            progress.set_restart_queued(False)
+            self._post_review_active = False
+            self.main_buttons[0].setEnabled(not self.busy and not self._emergency_stopping and not self._close_when_idle)
+            self.status.setText('Queued restart cancelled. No new optimization will start from that request.')
+
+    def _poll_optimization_restart(self):
+        progress = self._restart_progress
+        if progress is None:
+            return
+        if (self._quitting or self._emergency_stopping or self._close_when_idle
+                or progress is not self._progress_window or not progress.isVisible()):
+            self._cancel_optimization_restart()
+            return
+        if (self.busy or self._worker is not None or self.pool.activeThreadCount()
+                or self._restart_probe is not None
+                or self._settings_window is not None and self._settings_window.busy):
+            return
+        from .emergency_stop import controller_for
+        try:
+            state = controller_for(self.backend).snapshot()
+        except Exception:
+            state = {}
+        if state.get('stopped') is True:
+            self._cancel_optimization_restart()
+            progress.restart_button.setEnabled(False)
+            progress.restart_button.setToolTip('STOP is active for this Optimus session. No new work can start.')
+            self.status.setText('STOP is active for this Optimus session. The queued restart was cancelled.')
+            return
+        if state.get('drained') is not True:
+            message = 'Restart queued. Waiting for owned system or vendor operations to finish and save their outcomes.'
+            progress.set_restart_queued(True, message)
+            self.status.setText(message)
+            return
+        if self._restart_lease_ready:
+            self._cancel_optimization_restart()
+            self._pending_post_review = self._pending_auto_fixes = None
+            self._post_review_active = False
+            # Keep the normal launch-review, setup, saved-scope and workflow
+            # lease checks. A probe is never authority to bypass them.
+            self.start_optimization()
+            return
+        worker = BackendWorker(_restart_lease_available, (self.backend.data_dir,), {})
+        worker.restart_generation = self._restart_generation
+        self._restart_probe = worker
+        worker.signals.result.connect(self._restart_probe_result)
+        worker.signals.error.connect(self._restart_probe_error)
+        worker.signals.finished.connect(self._restart_probe_finished)
+        self.pool.start(worker)
+
+    @Slot(object)
+    def _restart_probe_result(self, available):
+        if (self._restart_probe is None or self._restart_progress is None
+                or self._restart_probe.restart_generation != self._restart_generation):
+            return
+        self._restart_lease_ready = available is True
+        if not self._restart_lease_ready:
+            message = 'Restart queued. Another optimization is active; waiting for its maintenance lease to be released.'
+            self._restart_progress.set_restart_queued(True, message)
+            self.status.setText(message)
+
+    @Slot(str)
+    def _restart_probe_error(self, error):
+        if (self._restart_probe is None or self._restart_progress is None
+                or self._restart_probe.restart_generation != self._restart_generation):
+            return
+        self._cancel_optimization_restart()
+        self.status.setText('Restart could not verify the maintenance lock. No new run started: ' + error)
+
+    @Slot()
+    def _restart_probe_finished(self):
+        self._restart_probe = None
+        if self._restart_lease_ready:
+            QTimer.singleShot(0, self._poll_optimization_restart)
+
     def start_optimization(self, checked=False):
         if self._emergency_stopping:
             return
@@ -5360,6 +5580,9 @@ class OptimusWindow(QMainWindow):
             return
         if self._close_when_idle:
             self.status.setText('Optimus is stopping safely. Wait for active operations to finish.')
+            return
+        if self._restart_progress is not None:
+            self.status.setText('A single restart is already queued. Close its progress window to cancel that request.')
             return
         if self.smoke_test:
             self.status.setText('Optimization is disabled during a UI smoke test.')
@@ -5414,6 +5637,9 @@ class OptimusWindow(QMainWindow):
         progress.resultsDismissed.connect(lambda: self._dismiss_post_optimization_reviews()
             if progress is self._progress_window else None)
         progress.autoContinueRequested.connect(lambda: self._start_auto_continue(progress))
+        progress.restartRequested.connect(lambda: self.request_optimization_restart(progress))
+        progress.restartCancelled.connect(lambda: self._cancel_optimization_restart()
+            if progress is self._restart_progress else None)
         self._progress_window.show()
         if self._self_update_notice:
             self._progress_window.log.appendPlainText(self._self_update_notice)
@@ -5428,6 +5654,14 @@ class OptimusWindow(QMainWindow):
     @Slot(object)
     def _workflow_result(self, result):
         self._progress_window.finish(result)
+        if self._progress_window._restart_requested:
+            self._pending_auto_fixes = None
+            if self._restart_progress is self._progress_window:
+                self.status.setText('Current work returned. Restart remains queued until its worker finishes saving outcomes.')
+            else:
+                self._prepare_post_reviews(result, dict(getattr(self._worker, 'settings', {})))
+                self.status.setText('Current work returned. The queued restart was cancelled; no automatic follow-up will start.')
+            return
         if self._close_when_idle:
             self._pending_post_review = None
             self._pending_auto_fixes = None
@@ -5481,12 +5715,13 @@ class OptimusWindow(QMainWindow):
         self._pending_post_review = None
         self._pending_auto_fixes = None
         self._progress_window.finish(None, error=error)
-        self.status.setText('Workflow stopped: ' + error)
+        self.status.setText('Another optimization is active. Choose Restart optimization to wait for it and start a new run.'
+            if _maintenance_lease_busy(error) else 'Workflow stopped: ' + error)
 
     @Slot()
     def _workflow_finished(self):
         self.busy = False
-        self.main_buttons[0].setEnabled(not self._emergency_stopping)
+        self.main_buttons[0].setEnabled(not self._emergency_stopping and self._restart_progress is None)
         bridge = getattr(self._worker, '_browser_prompts', None)
         if bridge is not None:
             bridge.shutdown()
@@ -5498,6 +5733,13 @@ class OptimusWindow(QMainWindow):
         self._enable_result_actions()
 
     def _enable_result_actions(self):
+        if self._restart_progress is not None and self._restart_progress is self._progress_window:
+            self._pending_post_review = self._pending_auto_fixes = None
+            self._post_review_active = True
+            self._progress_window.clear_auto_continue()
+            self._progress_window.set_recommendations_available(False)
+            QTimer.singleShot(0, self._poll_optimization_restart)
+            return
         if self.smoke_test or self._quitting or not self._progress_window.isVisible():
             self._pending_post_review = None
             self._pending_auto_fixes = None
@@ -5590,7 +5832,7 @@ class OptimusWindow(QMainWindow):
     @Slot()
     def _auto_fixes_finished(self):
         self.busy = False
-        self.main_buttons[0].setEnabled(not self._emergency_stopping)
+        self.main_buttons[0].setEnabled(not self._emergency_stopping and self._restart_progress is None)
         self._worker = None
         if self._close_when_idle:
             QTimer.singleShot(0, self._finish_emergency_stop if self._emergency_stopping else self.quit_application)
@@ -5766,6 +6008,7 @@ class OptimusWindow(QMainWindow):
             QTimer.singleShot(0, self.canvas, self.canvas.sync_motion)
 
     def closeEvent(self, event):
+        self._cancel_optimization_restart()
         if self._quitting or self.smoke_test:
             event.accept()
         elif self.busy:
@@ -5778,6 +6021,7 @@ class OptimusWindow(QMainWindow):
                 event.ignore()
 
     def quit_application(self):
+        self._cancel_optimization_restart()
         if self._emergency_stopping:
             state = self._emergency_stop.snapshot()
             if (state.get('drained') is not True or self.busy or self.pool.activeThreadCount()
@@ -5827,6 +6071,7 @@ class OptimusWindow(QMainWindow):
         if self._emergency_stopping or self._quitting:
             return False
         self._emergency_stopping = True
+        self._cancel_optimization_restart()
         self._close_when_idle = True
         self._cancel.set()
         from .emergency_stop import controller_for
@@ -5959,6 +6204,7 @@ class OptimusWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        self._cancel_optimization_restart()
         if self._self_update_controller is not None:
             self._self_update_controller.shutdown()
         self.invalidate_session_review('Optimus is closing; automatic maintenance is stopped.')
