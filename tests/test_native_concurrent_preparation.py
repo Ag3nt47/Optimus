@@ -13,7 +13,7 @@ from optimus.automated_system import run_drivers
 from optimus.bridge import PowerShellBridge
 from optimus.parallel_updates import (ParallelAppUpdates, ParallelInstallerQueue, ProgressMux,
                                       WINDOWS_DRIVERS, WINDOWS_DRIVER_REVIEW, WINDOWS_SOFTWARE)
-from optimus.workflow import DEFAULTS, Preferences, Workflow
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, Workflow
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +36,8 @@ def configuration(**changes):
         software_update_ids=['Fixture.App'], software_update_agreements_accepted=True,
         driver_updates_enabled=True, driver_policy='install_approved', driver_changes_approved=True,
         driver_update_agreements_accepted=True, driver_approved_updates=[driver_descriptor(driver())])
+    settings.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    settings.update({key: False for key in settings if key.startswith('privacy_')})
     settings.update(changes)
     return Preferences.validate(settings)
 

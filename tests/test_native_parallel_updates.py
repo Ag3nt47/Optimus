@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from optimus.automation import CURRENT_SETUP_VERSION, RunLease
-from optimus.workflow import DEFAULTS, Preferences, Workflow
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, Workflow
 from optimus.native_workflow import NativeWorkflow
 from optimus.parallel_updates import (ParallelAppUpdates, ProgressMux, WINDOWS_SOFTWARE,
                                       NATIVE_SOFTWARE, WINDOWS_DRIVERS, WAITING_FOR_UPDATES, isolated_backend,
@@ -30,6 +30,8 @@ def settings(**changes):
                  setup_version=CURRENT_SETUP_VERSION, software_update_policy='selected',
                  software_update_ids=['Fixture.One', 'Fixture.Two'],
                  software_update_agreements_accepted=True)
+    value.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    value.update({key: False for key in value if key.startswith('privacy_')})
     value.update(changes)
     return Preferences.validate(value)
 

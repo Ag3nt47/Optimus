@@ -20,9 +20,10 @@ function Get-OptimusOfficeProductFamily {
     return ''
 }
 function Get-OptimusOfficeRegistryRows {
+    # Per-user ARP entries are writable by unelevated software and cannot grant
+    # authority to uninstall an arbitrary system MSI product after elevation.
     $roots=@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
-        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')
     foreach($root in $roots) {
         foreach($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
             $row=Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
@@ -193,6 +194,8 @@ function Invoke-OptimusOfficeRemovalTarget {
     if($removed -and -not $restart) { Publish-OptimusOfficeRemovalProgress -Callback $ProgressCallback -Action $Action -Target $current -Phase uninstall -Percent 100 }
     return [pscustomobject]@{id=$current.id;name=$current.name;family=$current.family;scope=$current.scope;productId=$current.productId;removed=$removed;status=$status;
         reason=$reason;exitCode=$exitCode;restartNeeded=$restart;requiresReview=(-not $removed -or $restart);verification=$readback;
-        outcomeKnown=($removed -or $exitCode -notin @(0,3010,1641));
+        # Native invocation waits for and retires its child before returning an
+        # exit code. Unverified product absence is a finding, not a live installer.
+        outcomeKnown=$true;running=$false;installer_started=$true;
         note='Only the selected registered Office suite is passed to its signed Microsoft uninstaller. Windows App, WebView2, shared Windows runtimes and personal documents are not removal targets. Other Office products or languages can retain shared files.'}
 }

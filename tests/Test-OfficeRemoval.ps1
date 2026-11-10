@@ -4,6 +4,7 @@ $script:Assertions=0
 function Assert-OfficeFixture {param([bool]$Condition,[string]$Message) if(-not $Condition){throw ('FAIL: '+$Message)};$script:Assertions++}
 function Assert-OfficeRefused {param([scriptblock]$Action,[string]$Message) $refused=$false;try{$null=& $Action}catch{$refused=$true};Assert-OfficeFixture $refused $Message}
 $nativeTrusted=(Get-Command Get-OptimusOfficeTrustedBinary).ScriptBlock
+$nativeRegistryRows=(Get-Command Get-OptimusOfficeRegistryRows).ScriptBlock
 $script:BinaryHash='a'*64
 function Get-OptimusOfficeTrustedBinary {param($Path,$Method) return [pscustomobject]@{path=$Path;sha256=$script:BinaryHash;signer='CN=Microsoft Corporation, O=Microsoft Corporation'}}
 function New-OfficeFixtureRow {
@@ -77,7 +78,7 @@ Reset-OfficeFixture
 $chosen=@(Get-OptimusOfficeRemovalTargets -Family m365)[0]
 $script:NativeMode='noop'
 $result=Invoke-OptimusOfficeRemovalTarget $chosen -VerificationSeconds 0
-Assert-OfficeFixture (-not $result.removed -and $result.reason -ceq 'office_uninstall_not_verified' -and -not $result.outcomeKnown) 'exit0 with surviving product is not a successful uninstall'
+Assert-OfficeFixture (-not $result.removed -and $result.requiresReview -and $result.reason -ceq 'office_uninstall_not_verified' -and $result.outcomeKnown -and $result.running -eq $false -and $result.installer_started) 'exit0 with surviving product requires review but its retired child is known complete'
 $script:NativeMode='error'
 $result=Invoke-OptimusOfficeRemovalTarget $chosen -VerificationSeconds 0
 Assert-OfficeFixture (-not $result.removed -and $result.exitCode -eq 1603 -and $result.reason -ceq 'office_uninstaller_error') 'known uninstaller failure remains visible'
@@ -85,6 +86,13 @@ $script:NativeMode='success'
 $other=@(Get-OptimusOfficeRemovalTargets -Family m365)[1]
 $result=Invoke-OptimusOfficeRemovalTarget $other -VerificationSeconds 0
 Assert-OfficeFixture $result.removed 'one failed suite does not prevent independent next target removal'
+
+Reset-OfficeFixture
+$queue=@(Get-OptimusOfficeRemovalTargets -Family m365)
+$script:NativeMode='noop';$unverified=Invoke-OptimusOfficeRemovalTarget $queue[0] -VerificationSeconds 0
+$script:NativeMode='success';$next=Invoke-OptimusOfficeRemovalTarget $queue[1] -VerificationSeconds 0
+Assert-OfficeFixture (-not $unverified.removed -and $unverified.requiresReview -and $unverified.outcomeKnown -and -not $unverified.running) 'unverified finished uninstall does not claim installation success or live activity'
+Assert-OfficeFixture ($next.removed -and $next.outcomeKnown -and $script:Calls.Count -eq 2) 'next exact suite still uninstalls after previous exited child lacks absence proof'
 
 Reset-OfficeFixture
 $chosen=@(Get-OptimusOfficeRemovalTargets -Family m365)[0]
@@ -142,4 +150,34 @@ $script:Reparse=$false;$script:Subject='CN=Microsoft Windows, O=Microsoft Corpor
 $proof=& $nativeTrusted -Path (Join-Path $env:SystemRoot 'System32\msiexec.exe') -Method msi
 Assert-OfficeFixture ($proof.sha256 -ceq ('a'*64)) 'System32 MSI engine accepts valid Microsoft Windows signer'
 Assert-OfficeRefused {& $nativeTrusted -Path $binary -Method clicktorun} 'Office vendor executable cannot impersonate the Windows-signed MSI exception'
+# The actual registry provider must never trust a fake per-user Office ARP entry
+# which points at another product's MSI identity. All providers below are inert.
+$script:RegistryRoots=@();$script:Calls=@();$script:Products=@()
+$script:FakeUserGuid='{00000000-0000-0000-0000-000000000001}'
+$script:MachineGuid='{90160000-0011-0000-1000-0000000FF1CE}'
+function Get-ChildItem {
+ param($LiteralPath,$ErrorAction)
+ $script:RegistryRoots+=@($LiteralPath)
+ if($LiteralPath -like 'HKCU:*'){return [pscustomobject]@{PSPath='Fixture:user';PSChildName=$script:FakeUserGuid}}
+ if($LiteralPath -ceq 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'){return [pscustomobject]@{PSPath='Fixture:machine';PSChildName=$script:MachineGuid}}
+ return @()
+}
+function Get-ItemProperty {
+ param($LiteralPath,$ErrorAction)
+ $id=if($LiteralPath -ceq 'Fixture:user'){$script:FakeUserGuid}else{$script:MachineGuid}
+ [pscustomobject]@{DisplayName='Microsoft Office Professional Plus 2016';Publisher='Microsoft Corporation';DisplayVersion='16.0';WindowsInstaller=1;UninstallString=('MsiExec.exe /I'+$id)}
+}
+Set-Item Function:Get-OptimusOfficeRegistryRows $nativeRegistryRows
+$observed=@(Get-OptimusOfficeRegistryRows)
+Assert-OfficeFixture ($script:RegistryRoots.Count -eq 2 -and @($script:RegistryRoots|Where-Object {$_ -like 'HKCU:*'}).Count -eq 0) 'native Office registry provider reads only two machine uninstall roots'
+Assert-OfficeFixture ($observed.Count -eq 1 -and $observed[0].identity -ceq $script:MachineGuid) 'per-user forged Office product never appears in real provider inventory'
+$listed=@(Get-OptimusOfficeRemovalTargets -Family office)
+Assert-OfficeFixture ($listed.Count -eq 1 -and $listed[0].appIdentity -ceq $script:MachineGuid) 'only machine Office MSI product is eligible for suite removal'
+$spoof=[pscustomobject]@{path=('HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\'+$script:FakeUserGuid);identity=$script:FakeUserGuid;name='Microsoft Office Professional Plus 2016';publisher='Microsoft Corporation';version='16.0';windowsInstaller=$true;uninstall=('MsiExec.exe /I'+$script:FakeUserGuid)}
+$script:Rows=@($spoof)
+function Get-OptimusOfficeRegistryRows {return @($script:Rows)}
+$forged=@(Get-OptimusOfficeRemovalTargets -Family office)[0]
+Set-Item Function:Get-OptimusOfficeRegistryRows $nativeRegistryRows
+Assert-OfficeRefused {Invoke-OptimusOfficeRemovalTarget $forged -VerificationSeconds 0} 'forged per-user MSI target cannot pass native fresh machine revalidation'
+Assert-OfficeFixture ($script:Calls.Count -eq 0) 'per-user MSI spoof launches no uninstaller'
 Write-Output ('PASS: '+$script:Assertions+' Office removal assertions; no host uninstall or registry mutation')
