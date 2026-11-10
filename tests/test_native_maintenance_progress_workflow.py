@@ -6,12 +6,15 @@ from types import SimpleNamespace
 import pytest
 
 from optimus.backend import Backend
-from optimus.workflow import DEFAULTS, Workflow
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Workflow
 from test_workflow import MockBackend
 
 
 def config(**changes):
-    return dict(copy.deepcopy(DEFAULTS), browser_cache_enabled=False, **changes)
+    result = copy.deepcopy(DEFAULTS)
+    result.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    result.update({key: False for key in result if key.startswith('privacy_')})
+    return dict(result, browser_cache_enabled=False, **changes)
 
 
 class ProgressBackend(MockBackend):
