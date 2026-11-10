@@ -29,6 +29,10 @@ MISSING_DEFAULT_KEYS = {
     'python_relocation_repair_enabled', 'python_relocation_approvals',
     'review_inventory_reuse_enabled', 'defender_scan_reuse_enabled', 'defender_scan_reuse_hours',
     'hardware_health_enabled', 'app_removal_exclusions',
+    'office365_desktop_debloat_enabled', 'office_desktop_debloat_enabled',
+    'windows_removal_enforcement_enabled', 'windows_removal_enforcement_scope_hash',
+    'privacy_disable_online_speech_enabled', 'privacy_disable_voice_activation_enabled',
+    'privacy_disable_activity_history_enabled',
 }
 
 

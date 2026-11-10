@@ -1,8 +1,10 @@
 """Recent Defender evidence is advisory; all scan/native fixtures are inert."""
+import base64
 import copy
 from datetime import datetime, timezone
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import threading
@@ -268,6 +270,26 @@ def test_all_supported_native_payloads_fit_the_quoted_windows_command_limit():
             '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script]
         assert len(subprocess.list2cmdline(arguments)) < 32767, operation
         assert ('function Quick-Scan-ReuseStatus' in script) is (operation == 'quick_scan_reuse_status')
+
+
+@pytest.mark.parametrize('operation', sorted(_ACTIONS | {'context', 'registry_read', 'privacy_snapshot',
+    'registry_write', 'security_status', 'quick_scan', 'quick_scan_reuse_status'}))
+def test_only_registry_operations_receive_the_privacy_control_allowlist(operation):
+    script = _script(operation, {})
+    match = re.search(r"\$C=\[Text.Encoding\]::UTF8.GetString\(\[Convert\]::FromBase64String\('([^']+)'\)\)", script)
+    assert match, operation
+    controls = json.loads(base64.b64decode(match.group(1)))
+    expected = json.loads(json.dumps(_CONTROLS)) if operation in {'registry_read', 'privacy_snapshot', 'registry_write'} else {}
+    assert controls == expected
+
+
+def test_security_command_size_is_independent_of_future_privacy_catalog_growth(monkeypatch):
+    before = _script('quick_scan_reuse_status', {})
+    monkeypatch.setitem(_CONTROLS, 'future_optional_policy', {'source': 'x' * 50000})
+    assert _script('quick_scan_reuse_status', {}) == before
+    arguments = [r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', before]
+    assert len(subprocess.list2cmdline(arguments)) < 32767
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Native PowerShell parser only; no operations execute.')

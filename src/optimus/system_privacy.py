@@ -493,8 +493,11 @@ def _script(operation, payload):
     if operation not in {'context', 'registry_read', 'privacy_snapshot', 'registry_write', 'security_status', 'quick_scan', 'quick_scan_reuse_status'} | _ACTIONS:
         raise ValueError('Unknown native operation.')
     encode = lambda value: base64.b64encode(json.dumps(value, separators=(',', ':'), allow_nan=False).encode('utf-8')).decode('ascii')
+    # Defender/context operations do not read registry controls. Keep their
+    # quoted command line independent of the growing privacy policy catalog.
+    controls = _CONTROLS if operation in {'registry_read', 'privacy_snapshot', 'registry_write'} else {}
     return (_POWERSHELL.replace('__CADENCE_FUNCTIONS__', _CADENCE_POWERSHELL if operation == 'quick_scan_reuse_status' else '')
-            .replace('__OPERATION__', operation).replace('__PAYLOAD__', encode(payload or {})).replace('__CONTROLS__', encode(_CONTROLS)))
+            .replace('__OPERATION__', operation).replace('__PAYLOAD__', encode(payload or {})).replace('__CONTROLS__', encode(controls)))
 
 
 def _native_request(operation, payload=None, *, timeout=45, cancel_event=None, progress_callback=None, stop_controller=None):

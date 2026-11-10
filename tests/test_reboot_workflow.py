@@ -10,12 +10,14 @@ import pytest
 from optimus.automation import RunLease
 from optimus.reboot_workflow import run_with_reboot_resume
 from optimus.update_resume import UpdateResumeService
-from optimus.workflow import DEFAULTS, Preferences, atomic_json
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, atomic_json
 
 
 @pytest.fixture
 def case(tmp_path, monkeypatch):
     config = copy.deepcopy(DEFAULTS)
+    config.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    config.update({key: False for key in config if key.startswith('privacy_')})
     config.update(setup_version=2, cleanup_enabled=False, software_updates_enabled=False,
                   driver_updates_enabled=False)
     config['toolkit_settings']['resume']['enabled'] = True
@@ -168,6 +170,8 @@ def test_real_windows_and_native_workflow_borrow_lease_without_releasing_owner(t
     backend.system = 'linux' if native else 'win32'
     backend.preference_store = SimpleNamespace(validate=Preferences.validate)
     config = copy.deepcopy(DEFAULTS)
+    config.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    config.update({key: False for key in config if key.startswith('privacy_')})
     config.update(setup_version=2, cleanup_enabled=False, browser_cache_enabled=False,
                   software_updates_enabled=False, driver_updates_enabled=False, drive_space_guard_enabled=False)
     workflow = (NativeWorkflow if native else Workflow)(backend)
