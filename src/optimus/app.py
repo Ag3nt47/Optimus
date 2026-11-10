@@ -32,6 +32,7 @@ def parser():
     commands.add_argument('--windows-compatibility-restore', type=_run_identity, metavar='CHANGE_ID', help='Restore one recorded Windows compatibility-policy change.')
     commands.add_argument('--update-recovery', choices=('status', 'reconcile'), help='Inspect one updater journal or reconcile a verified legacy preflight error; never starts an installer.')
     commands.add_argument('--continue-updates', action='store_true', help='Continue saved approved app and driver updates, skipping held packages; no cleanup or debloat.')
+    commands.add_argument('--enforce-removals', action='store_true', help='Reapply only explicitly saved Windows app-removal and privacy scopes without opening the interface.')
     commands.add_argument('--toolkit', choices=('status', 'check', 'resume', 'integrity-check'), help='Inspect optional maintenance settings, run read-only health checks, resume a saved reboot plan, or check Windows integrity; no automatic repair.')
     commands.add_argument('--safe-stop', action='store_true', help='Ask the running Optimus window to stop new work and exit after active operations save their outcomes; never force-kills installers.')
     commands.add_argument('--self-update-worker', type=_run_identity, help=argparse.SUPPRESS)
@@ -291,9 +292,13 @@ def main(argv=None):
         from .native_backend import NativeBackend as Backend
     backend = Backend()
     if (args.verify_run or args.startup_mode or args.speed_enhancements or args.speed_restore
-            or args.windows_compatibility or args.windows_compatibility_restore or args.update_recovery or args.safe_stop or args.continue_updates or args.toolkit):
+            or args.windows_compatibility or args.windows_compatibility_restore or args.update_recovery or args.safe_stop or args.continue_updates or args.toolkit or args.enforce_removals):
         try:
-            if args.toolkit:
+            if args.enforce_removals:
+                if sys.platform != 'win32':
+                    raise RuntimeError('Saved Windows app-removal enforcement is unavailable on this platform.')
+                result = backend.enforce_saved_removals()
+            elif args.toolkit:
                 result = _toolkit_command(backend, args)
             elif args.continue_updates:
                 from .continue_updates import run_saved_updates, continuation_exit_code
@@ -318,6 +323,8 @@ def main(argv=None):
                 return 2
             if args.continue_updates:
                 return continuation_exit_code(result)
+            if args.enforce_removals:
+                return 0 if result.get('status') in ('completed', 'busy_deferred') else 2
             if args.safe_stop and result.get('request_accepted') is not True:
                 return 2
             if args.update_recovery == 'reconcile' and result.get('status') not in ('reconciled', 'already_reconciled'):

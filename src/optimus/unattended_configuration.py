@@ -11,7 +11,7 @@ import re
 UNATTENDED_DEFAULTS = {'unattended_auto_clean_enabled': False,
                        'unattended_scope_hash': '', 'unattended_browser_policy': 'skip_open'}
 UNATTENDED_SETUP_VERSION = 2
-_EXCLUDED = frozenset(('unattended_scope_hash', 'reduce_motion', 'theme', 'motion',
+_EXCLUDED = frozenset(('unattended_scope_hash', 'windows_removal_enforcement_scope_hash', 'reduce_motion', 'theme', 'motion',
                        'ui_theme', 'ui_motion_enabled',
                        'review_inventory_reuse_enabled',
                        'hardware_health_enabled',

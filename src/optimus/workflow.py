@@ -25,24 +25,52 @@ CONSUMER_PACKAGE_NAMES = (
     'Microsoft.MicrosoftSolitaireCollection', 'Microsoft.Microsoft3DViewer', 'Microsoft.Print3D',
     'Microsoft.MixedReality.Portal', 'Microsoft.People', 'Microsoft.WindowsMaps',
     'Microsoft.WindowsFeedbackHub', 'Microsoft.549981C3F5F10', 'Microsoft.SkypeApp',
-    'Microsoft.Windows.DevHome', 'Microsoft.MicrosoftPCManager', 'MicrosoftCorporationII.Windows365',
+    'Microsoft.Windows.DevHome', 'Microsoft.MicrosoftPCManager',
     'MicrosoftCorporationII.MicrosoftFamily', 'Clipchamp.Clipchamp', 'MicrosoftTeams', 'MSTeams', 'Microsoft.Copilot',
+    'Microsoft.Office.OneNote', 'Microsoft.Office.ActionsServer', 'Microsoft.OfficePushNotificationUtility',
 )
+
+CONSUMER_PACKAGE_LABELS = {
+    'Microsoft.BingNews': 'Microsoft News', 'Microsoft.BingWeather': 'Microsoft Weather',
+    'Microsoft.Getstarted': 'Windows Tips / Get Started',
+    'Microsoft.MicrosoftSolitaireCollection': 'Microsoft Solitaire Collection',
+    'Microsoft.Microsoft3DViewer': 'Microsoft 3D Viewer', 'Microsoft.Print3D': 'Microsoft Print 3D',
+    'Microsoft.MixedReality.Portal': 'Windows Mixed Reality Portal', 'Microsoft.People': 'Microsoft People',
+    'Microsoft.WindowsMaps': 'Windows Maps', 'Microsoft.WindowsFeedbackHub': 'Windows Feedback Hub',
+    'Microsoft.549981C3F5F10': 'Cortana', 'Microsoft.SkypeApp': 'Skype',
+    'Microsoft.Windows.DevHome': 'Microsoft Dev Home', 'Microsoft.MicrosoftPCManager': 'Microsoft PC Manager',
+    'MicrosoftCorporationII.MicrosoftFamily': 'Microsoft Family app', 'Clipchamp.Clipchamp': 'Clipchamp',
+    'MicrosoftTeams': 'Microsoft Teams (personal)', 'MSTeams': 'Microsoft Teams (new)',
+    'Microsoft.Copilot': 'Microsoft Copilot',
+    'Microsoft.Office.OneNote': 'OneNote (Store app)',
+    'Microsoft.Office.ActionsServer': 'Microsoft Office Actions Server',
+    'Microsoft.OfficePushNotificationUtility': 'Microsoft Office Push Notification Utility',
+}
+CONSUMER_PACKAGE_NOTES = {
+    'Microsoft.Office.OneNote': 'Uninstalling this Store app can remove its app-local data and offline note cache. Personal document folders are not targeted.',
+}
+WINDOWS_REMOVAL_KEYS = ('consumer_debloat_enabled', 'm365_debloat_enabled',
+    'office365_desktop_debloat_enabled', 'office_desktop_debloat_enabled',
+    'outlook_debloat_enabled', 'edge_debloat_enabled', 'windows_removal_enforcement_enabled')
+WINDOWS_APP_KEEP_LABEL = 'Keep Windows App — remote access (protected)'
 
 DEFAULTS = {
     'optimization_mode': 'custom',
     'request_admin_on_startup': False,
     'launch_at_sign_in': False,
     'intensity': 'Standard', 'cleanup_enabled': True, 'cleanup_age_days': 7,
-    'browser_cache_enabled': True, 'consumer_debloat_enabled': False,
+    'browser_cache_enabled': True, 'consumer_debloat_enabled': True,
     'consumer_debloat_package_names': list(CONSUMER_PACKAGE_NAMES),
     'app_removal_exclusions': [],
     'browser_history_enabled': False, 'browser_cookies_enabled': False,
     'browser_download_history_enabled': False,
     'browser_cleanup_browsers': ['edge', 'chrome', 'brave', 'vivaldi', 'firefox'],
     'browser_keep_domains': [],
-    'm365_debloat_enabled': False, 'outlook_debloat_enabled': False,
-    'edge_debloat_enabled': False, 'codex_priority_enabled': False,
+    'm365_debloat_enabled': True, 'outlook_debloat_enabled': True,
+    'office365_desktop_debloat_enabled': True, 'office_desktop_debloat_enabled': True,
+    'edge_debloat_enabled': True, 'windows_removal_enforcement_enabled': True,
+    'windows_removal_enforcement_scope_hash': '',
+    'codex_priority_enabled': False,
     'codex_priority': 'High', 'background_analysis_enabled': False,
     'analysis_interval': 5, 'reduce_motion': False,
     'setup_version': 0, 'automation_mode': 'manual',
@@ -68,11 +96,14 @@ DEFAULTS = {
     'failed_downloads_cleanup_enabled': False, 'failed_downloads_retention_days': 7,
     'drive_space_guard_enabled': True, 'drive_space_guard_target_gib': 2.0,
     'post_process_review_enabled': False,
-    'privacy_advertising_enabled': False, 'privacy_diagnostics_enabled': False,
+    'privacy_advertising_enabled': True, 'privacy_diagnostics_enabled': True,
     'privacy_block_silent_consumer_apps_enabled': False,
-    'privacy_disable_cloud_promotions_enabled': False,
+    'privacy_disable_cloud_promotions_enabled': True,
     'privacy_disable_clipboard_sync_enabled': False,
-    'privacy_disable_recall_snapshots_enabled': False,
+    'privacy_disable_recall_snapshots_enabled': True,
+    'privacy_disable_online_speech_enabled': True,
+    'privacy_disable_voice_activation_enabled': True,
+    'privacy_disable_activity_history_enabled': True,
     'privacy_disable_advertising_id': True, 'privacy_disable_tailored_experiences': True,
     'privacy_disable_optional_diagnostics': True, 'privacy_disable_app_diagnostics': True,
     'privacy_disable_suggestions': True,
@@ -170,6 +201,8 @@ class Preferences:
         value.update({'cleanup_enabled': False, 'browser_cache_enabled': False,
                       'update_payload_cleanup_enabled': False,
                       'automation_mode': 'manual', 'optimization_mode': 'custom'})
+        value.update({key: False for key in WINDOWS_REMOVAL_KEYS})
+        value.update({key: False for key in value if key.startswith('privacy_')})
         return value
 
     def load(self):
@@ -218,6 +251,11 @@ class Preferences:
         result.update(validate_unattended_configuration(result))
         result['software_app_rules'] = validate_app_rules(result['software_app_rules'])
         result['app_removal_exclusions'] = validate_app_removal_exclusions(result['app_removal_exclusions'])
+        removal_scope = result['windows_removal_enforcement_scope_hash']
+        if not isinstance(removal_scope, str) or removal_scope != '' and not re.fullmatch('[0-9a-f]{64}', removal_scope):
+            raise ValueError('The saved app-removal enforcement scope is invalid; review and save these choices again.')
+        if not result['windows_removal_enforcement_enabled']:
+            result['windows_removal_enforcement_scope_hash'] = ''
         from .python_relocation import ApprovedPythonRelocation
         relocations = result['python_relocation_approvals']
         if type(relocations) is not list or len(relocations) > 20:
@@ -231,6 +269,11 @@ class Preferences:
         if result['software_update_policy'] not in ('review', 'selected', 'all_supported'):
             raise ValueError('Software updates require review, selected IDs, or all-supported policy.')
         packages = result['consumer_debloat_package_names']
+        # Earlier saved consumer lists included the remote-access client.
+        # Remove only that legacy selection, retaining all other saved choices.
+        if type(packages) is list:
+            packages = [name for name in packages if name != 'MicrosoftCorporationII.Windows365']
+            result['consumer_debloat_package_names'] = packages
         if (type(packages) is not list or len(packages) > len(CONSUMER_PACKAGE_NAMES)
                 or any(not isinstance(item, str) or item not in CONSUMER_PACKAGE_NAMES for item in packages)
                 or len(set(packages)) != len(packages)):
@@ -570,9 +613,11 @@ class Workflow:
                                    progress_callback=item_progress('Optimize eligible internal drives'))))
             for key, action, label in (
                 ('consumer_debloat_enabled', 'consumer-apps', 'Remove selected consumer app group'),
-                ('m365_debloat_enabled', 'm365', 'Remove Microsoft 365 consumer packages'),
+                ('m365_debloat_enabled', 'm365', 'Uninstall Microsoft 365 hub and companion apps'),
+                ('office365_desktop_debloat_enabled', 'office365-desktop', 'Fully uninstall Microsoft 365 desktop apps'),
+                ('office_desktop_debloat_enabled', 'office-desktop', 'Fully uninstall desktop Microsoft Office'),
                 ('outlook_debloat_enabled', 'outlook', 'Remove new Outlook package'),
-                ('edge_debloat_enabled', 'edge', 'Uninstall Microsoft Edge using the supported installer'),
+                ('edge_debloat_enabled', 'edge', 'Uninstall Microsoft Edge browser'),
             ):
                 if configuration[key]:
                     def remove_group(action=action, label=label):
@@ -607,7 +652,7 @@ class Workflow:
                             if refused:
                                 outcome = dict(outcome, failed_items=refused)
                         return outcome
-                    stages.append((label, 'Applying only the curated package group explicitly enabled in Settings. Bing Wallpaper, Store, security, frameworks and WebView2 are preserved.', remove_group))
+                    stages.append((label, 'Applying the selected app uninstall scope. Windows App remote access, Bing Wallpaper, Store, security, frameworks and WebView2 are preserved.', remove_group))
             if configuration['software_updates_enabled']:
                 from .automated_software import run_software
                 def software_updates():
@@ -626,7 +671,9 @@ class Workflow:
                 stages.append(('Enable resource analysis', 'Starting the optional read-only CPU, memory, disk and network sampler.', lambda: self.backend.analysis_start(configuration['analysis_interval'])))
             if any(configuration[key] for key in ('privacy_advertising_enabled', 'privacy_diagnostics_enabled',
                     'privacy_block_silent_consumer_apps_enabled', 'privacy_disable_cloud_promotions_enabled',
-                    'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled')):
+                    'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled',
+                    'privacy_disable_online_speech_enabled', 'privacy_disable_voice_activation_enabled',
+                    'privacy_disable_activity_history_enabled')):
                 stages.append(('Apply saved privacy controls',
                                'Disabling selected Windows advertising and optional diagnostic sharing settings, with recovery records; managed or administrator-only settings may need review.',
                                lambda: progress_operation(self.backend.apply_system_privacy, configuration,

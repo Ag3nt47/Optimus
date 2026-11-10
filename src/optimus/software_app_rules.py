@@ -62,6 +62,10 @@ def apply_update_rules(settings, rules=None):
     result = copy.deepcopy(settings)
     rows = validate_app_rules(settings.get('software_app_rules', []) if rules is None else rules, native=True)
     exclusions = list(result.get('software_update_exclude_ids', []))
+    from .removal_enforcement import blocked_package_ids
+    for identity in sorted(blocked_package_ids(settings)):
+        if identity.casefold() not in {value.casefold() for value in exclusions}:
+            exclusions.append(identity)
     excluded = {value.casefold() for value in exclusions}
     for row in rows:
         if row['update_policy'] == 'always_ignore' and row['id'].casefold() not in excluded:

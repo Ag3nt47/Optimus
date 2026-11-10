@@ -94,6 +94,33 @@ _CONTROLS['recall_snapshots'] = dict(hive='LocalMachine', path=r'SOFTWARE\Polici
     minimum_build=26100, minimum_revision=3915,
     source='https://learn.microsoft.com/windows/client-management/mdm/policy-csp-windowsai#disableaidataanalysis',
     note='Windows blocks Recall snapshot saving and deletes previously saved snapshots when this policy is enabled. Restoring the original policy cannot restore deleted snapshots; a registry readback does not verify snapshot deletion.')
+_PRIVACY_SOURCE = 'https://learn.microsoft.com/windows/client-management/mdm/policy-csp-privacy#'
+_CONTROLS['online_speech_preference'] = dict(hive='CurrentUser',
+    path=r'Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy', name='HasAccepted',
+    desired=0, existing_only=True, scope='user', minimum_build=10240,
+    master='privacy_disable_online_speech_enabled', flag='privacy_disable_online_speech_enabled',
+    source='https://support.microsoft.com/windows/speech-voice-activation-inking-typing-and-privacy',
+    note='Changes only an existing Windows online-speech preference. Microphone access and Windows App remote audio are preserved.')
+_CONTROLS['online_speech_policy'] = dict(hive='LocalMachine',
+    path=r'Software\Policies\Microsoft\InputPersonalization', name='AllowInputPersonalization', desired=0,
+    scope='device', policy=True, minimum_build=10240,
+    master='privacy_disable_online_speech_enabled', flag='privacy_disable_online_speech_enabled',
+    source=_PRIVACY_SOURCE+'allowinputpersonalization')
+for _key, _name in (('voice_activation', 'LetAppsActivateWithVoice'),
+                    ('voice_activation_locked', 'LetAppsActivateWithVoiceAboveLock')):
+    _CONTROLS[_key] = dict(hive='LocalMachine', path=r'Software\Policies\Microsoft\Windows\AppPrivacy',
+        name=_name, desired=2, scope='device', policy=True, minimum_build=18362, allowed=(0, 1, 2),
+        master='privacy_disable_voice_activation_enabled', flag='privacy_disable_voice_activation_enabled',
+        source=_PRIVACY_SOURCE+_name.lower(),
+        note='Blocks voice-keyword activation where supported; microphone permissions and remote-desktop audio are unchanged.')
+for _key, _name, _build in (('activity_feed', 'EnableActivityFeed', 16299),
+                           ('activity_publish', 'PublishUserActivities', 16299),
+                           ('activity_upload', 'UploadUserActivities', 17134)):
+    _CONTROLS[_key] = dict(hive='LocalMachine', path=r'Software\Policies\Microsoft\Windows\System',
+        name=_name, desired=0, scope='device', policy=True, minimum_build=_build,
+        master='privacy_disable_activity_history_enabled', flag='privacy_disable_activity_history_enabled',
+        source=_PRIVACY_SOURCE+_name.lower(),
+        note='Disables supported Windows activity publishing or upload; this does not erase cloud account history.')
 # An unknown edition/build remains unverified; only recognizable Windows client
 # metadata can establish that a documented feature is simply not applicable.
 _KNOWN_CLIENT_EDITIONS = set(_CONSUMER_POLICY_EDITIONS) | {
@@ -107,6 +134,9 @@ _CONTROL_LABELS = {
     'consumer_features': 'Consumer-content policy', 'cloud_optimized_content': 'Cloud promotions',
     'consumer_account_content': 'Consumer account content', 'cross_device_clipboard': 'Cross-device clipboard',
     'recall_snapshots': 'Recall snapshots',
+    'online_speech_preference': 'Cloud speech preference', 'online_speech_policy': 'Cloud speech policy',
+    'voice_activation': 'Voice activation', 'voice_activation_locked': 'Voice activation while locked',
+    'activity_feed': 'Activity feed', 'activity_publish': 'Activity publishing', 'activity_upload': 'Activity upload',
 }
 
 
@@ -806,7 +836,7 @@ class SystemPrivacy:
                     else:
                         if snapshots is None:
                             before = _snapshot(self._call('registry_read', {'control': key}, cancel_event=cancel_event))
-                        allowed = {0, 1, 2, 3} if key == 'optional_diagnostics' else {0, 1, 2} if key == 'app_diagnostics' else {0, 1}
+                        allowed = set(control.get('allowed', (0, 1, 2, 3) if key == 'optional_diagnostics' else (0, 1, 2) if key == 'app_diagnostics' else (0, 1)))
                         if before['exists'] and before['value'] not in allowed:
                             raise ValueError('The existing preference value is not a recognized setting.')
                         item['before'] = before

@@ -105,6 +105,8 @@ class WorkflowTests(unittest.TestCase):
 
     def config(self, **values):
         result = copy.deepcopy(workflow_module.DEFAULTS)
+        result.update({key: False for key in workflow_module.WINDOWS_REMOVAL_KEYS})
+        result.update({key: False for key in result if key.startswith('privacy_')})
         result.update(values)
         return result
 

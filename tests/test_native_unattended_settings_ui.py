@@ -11,13 +11,15 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 from optimus.ui import DetailedSettingsWindow, OptimusWindow
 from optimus.unattended_configuration import approve_unattended_settings, matches_unattended
-from optimus.workflow import DEFAULTS, Preferences
+from optimus.workflow import DEFAULTS, Preferences, WINDOWS_REMOVAL_KEYS
 
 
 class CopyBackend:
     def __init__(self, directory, initial=None):
         self.data_dir = directory
-        self.settings = Preferences.validate(initial or dict(DEFAULTS, setup_version=2, automation_mode='monthly'))
+        baseline = dict(DEFAULTS, **{key: False for key in WINDOWS_REMOVAL_KEYS})
+        baseline.update(setup_version=2, automation_mode='monthly')
+        self.settings = Preferences.validate(initial or baseline)
         self.analysis_start, self.analysis_stop, self.optimize, self.close = Mock(), Mock(), Mock(), Mock()
         self.save_preferences = Mock(side_effect=AssertionError('Settings fixture captures saves without host actions.'))
     def preferences(self):

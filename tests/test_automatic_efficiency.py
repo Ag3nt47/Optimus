@@ -3,13 +3,16 @@ import copy
 
 import pytest
 
-from optimus.workflow import DEFAULTS, Preferences, Workflow
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, Workflow
 from optimus.unattended_configuration import approve_unattended_settings, matches_unattended, _scope_hash
 from test_workflow import MockBackend
 
 
 def configuration(**changes):
-    return Preferences.validate(dict(copy.deepcopy(DEFAULTS), cleanup_enabled=False,
+    result = copy.deepcopy(DEFAULTS)
+    result.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    result.update({key: False for key in result if key.startswith('privacy_')})
+    return Preferences.validate(dict(result, cleanup_enabled=False,
         browser_cache_enabled=False, drive_space_guard_enabled=False, **changes))
 
 

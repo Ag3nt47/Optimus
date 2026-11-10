@@ -1084,7 +1084,7 @@ class DetailedSettingsWindow(QMainWindow):
 
     def _build_app_protection(self):
         layout = self.layouts['Protected apps']
-        self._note(layout, 'Check apps to keep and save. Protection takes priority over Optimus debloat presets and uninstall rules. Update choices are managed on the Updates page.')
+        self._note(layout, 'Check apps to keep and save. Windows App remote access is always protected. Protection takes priority over Optimus debloat presets and uninstall rules. Update choices are managed on the Updates page.')
         bar = self._toolbar(layout)
         self.protected_app_search = QLineEdit()
         self.protected_app_search.setPlaceholderText('Search installed apps or package IDs')
@@ -1104,22 +1104,27 @@ class DetailedSettingsWindow(QMainWindow):
             self._run('app_protection_inventory', done=self._app_protection_ready)
 
     def _app_protection_ready(self, data):
-        from .app_removal_protection import validate_app_removal_exclusions
+        from .app_removal_protection import validate_app_removal_exclusions, WINDOWS_APP_RECORD, WINDOWS_APP_FAMILY
         saved = validate_app_removal_exclusions(data['saved'])
         key = lambda row: (row['kind'], row['id'].casefold())
         installed = {key(row): row for row in data['installed']}
         saved_by_key = {key(row): row for row in saved}
         records = {**installed, **saved_by_key}
+        records.setdefault(key(WINDOWS_APP_RECORD), dict(WINDOWS_APP_RECORD))
         self._protection_baseline = saved
         self.protected_apps_list.blockSignals(True)
         self.protected_apps_list.clear()
         for identity, row in sorted(records.items(), key=lambda item: (item[1]['label'].casefold(), item[0])):
-            suffix = ('Store app' if row['kind'] == 'store' else 'Desktop app') if identity in installed else 'Saved protection'
+            always_keep = row['kind'] == 'store' and row['id'].casefold() == WINDOWS_APP_FAMILY.casefold()
+            suffix = ('Always protected · remote access' if always_keep else
+                      ('Store app' if row['kind'] == 'store' else 'Desktop app') if identity in installed else 'Saved protection')
             item = QListWidgetItem(row['label'] + ' · ' + suffix)
             item.setToolTip(row['name'] + '\n' + row['id'])
             item.setData(Qt.UserRole, row)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if identity in saved_by_key else Qt.Unchecked)
+            item.setCheckState(Qt.Checked if always_keep or identity in saved_by_key else Qt.Unchecked)
+            if always_keep:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
             self.protected_apps_list.addItem(item)
         self.protected_apps_list.blockSignals(False)
         self._filter_app_protection(self.protected_app_search.text())
@@ -1510,7 +1515,7 @@ class DetailedSettingsWindow(QMainWindow):
         split.setStretchFactor(0,1)
         split.setStretchFactor(1,1)
         layout.addWidget(split,1)
-        self._note(layout,'Bing Wallpaper is protected from debloat. No target is selected by default. Review package names, scope, recovery and restart requirements before applying only your checked selection. Some removals require reinstallation.')
+        self._note(layout,'Windows App remote access and Bing Wallpaper are protected from debloat. Review package names, scope, recovery and restart requirements before applying only your checked selection. Uninstalling an app may require reinstallation to use it again.')
 
     def load_debloat_actions(self):
         self._run('debloat_actions',done=self._debloat_actions_ready)
@@ -4993,11 +4998,17 @@ class OptimusWindow(QMainWindow):
                         combo.setCurrentIndex(max(0, combo.findData(self.workflow_settings.get('unattended_browser_policy', 'skip_open'))))
                     from .launch_review import scope_fingerprint
                     settings_window.workflow_review_baseline = scope_fingerprint(self.workflow_settings)
+                    from .removal_enforcement import scope_hash
+                    settings_window.workflow_removal_review_baseline = scope_hash(self.workflow_settings)
                 message = 'Setup choices saved. ' + ('Starting the maintenance you selected.' if run_now else 'Maintenance will follow your saved cadence; no run was started now.')
                 if self._launch_consent.required and not self.session_approved(self.workflow_settings):
                     message = 'Setup choices saved. Review the updated actions before Auto Clean; automatic maintenance is paused.'
                 if analysis_error:
                     message += ' Background analysis could not be updated: ' + analysis_error
+                from .onboarding import removal_guard_save_warning
+                warning = removal_guard_save_warning(self.backend)
+                if warning:
+                    message += ' ' + warning
                 self.status.setText(message)
         finally:
             self._setup_wizard = None
@@ -5136,8 +5147,14 @@ class OptimusWindow(QMainWindow):
             ('interface_priority_boost_enabled','Prioritize Optimus interface (Above Normal CPU; takes effect the next time Optimus opens)'),
             ('browser_history_enabled','Clear selected browsers’ history'),('browser_cookies_enabled','Clear selected cookies (can sign me out)'),
             ('browser_download_history_enabled','Clear selected browser download-list records'),
-            ('consumer_debloat_enabled','Remove selected consumer bloatware'),('m365_debloat_enabled','Run Microsoft 365 debloat'),
-            ('outlook_debloat_enabled','Run Outlook debloat'),('edge_debloat_enabled','Run Edge debloat'),
+            ('consumer_debloat_enabled','Fully uninstall the individually selected Windows consumer apps'),
+            ('m365_debloat_enabled','Fully uninstall Microsoft 365 Hub and companion Store apps'),
+            ('office365_desktop_debloat_enabled','Fully uninstall Microsoft 365 desktop apps (Word, Excel, PowerPoint, classic Outlook)'),
+            ('office_desktop_debloat_enabled','Fully uninstall desktop Microsoft Office (perpetual Office suites)'),
+            ('outlook_debloat_enabled','Fully uninstall the new Outlook Store app'),
+            ('edge_debloat_enabled','Uninstall Microsoft Edge browser (keep shared WebView2)'),
+            ('windows_removal_enforcement_enabled','Automatically remove selected apps again if restored by Windows or another installer'),
+            ('keep_windows_app_protected','Keep Windows App — remote access (protected)'),
             ('software_updates_enabled','Check/apply supported software updates under saved approval'),
             ('update_payload_cleanup_enabled','Automatically delete tracked installer downloads after verified updates\n(keeps personal Downloads, Windows caches, logs and rollback backups)'),
             ('legacy_patch_review_enabled','Review known legacy/unofficial support provider paths (no automatic replacement installs)'),
@@ -5161,6 +5178,14 @@ class OptimusWindow(QMainWindow):
             ('reduce_motion','Reduce window and starfield motion')]
         for index,(key,label) in enumerate(labels):
             checkbox=WrappingCheckBox(label)
+            if key == 'keep_windows_app_protected':
+                checkbox.setChecked(True)
+                checkbox.setEnabled(False)
+                checkbox.setObjectName('keepWindowsAppProtected')
+                checkbox.setToolTip('Microsoft Windows App is preserved for remote desktop connections. Shared runtimes and WebView2 remain available.')
+                window.keep_windows_app = checkbox
+                toggles.addWidget(checkbox,index,0)
+                continue
             checkbox.setChecked(bool(settings.get(key,False)))
             if key == 'python_relocation_repair_enabled':
                 checkbox.setEnabled(bool(settings.get('python_relocation_approvals')))
@@ -5171,7 +5196,9 @@ class OptimusWindow(QMainWindow):
                 checkbox.setToolTip('Avoid duplicate metadata queries for up to 30 seconds within one maintenance run. Actions, process identities and update offers still use fresh checks; cache is discarded before relevant changes and when the run ends.')
             if 'debloat' in key:
                 checkbox.setStyleSheet('color:#ffad73;')
-                checkbox.setToolTip('Opt in to this removal stage. Review the Debloat page and target list before enabling it.')
+            from .onboarding import REMOVAL_EFFECTS
+            if key in REMOVAL_EFFECTS:
+                checkbox.setToolTip(REMOVAL_EFFECTS[key])
             controls[key]=checkbox
             toggles.addWidget(checkbox,index,0)
         layout.addLayout(toggles)
@@ -5295,7 +5322,10 @@ class OptimusWindow(QMainWindow):
             ('privacy_block_silent_consumer_apps_enabled', 'Reduce silent Windows consumer-app installations (supported preferences/policies)'),
             ('privacy_disable_cloud_promotions_enabled', 'Disable supported Windows cloud and account promotions (edition dependent)'),
             ('privacy_disable_clipboard_sync_enabled', 'Disable Windows cross-device clipboard sharing (supported editions)'),
-            ('privacy_disable_recall_snapshots_enabled', 'Disable Recall snapshots and ask Windows to delete previous snapshots — irreversible')):
+            ('privacy_disable_recall_snapshots_enabled', 'Disable Recall snapshots and ask Windows to delete previous snapshots — irreversible'),
+            ('privacy_disable_online_speech_enabled', 'Turn off cloud speech recognition (keep microphone access and Windows App audio)'),
+            ('privacy_disable_voice_activation_enabled', 'Disable background voice activation where Windows supports it'),
+            ('privacy_disable_activity_history_enabled', 'Stop Windows activity-history upload and collection where available')):
             control = WrappingCheckBox(label)
             control.setChecked(settings.get(key, False) is True)
             controls[key] = control
@@ -5322,7 +5352,7 @@ class OptimusWindow(QMainWindow):
                 dialog.deleteLater()
         privacy_restore.clicked.connect(lambda: window._run('system_privacy_history', done=show_privacy_history))
         layout.addWidget(privacy_restore)
-        from .workflow import CONSUMER_PACKAGE_NAMES
+        from .workflow import CONSUMER_PACKAGE_NAMES, CONSUMER_PACKAGE_LABELS, CONSUMER_PACKAGE_NOTES
         layout.addWidget(QLabel('CURRENT-USER CONSUMER PACKAGE SCOPE'))
         consumer_bar = FlowLayout()
         select_consumer, clear_consumer = QPushButton('Select all consumer packages'), QPushButton('Clear all consumer packages')
@@ -5332,14 +5362,16 @@ class OptimusWindow(QMainWindow):
         consumer_controls = {}
         selected_names = set(settings.get('consumer_debloat_package_names', CONSUMER_PACKAGE_NAMES))
         for name in CONSUMER_PACKAGE_NAMES:
-            control = QCheckBox(name)
+            control = WrappingCheckBox('Fully uninstall ' + CONSUMER_PACKAGE_LABELS.get(name, name))
+            control.setToolTip('Uninstalls the exact package ' + name + '. '
+                + CONSUMER_PACKAGE_NOTES.get(name, 'App-local data may be removed.') + ' Uncheck this app to keep it.')
             control.setChecked(name in selected_names)
             consumer_controls[name] = control
             layout.addWidget(control)
         window.consumer_package_controls = consumer_controls
         select_consumer.clicked.connect(lambda: [control.setChecked(True) for control in consumer_controls.values()])
         clear_consumer.clicked.connect(lambda: [control.setChecked(False) for control in consumer_controls.values()])
-        package_note = QLabel('The consumer stage removes only the selected exact current-user package names. Bing Wallpaper, security components, frameworks and shared WebView2 remain protected. Review other application removals separately. Run setup questions to edit browser scopes, cookie exceptions, package exclusions and update/device approvals.')
+        package_note = QLabel('A checked app is fully uninstalled from this Windows account when its removal stage runs. Windows App remote access, Bing Wallpaper, security components, frameworks and shared WebView2 remain protected. Uncheck an app to keep it. Uninstall results show failures and remaining components instead of claiming a completed removal.')
         package_note.setWordWrap(True)
         layout.addWidget(package_note)
         note=QLabel('Full starts with age 0: all eligible temporary/cache ages. Low selects 30 days, Standard 7 days and High 1 day; an intensity change does not enable other modules. Active, locked and protected files remain excluded.')
@@ -5396,6 +5428,11 @@ class OptimusWindow(QMainWindow):
             if 'consumer_debloat_package_names' in window.workflow_force_keys or chosen_consumers != window.workflow_consumer_baseline or 'consumer_debloat_package_names' not in value:
                 value['consumer_debloat_package_names'] = chosen_consumers
             value['unattended_browser_policy'] = unattended_browser.currentData()
+            if value.get('windows_removal_enforcement_enabled') is True:
+                from .removal_enforcement import scope_hash
+                if scope_hash(current_settings) != window.workflow_removal_review_baseline:
+                    window._error('Saved removal or privacy choices changed outside this form. Run setup questions again to review the current scope before saving.')
+                    return
             if value.get('unattended_auto_clean_enabled') is True:
                 from .workflow import Preferences
                 from .unattended_configuration import approve_unattended_settings
@@ -5410,6 +5447,13 @@ class OptimusWindow(QMainWindow):
             if value.get('windows_security_updates_enabled') and value.get('windows_security_updates_install_approved') and not value.get('windows_security_update_agreements_accepted'):
                 window._error('Accept Microsoft update agreements for automatic Windows Security/Critical patches, or leave installation approval off. No automatic reboot is requested.')
                 return
+            try:
+                from .workflow import Preferences
+                from .removal_enforcement import stamp_approval
+                value = stamp_approval(Preferences.validate(value))
+            except (ValueError, TypeError) as error:
+                window._error('One-click configuration was not saved: ' + str(error))
+                return
             def saved(result):
                 window.workflow_mode_overlay = {}
                 window.workflow_force_keys = set()
@@ -5418,11 +5462,15 @@ class OptimusWindow(QMainWindow):
                 self.workflow_settings=result if isinstance(result,dict) else value
                 from .launch_review import scope_fingerprint
                 window.workflow_review_baseline = scope_fingerprint(self.workflow_settings)
+                from .removal_enforcement import scope_hash
+                window.workflow_removal_review_baseline = scope_hash(self.workflow_settings)
                 window.speed_enhancements_panel.sync_settings(self.workflow_settings)
                 self.config.ui_motion_enabled=bool(self.appearance.get('motion',True)) and not bool(value.get('reduce_motion',False))
                 self.canvas.motion=motion_allowed(self.config)
                 self.canvas.sync_motion()
-                window.status.setText('One-click configuration saved. The main Optimize button will use these selected modules.')
+                from .onboarding import removal_guard_save_warning
+                warning = removal_guard_save_warning(self.backend)
+                window.status.setText(warning or 'One-click configuration saved. The main Optimize button will use these selected modules.')
             window._run('save_preferences',value,done=saved)
         save.clicked.connect(save_configuration)
         layout.addWidget(save)
@@ -5439,6 +5487,8 @@ class OptimusWindow(QMainWindow):
         window.workflow_controls=controls
         from .launch_review import scope_fingerprint
         window.workflow_review_baseline = scope_fingerprint(settings)
+        from .removal_enforcement import scope_hash
+        window.workflow_removal_review_baseline = scope_hash(settings)
         window.workflow_control_baseline = {key:control.isChecked() if isinstance(control,QCheckBox) else control.value() if isinstance(control,(QSpinBox,QDoubleSpinBox)) else control.currentData() if key in ('optimization_mode','automation_mode') else control.currentText() for key,control in controls.items()}
         window.workflow_consumer_baseline = [name for name,control in consumer_controls.items() if control.isChecked()]
 

@@ -52,6 +52,9 @@ INSTALLER_STAGES = frozenset({
     'Optimize eligible internal drives', 'Remove selected consumer app group',
     'Remove Microsoft 365 consumer packages', 'Remove new Outlook package',
     'Uninstall Microsoft Edge using the supported installer',
+    'Uninstall Microsoft 365 hub and companion apps',
+    'Fully uninstall Microsoft 365 desktop apps', 'Fully uninstall desktop Microsoft Office',
+    'Uninstall Microsoft Edge browser',
     'Update approved Chocolatey packages',
 })
 BLOCKED_STAGES = INSTALLER_STAGES | frozenset({

@@ -15,7 +15,8 @@ function Test-OptimusPreservedPackage {
     param([string]$Name)
     # Bing Wallpaper is explicitly retained, including name/publisher variants.
     # Bing News and Weather remain independent optional selections.
-    return (($Name -replace '[^A-Za-z0-9]','') -match '(?i)BingWallpaper')
+    return (($Name -replace '[^A-Za-z0-9]','') -match '(?i)BingWallpaper' -or
+        $Name -match '^(?i)MicrosoftCorporationII\.Windows365(?:[|_]|$)')
 }
 function Test-OptimusOptionalPackage {
     param([string]$Name,[string]$Action)
@@ -28,8 +29,9 @@ function Test-OptimusOptionalPackage {
         'Microsoft.MicrosoftSolitaireCollection','Microsoft.Microsoft3DViewer','Microsoft.Print3D',
         'Microsoft.MixedReality.Portal','Microsoft.People','Microsoft.WindowsMaps',
         'Microsoft.WindowsFeedbackHub','Microsoft.549981C3F5F10','Microsoft.SkypeApp',
-        'Microsoft.Windows.DevHome','Microsoft.MicrosoftPCManager','MicrosoftCorporationII.Windows365',
-        'MicrosoftCorporationII.MicrosoftFamily','Clipchamp.Clipchamp','MicrosoftTeams','MSTeams','Microsoft.Copilot'
+        'Microsoft.Windows.DevHome','Microsoft.MicrosoftPCManager',
+        'MicrosoftCorporationII.MicrosoftFamily','Clipchamp.Clipchamp','MicrosoftTeams','MSTeams','Microsoft.Copilot',
+        'Microsoft.Office.OneNote','Microsoft.Office.ActionsServer','Microsoft.OfficePushNotificationUtility'
     )
 }
 function Test-OptimusExcludedRemovalTarget {
@@ -38,9 +40,10 @@ function Test-OptimusExcludedRemovalTarget {
     $identity=[string]$Target.appIdentity
     $recordKind=switch($kind){
         {$_ -in @('appx','provisioned')} {'store'}
-        'office-dialog' {'desktop'}
+        {$_ -in @('office-dialog','office-clicktorun','office-msi','office-review')} {'desktop'}
         {$_ -in @('edge','desktop-edge-script')} {'edge'}
     }
+    if(Test-OptimusPreservedPackage -Name ([string]$Target.name)){return $true}
     if(-not $recordKind){return $false}
     if($recordKind -eq 'store' -and -not $identity){
         $parts=([string]$Target.packageFullName).Split('_')
@@ -92,14 +95,12 @@ function Get-OptimusEdgeTarget {
     return [pscustomobject]@{id='edge-browser';name='Microsoft Edge browser';scope=if($chosen.Count -and -not $chosen[0].systemLevel){'current-user'}else{'machine'};kind='edge';fingerprint=$fingerprint;method=$method;payload=$payload;selected=$false;admin=($method -eq 'microsoft-setup' -and $chosen[0].systemLevel);recovery='Reinstall Edge from Microsoft. Browser profile data is not separately backed up by Optimus.'}
 }
 function Get-OptimusMaintenanceTargets {
-    param([Parameter(Mandatory=$true)][ValidateSet('consumer-apps','m365','outlook','edge','office-desktop','desktop-edge-script')][string]$Action,[bool]$IncludeProvisioned=$false)
-    if ($Action -eq 'edge') { return @(Get-OptimusEdgeTarget) }
+    param([Parameter(Mandatory=$true)][ValidateSet('consumer-apps','m365','outlook','edge','office365-desktop','office-desktop','desktop-edge-script')][string]$Action,[bool]$IncludeProvisioned=$false)
+    if ($Action -eq 'edge') { return @(Get-OptimusEdgeRemovalTargets -IncludeProvisioned:$IncludeProvisioned) }
     if ($Action -eq 'desktop-edge-script') { return @(Get-OptimusDesktopEdgeIntegration) }
-    if ($Action -eq 'office-desktop') {
-        return @(Get-SCMInstalledApps | Where-Object { $_.Type -eq 'Desktop' -and $_.Publisher -match '(?i)Microsoft' -and $_.Name -match '(?i)^(Microsoft 365|Microsoft Office)' -and $_.Name -notmatch '(?i)update|proof|language|extensibility|runtime|access database' } | ForEach-Object {
-            $fingerprint=Get-OptimusMaintenanceHash ($_.Identity+'|'+$_.Name+'|'+$_.Version)
-            [pscustomobject]@{id=('office-'+$fingerprint.Substring(0,16));name=$_.Name;version=$_.Version;scope='desktop';kind='office-dialog';appIdentity=$_.Identity;fingerprint=$fingerprint;selected=$false;admin=$false;recovery='Reinstall Office from its original Microsoft account or organization deployment. This action opens Windows uninstall controls.'}
-        })
+    if ($Action -in @('office365-desktop','office-desktop')) {
+        $family=if($Action -eq 'office365-desktop'){'m365'}else{'office'}
+        return @(Get-OptimusOfficeRemovalTargets -Family $family)
     }
     $targets=@()
     foreach ($package in @(Get-AppxPackage -ErrorAction Stop)) {
@@ -201,9 +202,9 @@ function Invoke-OptimusMaintenanceRequest {
     param([Parameter(Mandatory=$true)][string]$Operation,$Arguments,[scriptblock]$ProgressCallback)
     if ($Operation -notin @('maintenance_preview','maintenance_apply')) { throw 'Unknown maintenance operation.' }
     $action=[string]$Arguments.action
-    if ($action -notin @('consumer-apps','m365','outlook','edge','office-desktop','desktop-edge-script')) { throw 'Unknown optional-app action.' }
+    if ($action -notin @('consumer-apps','m365','outlook','edge','office365-desktop','office-desktop','desktop-edge-script')) { throw 'Unknown optional-app action.' }
     $includeProvisioned=($Arguments.includeProvisioned -eq $true)
-    if ($includeProvisioned -and $action -in @('edge','office-desktop','desktop-edge-script')) { throw 'Provisioned-package removal is only available for optional Store apps.' }
+    if ($includeProvisioned -and $action -in @('office365-desktop','office-desktop','desktop-edge-script')) { throw 'Provisioned-package removal is only available for optional Store apps.' }
     $fresh=@(Get-OptimusMaintenanceTargets -Action $action -IncludeProvisioned $includeProvisioned)
     $exclusions=@($Arguments.removalExclusions | Where-Object { $null -ne $_ })
     if ($exclusions.Count -gt 500) { throw 'Too many saved application removal exclusions.' }
@@ -262,7 +263,10 @@ function Invoke-OptimusMaintenanceRequest {
                     $status=if($nativeRestartNeeded -eq $true){'Provisioning removed for future new accounts; restart required'}elseif($null -eq $nativeRestartNeeded){'Provisioning removed for future new accounts; restart status requires review'}else{'Provisioning removed for future new accounts'}
                     $results+=[pscustomobject]@{id=$target.id;name=$target.name;scope=$target.scope;status=$status;removed=$true;restartNeeded=$nativeRestartNeeded;requiresReview=($nativeRestartNeeded -ne $false)}
                 }
-                'edge' { $results+=Invoke-OptimusEdgeUninstall -Target $target -ProgressCallback $ProgressCallback }
+                'edge' { $results+=Invoke-OptimusEdgeRemovalTarget -Target $target -ProgressCallback $ProgressCallback }
+                {$_ -in @('office-clicktorun','office-msi','office-review')} {
+                    $results+=Invoke-OptimusOfficeRemovalTarget -Target $target -Exclusions $exclusions -ProgressCallback $ProgressCallback -Action $action
+                }
                 'desktop-edge-script' { $results+=Start-OptimusDesktopEdgeScript -Target $target }
                 'office-dialog' {
                     Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\control.exe') -ArgumentList 'appwiz.cpl' -ErrorAction Stop

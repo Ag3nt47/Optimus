@@ -1,5 +1,7 @@
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+. (Join-Path $PSScriptRoot '..\src\optimus\engine\EdgeRemoval.ps1')
+. (Join-Path $PSScriptRoot '..\src\optimus\engine\OfficeRemoval.ps1')
 . (Join-Path $PSScriptRoot '..\src\optimus\engine\MaintenanceOperations.ps1')
 $script:Assertions=0
 function Assert-OptimusTest {param([bool]$Condition,[string]$Message) if(-not $Condition){throw ('FAIL: '+$Message)};$script:Assertions++}
@@ -84,57 +86,53 @@ $legacy=[pscustomobject]@{id=('appx-'+$legacyFingerprint.Substring(0,20));finger
 $beforeCalls=$script:Calls.Count;$blocked=$false
 try{Invoke-OptimusMaintenanceRequest -Operation maintenance_apply -Arguments @{action='consumer-apps';targets=@($legacy);confirmation='REMOVE'}|Out-Null}catch{$blocked=$true}
 Assert-OptimusTest ($blocked -and $script:Calls.Count -eq $beforeCalls) 'stale pre-protection Bing plan cannot remove retained package'
-# Saved exclusions are applied to fresh AppX inventory at the native boundary.
+# Windows App is preserved even before a saved exclusion has been created.
 $windowsApp=[pscustomobject]@{Name='MicrosoftCorporationII.Windows365';PackageFullName='MicrosoftCorporationII.Windows365_7.5.9.0_x64__8wekyb3d8bbwe';PackageFamilyName='MicrosoftCorporationII.Windows365_8wekyb3d8bbwe';Version='7.5.9.0';NonRemovable=$false;IsFramework=$false;IsResourcePackage=$false}
 $weather=[pscustomobject]@{Name='Microsoft.BingWeather';PackageFullName='Microsoft.BingWeather_1.0.0.0_x64__8wekyb3d8bbwe';Version='1.0.0.0';NonRemovable=$false;IsFramework=$false;IsResourcePackage=$false}
 $script:Packages=@($windowsApp,$weather)
 $exclusion=[pscustomobject]@{kind='store';id=$windowsApp.PackageFamilyName;name=$windowsApp.Name;label='Microsoft Windows App'}
 $unprotectedPreview=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='consumer-apps'}
 $protectedPreview=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='consumer-apps';removalExclusions=@($exclusion)}
-Assert-OptimusTest ($protectedPreview.protectedCount -eq 1 -and $protectedPreview.targets.Count -eq 1 -and $protectedPreview.targets[0].name -ceq $weather.Name) 'preview protects exact Windows App family only'
+Assert-OptimusTest ($unprotectedPreview.targets.Count -eq 1 -and $unprotectedPreview.targets[0].name -ceq $weather.Name) 'Windows App never enters the consumer removal candidates'
+Assert-OptimusTest ($protectedPreview.targets.Count -eq 1 -and $protectedPreview.targets[0].name -ceq $weather.Name) 'saved Windows App protection retains unrelated removable targets'
 $beforeCalls=$script:Calls.Count
 $protectedResult=Invoke-OptimusMaintenanceRequest maintenance_apply @{action='consumer-apps';targets=$unprotectedPreview.targets;confirmation='REMOVE';removalExclusions=@($exclusion)}
 Assert-OptimusTest ($script:Calls.Count -eq ($beforeCalls+1) -and $script:Calls[-1].package -ceq $weather.PackageFullName) 'stale mixed plan removes only the unprotected fixture'
-Assert-OptimusTest ($protectedResult.results.Count -eq 2 -and $protectedResult.results[0].protected -eq $true -and $protectedResult.results[0].removed -eq $false -and $protectedResult.results[1].removed -eq $true) 'protection skip and unrelated removal remain distinguishable'
+Assert-OptimusTest ($protectedResult.results.Count -eq 1 -and $protectedResult.results[0].removed -eq $true) 'unrelated removable package continues while Windows App remains excluded'
 Assert-OptimusTest ($script:Packages.Count -eq 1 -and $script:Packages[0].PackageFamilyName -ceq $windowsApp.PackageFamilyName) 'Windows App survives native apply'
 $provisioned=[pscustomobject]@{kind='provisioned';name=$windowsApp.Name;packageFullName='MicrosoftCorporationII.Windows365_8.0.0.0_neutral_~_8wekyb3d8bbwe'}
 Assert-OptimusTest (Test-OptimusExcludedRemovalTarget $provisioned @($exclusion)) 'provisioned release matches the same stable family'
+Assert-OptimusTest (Test-OptimusExcludedRemovalTarget $provisioned @()) 'mandatory Windows App preservation does not depend on saved configuration'
 $provisioned.packageFullName='MicrosoftCorporationII.Windows365_8.0.0.0_neutral_~_otherpub00000'
-Assert-OptimusTest (-not(Test-OptimusExcludedRemovalTarget $provisioned @($exclusion))) 'different publisher is not protected by similar package name'
-# Native Edge regression fixtures: every process launch and installed-state
-# query is mocked. These checks never run WinGet or the Microsoft installer.
-$script:EdgeExitCode=-1978335212
-$script:EdgeRemaining=$true
-$script:EdgeAdmin=$true
-$script:EdgeLaunches=@()
-function Get-OptimusEdgeTarget {if($script:EdgeRemaining){return @([pscustomobject]@{id='edge-browser'})};return @()}
-function Test-OptimusMaintenanceAdmin {return $script:EdgeAdmin}
-function Start-Process {param($FilePath,$ArgumentList,$ErrorAction,[switch]$PassThru,$Verb,$WorkingDirectory,$WindowStyle,[switch]$Wait) $script:EdgeLaunches+=[pscustomobject]@{File=$FilePath;Arguments=@($ArgumentList);WindowStyle=$WindowStyle;Wait=$Wait.IsPresent};return [pscustomobject]@{Id=12345;ExitCode=$script:EdgeExitCode}}
-$edge=[pscustomobject]@{id='edge-browser';name='Microsoft Edge browser';method='winget';payload=[pscustomobject]@{executable='C:\OptimusFixture\winget.exe';packageId='Microsoft.Edge'}}
-$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
-Assert-OptimusTest ($edgeResult.exitCode -eq -1978335212 -and $edgeResult.exitCodeHex -ceq '0x8A150014') 'signed native package-not-found exit preserved exactly'
-Assert-OptimusTest ($edgeResult.reason -ceq 'winget_no_applications_found' -and $edgeResult.requiresReview -and $edgeResult.skipped -and -not $edgeResult.removed -and $edgeResult.remainingDetected) 'package identity miss accurately requires review and retains Edge'
-Assert-OptimusTest ($edgeResult.status -notmatch 'Windows may restrict' -and $script:EdgeLaunches.Count -eq 1 -and $script:EdgeLaunches[0].File -ceq 'C:\OptimusFixture\winget.exe') 'package identity miss does not claim a Windows restriction or launch a fallback'
-Assert-OptimusTest (($script:EdgeLaunches[0].Arguments -join '|') -ceq 'uninstall|--id|Microsoft.Edge|--exact|--disable-interactivity') 'only exact stable package uninstall requested in fixture'
-$script:EdgeRemaining=$false
-$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
-Assert-OptimusTest (-not $edgeResult.removed -and -not $edgeResult.remainingDetected -and $edgeResult.requiresReview) 'package-not-found never claims removal even if a concurrent inventory finds no Edge'
-$script:EdgeExitCode=0;$script:EdgeRemaining=$true
-$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
-Assert-OptimusTest (-not $edgeResult.removed -and $edgeResult.reason -ceq 'edge_still_detected') 'successful process exit alone cannot claim removal'
-$script:EdgeRemaining=$false
-$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
-Assert-OptimusTest ($edgeResult.removed -and -not $edgeResult.requiresReview -and $edgeResult.reason -ceq 'removal_verified') 'successful exit plus fresh absent inventory verifies removal'
-$script:EdgeExitCode=3010;$script:EdgeRemaining=$true
-$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
-Assert-OptimusTest (-not $edgeResult.removed -and $edgeResult.restartNeeded -and $edgeResult.reason -ceq 'restart_required') 'restart result remains unverified until inventory confirms absence'
-$edge.method='microsoft-setup';$edge.payload=[pscustomobject]@{path='C:\OptimusFixture\Microsoft\Edge\Installer\setup.exe';systemLevel=$true}
-$script:EdgeExitCode=0
-$edgeResult=Invoke-OptimusEdgeUninstall -Target $edge
-$setupLaunch=$script:EdgeLaunches[-1]
-Assert-OptimusTest (($setupLaunch.Arguments -join '|') -ceq '--uninstall|--verbose-logging|--system-level' -and $setupLaunch.WindowStyle -eq 'Hidden' -and $setupLaunch.Wait) 'Microsoft installer route uses normal uninstall without a force flag'
-$script:EdgeAdmin=$false;$beforeLaunches=$script:EdgeLaunches.Count;$blocked=$false
-try{Invoke-OptimusEdgeUninstall -Target $edge|Out-Null}catch{$blocked=$true}
-Assert-OptimusTest ($blocked -and $script:EdgeLaunches.Count -eq $beforeLaunches) 'machine installer remains blocked without administrator permission'
+Assert-OptimusTest (Test-OptimusExcludedRemovalTarget $provisioned @()) 'Windows App name is conservatively preserved for any publisher metadata'
+
+# New module dispatch is exercised with strict fixture signatures: unknown
+# parameters, accidental direct launches or changed selections cannot pass.
+$script:EdgeCalls=@();$script:OfficeCalls=@();$script:EdgeProvisionedFlags=@()
+$script:EdgeFixture=[pscustomobject]@{id='edge-fixture';name='Microsoft Edge browser';kind='edge';method='edge-scoped';fingerprint=('e'*64);admin=$false;scope='current-user'}
+function Get-OptimusEdgeRemovalTargets {param([bool]$IncludeProvisioned=$false)$script:EdgeProvisionedFlags+=@($IncludeProvisioned);return @($script:EdgeFixture)}
+function Invoke-OptimusEdgeRemovalTarget {[CmdletBinding()]param($Target,[scriptblock]$ProgressCallback)$script:EdgeCalls+=@($Target.id);return [pscustomobject]@{id=$Target.id;name=$Target.name;removed=$true;restartNeeded=$false;sharedComponentsPreserved=$true}}
+function Start-Process {param($FilePath,$ArgumentList,$ErrorAction,[switch]$PassThru,$Verb,$WorkingDirectory,$WindowStyle,[switch]$Wait)throw 'Unexpected real program launch in integrated maintenance fixture.'}
+$edgePreview=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='edge';includeProvisioned=$true}
+$edgeResult=Invoke-OptimusMaintenanceRequest maintenance_apply @{action='edge';includeProvisioned=$true;targets=$edgePreview.targets;confirmation='REMOVE'}
+Assert-OptimusTest ($edgeResult.results.Count -eq 1 -and $edgeResult.results[0].removed -and $script:EdgeCalls.Count -eq 1) 'new Edge module receives reviewed target without unsupported parameters'
+Assert-OptimusTest ($script:EdgeProvisionedFlags.Count -eq 2 -and $script:EdgeProvisionedFlags[0] -and $script:EdgeProvisionedFlags[1]) 'explicit Edge future-user scope is retained across preview/apply'
+$edgeExclusion=[pscustomobject]@{kind='desktop';id='Microsoft.Edge';name='Microsoft Edge';label='Microsoft Edge'}
+$protectedEdge=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='edge';removalExclusions=@($edgeExclusion)}
+Assert-OptimusTest ($protectedEdge.targets.Count -eq 0 -and $protectedEdge.protectedCount -eq 1) 'saved Edge exclusion remains effective at the native boundary'
+$stale=$script:EdgeFixture|ConvertTo-Json|ConvertFrom-Json;$stale.fingerprint='f'*64;$before=$script:EdgeCalls.Count;$blocked=$false
+try{Invoke-OptimusMaintenanceRequest maintenance_apply @{action='edge';targets=@($stale);confirmation='REMOVE'}|Out-Null}catch{$blocked=$true}
+Assert-OptimusTest ($blocked -and $script:EdgeCalls.Count -eq $before) 'stale Edge plan cannot reach removal module'
+
+$script:OfficeFixture=@([pscustomobject]@{id='office-first';name='Microsoft 365 Fixture';kind='office-clicktorun';appIdentity='Office.First';method='clicktorun';fingerprint=('a'*64);admin=$false;scope='desktop'},[pscustomobject]@{id='office-second';name='Microsoft Office Fixture';kind='office-msi';appIdentity='Office.Second';method='msi';fingerprint=('b'*64);admin=$false;scope='desktop'})
+function Get-OptimusOfficeRemovalTargets {param($Family)$script:OfficeFamily=$Family;return @($script:OfficeFixture)}
+function Invoke-OptimusOfficeRemovalTarget {[CmdletBinding()]param($Target,$Exclusions,[scriptblock]$ProgressCallback,$Action)$script:OfficeCalls+=@([pscustomobject]@{id=$Target.id;action=$Action});if($Target.id -ceq 'office-first'){return [pscustomobject]@{id=$Target.id;name=$Target.name;removed=$false;error='Fixture first-product failure';requiresReview=$true;restartNeeded=$false}};return [pscustomobject]@{id=$Target.id;name=$Target.name;removed=$true;restartNeeded=$false}}
+$officePreview=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='office365-desktop'}
+Assert-OptimusTest ($script:OfficeFamily -ceq 'm365' -and $officePreview.targets.Count -eq 2) 'desktop Microsoft 365 preview is dispatched to native suite inventory'
+$officeResult=Invoke-OptimusMaintenanceRequest maintenance_apply @{action='office365-desktop';targets=$officePreview.targets;confirmation='REMOVE'}
+Assert-OptimusTest ($script:OfficeCalls.Count -eq 2 -and -not $officeResult.results[0].removed -and $officeResult.results[1].removed -and $script:OfficeCalls[1].action -ceq 'office365-desktop') 'one Office product failure does not block the next reviewed product'
+$officeExclusion=[pscustomobject]@{kind='desktop';id='Office.Second';name='Microsoft Office Fixture';label='Keep Office Fixture'}
+$officeProtected=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='office-desktop';removalExclusions=@($officeExclusion)}
+Assert-OptimusTest ($script:OfficeFamily -ceq 'office' -and $officeProtected.targets.Count -eq 1 -and $officeProtected.protectedCount -eq 1) 'desktop Office uses exact saved removal protections'
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealAppRemovals=0;RealExternalProgramsLaunched=0;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress
 

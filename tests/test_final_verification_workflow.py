@@ -8,12 +8,15 @@ from unittest.mock import Mock
 
 import pytest
 
-from optimus.workflow import DEFAULTS, FINAL_VERIFICATION_STAGE, Workflow
+from optimus.workflow import DEFAULTS, FINAL_VERIFICATION_STAGE, WINDOWS_REMOVAL_KEYS, Workflow
 from test_workflow import MockBackend, mock_verification
 
 
 def config(**changes):
-    return dict(copy.deepcopy(DEFAULTS), cleanup_enabled=False, browser_cache_enabled=False, **changes)
+    result = copy.deepcopy(DEFAULTS)
+    result.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    result.update({key: False for key in result if key.startswith('privacy_')})
+    return dict(result, cleanup_enabled=False, browser_cache_enabled=False, **changes)
 
 
 def verification(status='needs_review', failed_items=0):

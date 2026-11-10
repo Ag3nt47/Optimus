@@ -109,13 +109,32 @@ class Backend(ExtendedMaintenanceBackend):
 
     def save_preferences(self, settings, *, _force_startup_launch=False):
         candidate = self.preference_store.validate(settings)
+        from .removal_enforcement import approved
+        # Only a reviewed setup/one-click Save can stamp a new removal scope.
+        # Startup, toolkit and app-rule saves must not approve new defaults.
+        self.last_removal_guard_registration = {}
         with self.preference_store.lock:
             previous = self.preferences()
             receipt = None
             if _force_startup_launch or candidate.get('launch_at_sign_in', False) != previous.get('launch_at_sign_in', False):
                 receipt = self._startup_launch_service().set_enabled(candidate['launch_at_sign_in'])
             try:
-                return self.preference_store.save(candidate)
+                saved = self.preference_store.save(candidate)
+                if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+                    try:
+                        registered = self._removal_guard_service().configure(approved(saved), saved)
+                        self.last_removal_guard_registration = {'status': 'configured', 'result': registered}
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+                        # Settings remain saved. A failed task registration is
+                        # reported, never counted as background enforcement.
+                        from .workflow import atomic_json
+                        self.last_removal_guard_registration = {'status': 'needs_review', 'error': str(error)[:2000]}
+                    try:
+                        from .workflow import atomic_json
+                        atomic_json(self.data_dir / 'removal-guard-registration-status.json', self.last_removal_guard_registration)
+                    except OSError:
+                        pass  # The visible outcome survives even if its status log cannot be written.
+                return saved
             except Exception as error:
                 if receipt is not None:
                     try:
@@ -129,6 +148,24 @@ class Backend(ExtendedMaintenanceBackend):
         if not hasattr(self, '_startup_registration'):
             self._startup_registration = StartupRegistration(self.data_dir)
         return self._startup_registration
+
+    def _removal_guard_service(self):
+        from .removal_enforcement import RemovalGuardRegistration
+        return RemovalGuardRegistration(self.data_dir)
+
+    def removal_guard_status(self):
+        return self._removal_guard_service().status()
+
+    def enforce_saved_removals(self):
+        from .removal_enforcement import run_saved_removals
+        return run_saved_removals(self)
+
+    def edge_install_policy(self):
+        from .removal_enforcement import approved
+        current = self.preferences()
+        if not approved(current) or current.get('edge_debloat_enabled') is not True:
+            return {'applied': False, 'reason': 'approval_changed', 'supported': False}
+        return self.bridge.request('edge_install_policy')
 
     def startup_launch_status(self):
         return self._startup_launch_service().status()

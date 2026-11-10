@@ -22,7 +22,15 @@ def rule(identity='Fixture.App', *, source='winget', update='always_update', pre
 
 
 def settings(**changes):
-    return dict(copy.deepcopy(DEFAULTS), setup_version=2, **changes)
+    result = copy.deepcopy(DEFAULTS)
+    # These fixtures isolate per-app updater choices. Removal enforcement has
+    # separate tests for its default-on package exclusions and saved approvals.
+    result.update(setup_version=2, consumer_debloat_enabled=False,
+        m365_debloat_enabled=False, office365_desktop_debloat_enabled=False,
+        office_desktop_debloat_enabled=False, outlook_debloat_enabled=False,
+        edge_debloat_enabled=False, windows_removal_enforcement_enabled=False)
+    result.update(changes)
+    return result
 
 
 @pytest.fixture(scope='module')

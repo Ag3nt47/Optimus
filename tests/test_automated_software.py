@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
 from optimus.automated_software import fresh_candidates, run_software, is_newer_version
-from optimus.workflow import DEFAULTS, Preferences, Workflow
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, Workflow
 from test_workflow import mock_verification
 
 
@@ -15,7 +15,10 @@ def package(identity='Vendor.One', **overrides):
 
 
 def configuration(**overrides):
-    return dict(copy.deepcopy(DEFAULTS), **dict({'software_updates_enabled': True,
+    result = copy.deepcopy(DEFAULTS)
+    result.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    result.update({key: False for key in result if key.startswith('privacy_')})
+    return dict(result, **dict({'software_updates_enabled': True,
         'software_update_policy': 'all_supported', 'software_update_all_approved': True,
         'software_update_agreements_accepted': True}, **overrides))
 

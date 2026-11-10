@@ -12,13 +12,17 @@ from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 from optimus.launch_review import LaunchConsent, ask_launch_review, launch_warning, scope_fingerprint
 from optimus.native_ui import NativeOptimusWindow
 from optimus.ui import OptimusWindow
-from optimus.workflow import DEFAULTS
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS
 from optimus.automation import CURRENT_SETUP_VERSION
 from test_onboarding import FixtureBackend
 
 
 def settings(**changes):
     result = copy.deepcopy(DEFAULTS)
+    # These cases exercise an explicitly review-only fixture configuration.
+    # New-install removal defaults have their own dedicated regression tests.
+    result.update({key: False for key in WINDOWS_REMOVAL_KEYS})
+    result.update({key: False for key in result if key.startswith('privacy_')})
     result.update(setup_version=CURRENT_SETUP_VERSION, cleanup_enabled=False, browser_cache_enabled=False)
     result.update(changes)
     return result

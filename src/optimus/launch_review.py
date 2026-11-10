@@ -95,6 +95,7 @@ def launch_warning(settings):
             checks.append('Browser cleanup has no selected browser; no browser family is authorized.')
     from .app_removal_protection import is_removal_protected, validate_app_removal_exclusions
     removal_exclusions = validate_app_removal_exclusions(settings.get('app_removal_exclusions', []))
+    checks.append('Always preserve Windows App for remote desktop connections, shared WebView2, Windows app runtimes and security components.')
     if removal_exclusions:
         rule_scope['keep_uninstalled'] = [
             row['id'] + ' [' + row['source'] + ']' for row in settings.get('software_app_rules', [])
@@ -111,10 +112,14 @@ def launch_warning(settings):
             checks.append('Consumer-app removal has no selected unprotected package names.')
     for key, description in (
         ('m365_debloat_enabled', 'Uninstall Microsoft 365 hub/companion Store apps if installed; app-local data may be removed.'),
+        ('office365_desktop_debloat_enabled', 'Fully uninstall installed Microsoft 365 subscription desktop apps, including Word, Excel, PowerPoint and classic Outlook. Reinstallation is needed to use the removed apps again.'),
+        ('office_desktop_debloat_enabled', 'Fully uninstall installed perpetual Microsoft Office desktop suites. Microsoft 365 subscription apps follow their separate checkbox.'),
         ('outlook_debloat_enabled', 'Uninstall the new Outlook Store app if installed; app-local data may be removed.'),
-        ('edge_debloat_enabled', 'Request Microsoft Edge removal through its supported uninstaller if available.')):
+        ('edge_debloat_enabled', 'Uninstall the Microsoft Edge browser through a matching Microsoft installer or package action; preserve shared WebView2 and its updates.')):
         if settings.get(key) is True:
             actions.append(description)
+    if settings.get('windows_removal_enforcement_enabled') is True:
+        actions.append('Remove selected apps again if Windows or another installer restores them. A separate approved background task checks at sign-in, every 15 minutes and after successful Windows Updates, even while the GUI is closed. This is independent of Launch at sign-in; turn off automatic removal to revoke it. Supported domain policies may additionally block installation; Windows security updates remain enabled. Windows upgrades can restore components before the next check. Privacy settings apply during Auto Clean, not through this task.')
     for prefix, label, roots in (('duplicate', 'local duplicate', settings.get('duplicate_roots') or []),
                                  ('cloud', 'OneDrive duplicate', settings.get('cloud_folder_ids') or [])):
         enabled = settings.get('duplicates_enabled' if prefix == 'duplicate' else 'cloud_review_enabled') is True
@@ -171,6 +176,9 @@ def launch_warning(settings):
         ('privacy_disable_cloud_promotions_enabled', 'Apply supported policies to reduce cloud/account promotions; Windows edition limits apply.'),
         ('privacy_disable_clipboard_sync_enabled', 'Turn off supported Windows cross-device clipboard syncing; local clipboard history is unchanged. Windows edition limits apply.'),
         ('privacy_disable_recall_snapshots_enabled', 'Disable supported Windows Recall snapshot saving. Windows also permanently deletes previous Recall snapshots; undoing this policy cannot recover deleted snapshots. Windows edition/build limits apply.'),
+        ('privacy_disable_online_speech_enabled', 'Turn off supported cloud speech recognition; retain microphone access and Windows App audio.'),
+        ('privacy_disable_voice_activation_enabled', 'Disable supported background voice activation; unsupported Windows editions or policies are reported.'),
+        ('privacy_disable_activity_history_enabled', 'Stop supported Windows activity-history collection and upload; unsupported settings are reported.'),
         ('speed_enhancements_enabled', 'Apply supported saved power/performance preferences; power use or heat can increase.'),
         ('drive_optimization_enabled', 'Run eligible Windows SSD TRIM/HDD optimization after native checks.'),
         ('codex_priority_enabled', 'Apply the saved Codex process-priority profile.'),
@@ -193,6 +201,8 @@ def launch_warning(settings):
               if any(settings.get(key) is True for key in ('cleanup_enabled', 'browser_cache_enabled', 'browser_history_enabled',
                   'browser_cookies_enabled', 'browser_download_history_enabled', 'consumer_debloat_enabled',
                   'm365_debloat_enabled', 'outlook_debloat_enabled', 'edge_debloat_enabled',
+                  'office365_desktop_debloat_enabled', 'office_desktop_debloat_enabled',
+                  'windows_removal_enforcement_enabled',
                   'codex_archives_cleanup_enabled', 'angerona_logs_cleanup_enabled', 'failed_downloads_cleanup_enabled',
                   'privacy_disable_recall_snapshots_enabled')) or categories or rule_scope['enabled'] and rule_scope['keep_uninstalled']
               else 'Auto Clean runs the saved checks and approved actions below. Native eligibility and saved scopes still apply.')

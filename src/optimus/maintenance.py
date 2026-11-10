@@ -25,10 +25,11 @@ from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING, is_newer_versi
 
 _ACTIONS = (
     {"id": "consumer-apps", "name": "Optional Windows apps", "description": "Review a curated exact-name list. Store, App Installer, security, frameworks, Xbox and OneDrive are preserved.", "admin": False},
-    {"id": "m365", "name": "Microsoft 365 consumer apps", "description": "Review Microsoft 365 hub/companion Store apps. Desktop Office, Outlook and OneDrive are separate.", "admin": False},
+    {"id": "m365", "name": "Microsoft 365 hub and companion apps", "description": "Uninstall selected Microsoft 365 hub/companion Store apps. Full desktop suites have separate controls.", "admin": False},
     {"id": "outlook", "name": "New Outlook app", "description": "Review the optional Microsoft.OutlookForWindows Store app separately. Local app data can be removed.", "admin": False},
     {"id": "edge", "name": "Microsoft Edge browser", "description": "Use an installed uninstaller. Windows may restrict removal. Shared WebView2 and update services are preserved.", "admin": False},
-    {"id": "office-desktop", "name": "Desktop Microsoft Office uninstall", "description": "Find registered desktop Office products and open Windows Programs and Features for their uninstall flow.", "admin": False},
+    {"id": "office365-desktop", "name": "Fully uninstall Microsoft 365 desktop apps", "description": "Uninstall registered Microsoft 365 desktop suites using their signed Microsoft uninstallers. Personal documents and Windows App are preserved.", "admin": True},
+    {"id": "office-desktop", "name": "Fully uninstall desktop Microsoft Office", "description": "Uninstall registered perpetual Microsoft Office suites using supported uninstallers. Microsoft 365, Project, Visio and shared runtimes remain separate.", "admin": True},
     {"id": "desktop-edge-script", "name": "Existing Desktop Edge removal script", "description": "Optional integration: review the existing script on the Windows Desktop, then launch its visible administrator console with its own typed APPLY gate. It changes region/update policies and has no complete undo.", "admin": True, "external": True},
 )
 _ALLOWED_ACTIONS = frozenset(item["id"] for item in _ACTIONS)
@@ -172,7 +173,7 @@ class Maintenance:
         provisioned = options.get("includeProvisioned", False)
         if not isinstance(provisioned, bool):
             raise ValueError("includeProvisioned must be true or false.")
-        if provisioned and action_id in {"edge", "office-desktop", "desktop-edge-script"}:
+        if provisioned and action_id in {"office365-desktop", "office-desktop", "desktop-edge-script"}:
             raise ValueError("Provisioning applies only to optional Store-app actions.")
         exclusions = self._removal_exclusions()
         response = self._request("maintenance_preview", action=action_id, includeProvisioned=provisioned,

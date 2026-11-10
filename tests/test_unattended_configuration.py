@@ -14,12 +14,15 @@ from optimus.native_ui import NativeSetupWizard
 from optimus.onboarding import InitialSetupWizard
 from optimus.unattended_configuration import (UNATTENDED_DEFAULTS, approve_unattended_settings,
                                              matches_unattended, validate_unattended_configuration)
-from optimus.workflow import DEFAULTS, Preferences, full_optimization_settings
+from optimus.workflow import DEFAULTS, Preferences, full_optimization_settings, WINDOWS_REMOVAL_KEYS
 
 
 def approved(**changes):
-    return approve_unattended_settings(Preferences.validate(dict(DEFAULTS, setup_version=2,
-        unattended_auto_clean_enabled=True, **changes)))
+    baseline = dict(DEFAULTS, **{key: False for key in WINDOWS_REMOVAL_KEYS})
+    baseline.update(privacy_disable_recall_snapshots_enabled=False, setup_version=2,
+                    unattended_auto_clean_enabled=True)
+    baseline.update(changes)
+    return approve_unattended_settings(Preferences.validate(baseline))
 
 
 def test_new_and_old_preferences_never_opt_in_implicitly():

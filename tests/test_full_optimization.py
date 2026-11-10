@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from optimus.automation import CURRENT_SETUP_VERSION, due, record_attempt
-from optimus.workflow import CONSUMER_PACKAGE_NAMES, DEFAULTS, Preferences, Workflow, full_optimization_settings
+from optimus.workflow import CONSUMER_PACKAGE_NAMES, DEFAULTS, Preferences, Workflow, full_optimization_settings, WINDOWS_REMOVAL_KEYS
 from test_workflow import mock_verification
 
 
@@ -149,7 +149,8 @@ def test_automatic_consumer_removal_respects_exact_list_and_scope(tmp_path):
         {'id': 'wrong-kind', 'name': 'Microsoft.BingNews', 'kind': 'office-dialog', 'scope': 'current-user'},
     ]}
     service.debloat_apply.return_value = {'results': [{'id': 'yes', 'removed': True}]}
-    settings = dict(DEFAULTS, cleanup_enabled=False, browser_cache_enabled=False,
+    settings = dict(DEFAULTS, **{key: False for key in WINDOWS_REMOVAL_KEYS})
+    settings.update(cleanup_enabled=False, browser_cache_enabled=False,
                     consumer_debloat_enabled=True, consumer_debloat_package_names=['Microsoft.BingNews'])
     result = Workflow(service).run(settings, lambda _: None)
     assert result['status'] == 'completed'

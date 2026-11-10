@@ -21,6 +21,8 @@ PORTABLE_SUITES = (
     'test_opera_browser.py', 'test_system_restore.py', 'test_driver_backups.py', 'test_recovery_panel.py',
     'test_launch_review.py', 'test_smart_setup_integration.py', 'test_consumer_privacy_controls.py',
     'test_unattended_configuration.py',
+    'test_windows_removal_choices.py', 'test_removal_enforcement.py',
+    'test_recording_privacy_controls.py', 'test_removal_scope_save.py',
     'test_change_history.py', 'test_revert_dialog.py',
     'test_live_metrics.py', 'test_app_presence.py', 'test_driver_update_backup.py',
     'test_thread_metrics.py', 'test_run_review_inventory.py',

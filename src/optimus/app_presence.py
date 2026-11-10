@@ -467,6 +467,13 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
         item_cancel = navigation.cancellation(cancel_event) if navigation is not None else cancel_event
         try:
             approvals_current()
+            from .removal_enforcement import package_blocked
+            if rule['source'] == 'winget' and rule['presence'] == 'keep_installed' and package_blocked(settings, rule['id']):
+                row.update(status='skipped', result=_known(
+                    'The saved Windows removal choice takes precedence over Always install for this package.',
+                    skipped=True, reason='selected_for_removal'))
+                items.append(row)
+                continue
             snapshot = provider.inspect(rule['id'], rule['source'], item_cancel, desired_presence=rule['presence'])
             row['before'] = copy.deepcopy(snapshot['installed'])
             action = 'install' if rule['presence'] == 'keep_installed' else 'uninstall'

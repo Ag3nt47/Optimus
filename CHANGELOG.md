@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.44
+
+- Add separate full Microsoft 365 and perpetual Office uninstall choices using exact signed native uninstallers.
+- Fix Edge removal when WinGet has no matching registration, with scoped vendor and removable-package fallback and actual absence checks.
+- Keep Windows App protected in setup, Settings and native removal boundaries; preserve shared WebView2 and Windows runtimes.
+- Add default-on removal choices and individual consumer-app controls, preserving saved off choices and showing concrete launch warnings.
+- Add saved-scope reappearance enforcement at sign-in, periodic checks and Windows Update completion, with honest policy applicability reporting.
+- Add supported cloud-speech, voice-activation and activity-history privacy controls without blocking remote-desktop audio or security updates.
+
 ## 0.12.43
 
 - Fit worker cards to the actual dashboard space after header layout changes, retaining access to controls and hardware status.

@@ -5,12 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import pytest
 from optimus.automation import CURRENT_SETUP_VERSION
-from optimus.workflow import DEFAULTS, Preferences, Workflow
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, Workflow
 from test_workflow import mock_verification
 
 
 def configuration(**values):
     result = copy.deepcopy(DEFAULTS)
+    result.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    result.update({key: False for key in result if key.startswith('privacy_')})
     result.update({'setup_version': CURRENT_SETUP_VERSION, 'cleanup_enabled': False, 'browser_cache_enabled': False})
     result.update(values)
     return result

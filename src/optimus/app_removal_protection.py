@@ -103,12 +103,15 @@ def _appx_family(target):
 
 def debloat_target_protected(rows, target):
     kind, name = target.get('kind'), target.get('name')
+    family = _appx_family(target)
+    if family.casefold() == WINDOWS_APP_FAMILY.casefold() or not family and name == WINDOWS_APP_NAME:
+        return True
     if kind in ('appx', 'provisioned'):
         return is_removal_protected(rows, identity=_appx_family(target), names=(name,), kind='store')
     if kind in ('edge', 'desktop-edge-script'):
         return (is_removal_protected(rows, identity='Microsoft.Edge', names=_EDGE_DESKTOP, kind='desktop')
                 or is_removal_protected(rows, names=(_EDGE_STORE,), kind='store'))
-    if kind == 'office-dialog':
+    if kind in ('office-dialog', 'office-clicktorun', 'office-msi', 'office-review'):
         return is_removal_protected(rows, identity=target.get('appIdentity'), names=(name,), kind='desktop')
     return False
 

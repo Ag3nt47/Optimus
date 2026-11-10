@@ -24,11 +24,32 @@ CADENCES = {
     'monthly': 'Monthly by the local calendar while the app is open',
 }
 REMOVALS = (
-    ('consumer_debloat_enabled', 'Remove the curated consumer-app group'),
-    ('m365_debloat_enabled', 'Remove Microsoft 365 consumer packages'),
-    ('outlook_debloat_enabled', 'Remove the new Outlook package'),
-    ('edge_debloat_enabled', 'Run the supported Microsoft Edge uninstall action'),
+    ('consumer_debloat_enabled', 'Fully uninstall the individually selected Windows consumer apps below'),
+    ('m365_debloat_enabled', 'Fully uninstall Microsoft 365 Hub and companion Store apps'),
+    ('office365_desktop_debloat_enabled', 'Fully uninstall Microsoft 365 desktop apps (Word, Excel, PowerPoint, classic Outlook)'),
+    ('office_desktop_debloat_enabled', 'Fully uninstall desktop Microsoft Office (perpetual Office suites)'),
+    ('outlook_debloat_enabled', 'Fully uninstall the new Outlook Store app'),
+    ('edge_debloat_enabled', 'Uninstall Microsoft Edge browser (keep shared WebView2)'),
+    ('windows_removal_enforcement_enabled', 'Automatically remove selected apps again if restored by Windows or another installer'),
 )
+REMOVAL_EFFECTS = {
+    'consumer_debloat_enabled': 'Uninstalls only the exact consumer packages selected below. Windows App, frameworks and shared runtimes are protected.',
+    'm365_debloat_enabled': 'Uninstalls the Microsoft 365 Hub and companion Store packages. The desktop Microsoft 365 suite has its own checkbox.',
+    'office365_desktop_debloat_enabled': 'Runs the Microsoft 365 desktop suite uninstaller for installed subscription products. App-local data may be removed; reinstall is needed to use these apps again.',
+    'office_desktop_debloat_enabled': 'Runs the desktop Office suite uninstaller for installed perpetual Office products. Microsoft 365 subscription products have a separate checkbox.',
+    'outlook_debloat_enabled': 'Uninstalls the new Outlook Store package. Classic Outlook is part of its selected desktop Office suite.',
+    'edge_debloat_enabled': 'Uninstalls the Edge browser through a matching Microsoft installer or package removal. Shared WebView2 and its updates stay available.',
+    'windows_removal_enforcement_enabled': 'Save registers a separate approved background task to remove selected installed or returning apps, even with Run selected maintenance now unchecked and the Optimus window closed. It checks at sign-in, every 15 minutes and after successful Windows Updates, independently of Launch at sign-in. Turn this switch off for manual-only removals. Administrator approval is required to register or remove the task. Windows security updates and shared runtimes stay enabled.',
+}
+
+
+def removal_guard_save_warning(backend):
+    """Read the completed save's in-memory registration result without a probe."""
+    result = getattr(backend, 'last_removal_guard_registration', None)
+    if isinstance(result, dict) and result.get('status') == 'needs_review':
+        reason = ' '.join(str(result.get('error') or 'Review sign-in launch and administrator access.').split())[:600]
+        return 'Choices saved; scheduled re-removal is unavailable: ' + reason
+    return ''
 
 
 def _label(text):
@@ -363,6 +384,12 @@ class InitialSetupWizard(QWizard):
             'Turn off Windows cross-device clipboard sync (Pro+; local clipboard history stays available)')
         self._check(body, 'privacy_disable_recall_snapshots_enabled',
             'Block Recall screen snapshots and let Windows delete existing snapshots (Pro+, build 26100.3915+; deleted snapshots cannot be restored)')
+        self._check(body, 'privacy_disable_online_speech_enabled',
+            'Turn off cloud speech recognition (keep microphone access and Windows App audio)')
+        self._check(body, 'privacy_disable_voice_activation_enabled',
+            'Disable background voice activation where Windows supports it')
+        self._check(body, 'privacy_disable_activity_history_enabled',
+            'Stop Windows activity-history upload and collection where available')
         body.addWidget(_label('These optional controls reduce Windows consumer provisioning and promotions. They cannot require approval for every third-party installer or block all tracking/data sharing. Windows Update, Defender and legitimate app/browser updates stay available. Changes have private original-value backups and guarded undo; managed policies can override them.'))
         for key, text in (
             ('privacy_disable_advertising_id', 'Turn off the Windows advertising ID'),
@@ -475,17 +502,27 @@ class InitialSetupWizard(QWizard):
         for key, label in REMOVALS:
             checkbox = self._check(body, key, label)
             checkbox.setStyleSheet('color:#ffd29c;')
-        from .workflow import CONSUMER_PACKAGE_NAMES
-        body.addWidget(_label('Selected consumer packages - only these exact current-user package names can be removed by the consumer-app stage:'))
+            checkbox.setToolTip(REMOVAL_EFFECTS[key])
+        from .workflow import CONSUMER_PACKAGE_NAMES, CONSUMER_PACKAGE_LABELS, CONSUMER_PACKAGE_NOTES, WINDOWS_APP_KEEP_LABEL
+        from .widgets.wrapping_checkbox import WrappingCheckBox
+        self.keep_windows_app = WrappingCheckBox(WINDOWS_APP_KEEP_LABEL)
+        self.keep_windows_app.setChecked(True)
+        self.keep_windows_app.setEnabled(False)
+        self.keep_windows_app.setObjectName('keepWindowsAppProtected')
+        self.keep_windows_app.setToolTip('Microsoft Windows App is preserved for remote desktop connections. Its exact package family and shared runtimes are outside these removal scopes.')
+        body.addWidget(self.keep_windows_app)
+        body.addWidget(_label('Individual Windows consumer apps — a checked box authorizes full uninstallation of that exact current-user package when the consumer-app removal stage is on:'))
         self.consumer_package_controls = {}
         self._checkbox_actions(body, 'consumer packages', lambda: list(self.consumer_package_controls.values()))
         chosen = set(self.initial.get('consumer_debloat_package_names', CONSUMER_PACKAGE_NAMES))
         for name in CONSUMER_PACKAGE_NAMES:
-            control = QCheckBox(name)
+            control = WrappingCheckBox('Fully uninstall ' + CONSUMER_PACKAGE_LABELS.get(name, name))
+            control.setToolTip('Uninstalls the exact package ' + name + '. '
+                + CONSUMER_PACKAGE_NOTES.get(name, 'App-local data may be removed.') + ' Uncheck this app to keep it.')
             control.setChecked(name in chosen)
             self.consumer_package_controls[name] = control
             body.addWidget(control)
-        body.addWidget(_label('Bing Wallpaper is always preserved by Optimus debloat. Store support, security components, frameworks and shared WebView2 are also protected. High intensity does not select removal groups for you.'))
+        body.addWidget(_label('Windows App remote access and Bing Wallpaper stay protected. Store support, security components, frameworks and shared WebView2 are also preserved. Each checked removal is an uninstall request; native failures remain visible in the results.'))
         body.addWidget(_label('These choices do not invoke an existing external Desktop removal script. Use the detailed Debloat page to inspect exact targets and that script\'s separate approval flow.'))
         body.addStretch()
 
@@ -1122,7 +1159,7 @@ class InitialSetupWizard(QWizard):
 
     def _build_summary(self):
         body = self._page('summary', '12. Review your choices',
-            'Save choices writes this configuration. It does not start a maintenance run unless you also select Run selected maintenance now below. Automatic cadence applies to the selected operations while the app is open.', on_enter=self.refresh_summary)
+            'Save choices writes this configuration. Run selected maintenance now starts the main workflow. The separately selected background app-removal task gets its own schedule when saved, even with Run now unchecked or the GUI closed; turn its switch off for manual-only removals. Other automatic cadence runs while the app is open.', on_enter=self.refresh_summary)
         self.summary = QPlainTextEdit()
         self.summary.setReadOnly(True)
         self.summary.setMinimumHeight(300)
@@ -1335,7 +1372,9 @@ class InitialSetupWizard(QWizard):
             if settings.get(master):
                 actions.extend('Windows privacy: ' + self.controls[key].text() for key in children if settings.get(key))
         for key in ('privacy_block_silent_consumer_apps_enabled', 'privacy_disable_cloud_promotions_enabled',
-                    'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled'):
+                    'privacy_disable_clipboard_sync_enabled', 'privacy_disable_recall_snapshots_enabled',
+                    'privacy_disable_online_speech_enabled', 'privacy_disable_voice_activation_enabled',
+                    'privacy_disable_activity_history_enabled'):
             if settings.get(key):
                 actions.append('Windows privacy: ' + self.controls[key].text() + '; original values saved for guarded undo. This does not block all installers or app/account data sharing.')
         if settings.get('software_updates_enabled') and settings['software_update_policy'] == 'selected':
@@ -1409,7 +1448,7 @@ class InitialSetupWizard(QWizard):
         lines.extend('- ' + text for text in actions or ['None; this configuration is scan/report only.'])
         lines.extend(['', 'SCAN / REPORT ONLY'])
         lines.extend('- ' + text for text in reviews)
-        lines.extend(['', 'PRESERVATION AND REVOKING APPROVAL', 'Bing Wallpaper is protected. Review policies do not apply changes. Only saved approved scopes can be changed without per-run prompts; turn a tool off or return its policy to Review to revoke approval. Recycle bins, supported startup backups and Windows driver recovery have limits; cleanup is permanent.', '', 'Save does not run maintenance unless Run selected maintenance now is checked. Unattended approval enables sign-in launch and Startup cadence for future launches.'])
+        lines.extend(['', 'PRESERVATION AND REVOKING APPROVAL', 'Bing Wallpaper is protected. Review policies do not apply changes. Only saved approved scopes can be changed without per-run prompts; turn a tool off or return its policy to Review to revoke approval. Recycle bins, supported startup backups and Windows driver recovery have limits; cleanup is permanent.', '', 'Run selected maintenance now starts the main workflow. Saving the separately selected background app-removal task enables its own future removal checks, even with Run now unchecked or the GUI closed. Turn that switch off for manual-only removal. Unattended approval enables main-window sign-in launch and Startup cadence for future launches.'])
         self.summary.setPlainText('\n'.join(lines))
 
     def validateCurrentPage(self):
@@ -1429,10 +1468,13 @@ class InitialSetupWizard(QWizard):
             return
         try:
             preferences = self.collect_choices()
+            from .workflow import Preferences
+            preferences = Preferences.validate(preferences)
             if preferences.get('unattended_auto_clean_enabled') is True:
-                from .workflow import Preferences
                 from .unattended_configuration import approve_unattended_settings
-                preferences = approve_unattended_settings(Preferences.validate(preferences))
+                preferences = approve_unattended_settings(preferences)
+            from .removal_enforcement import stamp_approval
+            preferences = stamp_approval(preferences)
             from .automation import save_setup
             saved = save_setup(self.backend.data_dir, preferences, self.backend.save_preferences,
                                run_now=self.run_now_checkbox.isChecked())

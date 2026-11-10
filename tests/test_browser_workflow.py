@@ -12,7 +12,7 @@ import pytest
 
 from optimus.backend import Backend
 from optimus.emergency_stop import controller_for
-from optimus.workflow import DEFAULTS, Preferences, Workflow
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, Workflow
 from test_workflow import MockBackend
 
 
@@ -23,6 +23,8 @@ BROWSERS = ('edge', 'chrome', 'brave', 'vivaldi', 'firefox')
 
 def configuration(**changes):
     result = copy.deepcopy(DEFAULTS)
+    result.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    result.update({key: False for key in result if key.startswith('privacy_')})
     result.update(cleanup_enabled=False, **{key: False for key in BROWSER_FLAGS})
     result.update(changes)
     return result

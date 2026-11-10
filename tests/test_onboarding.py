@@ -100,10 +100,13 @@ def test_construct_and_cancel_do_not_write_or_run(wizard, backend):
     backend.analysis_stop.assert_not_called()
 
 
-def test_safe_starting_values_and_run_now_off(wizard):
+def test_requested_removal_defaults_are_on_but_run_now_is_off(wizard):
     assert wizard.cadence_buttons['manual'].isChecked()
     assert not wizard.run_now_checkbox.isChecked()
-    for key in ('consumer_debloat_enabled','m365_debloat_enabled','outlook_debloat_enabled','edge_debloat_enabled','duplicates_enabled','cloud_review_enabled','software_updates_enabled','driver_updates_enabled'):
+    from optimus.workflow import WINDOWS_REMOVAL_KEYS
+    assert all(wizard.controls[key].isChecked() for key in WINDOWS_REMOVAL_KEYS)
+    assert wizard.keep_windows_app.isChecked() and not wizard.keep_windows_app.isEnabled()
+    for key in ('duplicates_enabled','cloud_review_enabled','software_updates_enabled','driver_updates_enabled'):
         assert not wizard.controls[key].isChecked()
     assert 'user-temp' not in wizard.category_controls
     assert 'fixture-browser' not in wizard.category_controls
@@ -117,7 +120,7 @@ def test_safe_starting_values_and_run_now_off(wizard):
 
 def test_existing_choices_preserved_without_reenabling_others(qapp, tmp_path):
     original = {'intensity':'High','cleanup_age_days':1,'consumer_debloat_enabled':False,
-                'm365_debloat_enabled':True,'background_analysis_enabled':True,'analysis_interval':9,
+                'm365_debloat_enabled':True,'edge_debloat_enabled':False,'background_analysis_enabled':True,'analysis_interval':9,
                 'automation_mode':'weekly','cleanup_category_ids':['fixture-errors'],'private_fixture_key':'retained'}
     backend = FixtureBackend(tmp_path, original)
     wizard = InitialSetupWizard(backend)
@@ -129,11 +132,11 @@ def test_existing_choices_preserved_without_reenabling_others(qapp, tmp_path):
 
 
 def test_high_preset_only_changes_age(wizard):
+    before = {key: wizard.controls[key].isChecked() for key in
+              ('consumer_debloat_enabled', 'edge_debloat_enabled', 'codex_priority_enabled')}
     wizard.controls['intensity'].setCurrentText('High')
     assert wizard.controls['cleanup_age_days'].value() == 1
-    assert not wizard.controls['consumer_debloat_enabled'].isChecked()
-    assert not wizard.controls['edge_debloat_enabled'].isChecked()
-    assert not wizard.controls['codex_priority_enabled'].isChecked()
+    assert all(wizard.controls[key].isChecked() == value for key, value in before.items())
     assert not any(wizard.controls[key].isChecked() for key in
                    ('browser_history_enabled','browser_cookies_enabled','browser_download_history_enabled'))
 
@@ -253,7 +256,7 @@ def test_summary_discloses_mutations_and_review_only_limits(wizard):
     text = wizard.summary.toPlainText()
     assert 'Weekly while the app is open' in text
     assert 'Permanently delete' in text
-    assert 'Remove the curated consumer-app group' in text
+    assert 'Fully uninstall the individually selected Windows consumer apps' in text
     assert 'Bing Wallpaper is protected' in text
     assert 'Driver inventory/update scan/report' in text
     assert 'Review policies do not apply changes' in text

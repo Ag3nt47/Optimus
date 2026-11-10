@@ -64,6 +64,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-Maintenance.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-OfficeRemoval.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-EdgeRemoval.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/Test-RemovalGuardTasks.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-UninstallProgress.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & tests/Test-RegistryTools.ps1

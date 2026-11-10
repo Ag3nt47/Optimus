@@ -11,7 +11,7 @@ import pytest
 from optimus.native_settings import NativePreferences, full_native_settings
 from optimus.onboarding import InitialSetupWizard
 from optimus.system_privacy import SystemPrivacy, _CONTROLS, _script
-from optimus.workflow import DEFAULTS, Preferences, Workflow, full_optimization_settings
+from optimus.workflow import DEFAULTS, WINDOWS_REMOVAL_KEYS, Preferences, Workflow, full_optimization_settings
 from test_system_privacy import NativeFixture, dword, mutation_calls, settings
 from test_workflow import MockBackend
 
@@ -30,16 +30,20 @@ def fixture(tmp_path):
 
 
 def only(**changes):
-    return dict.fromkeys(NEW_FLAGS, False) | changes
+    return {key: False for key in DEFAULTS if key.startswith('privacy_')} | changes
 
 
-def test_new_preferences_and_full_presets_preserve_explicit_opt_in():
-    for config in (DEFAULTS, Preferences.validate({}), Preferences.safe_defaults(),
-                   full_optimization_settings(), full_native_settings()):
+def test_new_preferences_defaults_keep_existing_explicit_choices_and_native_limits():
+    defaults_on = {'privacy_disable_cloud_promotions_enabled', 'privacy_disable_recall_snapshots_enabled'}
+    for config in (DEFAULTS, Preferences.validate({}), full_optimization_settings()):
+        assert {key for key in NEW_FLAGS if config[key]} == defaults_on
+    for config in (Preferences.safe_defaults(), full_native_settings()):
         assert all(config[key] is False for key in NEW_FLAGS)
     for key in NEW_FLAGS:
         assert Preferences.validate({key: True})[key] is True
         assert full_optimization_settings({key: True})[key] is True
+        assert Preferences.validate({key: False})[key] is False
+        assert full_optimization_settings({key: False})[key] is False
         assert NativePreferences.validate({key: True})[key] is False
 
 
@@ -182,7 +186,9 @@ def test_independent_new_toggle_dispatches_existing_privacy_stage(tmp_path, key)
     backend = MockBackend(tmp_path)
     backend.apply_system_privacy = Mock(return_value={'status': 'completed', 'failed_items': 0,
                                                      'changed_count': 0, 'items': []})
-    config = dict(DEFAULTS, cleanup_enabled=False, browser_cache_enabled=False, **{key: True})
+    config = dict(DEFAULTS, cleanup_enabled=False, browser_cache_enabled=False)
+    config.update(dict.fromkeys(WINDOWS_REMOVAL_KEYS, False))
+    config.update(only(**{key: True}))
     report = Workflow(backend).run(config, lambda _: None)
     backend.apply_system_privacy.assert_called_once()
     assert any(row['title'] == 'Apply saved privacy controls' for row in report['stages'])
@@ -195,7 +201,8 @@ def test_windows_setup_discloses_new_optional_policies_without_saving(tmp_path):
     backend = Mock(data_dir=tmp_path, preferences=Mock(return_value=copy.deepcopy(DEFAULTS)), cleanup_categories=Mock(return_value=[]))
     wizard = InitialSetupWizard(backend)
     try:
-        assert all(not wizard.controls[key].isChecked() for key in NEW_FLAGS)
+        assert {key for key in NEW_FLAGS if wizard.controls[key].isChecked()} == {
+            'privacy_disable_cloud_promotions_enabled', 'privacy_disable_recall_snapshots_enabled'}
         assert 'deleted snapshots cannot be restored' in wizard.controls['privacy_disable_recall_snapshots_enabled'].text()
         wizard.controls['privacy_disable_recall_snapshots_enabled'].setChecked(True)
         wizard.refresh_summary()

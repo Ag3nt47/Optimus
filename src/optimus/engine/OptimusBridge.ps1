@@ -13,6 +13,8 @@ $WarningPreference='SilentlyContinue'
 . (Join-Path $PSScriptRoot 'UpdateRecovery.ps1')
 . (Join-Path $PSScriptRoot 'SystemDiagnostics.ps1')
 . (Join-Path $PSScriptRoot 'AdaptiveProbe.ps1')
+. (Join-Path $PSScriptRoot 'EdgeRemoval.ps1')
+. (Join-Path $PSScriptRoot 'OfficeRemoval.ps1')
 . (Join-Path $PSScriptRoot 'MaintenanceOperations.ps1')
 . (Join-Path $PSScriptRoot 'RegistryTools.ps1')
 function Test-OptimusSameExecutableFile {
@@ -157,6 +159,16 @@ function Invoke-OptimusRequest {
                 $progressCallback=New-OptimusProgressCallback -RequestId ([string]$Request.id)
             }
             Invoke-SCMDriverUpdateApply -Record $record -Unattended ($arg.unattended -eq $true) -AcceptEula ($arg.acceptEula -eq $true) -ProgressCallback $progressCallback -CleanupDownloads $cleanupDownloads -CancelRequested (New-OptimusCancellationCallback -Request $Request)
+        }
+        'edge_install_policy' {
+            $context=Get-OptimusEdgeInstallPolicyContext
+            if($context.supported -ne $true){
+                [pscustomobject]@{supported=$false;applied=$false;reason=$context.reason;note=$context.note}
+            }else{
+                $backup=Join-Path $DataRoot 'edge-install-policy-backups'
+                if(-not(Test-Path -LiteralPath $backup)){$null=New-Item -ItemType Directory -Path $backup}
+                Set-OptimusEdgeInstallBlock -BackupDirectory $backup
+            }
         }
         default {
             $progressCallback=$null

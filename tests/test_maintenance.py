@@ -43,7 +43,10 @@ class Tests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
     def test_01_actions_and_preview(self):
-        self.assertEqual(len(self.tool.debloat_actions()), 6)
+        actions = self.tool.debloat_actions()
+        self.assertEqual(len(actions), 7)
+        self.assertEqual({row['id'] for row in actions}, {'consumer-apps', 'm365', 'outlook', 'edge',
+                         'office365-desktop', 'office-desktop', 'desktop-edge-script'})
         self.assertFalse((Path(self.temp.name) / 'MaintenancePlans').exists())
         plan = self.tool.debloat_preview('consumer-apps')
         self.assertFalse(plan['targets'][0]['selected'])
@@ -51,8 +54,13 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.bridge.calls[0][0], 'maintenance_preview')
     def test_02_unknown_and_provisioning_scope(self):
         with self.assertRaises(ValueError): self.tool.debloat_preview('unknown')
-        with self.assertRaises(ValueError): self.tool.debloat_preview({'action': 'edge', 'includeProvisioned': True})
+        for action in ('office365-desktop', 'office-desktop', 'desktop-edge-script'):
+            with self.assertRaises(ValueError): self.tool.debloat_preview({'action': action, 'includeProvisioned': True})
         self.assertEqual(self.bridge.calls, [])
+        plan = self.tool.debloat_preview({'action': 'edge', 'includeProvisioned': True})
+        self.assertTrue(plan['includeProvisioned'])
+        self.assertEqual(self.bridge.calls, [('maintenance_preview', {'action': 'edge',
+                         'includeProvisioned': True, 'removalExclusions': []})])
     def test_03_confirmation_required(self):
         plan = self.tool.debloat_preview('consumer-apps')
         with self.assertRaises(ValueError): self.tool.debloat_apply({'planId': plan['planId'], 'selectedIds': ['appx-fixture']})

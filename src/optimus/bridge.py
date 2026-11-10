@@ -317,6 +317,20 @@ class PowerShellBridge:
             self._retire_when_idle = True
         self._retire_idle_host()
 
+    def wait_for_pending_operation(self, operation):
+        """Retain an owning caller's lease after a native request times out.
+
+        A caller timeout never proves an uninstaller stopped. The exact host's
+        reader removes pending requests only after a reply or observed exit.
+        This observer submits no requests and never kills native processes.
+        """
+        while True:
+            with self._pending_lock:
+                pending = any(value[0] == operation for value in self._pending.values())
+            if not pending:
+                return
+            time.sleep(0.25)
+
     def _retire_idle_host(self):
         if not self._lock.acquire(blocking=False):
             return False
