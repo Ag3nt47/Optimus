@@ -2,6 +2,8 @@
 #requires -Version 5.1
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+. (Join-Path $PSScriptRoot '..\src\optimus\engine\OfficeRemoval.ps1')
+. (Join-Path $PSScriptRoot '..\src\optimus\engine\EdgeRemoval.ps1')
 . (Join-Path $PSScriptRoot '..\src\optimus\engine\MaintenanceOperations.ps1')
 $script:Assertions=0
 function Assert-Fixture {param([bool]$Condition,[string]$Message) if(-not $Condition){throw ('FAIL: '+$Message)};$script:Assertions++}
@@ -53,22 +55,47 @@ $preview=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='consumer
 $blocked=$false
 try{Invoke-OptimusMaintenanceRequest maintenance_apply @{action='consumer-apps';targets=$preview.targets;confirmation='no'} -ProgressCallback $observer|Out-Null}catch{$blocked=$true}
 Assert-Fixture ($blocked -and $script:Calls.Count -eq 0 -and $script:Events.Count -eq 0) 'invalid approval emits no progress or mutation'
-$script:Edge=[pscustomobject]@{id='edge-browser';fingerprint=('a'*64);name='Microsoft Edge';kind='edge';method='microsoft-setup';admin=$false;payload=[pscustomobject]@{path='C:\OptimusFixture\setup.exe';systemLevel=$false}}
+$script:EdgeRoot='D:\OptimusFixture\Microsoft\Edge\Application'
+$script:EdgeBrowser=$script:EdgeRoot+'\msedge.exe';$script:EdgeSetup=$script:EdgeRoot+'\157.0.0.0\Installer\setup.exe'
+$script:EdgePresent=$true
+$script:Edge=[pscustomobject]@{id='edge-browser';fingerprint=('a'*64);name='Microsoft Edge';kind='edge';scope='machine';admin=$true;payload=[pscustomobject]@{
+    root=$script:EdgeRoot;browser=$script:EdgeBrowser;browserFile=[pscustomobject]@{path=$script:EdgeBrowser;sha256=('b'*64);version='157.0.0.0'};
+    setup=[pscustomobject]@{path=$script:EdgeSetup;sha256=('c'*64);version='157.0.0.0'};winget=$null;packages=@();safe=$true}}
 function Get-OptimusMaintenanceTargets {param($Action,[bool]$IncludeProvisioned) return @($script:Edge)}
-function Get-OptimusEdgeTarget {return @()}
-function Start-Process {param($FilePath,$ArgumentList,$WindowStyle,[switch]$Wait,[switch]$PassThru,$ErrorAction) $script:Calls+=@($FilePath);return [pscustomobject]@{Id=12345;ExitCode=$script:ExitCode}}
+function Get-OptimusEdgeRemovalTargets {param([bool]$IncludeProvisioned=$false) return @($script:Edge)}
+function Get-OptimusEdgePackages {return @()}
+function Test-OptimusEdgeRemovalAdmin {return $true}
+function Get-OptimusEdgeSignedFile {
+    param($Path)
+    if($Path -ceq $script:EdgeBrowser){return $script:Edge.payload.browserFile}
+    if($Path -ceq $script:EdgeSetup){return $script:Edge.payload.setup}
+    throw 'Unexpected executable proof request in inert fixture.'
+}
+function Test-Path {
+    param($LiteralPath,$PathType)
+    if($LiteralPath -ceq $script:EdgeBrowser){return $script:EdgePresent}
+    throw 'Unexpected filesystem probe in inert fixture.'
+}
+function Invoke-OptimusEdgeProcess {
+    param($Path,$Arguments)
+    $script:Calls+=@([pscustomobject]@{path=$Path;arguments=@($Arguments)})
+    if($script:ExitCode -in @(0,3010)){$script:EdgePresent=$false}
+    return $script:ExitCode
+}
 foreach($code in @(0,3010,1603)){
-    $script:ExitCode=$code;$script:Events=@();$script:Calls=@()
+    $script:ExitCode=$code;$script:Events=@();$script:Calls=@();$script:EdgePresent=$true
     $result=Invoke-OptimusMaintenanceRequest maintenance_apply @{action='edge';targets=@($script:Edge);confirmation='REMOVE'} -ProgressCallback $observer
     Assert-Fixture ($script:Calls.Count -eq 1) ('exactly one mocked registered remover for '+$code)
+    Assert-Fixture ($script:Calls[0].path -ceq $script:EdgeSetup -and $script:Calls[0].arguments -contains '--system-level' -and $script:Calls[0].arguments -contains '--msedge') ('exact current native remover and scope for '+$code)
     $complete=@($script:Events|Where-Object{$_.percent -eq 100})
-    Assert-Fixture ($complete.Count -eq $(if($code -eq 0){1}else{0})) ('restart/error never produces terminal100 '+$code)
+    Assert-Fixture ($complete.Count -eq $(if($code -eq 0){2}else{0})) ('restart/error never produces terminal100; verified native and workflow terminal events '+$code)
     Assert-Fixture ($script:Events[0].phase -ceq 'uninstall' -and $null -eq $script:Events[0].percent) ('registered remover begins indeterminate '+$code)
+    Assert-Fixture ($result.results[0].removed -eq ($code -in @(0,3010)) -and $result.results[0].restartNeeded -eq ($code -eq 3010)) ('actual absence and restart retain their separate meanings '+$code)
 }
-$script:Edge.method='windows-dialog';$script:Events=@();$script:Calls=@()
+$script:Edge.payload.safe=$false;$script:Events=@();$script:Calls=@();$script:EdgePresent=$true
 $result=Invoke-OptimusMaintenanceRequest maintenance_apply @{action='edge';targets=@($script:Edge);confirmation='REMOVE'} -ProgressCallback $observer
-Assert-Fixture ($script:Events.Count -eq 1 -and $script:Events[0].phase -ceq 'review' -and $null -eq $script:Events[0].percent) 'opening Windows controls does not claim an uninstall ran'
-Assert-Fixture (-not $result.results[0].removed) 'external user-managed dialog has no verified removal'
+Assert-Fixture ($script:Calls.Count -eq 0 -and @($script:Events|Where-Object{$_.percent -eq 100}).Count -eq 0) 'unverified native Edge installation never launches a remover or receives completion percent'
+Assert-Fixture (-not $result.results[0].removed -and $result.results[0].requiresReview -and $result.results[0].reason -ceq 'edge_removal_refused') 'unverified native installation is an explicit review finding'
 $script:Edge=[pscustomobject]@{id='provisioned-fixture';fingerprint=('b'*64);name='Microsoft.BingWeather';kind='provisioned';scope='future-users';admin=$true;packageFullName='Microsoft.BingWeather_1.0_neutral__fixture'}
 $script:NativeRemoval=@()
 $script:ProvisionedReadback='absent'
