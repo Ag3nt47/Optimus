@@ -8,6 +8,7 @@
 - Add default-on removal choices and individual consumer-app controls, preserving saved off choices and showing concrete launch warnings.
 - Add saved-scope reappearance enforcement at sign-in, periodic checks and Windows Update completion, with honest policy applicability reporting.
 - Add supported cloud-speech, voice-activation and activity-history privacy controls without blocking remote-desktop audio or security updates.
+- Keep Defender status/remediation commands within Windows' command-line limit as the privacy catalog expands, and continue after known terminal uninstall findings.
 
 ## 0.12.43
 
