@@ -68,6 +68,30 @@ Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml $xml) -ceq (ConvertTo-Optimus
 [IO.File]::WriteAllText($path,$pretty,[Text.Encoding]::Unicode)
 $utf16=Read-OptimusPersistedTask $name $xml
 Assert-Fixture ($utf16.verified -eq $true) 'UTF-16 BOM storage is decoded independently'
+$registeredDefaults=@'
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Fixture</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>FIXTURE\User</UserId><Delay>PT1M</Delay></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><AllowHardTerminate>true</AllowHardTerminate><IdleSettings><Duration>PT10M</Duration><StopOnIdleEnd>true</StopOnIdleEnd></IdleSettings><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>
+  <Actions Context="Author"><Exec><Command>D:\fixture\Optimus.exe</Command></Exec></Actions>
+</Task>
+'@
+$compactRewrite=@'
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Fixture</Description></RegistrationInfo>
+  <Principals><Principal id="Author"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals>
+  <Settings><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><IdleSettings><Duration>PT10M</Duration><StopOnIdleEnd>true</StopOnIdleEnd></IdleSettings></Settings>
+  <Triggers><LogonTrigger><Delay>PT1M</Delay><UserId>FIXTURE\User</UserId></LogonTrigger></Triggers>
+  <Actions Context="Author"><Exec><Command>D:\fixture\Optimus.exe</Command></Exec></Actions>
+</Task>
+'@
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml $registeredDefaults) -ceq (ConvertTo-OptimusCanonicalTaskXml $compactRewrite)) 'a Windows compact rewrite without schema defaults and with xs:all order changes verifies'
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml $registeredDefaults) -cne (ConvertTo-OptimusCanonicalTaskXml ($compactRewrite.Replace('<ExecutionTimeLimit>PT0S','<Priority>4</Priority><ExecutionTimeLimit>PT0S')))) 'a non-default setting is never dropped'
+Assert-Fixture ((ConvertTo-OptimusCanonicalTaskXml $registeredDefaults) -cne (ConvertTo-OptimusCanonicalTaskXml ($compactRewrite.Replace('<Delay>PT1M','<Enabled>false</Enabled><Delay>PT1M')))) 'a disabled trigger remains different'
+
 Assert-Fixture ($utf16.canonical_sha256 -ceq $verified.canonical_sha256) 'UTF-8 and UTF-16 storage preserve the same canonical XML'
 
 $principal='<Principals><Principal id="Fixture"><UserId>S-1-5-21-111-222-333-1001</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>'

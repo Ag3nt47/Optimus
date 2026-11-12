@@ -25,6 +25,10 @@ function ConvertTo-OptimusCanonicalTaskXml([string]$Text) {
     # Keep every value/attribute and all other XML order, including Actions/Triggers.
     $namespace=[Xml.XmlNamespaceManager]::new($document.NameTable)
     $namespace.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+    # Windows may store XML without these schema defaults and in other xs:all order.
+    $d=@('Principals/t:Principal/t:RunLevel=LeastPrivilege','Triggers/*/t:Enabled=true')+('AllowStartOnDemand=true AllowHardTerminate=true Enabled=true Hidden=false StartWhenAvailable=false RunOnlyIfNetworkAvailable=false RunOnlyIfIdle=false WakeToRun=false Priority=7'-split' '|%{'Settings/t:'+$_})
+    foreach($e in $d){$p,$v=$e-split'=';foreach($n in @($document.SelectNodes('/t:Task/t:'+$p,$namespace))){if(!$n.HasAttributes-and$n.InnerXml-ceq$v){[void]$n.ParentNode.RemoveChild($n)}}}
+    foreach($p in '','/t:Settings','/t:Triggers/*'){foreach($c in @($document.SelectNodes('/t:Task'+$p,$namespace))){$k=@($c.ChildNodes);$m=@($k|% Name);if(!($k|? NodeType -ne 'Element')-and@($m|select -u).Count-eq$m.Count){$k|sort Name -CaseSensitive|%{[void]$c.AppendChild($_)}}}}
     $principalOrder=@('UserId','LogonType','GroupId','DisplayName','RunLevel','ProcessTokenSidType','RequiredPrivileges')
     foreach($principal in $document.SelectNodes('/t:Task/t:Principals/t:Principal',$namespace)){
         $singletons=@{}
