@@ -170,6 +170,7 @@ class NativeSetupWizard(QWizard):
         body = self.page_body('Which temporary and browser data?',
             'Browser cleanup asks Close and clean / Skip separately for each open browser.')
         self.check(body, 'cleanup_enabled', 'Clean selected rebuildable temporary/cache files')
+        self.check(body, 'recycle_bin_empty_enabled', 'Empty the Trash each run (permanent; items Optimus recycles in the same run are kept until the next)')
         self.intensity = QComboBox()
         self.intensity.addItems(['Low', 'Standard', 'High'])
         self.intensity.setCurrentText(self.initial.get('intensity', 'Standard'))

@@ -380,8 +380,18 @@ class OutcomeVerification:
                 'A recent native scan was reused under the saved cadence. No new scan or clean-system result is claimed.',
                 completion_verified=False, cadence_check=value.get('cadence_check'))
             return
+        if title in ('Empty the Recycle Bin', 'Empty the Trash') and isinstance(value, dict) and not _no_change_claimed(value):
+            # Later duplicate recycling in the same run refills the bin by design, so a fresh
+            # read cannot judge this stage; use its own post-delete readback instead.
+            good = value.get('emptied') is True and not value.get('failed_items')
+            self._add(checks, 'recycle_bin', title, 'confirmed' if good else 'needs_review',
+                      'The stage\'s own readback immediately after deletion found no remaining items.' if good else
+                      'Some Recycle Bin/Trash items remained or could not be removed: ' + str(value.get('error', ''))[:500],
+                      failure=not good, items=value.get('items'), bytes=value.get('bytes'))
+            return
         if title in ('Clean temporary files', 'Clean selected additional categories', 'Clean selected browser data',
-                     'Scan for spyware and malware', 'Optimize eligible internal drives') and _no_change_claimed(value):
+                     'Scan for spyware and malware', 'Optimize eligible internal drives',
+                     'Empty the Recycle Bin', 'Empty the Trash') and _no_change_claimed(value):
             self._add(checks, 'review', title, 'not_applicable',
                       'This operation was skipped or review-only; no applied maintenance change is claimed.',
                       note=str(value.get('note', value.get('reason', value.get('stop_reason', ''))))[:500])

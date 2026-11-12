@@ -181,6 +181,7 @@ def launch_warning(settings):
         ('privacy_disable_activity_history_enabled', 'Stop supported Windows activity-history collection and upload; unsupported settings are reported.'),
         ('speed_enhancements_enabled', 'Apply supported saved power/performance preferences; power use or heat can increase.'),
         ('drive_optimization_enabled', 'Run eligible Windows SSD TRIM/HDD optimization after native checks.'),
+        ('recycle_bin_empty_enabled', 'Permanently empty the Recycle Bin/Trash; emptied items cannot be restored.'),
         ('codex_priority_enabled', 'Apply the saved Codex process-priority profile.'),
         ('spyware_scan_enabled', 'Run the configured malware scan using Windows Defender\'s existing remediation policy.'),
         ('auto_continue_fixes_enabled', 'Automatically continue supported post-scan security fixes/updates within existing saved approvals.'),

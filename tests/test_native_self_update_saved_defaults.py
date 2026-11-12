@@ -32,7 +32,7 @@ MISSING_DEFAULT_KEYS = {
     'office365_desktop_debloat_enabled', 'office_desktop_debloat_enabled',
     'windows_removal_enforcement_enabled', 'windows_removal_enforcement_scope_hash',
     'privacy_disable_online_speech_enabled', 'privacy_disable_voice_activation_enabled',
-    'privacy_disable_activity_history_enabled',
+    'privacy_disable_activity_history_enabled', 'recycle_bin_empty_enabled',
 }
 
 

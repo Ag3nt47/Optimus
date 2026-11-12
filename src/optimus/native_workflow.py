@@ -406,6 +406,10 @@ class NativeWorkflow:
                 startup_title = ('Review or disable approved user startup entries' if configuration.get('startup_policy') == 'disable_selected'
                                  else 'Review native startup registrations')
                 stages.append((startup_title, lambda: run_native_startup(self.backend, configuration, cancel_event=cancel_event)))
+            if configuration.get('recycle_bin_empty_enabled') is True:
+                # Before duplicate recycling, so this run's recycled copies stay restorable until the next run.
+                from .trash_cleanup import empty_trash
+                stages.append(('Empty the Trash', lambda: empty_trash(cancel_event=cancel_event)))
             if configuration.get('duplicates_enabled'):
                 duplicate_title = ('Find or recycle approved duplicate copies' if configuration.get('duplicate_policy') != 'review'
                                    else 'Review native duplicate copies')

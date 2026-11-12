@@ -80,6 +80,7 @@ DEFAULTS = {
     'hardware_health_enabled': True,
     'defender_scan_reuse_enabled': True, 'defender_scan_reuse_hours': 6,
     'drive_optimization_enabled': False, 'auto_continue_fixes_enabled': False,
+    'recycle_bin_empty_enabled': False,
     'parallel_app_updates_enabled': False,
     'interface_priority_boost_enabled': True,
     'update_compatibility_mode_enabled': False, 'windows_cpu_compatibility_enabled': False,
@@ -150,6 +151,7 @@ def full_optimization_settings(settings=None):
         'applications_review_enabled': True, 'performance_review_enabled': True,
         'speed_enhancements_enabled': True,
         'drive_optimization_enabled': True, 'auto_continue_fixes_enabled': True,
+        'recycle_bin_empty_enabled': True,
         'parallel_app_updates_enabled': True,
         'startup_review_enabled': True, 'software_updates_enabled': True,
         'driver_updates_enabled': True, 'post_process_review_enabled': True,
@@ -502,6 +504,11 @@ class Workflow:
                                    lambda: run_startup(self.backend, configuration, cancel_event=cancel_event, item_callback=item_progress('Disable approved startup entries'))))
                 else:
                     stages.append(('Review startup registrations', 'Inspecting sign-in entries; no registration is changed.', lambda: review(getattr(self.backend, 'startup_list_review', self.backend.startup_list), 'Review only; no startup entry was disabled or deleted.')))
+            if configuration['recycle_bin_empty_enabled']:
+                # Before duplicate/cloud recycling, so this run's recycled items stay restorable until the next run.
+                from .trash_cleanup import empty_trash
+                stages.append(('Empty the Recycle Bin', "Permanently deleting the items already in this account's Recycle Bins; they cannot be restored. Files Optimus recycles later in this run are kept.",
+                               lambda: empty_trash(cancel_event=cancel_event)))
             if configuration['duplicates_enabled']:
                 if configuration['duplicate_policy'] != 'review':
                     from .automated_files import run_local

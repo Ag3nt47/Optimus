@@ -5141,7 +5141,7 @@ class OptimusWindow(QMainWindow):
         grid.addWidget(priority, 3, 1)
         layout.addLayout(grid)
         toggles = QGridLayout()
-        labels = [('cleanup_enabled','Clean reviewed temporary files'),('browser_cache_enabled','Clean selected browser caches (ask before closing active browsers)'),
+        labels = [('cleanup_enabled','Clean reviewed temporary files'),('recycle_bin_empty_enabled','Empty the Recycle Bin each run (permanent)'),('browser_cache_enabled','Clean selected browser caches (ask before closing active browsers)'),
             ('launch_at_sign_in','Launch Optimus when I sign in to Windows'),
             ('request_admin_on_startup','Ask Windows for administrator access once at app startup (UAC)'),
             ('interface_priority_boost_enabled','Prioritize Optimus interface (Above Normal CPU; takes effect the next time Optimus opens)'),

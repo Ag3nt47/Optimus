@@ -416,6 +416,7 @@ class InitialSetupWizard(QWizard):
             'Choose temporary files, browser caches and optional browser records to clean. Temporary/cache files use the minimum age below. Selected history, cookies and download-list records are cleared across the selected browsers\' recognized profiles, regardless of age; private database backups are required. Passwords, bookmarks and downloaded files are preserved.')
         self._checkbox_actions(body, 'cleanup', lambda: [*(self.controls[key] for key in ('cleanup_enabled', 'browser_cache_enabled', 'browser_history_enabled', 'browser_cookies_enabled', 'browser_download_history_enabled')), *self.category_controls.values(), *self.browser_controls.values()])
         self._check(body, 'cleanup_enabled', 'Clean old files in my user temporary folder', default=True)
+        self._check(body, 'recycle_bin_empty_enabled', 'Empty the Recycle Bin/Trash each run (permanent; items Optimus recycles in the same run are kept until the next)')
         self._check(body, 'browser_cache_enabled', 'Clean recognized browser caches and cached temporary web files', default=True)
         self._check(body, 'browser_history_enabled', 'Clear browsing history (all ages; private backup retained)')
         self._check(body, 'browser_cookies_enabled', 'Clear cookies and site sign-ins (can sign me out; private backup retained)')
@@ -1318,6 +1319,8 @@ class InitialSetupWizard(QWizard):
             actions.append('Request administrator access once at each normal app launch using Windows UAC; declining keeps Optimus open with standard access')
         if settings.get('cleanup_enabled'):
             actions.append('Permanently delete eligible old user temporary files')
+        if settings.get('recycle_bin_empty_enabled'):
+            actions.append('Permanently empty the Recycle Bin/Trash before duplicate recycling; emptied items cannot be restored')
         from .retention_configuration import retention_actions
         actions.extend(retention_actions(settings))
         if settings.get('drive_space_guard_enabled') is True:
