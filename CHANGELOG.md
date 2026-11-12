@@ -1,11 +1,14 @@
 # Changelog
 
-## 0.12.45
+## 0.12.46
 
 - Add **Empty the Recycle Bin/Trash each run** (Windows Recycle Bin, macOS and Linux Trash), on in Full Optimization. It runs before duplicate recycling, reports measured item and byte counts, and is verified from its own readback.
-- Verify the Optimus sign-in task after Windows rewrites its stored XML without default elements or in another order; this previously blocked launcher updates and sign-in changes.
 - Load the Settings process inventory about four times faster on Windows (7.3 s to 1.7 s with about 290 processes) by reading the parent-process map once per census.
 - Add CodeQL, Dependabot, Gitleaks and Ruff defect checks to GitHub.
+
+## 0.12.45
+
+- Verify the Optimus sign-in task after Windows rewrites its stored XML without default elements or in another order; this previously blocked launcher updates and sign-in changes.
 - Cut the opt-in background resource sampler's cost per sample by about two thirds on Windows by reading process CPU and I/O counters in one snapshot per process.
 - Reuse network adapter up/link-speed reports in live metrics for up to 30 seconds while the adapter list is unchanged; traffic is still read every sample.
 
