@@ -93,7 +93,7 @@ jobs:
       - name: Upload native release package
         id: release_artifact_upload
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Optimus-release-${{ matrix.target }}
           path: release-assets/*
@@ -102,7 +102,7 @@ jobs:
         id: release_artifact_upload_retry
         if: ${{ !cancelled() && steps.release_artifact_upload.outcome == 'failure' }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Optimus-release-${{ matrix.target }}
           path: release-assets/*
@@ -112,7 +112,7 @@ jobs:
         id: qa_artifact_upload
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Optimus-test-results-${{ matrix.target }}
           path: test-artifacts/
@@ -121,7 +121,7 @@ jobs:
         id: qa_artifact_upload_retry
         if: ${{ !cancelled() && steps.qa_artifact_upload.outcome == 'failure' }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Optimus-test-results-${{ matrix.target }}
           path: test-artifacts/
