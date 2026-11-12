@@ -35,7 +35,15 @@ class ResourceSampler:
             network = None
             errors.append('System network counters are unavailable.')
         processes = []
-        for process in psutil.process_iter(['pid', 'name', 'memory_info', 'create_time', 'nice']):
+        # A protected Windows process makes psutil fall back to a whole-system
+        # snapshot for each denied counter. Reading CPU and I/O inside
+        # process_iter's oneshot reuses one snapshot per process instead of
+        # three. Other platforms keep per-call reads: as_dict re-raises
+        # NotImplementedError for explicitly requested attributes.
+        attrs = ['pid', 'name', 'memory_info', 'create_time', 'nice']
+        if sys.platform == 'win32':
+            attrs += ['cpu_times', 'io_counters']
+        for process in psutil.process_iter(attrs):
             try:
                 item = process.info
                 record = {'pid': item['pid'], 'name': item['name'], 'rss': item['memory_info'].rss,
@@ -43,7 +51,8 @@ class ResourceSampler:
                           'priority': str(item['nice']), 'create_time': item['create_time']}
                 key = (item['pid'], item['create_time'])
                 try:
-                    cpu = process.cpu_times()
+                    # A denied prefetched counter is None and is skipped like a raised denial.
+                    cpu = item['cpu_times'] if 'cpu_times' in item else process.cpu_times()
                     cpu_total = cpu.user + cpu.system
                     previous_cpu = self._previous_cpu.get(key)
                     if previous_cpu:
@@ -52,7 +61,7 @@ class ResourceSampler:
                 except (psutil.Error, OSError, AttributeError, NotImplementedError):
                     pass
                 try:
-                    counters = process.io_counters()
+                    counters = item['io_counters'] if 'io_counters' in item else process.io_counters()
                     record.update(read_bytes=counters.read_bytes, write_bytes=counters.write_bytes)
                     key = (item['pid'], item['create_time'])
                     previous = self._previous_io.get(key)

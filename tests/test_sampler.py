@@ -134,6 +134,41 @@ class SamplerTests(unittest.TestCase):
         snapshot['latest']['processes'][0]['pid'] = 999
         self.assertEqual(self.sampler.status()['latest']['processes'][0]['pid'], 200)
 
+    def test_windows_reads_counters_in_one_snapshot_and_skips_denied_values(self):
+        requested = []
+        def process_iter(attrs):
+            requested.append(list(attrs))
+            return list(self.processes)
+        mock_psutil.process_iter = process_iter
+        denied = MockProcess(process_id=300, created=99.0)
+        denied.info.update(cpu_times=None, io_counters=None)
+        self.process.info.update(cpu_times=types.SimpleNamespace(user=1.0, system=2.0),
+                                 io_counters=types.SimpleNamespace(read_bytes=7, write_bytes=8))
+        for process in (self.process, denied):
+            process.cpu_times = process.io_counters = lambda: (_ for _ in ()).throw(
+                AssertionError('Prefetched counters must not be read again'))
+        self.processes.append(denied)
+        with patch.object(sampler_module, 'sys', types.SimpleNamespace(platform='win32')):
+            snapshot = self.sampler.sample()
+        self.assertIn('cpu_times', requested[0])
+        self.assertIn('io_counters', requested[0])
+        rows = {row['pid']: row for row in snapshot['processes']}
+        self.assertEqual(rows[200]['read_bytes'], 7)
+        self.assertNotIn('read_bytes', rows[300])
+        self.assertEqual(self.sampler._previous_cpu[(200, 1234.5)][1], 3.0)
+        self.assertNotIn((300, 99.0), self.sampler._previous_cpu)
+
+    def test_non_windows_keeps_individual_counter_reads(self):
+        requested = []
+        def process_iter(attrs):
+            requested.append(list(attrs))
+            return list(self.processes)
+        mock_psutil.process_iter = process_iter
+        with patch.object(sampler_module, 'sys', types.SimpleNamespace(platform='linux')):
+            snapshot = self.sampler.sample()
+        self.assertNotIn('io_counters', requested[0])
+        self.assertEqual(snapshot['processes'][0]['read_bytes'], 1000)
+
     def test_invalid_interval_does_not_start_worker(self):
         for interval in (0, 1, 61):
             with self.subTest(interval=interval):
