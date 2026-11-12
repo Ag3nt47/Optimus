@@ -55,7 +55,7 @@ background service is enabled by these performance changes. Windows privacy
 checks retain the 0.12.11 batching improvement and their separate per-control
 recovery, pre-write comparison and post-write verification.
 
-## Background sampling (unreleased)
+## Background sampling in 0.12.45
 
 | Area | Change | Behavior retained |
 | --- | --- | --- |

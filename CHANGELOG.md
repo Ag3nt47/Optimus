@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.45
 
 - Cut the opt-in background resource sampler's cost per sample by about two thirds on Windows by reading process CPU and I/O counters in one snapshot per process.
 - Reuse network adapter up/link-speed reports in live metrics for up to 30 seconds while the adapter list is unchanged; traffic is still read every sample.
