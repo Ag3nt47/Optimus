@@ -13,7 +13,7 @@ dependencies = ["PySide6>=6.6,<7", "psutil>=6,<8", "Send2Trash>=2.1,<3", "crypto
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.11,<7"]
-test = ["pytest>=8,<10"]
+test = ["pytest>=8,<10", "pytest-xdist>=3.6,<4"]
 
 [project.gui-scripts]
 optimus = "optimus.app:main"
@@ -27,4 +27,11 @@ optimus = ["engine/*.ps1", "widgets/*.txt", "assets/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["build", "dist", "release-assets", "test-artifacts"]
 
+[tool.ruff.lint]
+# Errors that indicate real defects: syntax errors, invalid comparisons, misplaced
+# statements and undefined names. Style rules are intentionally not enforced.
+select = ["E9", "F63", "F7", "F82"]

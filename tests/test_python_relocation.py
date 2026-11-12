@@ -284,7 +284,7 @@ def test_inherit_only_acl_entries_do_not_apply_to_this_object():
 
 NAMESPACE_PATHS = list(dict.fromkeys(repair._path_chain(SOURCE) + repair._path_chain(TARGET)
     + [str(PureWindowsPath(approval().target_dll).parent), approval().target_dll]))
-STRICT_PATHS = {SOURCE, TARGET, str(PureWindowsPath(approval().target_dll).parent), approval().target_dll}
+STRICT_PATHS = sorted({SOURCE, TARGET, str(PureWindowsPath(approval().target_dll).parent), approval().target_dll})
 ANCESTOR_PATHS = [path for path in NAMESPACE_PATHS if path not in STRICT_PATHS]
 
 
