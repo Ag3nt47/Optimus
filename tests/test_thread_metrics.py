@@ -232,6 +232,44 @@ def test_optional_cpu_frequency_never_discards_cpu_memory_or_network(monkeypatch
     process.assert_not_called()
 
 
+def test_interface_stats_cache_reuses_link_reports_but_never_traffic(monkeypatch):
+    psutil, _ = system_fixture(monkeypatch, platform='linux')
+    state = {'now': 1000.0, 'names': ['Fixture network'], 'received': 10, 'stats_calls': 0, 'fail': False}
+    monkeypatch.setattr(live_metrics, 'time', SimpleNamespace(monotonic=lambda: state['now']))
+    monkeypatch.setattr(psutil, 'net_io_counters', lambda **options: {
+        name: SimpleNamespace(bytes_recv=state['received'], bytes_sent=0) for name in state['names']})
+    def net_if_stats():
+        state['stats_calls'] += 1
+        if state['fail']:
+            raise OSError('Fixture adapter enumeration failure')
+        return {name: SimpleNamespace(isup=True, speed=state['stats_calls']) for name in state['names']}
+    monkeypatch.setattr(psutil, 'net_if_stats', net_if_stats)
+    cache = {}
+    first = live_metrics._read_system(interface_cache=cache)
+    state.update(now=1029.0, received=20)
+    second = live_metrics._read_system(interface_cache=cache)
+    assert state['stats_calls'] == 1 and second['network_stats'] == first['network_stats']
+    assert second['network_counters']['Fixture network']['received'] == 20
+    state['now'] = 1030.0  # The reuse window has elapsed.
+    assert live_metrics._read_system(interface_cache=cache)['network_stats']['Fixture network']['link_mbps'] == 2
+    state['names'] = ['Fixture network', 'Second fixture']  # A changed adapter set is read fresh.
+    assert set(live_metrics._read_system(interface_cache=cache)['network_stats']) == set(state['names'])
+    assert state['stats_calls'] == 3
+    live_metrics._read_system()  # No caller cache means a fresh read.
+    assert state['stats_calls'] == 4
+    state.update(names=['Third fixture'], fail=True)
+    failed = live_metrics._read_system(interface_cache=cache)
+    assert failed['network_stats'] is None and 'network_stats' in failed['errors']
+    assert cache['names'] == frozenset({'Fixture network', 'Second fixture'})
+
+
+def test_live_metrics_restart_discards_cached_interface_reports(monkeypatch):
+    metrics = live_metrics.LiveMetrics(SimpleNamespace(), reader=lambda: {})
+    metrics._interface_cache['stats'] = {'Fixture network': {'is_up': True}}
+    metrics._reset()
+    assert metrics._interface_cache == {}
+
+
 def navigation(tid=101):
     return dict(active=True, session_id='session', jobs=[dict(id='software_updates', active=True,
         current=dict(key='current-package', thread_id=tid))])
@@ -282,7 +320,7 @@ def test_default_reader_receives_only_bounded_before_navigation_worker_ids(monke
     metrics = live_metrics.LiveMetrics(backend, wifi_provider=lambda: {}, clock=lambda: 100)
     reader.assert_not_called()
     metrics._sample()
-    reader.assert_called_once_with((101, 102))
+    reader.assert_called_once_with((101, 102), interface_cache=metrics._interface_cache)
 
 
 @pytest.mark.parametrize('platform', ['linux', 'darwin'])

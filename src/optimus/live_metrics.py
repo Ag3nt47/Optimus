@@ -102,7 +102,17 @@ def identify_wifi(*, system=None, runner=subprocess.run, linux_root=Path('/sys/c
     return report
 
 
-def _read_system(thread_ids=()):
+_INTERFACE_STATS_SECONDS = 30
+
+
+def _read_system(thread_ids=(), *, interface_cache=None):
+    """Read one live sample.
+
+    ``interface_cache`` is a caller-owned dict. With it, adapter up/link-speed
+    reports (a costly Windows adapter enumeration) are reused for up to
+    ``_INTERFACE_STATS_SECONDS`` while the reported adapter names are unchanged;
+    traffic counters are always read fresh. Without it every read is fresh.
+    """
     import psutil
     value = {'errors': []}
     def read(name, operation):
@@ -145,8 +155,19 @@ def _read_system(thread_ids=()):
              for row in psutil.Process().threads() if row.id in selected} if selected else {})
     read('network_counters', lambda: {name: {'received': row.bytes_recv, 'sent': row.bytes_sent}
          for name, row in psutil.net_io_counters(pernic=True, nowrap=False).items()})
-    read('network_stats', lambda: {name: {'is_up': row.isup, 'link_mbps': row.speed}
-         for name, row in psutil.net_if_stats().items()})
+    def interface_stats():
+        counters, now = value.get('network_counters'), time.monotonic()
+        names = frozenset(counters) if isinstance(counters, dict) else None
+        if (interface_cache is not None and names is not None and interface_cache.get('names') == names
+                and 0 <= now - interface_cache.get('at', float('-inf')) < _INTERFACE_STATS_SECONDS):
+            return interface_cache['stats']
+        stats = {name: {'is_up': row.isup, 'link_mbps': row.speed}
+                 for name, row in psutil.net_if_stats().items()}
+        if interface_cache is not None and names is not None:
+            interface_cache.clear()
+            interface_cache.update(stats=stats, names=names, at=now)
+        return stats
+    read('network_stats', interface_stats)
     return value
 
 
@@ -169,6 +190,7 @@ class LiveMetrics:
         self._adapter = None
         self._wifi = None
         self._wifi_at = None
+        self._interface_cache = {}
 
     def status(self):
         with self._lock:
@@ -229,7 +251,8 @@ class LiveMetrics:
         before = self._navigation()
         try:
             selected = tuple(sorted({binding[2] for binding in self._bindings(before).values() if binding is not None}))
-            raw = self._reader() if self._reader is not None else _read_system(selected)
+            raw = (self._reader() if self._reader is not None
+                   else _read_system(selected, interface_cache=self._interface_cache))
             now = self._clock()
             with self._lock:
                 if generation is not None and (generation != self._generation or not self._desired):
