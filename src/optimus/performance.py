@@ -171,11 +171,65 @@ class _InventoryContext:
         self.services = _service_ids() if _PLATFORM == 'win32' else set()
         self.cpu_count = max(1, int(_safe_metric(lambda: psutil.cpu_count(logical=True), None) or os.cpu_count() or 1))
         self.sessions = {}
+        self._parents = None
+        self._codex_related = {}
 
     def session_id(self, pid):
         if pid not in self.sessions:
             self.sessions[pid] = _session_id(pid)
         return self.sessions[pid]
+
+    def ppid(self, process):
+        if self._parents is None:
+            self._parents = _parent_map() or {}
+        value = self._parents.get(int(process.pid))
+        return int(value) if value is not None else int(process.ppid())
+
+    def related_to_codex(self, process):
+        """_related_to_codex for one display census, memoized per PID.
+
+        Shared ancestors are opened once. Like psutil.Process.parent(), a parent
+        newer than its child is a reused PID and ends the chain.
+        """
+        return self._codex_entry(process)[1]
+
+    def _codex_entry(self, process):
+        pid = int(process.pid)
+        if pid in self._codex_related:
+            return self._codex_related[pid]
+        created = None
+        self._codex_related[pid] = (created, False)  # Guards against a cyclic parent map.
+        try:
+            created = process.create_time()
+            related = _trusted_codex_exe(process.exe())
+            if not related:
+                parent_pid = self.ppid(process)
+                if parent_pid > 0 and parent_pid != pid:
+                    parent = self._codex_related.get(parent_pid)
+                    if parent is None:
+                        parent = self._codex_entry(psutil.Process(parent_pid))
+                    related = parent[0] is not None and parent[0] <= created and parent[1]
+        except psutil.Error:
+            related = False
+        self._codex_related[pid] = (created, related)
+        return self._codex_related[pid]
+
+
+def _parent_map():
+    """One native parent-PID snapshot, or None.
+
+    psutil's Windows ppid() rebuilds this whole-system map on every call, which
+    dominated inventory time. Other platforms read a parent PID cheaply.
+    """
+    if _PLATFORM != 'win32':
+        return None
+    try:
+        from psutil import _psplatform
+        reader = getattr(getattr(_psplatform, 'cext', None), 'ppid_map', None)
+        value = reader() if callable(reader) else None
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _base_protection(process: Any, *, for_sleep: bool = True,
@@ -224,7 +278,8 @@ def _base_protection(process: Any, *, for_sleep: bool = True,
             # Only an explicit priority request may address a verified Codex ancestor.
             if for_sleep or process_id == os.getpid() or not _trusted_codex_exe(executable):
                 return "Optimus or a parent process of Optimus."
-        if for_sleep and _related_to_codex(process):
+        if for_sleep and (inventory_context.related_to_codex(process) if inventory_context is not None
+                          else _related_to_codex(process)):
             return "Codex and its verified tool family are excluded from sleeping."
         return ""
     except (psutil.Error, OSError, ValueError) as exc:
@@ -305,7 +360,7 @@ def _record(process: Any, *, inventory_context=None) -> dict[str, Any]:
         record = {
             'pid': int(process.pid), 'name': _safe_metric(process.name, 'Unavailable'), 'exe': executable,
             'create_time': _safe_metric(lambda: float(process.create_time())), 'username': _safe_metric(process.username, ''),
-            'ppid': _safe_metric(lambda: int(process.ppid())), 'priority': _PRIORITY_NAMES.get(priority, str(priority)) if priority is not None else 'Unavailable',
+            'ppid': _safe_metric(lambda: inventory_context.ppid(process) if inventory_context is not None else int(process.ppid())), 'priority': _PRIORITY_NAMES.get(priority, str(priority)) if priority is not None else 'Unavailable',
             'priority_value': priority, 'memory_rss': int(memory.rss) if memory else 0,
             'private_bytes': getattr(memory, 'private', 0 if _PLATFORM == 'win32' else None) if memory else (0 if _PLATFORM == 'win32' else None),
             'cpu_percent': round(min(100.0, max(0.0, raw_cpu / cpu_count)), 2) if raw_cpu is not None else 0.0,
