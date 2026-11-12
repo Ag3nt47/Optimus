@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Cut the opt-in background resource sampler's cost per sample by about two thirds on Windows by reading process CPU and I/O counters in one snapshot per process.
+- Reuse network adapter up/link-speed reports in live metrics for up to 30 seconds while the adapter list is unchanged; traffic is still read every sample.
+
 ## 0.12.44
 
 - Add separate full Microsoft 365 and perpetual Office uninstall choices using exact signed native uninstallers.

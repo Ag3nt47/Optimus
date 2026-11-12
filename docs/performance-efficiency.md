@@ -54,3 +54,20 @@ No new tuning, automatic deletion, real-time priority, security exceptions or
 background service is enabled by these performance changes. Windows privacy
 checks retain the 0.12.11 batching improvement and their separate per-control
 recovery, pre-write comparison and post-write verification.
+
+## Background sampling (unreleased)
+
+| Area | Change | Behavior retained |
+| --- | --- | --- |
+| Opt-in resource sampler | On Windows, read process CPU and I/O counters in the same psutil snapshot as name, memory and start time. Protected processes previously triggered three whole-system snapshots each. | Same process set, baselines keyed by PID and start time, and denied counters still omitted rather than invented. Other platforms keep per-call reads. |
+| Live metrics | Reuse adapter up/link-speed reports for up to 30 seconds while the reported adapter names are unchanged. | Traffic counters, CPU, memory and worker thread CPU are read fresh on every sample. Restarting live metrics discards the cached reports. |
+
+Paired, alternating measurements on one Windows PC with about 285 processes, taken while another test workload was running. Numbers vary with load and process count.
+
+| Fixture | Previous implementation | Current |
+| --- | ---: | ---: |
+| `ResourceSampler.sample()`, median of 10 | 1,990 ms (18.4 s CPU in total) | 638 ms (6.2 s CPU in total) |
+| Live metrics system read, median of 60 | 29.97 ms | 11.62 ms |
+| `tests/test_browser_privacy.py` (18 tests; SQLite fixtures written in one transaction) | 221 s | 84 s |
+
+An adapter that goes down without disappearing from the counter list can take up to 30 seconds to be reported as down.

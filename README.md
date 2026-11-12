@@ -113,7 +113,7 @@ Optimus checks for an update before maintenance. A verified, single-use cleanup 
 
 GitHub updates verify the restarted window and preserve saved choices. App updates confirm the installed version after the installer exits. Individual failures with confirmed terminal outcomes allow the next eligible update to proceed. After a Windows restart, Optimus checks installer activity and can resume approved updates while holding the exact WinGet offer whose outcome remains unknown, including recorded timeouts. Driver installation rechecks current saved approvals and present device evidence. Update-only continuation runs the remaining saved scope without cleanup or debloat. [Update and restart verification](docs/github-update-restart.md)
 
-The performance improvements from 0.12.12 reduce repeated work in process attribution, browser-cleaning checks, worker totals and the animated interface. Fresh process checks, file protections, truthful progress and saved choices remain in effect. Fixture timings do not establish a general PC speed gain. [Performance changes and measurements](docs/performance-efficiency.md)
+The performance improvements from 0.12.12 reduce repeated work in process attribution, browser-cleaning checks, worker totals and the animated interface. Background sampling now costs less on Windows: the optional resource sampler reads each process's counters in one snapshot (about 1,990 ms down to 638 ms per sample with about 285 processes), and live metrics reuse adapter link reports for up to 30 seconds while the adapter list is unchanged (30.0 ms down to 11.6 ms per read). Traffic, CPU and memory are still read fresh every sample. Fresh process checks, file protections, truthful progress and saved choices remain in effect. Fixture timings do not establish a general PC speed gain. [Performance changes and measurements](docs/performance-efficiency.md)
 
 The dashboard, main menu, Settings and Sandbox adapt to their window size. Larger windows grow text and controls, give all four worker cards equal space and show fuller details when they fit. Smaller windows retain readable text and vertical scrolling. The bottom panel keeps the gag animation, computer/network utilization and disk-buffer checks visible; Current processes, Stage log and raw verification data collapse behind Details. Full-screen controls support F11, and Escape restores the previous size. Resizing does not save preferences or expand approved actions. [Responsive layout](docs/responsive-layout.md)
 
@@ -223,7 +223,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m optimus
 ```
 
-`Install-Source.bat`, `Start-Optimus.bat` and `Build-Windows.bat` provide the same basic workflow. Exact dependency versions used for the release build are in `requirements-build.txt`.
+`Install-Source.bat`, `Start-Optimus.bat` and `Build-Windows.bat` provide the same basic workflow. The complete Windows CI gate also runs `python tools/critical_review.py --output test-artifacts/critical-review` and the `tests/Test-*.ps1` engine fixtures listed in `.github/workflows/windows.yml`. Exact dependency versions used for the release build are in `requirements-build.txt`.
 
 To build the portable executable:
 

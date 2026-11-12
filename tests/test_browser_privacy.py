@@ -17,7 +17,7 @@ BrowserPrivacy=module.BrowserPrivacy
 def chrome_fixture(p):
  p.mkdir(parents=True)
  with closing(sqlite3.connect(p/'History')) as db:
-  db.executescript('CREATE TABLE urls(id INTEGER PRIMARY KEY,url TEXT); CREATE TABLE visits(id INTEGER PRIMARY KEY,url INTEGER); CREATE TABLE visit_source(id INTEGER,source INTEGER); CREATE TABLE keyword_search_terms(url_id INTEGER,term TEXT); CREATE TABLE downloads(id INTEGER PRIMARY KEY,target_path TEXT); CREATE TABLE downloads_url_chains(id INTEGER,chain_index INTEGER,url TEXT); INSERT INTO urls VALUES(1,"https://private-history.fixture"); INSERT INTO visits VALUES(1,1); INSERT INTO visit_source VALUES(1,1); INSERT INTO keyword_search_terms VALUES(1,"private-search.fixture"); INSERT INTO downloads VALUES(1,"fixture-download.bin"); INSERT INTO downloads_url_chains VALUES(1,0,"https://private-download.fixture");');db.commit()
+  db.executescript('BEGIN; CREATE TABLE urls(id INTEGER PRIMARY KEY,url TEXT); CREATE TABLE visits(id INTEGER PRIMARY KEY,url INTEGER); CREATE TABLE visit_source(id INTEGER,source INTEGER); CREATE TABLE keyword_search_terms(url_id INTEGER,term TEXT); CREATE TABLE downloads(id INTEGER PRIMARY KEY,target_path TEXT); CREATE TABLE downloads_url_chains(id INTEGER,chain_index INTEGER,url TEXT); INSERT INTO urls VALUES(1,"https://private-history.fixture"); INSERT INTO visits VALUES(1,1); INSERT INTO visit_source VALUES(1,1); INSERT INTO keyword_search_terms VALUES(1,"private-search.fixture"); INSERT INTO downloads VALUES(1,"fixture-download.bin"); INSERT INTO downloads_url_chains VALUES(1,0,"https://private-download.fixture"); COMMIT;');db.commit()
  (p/'Network').mkdir()
  with closing(sqlite3.connect(p/'Network'/'Cookies')) as db:
   db.execute('CREATE TABLE cookies(host_key TEXT,name TEXT,value TEXT,encrypted_value BLOB)')
@@ -29,9 +29,9 @@ def chrome_fixture(p):
 def firefox_fixture(p):
  p.mkdir(parents=True)
  with closing(sqlite3.connect(p/'places.sqlite')) as db:
-  db.executescript('CREATE TABLE moz_places(id INTEGER PRIMARY KEY,url TEXT,visit_count INTEGER,last_visit_date INTEGER); CREATE TABLE moz_historyvisits(id INTEGER PRIMARY KEY,place_id INTEGER); CREATE TABLE moz_bookmarks(id INTEGER PRIMARY KEY,fk INTEGER,title TEXT); INSERT INTO moz_places VALUES(1,"https://bookmarked.fixture",5,1234); INSERT INTO moz_places VALUES(2,"https://private-history.fixture",3,4567); INSERT INTO moz_historyvisits VALUES(1,1); INSERT INTO moz_historyvisits VALUES(2,2); INSERT INTO moz_bookmarks VALUES(1,1,"preserve-bookmark");');db.commit()
+  db.executescript('BEGIN; CREATE TABLE moz_places(id INTEGER PRIMARY KEY,url TEXT,visit_count INTEGER,last_visit_date INTEGER); CREATE TABLE moz_historyvisits(id INTEGER PRIMARY KEY,place_id INTEGER); CREATE TABLE moz_bookmarks(id INTEGER PRIMARY KEY,fk INTEGER,title TEXT); INSERT INTO moz_places VALUES(1,"https://bookmarked.fixture",5,1234); INSERT INTO moz_places VALUES(2,"https://private-history.fixture",3,4567); INSERT INTO moz_historyvisits VALUES(1,1); INSERT INTO moz_historyvisits VALUES(2,2); INSERT INTO moz_bookmarks VALUES(1,1,"preserve-bookmark"); COMMIT;');db.commit()
  with closing(sqlite3.connect(p/'cookies.sqlite')) as db:
-  db.executescript('CREATE TABLE moz_cookies(host TEXT,name TEXT,value TEXT); INSERT INTO moz_cookies VALUES("example.com","fixture","private-cookie.fixture"); INSERT INTO moz_cookies VALUES("other.test","fixture","private-cookie.fixture");');db.commit()
+  db.executescript('BEGIN; CREATE TABLE moz_cookies(host TEXT,name TEXT,value TEXT); INSERT INTO moz_cookies VALUES("example.com","fixture","private-cookie.fixture"); INSERT INTO moz_cookies VALUES("other.test","fixture","private-cookie.fixture"); COMMIT;');db.commit()
  (p/'logins.json').write_text('{"fixture":"preserve-password"}');(p/'key4.db').write_bytes(b'preserve-password-key')
 
 class Tests(unittest.TestCase):
