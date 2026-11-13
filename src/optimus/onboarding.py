@@ -639,6 +639,8 @@ class InitialSetupWizard(QWizard):
         body = self._page('software', '9. Software Updater',
             'Choose global update scope and exact per-app rules. Global review only checks updates; explicit per-app rules can authorize updates, installation or removal. All-supported approval also covers future matching installed applications.')
         self._check(body, 'software_updates_enabled', 'Include the Software Updater stage')
+        self._check(body, 'craft_updates_enabled', 'Keep my registered Craft apps up to date (closed apps only)')
+        body.addWidget(_label('Checks the official publisher releases at each maintenance run. Downloads are verified before replacement, and the previous version is kept for recovery.'))
         self._check(body, 'update_payload_cleanup_enabled', 'Automatically delete Optimus-owned installer downloads after a verified update', default=True)
         body.addWidget(_label('Only tracked temporary payloads from this update attempt are eligible. Failed or uncertain installers, pending-restart files, logs and rollback backups are retained. Personal Downloads and Windows-managed driver/update caches are excluded.'))
         self._check(body, 'parallel_app_updates_enabled', 'Update apps and Windows drivers in background while independent steps continue')

@@ -32,6 +32,7 @@ def parser():
     commands.add_argument('--windows-compatibility-restore', type=_run_identity, metavar='CHANGE_ID', help='Restore one recorded Windows compatibility-policy change.')
     commands.add_argument('--update-recovery', choices=('status', 'reconcile'), help='Inspect one updater journal or reconcile a verified legacy preflight error; never starts an installer.')
     commands.add_argument('--continue-updates', action='store_true', help='Continue saved approved app and driver updates, skipping held packages; no cleanup or debloat.')
+    commands.add_argument('--craft-updates-only', action='store_true', help='Check and update only the explicitly registered Craft apps; no interface, cleanup, UAC or other maintenance.')
     commands.add_argument('--enforce-removals', action='store_true', help='Reapply only explicitly saved Windows app-removal and privacy scopes without opening the interface.')
     commands.add_argument('--toolkit', choices=('status', 'check', 'resume', 'integrity-check'), help='Inspect optional maintenance settings, run read-only health checks, resume a saved reboot plan, or check Windows integrity; no automatic repair.')
     commands.add_argument('--safe-stop', action='store_true', help='Ask the running Optimus window to stop new work and exit after active operations save their outcomes; never force-kills installers.')
@@ -270,6 +271,16 @@ def main(argv=None):
         except (ImportError, OSError, ValueError, RuntimeError) as error:
             print(json.dumps({'status': 'error', 'command': 'tls-probe',
                               'network_requests': 0, 'maintenance_applied': False,
+                              'error': str(error)[:2048]}), file=sys.stderr)
+            return 2
+    if args.craft_updates_only:
+        try:
+            from .craft_updates import run_saved_craft_updates
+            outcome = run_saved_craft_updates()
+            print(json.dumps(outcome))
+            return 2 if outcome.get('failed_items', 0) else 0
+        except (ImportError, OSError, ValueError, RuntimeError) as error:
+            print(json.dumps({'command': 'craft-updates-only', 'status': 'error',
                               'error': str(error)[:2048]}), file=sys.stderr)
             return 2
     if args.self_update_worker:

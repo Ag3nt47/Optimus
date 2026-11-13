@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.47
+
+- Add an opt-in Windows updater for the explicitly registered twelve-app ArtCraft portable suite, using exact official stable GitHub x64 ZIP releases with SHA-256 and size verification.
+- Defer running Craft apps, stage replacements, preserve portable settings/recovery and non-release files, and retain prior app directories with journaled interrupted-swap recovery.
+- Add a separate Craft-only command for explicitly configured sign-in checks; saved Craft and Software Updater choices control it without launching the interface or other maintenance.
+
 ## 0.12.46
 
 - Add **Empty the Recycle Bin/Trash each run** (Windows Recycle Bin, macOS and Linux Trash), on in Full Optimization. It runs before duplicate recycling, reports measured item and byte counts, and is verified from its own readback.

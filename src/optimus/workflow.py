@@ -86,6 +86,7 @@ DEFAULTS = {
     'update_compatibility_mode_enabled': False, 'windows_cpu_compatibility_enabled': False,
     'startup_review_enabled': False, 'duplicates_enabled': False, 'duplicate_roots': [],
     'cloud_review_enabled': False, 'software_updates_enabled': False,
+    'craft_updates_enabled': False,
     'software_update_policy': 'review', 'software_update_ids': [],
     'software_update_all_approved': False, 'software_update_exclude_ids': [],
     'software_update_agreements_accepted': False, 'driver_updates_enabled': False,
@@ -660,6 +661,12 @@ class Workflow:
                                 outcome = dict(outcome, failed_items=refused)
                         return outcome
                     stages.append((label, 'Applying the selected app uninstall scope. Windows App remote access, Bing Wallpaper, Store, security, frameworks and WebView2 are preserved.', remove_group))
+            if configuration['software_updates_enabled'] and configuration['craft_updates_enabled']:
+                from .craft_updates import run_craft_updates
+                stages.append(('Update Craft apps',
+                    'Checking the registered Craft apps for official portable releases; open apps are deferred and prior versions are retained.',
+                    lambda: run_craft_updates(self.backend.data_dir, cancel_event=cancel_event,
+                                             progress=item_progress('Update Craft apps'))))
             if configuration['software_updates_enabled']:
                 from .automated_software import run_software
                 def software_updates():
@@ -843,7 +850,7 @@ class Workflow:
                                     else maintenance_navigation)
                 cancel_event = (stage_navigation.cancellation(global_cancel_event)
                                 if navigation_item else global_cancel_event)
-                mutation_item = title.startswith(('Apply ', 'Prepare approved ', 'Disable ', 'Recycle ', 'Clean ', 'Optimize ', 'Remove ', 'Uninstall ', 'Enable '))
+                mutation_item = title == 'Update Craft apps' or title.startswith(('Apply ', 'Prepare approved ', 'Disable ', 'Recycle ', 'Clean ', 'Optimize ', 'Remove ', 'Uninstall ', 'Enable '))
                 if title.startswith(('Disable ', 'Remove ', 'Uninstall ')):
                     invalidate_inventory = getattr(self.backend, 'invalidate_review_inventory', None)
                     if callable(invalidate_inventory):

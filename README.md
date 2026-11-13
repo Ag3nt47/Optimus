@@ -35,7 +35,7 @@ Select or copy the current readings, and refresh them while maintenance continue
 - **Cleanup:** Preview selected temporary files, diagnostics and rebuildable app caches with age limits and local logs.
 - **Browsers:** Clean supported cache, history, cookies and download lists; preserve passwords, bookmarks and chosen cookie domains.
 - **Windows privacy/debloat:** Separate switches remove Microsoft 365 desktop suites, perpetual Office, Hub/companions, new Outlook, Edge and selected consumer apps. Windows App remote access stays protected. [Removal and privacy choices](docs/office-edge-removal.md)
-- **Updates:** Manage supported app offers, package rules and Windows Update drivers with scoped approval and backup checks.
+- **Updates:** Manage supported app offers, package rules and Windows Update drivers with scoped approval and backup checks. Opt in to verified portable updates for an explicitly registered Windows ArtCraft suite. [Craft update scope](docs/CraftUpdates.md)
 - **Security:** Run Defender quick scans and review threats, supported corrections and eligible Windows Security/Critical updates.
 - **Automatic efficiency:** Avoid repeated inventory queries and redundant eligible Defender scans, with lighter live monitoring and adjustable settings. [How it works](docs/automatic-efficiency.md)
 - **Automatic follow-through.** Apply supported fixes, verify late app-version registration and advance the update queue after confirmed package download failures. Recommendations distinguish installed fixes from Windows controls and coverage reports. [What runs automatically](docs/automatic-remediation.md)
@@ -100,6 +100,8 @@ Review and save the first-start choices, then choose **Auto Clean** at the launc
 ### Current release
 
 The published downloads above identify the available release and file sizes. The updated removal settings distinguish full Microsoft 365 desktop suites and perpetual Office from their Store apps, keep Windows App remote access protected, and offer approved reappearance checks. See the [switch-by-switch guide and setup example](docs/office-edge-removal.md). Existing explicit On/Off choices are retained; new scopes still require review before unattended enforcement.
+
+**0.12.47 source update:** adds an opt-in updater for twelve explicitly registered Windows ArtCraft portable apps. It verifies official stable x64 ZIPs, defers open apps, preserves local settings/recovery files and keeps prior versions. A separate Craft-only command supports explicitly configured sign-in checks. Registration and a verified initial manifest are required; the option does not install apps or create a sign-in task. [Setup and limits](docs/CraftUpdates.md)
 
 Saved automation continues past proven local control failures, rechecks late app-version registration without reinstalling, and applies approved Windows security update recommendations with fresh installation-history verification. Remaining recommendations show **Apply / Install / Open / View** and the actual outcome. [Automatic fixes and installation](docs/automatic-remediation.md).
 
