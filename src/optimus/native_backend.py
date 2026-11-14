@@ -401,10 +401,11 @@ class NativeBackend(Backend):
                 directories[:] = [name for name in directories if name not in bundles]
         paths = []
         for value in candidates:
-            if not isinstance(value, str) or not value.startswith('/') or len(value) > 4096 or '\x00' in value:
+            if not isinstance(value, str) or len(value) > 4096 or '\x00' in value:
                 continue
             path = Path(value)
-            if path.suffix.casefold() != '.app' or path.is_symlink() or not path.is_dir():
+            if (not path.is_absolute() or path.suffix.casefold() != '.app'
+                    or path.is_symlink() or not path.is_dir()):
                 continue
             if any(parent.suffix.casefold() == '.app' for parent in path.parents):
                 continue  # Helper bundles inside an application are not separate installations.
