@@ -569,6 +569,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('--restart', command)
         self.assertTrue(result['verified'])
 
+    def test_ventura_no_updates_terminal_result_on_stderr_is_complete(self):
+        backend = object.__new__(NativeBackend)
+        backend.system = 'darwin'
+        backend.native_runner = Mock()
+        backend.native_runner.run.return_value = {
+            'exitCode': 0,
+            'stdout': 'Software Update Tool\n\nFinding available software\n',
+            'stderr': 'No new software available.\n',
+        }
+        scan = backend.os_updates_scan()
+        self.assertTrue(scan['complete'])
+        self.assertTrue(scan['structured'])
+        self.assertEqual(scan['updates'], [])
+
     def test_major_macos_upgrade_is_inventory_only_and_cannot_install(self):
         backend = object.__new__(NativeBackend)
         backend.system = 'darwin'

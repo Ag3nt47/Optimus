@@ -562,9 +562,13 @@ class NativeBackend(Backend):
         if result['exitCode'] != 0:
             return {'source': 'Apple Software Update', 'structured': False, 'complete': False,
                     'exitCode': result['exitCode'], 'updates': [], 'note': result.get('stderr', '')[:1000]}
+        # Ventura writes the successful "No new software available" terminal
+        # result to stderr while writing progress headings to stdout. Both are
+        # native tool output, and exit status still governs successful parsing.
+        output = result.get('stdout', '') + '\n' + result.get('stderr', '')
         updates = []
         label = None
-        for line in result['stdout'].splitlines():
+        for line in output.splitlines():
             match = re.match(r'^\s*\*\s+Label:\s*(.+?)\s*$', line)
             if match:
                 label = match[1]
@@ -592,7 +596,7 @@ class NativeBackend(Backend):
                                 'eligible': not major_upgrade, 'review_only': major_upgrade,
                                 'detail': line.strip()[:2000]})
                 label = None
-        text = result['stdout'].casefold()
+        text = output.casefold()
         complete = bool(updates) or 'no new software available' in text or 'no updates are available' in text
         return {'source': 'Apple Software Update', 'structured': complete, 'complete': complete,
                 'exitCode': 0, 'updates': updates, 'note': 'Apple controls OS, firmware and bundled driver compatibility. Installation requires explicit review and native authorization; no automatic restart is requested.'}
