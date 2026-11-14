@@ -6,6 +6,7 @@ import math
 import ntpath
 import os
 import re
+import sys
 import threading
 import time
 import uuid
@@ -93,6 +94,7 @@ DEFAULTS = {
     'python_relocation_repair_enabled': False, 'python_relocation_approvals': [],
     'update_payload_cleanup_enabled': True,
     'cleanup_category_ids': [],
+    'macos_cleanup_locations_added': False,
     'codex_archives_cleanup_enabled': False, 'codex_archives_retention_days': 7,
     'angerona_logs_cleanup_enabled': False, 'angerona_logs_retention_days': 7,
     'failed_downloads_cleanup_enabled': False, 'failed_downloads_retention_days': 7,
@@ -165,6 +167,8 @@ def full_optimization_settings(settings=None):
     if not value.get('browser_cleanup_browsers'):
         value['browser_cleanup_browsers'] = copy.deepcopy(DEFAULTS['browser_cleanup_browsers'])
     value['cleanup_category_ids'] = list(dict.fromkeys([*value.get('cleanup_category_ids', []), 'windows-temp', 'canonical-user-temp']))
+    if sys.platform == 'darwin':
+        with_macos_cleanup_locations(value)
     # Selecting the preset is not agreement acceptance or an invented device,
     # account, file, startup or update approval.
     if not value.get('software_update_agreements_accepted'):
@@ -178,6 +182,21 @@ def full_optimization_settings(settings=None):
         value['driver_policy'] = 'review'
     # Only the concrete consumer list is selected by this preset. Other removal
     # groups retain their explicitly saved individual choices.
+    return value
+
+
+# macOS-only cleanup locations (see cleaner._native_definitions). They are on by
+# default and are added once to existing settings; unticking one later is kept.
+MACOS_CLEANUP_CATEGORY_IDS = (
+    'mac-diagnostic-reports', 'mac-user-logs', 'homebrew-downloads', 'xcode-derived-data',
+    'xcode-device-support', 'simulator-caches', 'ios-update-files', 'ipados-update-files',
+)
+
+
+def with_macos_cleanup_locations(value):
+    value['cleanup_category_ids'] = list(dict.fromkeys(
+        [*value.get('cleanup_category_ids', []), *MACOS_CLEANUP_CATEGORY_IDS]))[:50]
+    value['macos_cleanup_locations_added'] = True
     return value
 
 
@@ -211,7 +230,15 @@ class Preferences:
     def load(self):
         with self.lock:
             try:
-                return self.validate(json.loads(self.path.read_text(encoding='utf-8')))
+                raw = json.loads(self.path.read_text(encoding='utf-8'))
+                result = self.validate(raw)
+                if (sys.platform == 'darwin' and isinstance(raw, dict)
+                        and 'macos_cleanup_locations_added' not in raw):
+                    # Settings saved before these locations existed: turn them
+                    # on (in memory; loading never writes). The marker travels
+                    # with the next save, so a later untick is kept.
+                    result = self.validate(with_macos_cleanup_locations(result))
+                return result
             except FileNotFoundError:
                 return full_optimization_settings()
             except (OSError, ValueError, TypeError, json.JSONDecodeError):

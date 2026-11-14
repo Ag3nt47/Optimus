@@ -2,6 +2,18 @@
 
 ## 0.12.47
 
+- Add a Review button to the App updates and Driver updates workers when they stop
+  with needs review, blocked, failed or approval-required states. It opens the full
+  recorded reason, search errors and each offer's outcome, with Proceed with update
+  (runs only already-approved updates through the existing continuation) and Deny
+  (installs nothing; records the decision and leaves approvals and journals intact).
+- Clean macOS-only locations, on by default and added once to existing settings:
+  crash and diagnostic reports, app logs (both keep the last day), the Homebrew
+  download cache, Xcode DerivedData and device support files, Simulator caches,
+  and downloaded iPhone/iPad software update images. Unticking one is kept.
+- Ship the Optimus artwork as the macOS app icon instead of PyInstaller's default.
+- Never register an App Translocation copy for sign-in launch; report such an
+  existing entry as stale instead of enabled.
 - Inventory macOS applications through Spotlight and standard nested application
   folders, retain malformed bundles as bounded metadata-only rows, and exclude
   embedded helper apps from the installed-application count.

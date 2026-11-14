@@ -155,6 +155,30 @@ class Cleaner:
             definitions = [Category('user-temp', 'User temporary files', temporary,
                 'Private user temporary files at least seven days old. Known open files and coordination files are preserved; an incomplete process check skips this scope.'),
                 Category('pip-cache', 'Python package download cache', cache / 'pip', 'Rebuildable package downloads; installed Python packages are preserved.')]
+            # macOS-only locations with no Windows counterpart path. All are
+            # inside the user's own Library, rebuildable, and off until chosen.
+            developer = home / 'Library/Developer'
+            definitions += [
+                Category('mac-diagnostic-reports', 'macOS crash and diagnostic reports',
+                    home / 'Library/Logs/DiagnosticReports',
+                    'Crash, hang and resource reports macOS saved for your apps (the Mac counterpart of Windows error reports). Only local copies are removed.'),
+                Category('mac-user-logs', 'App log files', home / 'Library/Logs',
+                    'Log files apps write in your Library. Logs still open by a running app are skipped; apps start new logs when needed.'),
+                Category('homebrew-downloads', 'Homebrew download cache', cache / 'Homebrew',
+                    'Downloaded Homebrew bottles and installers. Installed packages are preserved; Homebrew downloads again only if it reinstalls.'),
+                Category('xcode-derived-data', 'Xcode build data (DerivedData)', developer / 'Xcode/DerivedData',
+                    'Intermediate build products and indexes that Xcode rebuilds; the next build of each project takes longer. Close Xcode first.'),
+                Category('xcode-device-support', 'Xcode device support files', developer / 'Xcode/iOS DeviceSupport',
+                    'Debug symbols copied from connected iPhones and iPads. Xcode copies them again the next time that device connects.'),
+                Category('simulator-caches', 'Simulator caches', developer / 'CoreSimulator/Caches',
+                    'Rebuildable Simulator caches. Simulator devices and their apps and data are preserved.'),
+                Category('ios-update-files', 'Downloaded iPhone software updates', home / 'Library/iTunes/iPhone Software Updates',
+                    'Saved iPhone system images (.ipsw). Finder downloads a current one when you next update or restore a device.',
+                    suffixes=('.ipsw',)),
+                Category('ipados-update-files', 'Downloaded iPad software updates', home / 'Library/iTunes/iPad Software Updates',
+                    'Saved iPad system images (.ipsw). Finder downloads a current one when you next update or restore a device.',
+                    suffixes=('.ipsw',)),
+            ]
         else:
             cache = Path(os.environ.get('XDG_CACHE_HOME', str(home / '.cache')))
             if not cache.is_absolute():
@@ -254,7 +278,8 @@ class Cleaner:
             available = category.path.is_dir()
             result.append({'id': category.id, 'name': category.name, 'path': str(category.path), 'available': available,
                            'description': category.description, 'requires_admin': category.requires_admin, 'process_names': list(category.process_names),
-                           'minimum_age_days': 7 if _PLATFORM != 'win32' and category.id == 'user-temp' else 0})
+                           'minimum_age_days': (7 if _PLATFORM != 'win32' and category.id == 'user-temp' else
+                                                1 if category.id in ('mac-user-logs', 'mac-diagnostic-reports') else 0)})
         return result
 
     @staticmethod
@@ -337,6 +362,9 @@ class Cleaner:
                 plan['skipped'].append(f'{category.name}: open-file ownership could not be completely verified; this scope was preserved.')
                 continue
             effective_age = max(min_age_days, 7) if _PLATFORM != 'win32' and category.id == 'user-temp' else min_age_days
+            if category.id in ('mac-user-logs', 'mac-diagnostic-reports'):
+                # Keep today's logs and crash reports available for troubleshooting.
+                effective_age = max(effective_age, 1)
             summary = {'id': category.id, 'name': category.name, 'files': 0, 'bytes': 0, 'size_mb': 0.0,
                        'effective_min_age_days': effective_age}
             stack = [root]
