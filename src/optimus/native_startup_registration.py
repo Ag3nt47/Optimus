@@ -16,10 +16,28 @@ from .filesystem import _ordinary_data_path, replace_with_retry
 from .workflow import atomic_json
 
 
+TRANSLOCATION_GUIDANCE = (
+    'macOS is running Optimus from a temporary protected copy (App Translocation) that disappears '
+    'when Optimus quits, so it cannot be registered for sign-in. Move Optimus.app to Applications '
+    'with Finder, open it from there, then turn on sign-in launch again.')
+
+
+def is_translocated(path):
+    """True for Gatekeeper's per-launch randomized read-only app copy.
+
+    An app opened from its quarantined download location runs from
+    ``/private/var/folders/.../AppTranslocation/<UUID>/d/``. That mount is
+    removed when the app quits, so a launch entry naming it can never start.
+    """
+    return '/AppTranslocation/' in str(path)
+
+
 def launch_specification():
     executable = Path(sys.executable).resolve(strict=True)
     if not executable.is_file():
         raise ValueError('The installed native launcher is unavailable.')
+    if sys.platform == 'darwin' and is_translocated(executable):
+        raise ValueError(TRANSLOCATION_GUIDANCE)
     if getattr(sys, 'frozen', False):
         if executable.name != 'Optimus':
             raise ValueError('The native Optimus executable could not be identified.')
@@ -84,6 +102,15 @@ class NativeStartupRegistration:
                     state, enabled = 'absent', False
                 elif owned is None or hashlib.sha256(current).hexdigest() != owned['sha256']:
                     state, enabled = 'foreign', None
+                elif self._registers_translocated_copy(current):
+                    # Owned, but it names a copy that no longer exists: it can
+                    # never launch. Report that instead of claiming "enabled".
+                    return {'available': True, 'state': 'stale', 'enabled': False, 'owned': True,
+                            'target': str(self.target),
+                            'reason': 'The saved sign-in entry points to a temporary macOS copy of Optimus '
+                                      '(App Translocation) that no longer exists, so it cannot start. Keep '
+                                      'Optimus.app in Applications, open it from there, then turn sign-in '
+                                      'launch off and on again.'}
                 else:
                     state, enabled = 'enabled', True
                 return {'available': True, 'state': state, 'enabled': enabled,
@@ -92,6 +119,16 @@ class NativeStartupRegistration:
             except (OSError, ValueError, TypeError) as error:
                 return {'available': False, 'state': 'unavailable', 'enabled': None,
                         'owned': False, 'target': str(self.target), 'reason': str(error)}
+
+    def _registers_translocated_copy(self, raw):
+        if self.platform != 'darwin':
+            return False
+        try:
+            arguments = plistlib.loads(raw).get('ProgramArguments')
+        except Exception:
+            return False
+        return bool(isinstance(arguments, list) and arguments and isinstance(arguments[0], str)
+                    and is_translocated(arguments[0]))
 
     @contextmanager
     def _mutation(self):
