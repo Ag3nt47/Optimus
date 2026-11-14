@@ -463,6 +463,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result['failed_items'], 0)
         backend.update_app_unattended.assert_called_once_with('apt:editor', cancel_event=None)
 
+    def test_native_all_supported_scope_skips_provider_ineligible_major_upgrade(self):
+        backend = Mock()
+        backend.updates_scan.return_value = {'source': 'macOS native update providers', 'complete': True,
+            'structured': True, 'exitCode': 0, 'updates': [
+                {'id': 'apple-os:' + 'a' * 64, 'version': '13.7.8', 'eligible': False},
+                {'id': 'apple-os:' + 'b' * 64, 'version': 'Installed', 'eligible': True}]}
+        backend.update_app_unattended.return_value = {'exitCode': 0, 'verified': True,
+            'installer_started': True, 'outcomeKnown': True, 'running': False}
+        settings = {'setup_version': 2, 'software_update_policy': 'all_supported',
+            'software_update_agreements_accepted': True, 'software_update_all_approved': True,
+            'software_update_exclude_ids': []}
+        result = run_native_software(backend, settings)
+        self.assertEqual(result['failed_items'], 0)
+        backend.update_app_unattended.assert_called_once_with('apple-os:' + 'b' * 64, cancel_event=None)
+
     def test_unapproved_update_never_starts_and_changed_startup_is_skipped(self):
         backend = Mock()
         backend.updates_scan.return_value = {'complete': True, 'structured': True, 'exitCode': 0, 'updates': []}
@@ -553,6 +568,110 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(command, ['/usr/sbin/softwareupdate', '--install', 'Security Update 2026-001-1.0', '--agree-to-license'])
         self.assertNotIn('--restart', command)
         self.assertTrue(result['verified'])
+
+    def test_major_macos_upgrade_is_inventory_only_and_cannot_install(self):
+        backend = object.__new__(NativeBackend)
+        backend.system = 'darwin'
+        backend.native_runner = Mock()
+        backend.native_runner.run.return_value = {'exitCode': 0, 'stderr': '', 'stdout':
+            'Software Update Tool\n* Label: macOS Sonoma 14.7-23H124\n'
+            '\tTitle: macOS Sonoma 14.7, Version: 14.7, Size: 12000000KiB, Recommended: YES, Action: restart,\n'}
+        with patch('optimus.native_backend.platform.mac_ver', return_value=('13.7.8', ('', '', ''), '')):
+            scan = backend.os_updates_scan()
+            self.assertFalse(scan['updates'][0]['eligible'])
+            self.assertTrue(scan['updates'][0]['major_upgrade'])
+            with self.assertRaisesRegex(UnsupportedOperation, 'Major macOS upgrades'):
+                backend.install_os_update(scan['updates'][0]['id'], confirmed=True, agreements_accepted=True)
+        backend.native_runner.privileged.assert_not_called()
+
+    def test_macos_inventory_finds_nested_standard_apps_and_excludes_embedded_helpers(self):
+        temp = tempfile.TemporaryDirectory(prefix='optimus-mac-apps-')
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        app = root / 'Utilities' / 'Fixture Editor.app'
+        helper = app / 'Contents' / 'Helpers' / 'Fixture Helper.app'
+        helper.mkdir(parents=True)
+        (app / 'Contents' / 'Info.plist').write_bytes(plistlib.dumps({
+            'CFBundleDisplayName': 'Fixture Editor', 'CFBundleIdentifier': 'test.fixture.editor',
+            'CFBundleShortVersionString': '2.4.1'}))
+        (helper / 'Contents').mkdir(exist_ok=True)
+        (helper / 'Contents' / 'Info.plist').write_bytes(plistlib.dumps({
+            'CFBundleName': 'Fixture Helper', 'CFBundleIdentifier': 'test.fixture.helper'}))
+        backend = object.__new__(NativeBackend)
+        backend.system = 'darwin'
+        backend.native_packages = Mock()
+        backend.native_packages.installed.return_value = []
+        backend.native_runner = Mock()
+        backend.native_runner.run.return_value = {'exitCode': 0, 'stdout': str(app) + '\0' + str(helper) + '\0', 'stderr': ''}
+        backend._mac_application_roots = Mock(return_value=(root,))
+        rows = backend.installed_apps()
+        self.assertEqual([row['Name'] for row in rows], ['Fixture Editor'])
+        self.assertEqual(rows[0]['Version'], '2.4.1')
+        self.assertEqual(rows[0]['BundleIdentifier'], 'test.fixture.editor')
+        self.assertEqual(rows[0]['InstallLocation'], str(app))
+
+    def test_macos_inventory_keeps_a_bundle_with_malformed_metadata_visible(self):
+        temp = tempfile.TemporaryDirectory(prefix='optimus-mac-bad-plist-')
+        self.addCleanup(temp.cleanup)
+        app = Path(temp.name) / 'Damaged Metadata.app'
+        (app / 'Contents').mkdir(parents=True)
+        (app / 'Contents' / 'Info.plist').write_bytes(b'<plist><broken></plist>')
+        backend = object.__new__(NativeBackend)
+        backend.system = 'darwin'
+        backend.native_packages = Mock()
+        backend.native_packages.installed.return_value = []
+        backend.native_runner = Mock()
+        backend._mac_application_roots = Mock(return_value=(Path(temp.name),))
+        rows = backend.installed_apps()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['Name'], 'Damaged Metadata')
+        self.assertEqual(rows[0]['Version'], 'Unknown')
+
+    def test_macos_update_scan_combines_apple_and_packages_and_dispatches_exact_apple_id(self):
+        backend = object.__new__(NativeBackend)
+        backend.system = 'darwin'
+        backend.native_packages = Mock()
+        backend.native_packages.scan.return_value = {'available': True, 'source': 'brew', 'structured': True,
+            'complete': True, 'exitCode': 0, 'updates': [{'id': 'brew:editor', 'version': '1', 'available': '2'}],
+            'excluded': [], 'installed_packages_checked': 1}
+        apple_row = {'id': 'apple-os:' + 'a' * 64, 'version': '13.7.8', 'available': '13.7.9'}
+        backend.os_updates_scan = Mock(return_value={'source': 'Apple Software Update', 'structured': True,
+            'complete': True, 'exitCode': 0, 'updates': [apple_row]})
+        scan = backend.updates_scan()
+        self.assertTrue(scan['complete'])
+        self.assertEqual([row['id'] for row in scan['updates']], ['brew:editor', apple_row['id']])
+        backend.install_os_update = Mock(return_value={'exitCode': 0, 'verified': True})
+        result = backend.update_app_unattended(apple_row['id'])
+        self.assertTrue(result['verified'])
+        backend.install_os_update.assert_called_once_with(apple_row['id'], confirmed=True,
+            agreements_accepted=True, cancel_event=None, progress_callback=None)
+        backend.native_packages.apply.assert_not_called()
+
+    def test_macos_final_verification_rechecks_apple_catalog_not_homebrew_inventory(self):
+        backend = Mock()
+        identity = 'apple-os:' + 'b' * 64
+        backend.os_updates_scan.return_value = {'complete': True, 'updates': []}
+        report = {'stages': [{'title': 'Review or install approved native package updates',
+            'status': 'completed', 'result': {'items': [{'id': identity, 'status': 'completed',
+                'from_version': '13.7.8', 'result': {'verified': True}}]}}]}
+        result = verify_native_outcomes(backend, report)
+        self.assertEqual(result['status'], 'confirmed')
+        backend.os_updates_scan.assert_called_once_with()
+        backend.native_packages.installed.assert_not_called()
+
+    def test_macos_driver_inventory_uses_system_profiler_extension_metadata(self):
+        backend = object.__new__(NativeBackend)
+        backend.system = 'darwin'
+        backend.native_runner = Mock()
+        backend.native_runner.run.return_value = {'exitCode': 0, 'stderr': '', 'stdout': json.dumps({
+            'SPExtensionsDataType': [{'_name': 'Fixture Driver', 'spext_bundleid': 'test.fixture.driver',
+                                      'spext_version': '3.0', 'spext_loaded': 'Yes',
+                                      'spext_obtained_from': 'Identified Developer'}]})}
+        with patch('optimus.native_backend.Path.is_file', return_value=True):
+            report = backend.driver_devices()
+        self.assertEqual(report['inventory_count'], 1)
+        self.assertEqual(report['devices'][0]['BundleIdentifier'], 'test.fixture.driver')
+        self.assertEqual(report['devices'][0]['Version'], '3.0')
 
 
 if __name__ == '__main__':
