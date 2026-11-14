@@ -115,7 +115,9 @@ def _run_native_software(backend, settings, *, cancel_event=None, item_callback=
         raise ValueError('Unknown software update policy.')
     wanted = {value.casefold() for value in settings.get('software_update_ids', [])}
     excluded = {value.casefold() for value in settings.get('software_update_exclude_ids', [])}
-    selected = [row for row in scan['updates'] if row['id'].casefold() not in excluded and (policy == 'all_supported' or row['id'].casefold() in wanted)]
+    selected = [row for row in scan['updates'] if row.get('eligible', True) is not False
+                and row['id'].casefold() not in excluded
+                and (policy == 'all_supported' or row['id'].casefold() in wanted)]
     approved_scope = copy.deepcopy({key: settings.get(key) for key in ('software_updates_enabled',
         'setup_version', 'software_update_policy', 'software_update_ids', 'software_update_all_approved',
         'software_update_exclude_ids', 'software_update_agreements_accepted', 'software_app_rules')})
@@ -688,6 +690,7 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
         return False
 
     installed = None
+    apple_updates = None
     if expired():
         add('Native outcome verification', 'unverified', 'Verification was cancelled or its deadline elapsed before postconditions were inspected.')
     for stage in report.get('stages', []):
@@ -736,6 +739,20 @@ def verify_native_outcomes(backend, report, *, cancel_event=None, timeout=30):
                     continue
                 if item.get('status') != 'completed':
                     add(item.get('id', label), 'not_applicable' if item.get('status') == 'skipped' else 'needs_review', 'No completed package installation to confirm.')
+                    continue
+                if str(item.get('id', '')).startswith('apple-os:'):
+                    if apple_updates is None:
+                        try:
+                            apple_updates = backend.os_updates_scan()
+                        except Exception as error:
+                            add(item['id'], 'unverified', 'Current Apple update inventory is unavailable (' + type(error).__name__ + ').')
+                            continue
+                    valid = (apple_updates.get('complete') is True
+                             and item.get('result', {}).get('verified') is True
+                             and not any(row.get('id') == item['id'] for row in apple_updates.get('updates', [])))
+                    add(item['id'], 'confirmed' if valid else 'needs_review',
+                        'A fresh Apple Software Update scan no longer offers the exact installed update.' if valid
+                        else 'The exact Apple update remains offered or its readback is incomplete.')
                     continue
                 if installed is None:
                     try:

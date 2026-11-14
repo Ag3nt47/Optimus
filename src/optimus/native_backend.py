@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import re
 import shutil
 import sys
 import threading
 import time
 import uuid
+from xml.parsers.expat import ExpatError
 
 import psutil
 
@@ -37,6 +40,41 @@ def _application(executable, fallback=''):
     parts = Path(executable).parts if executable else ()
     bundle = next((part[:-4] for part in parts if part.endswith('.app')), None)
     return bundle or Path(executable).name or str(fallback) or 'Unidentified application'
+
+
+def _mac_application_record(path):
+    """Return bounded bundle metadata without executing bundle-owned code."""
+    path = Path(path)
+    info = {}
+    plist = path / 'Contents' / 'Info.plist'
+    try:
+        stat_result = plist.lstat()
+        if plist.is_symlink() or not plist.is_file() or stat_result.st_size > 2 * 1024 * 1024:
+            raise ValueError('unsupported Info.plist')
+        document = plistlib.loads(plist.read_bytes())
+        if isinstance(document, dict):
+            info = document
+    except (OSError, ValueError, plistlib.InvalidFileException, ExpatError):
+        pass
+    def text(*keys, fallback=''):
+        for key in keys:
+            value = info.get(key)
+            if isinstance(value, str) and 0 < len(value) <= 512 and not any(ord(char) < 32 for char in value):
+                return value
+        return fallback
+    location = str(path)
+    name = text('CFBundleDisplayName', 'CFBundleName', fallback=path.stem)
+    version = text('CFBundleShortVersionString', 'CFBundleVersion', fallback='Unknown')
+    bundle_id = text('CFBundleIdentifier')
+    identity = 'app-bundle:' + hashlib.sha256(location.encode('utf-8', errors='surrogatepass')).hexdigest()
+    source = ('Apple system application' if location.startswith('/System/') else
+              'Mac App Store application' if (path / 'Contents' / '_MASReceipt' / 'receipt').is_file() else
+              'macOS application bundle')
+    return {'Identity': identity, 'id': identity, 'Name': name, 'name': name,
+            'Version': version, 'version': version, 'BundleIdentifier': bundle_id or None,
+            'InstallLocation': location, 'source': source, 'review_only': True,
+            'update_coverage': 'Apple Software Update' if source == 'Apple system application' else
+                               'Mac App Store' if source == 'Mac App Store application' else 'Vendor or native package manager'}
 
 
 class NativeProcessHarness:
@@ -340,17 +378,43 @@ class NativeBackend(Backend):
     def service_set(self, record, action):
         raise UnsupportedOperation('Native system services are read-only in Optimus. Use the operating-system service manager for reviewed changes.')
 
+    def _mac_application_roots(self):
+        return (Path('/Applications'), Path.home() / 'Applications', Path('/System/Applications'),
+                Path('/System/Library/CoreServices/Applications'))
+
+    def _mac_application_paths(self):
+        candidates = set()
+        spotlight = Path('/usr/bin/mdfind')
+        if spotlight.is_file():
+            result = self.native_runner.run([str(spotlight), '-0',
+                "kMDItemContentType == 'com.apple.application-bundle'"], timeout=120)
+            if result.get('exitCode') == 0:
+                candidates.update(item for item in result.get('stdout', '').split('\0') if item)
+        # Spotlight can be disabled or still indexing. Walk the standard roots as
+        # a deterministic fallback and prune inside each discovered app bundle.
+        for root in self._mac_application_roots():
+            if not root.is_dir() or root.is_symlink():
+                continue
+            for current, directories, _files in os.walk(root, followlinks=False):
+                bundles = [name for name in directories if name.casefold().endswith('.app')]
+                candidates.update(str(Path(current) / name) for name in bundles)
+                directories[:] = [name for name in directories if name not in bundles]
+        paths = []
+        for value in candidates:
+            if not isinstance(value, str) or not value.startswith('/') or len(value) > 4096 or '\x00' in value:
+                continue
+            path = Path(value)
+            if path.suffix.casefold() != '.app' or path.is_symlink() or not path.is_dir():
+                continue
+            if any(parent.suffix.casefold() == '.app' for parent in path.parents):
+                continue  # Helper bundles inside an application are not separate installations.
+            paths.append(path)
+        return sorted(set(paths), key=lambda path: str(path).casefold())[:10000]
+
     def installed_apps(self):
         records = self.native_packages.installed()
         if self.system == 'darwin':
-            known = {row.get('Name', '').casefold() for row in records}
-            for root in (Path('/Applications'), Path.home() / 'Applications'):
-                if root.is_dir():
-                    for path in root.glob('*.app'):
-                        if path.stem.casefold() not in known:
-                            records.append({'Identity': 'app-bundle:' + str(path), 'Name': path.stem,
-                                            'InstallLocation': str(path), 'Version': 'Unknown',
-                                            'source': 'macOS application bundle', 'review_only': True})
+            records.extend(_mac_application_record(path) for path in self._mac_application_paths())
         return records
 
     def uninstall(self, record):
@@ -359,7 +423,7 @@ class NativeBackend(Backend):
         if len(matches) != 1:
             raise ValueError('This installed application changed. Refresh before reviewing removal.')
         item = matches[0]
-        if item.get('source') == 'macOS application bundle':
+        if str(item.get('Identity', '')).startswith('app-bundle:') and item.get('source') != 'Apple system application':
             return {'review_only': True, 'application': item['Name'], 'path': item['InstallLocation'],
                     'note': 'Review this exact application in Finder or its vendor uninstaller. Optimus did not delete the bundle or its user data.'}
         manager, name = item.get('source'), item.get('native_name')
@@ -377,12 +441,35 @@ class NativeBackend(Backend):
         raise UnsupportedOperation(self.capabilities()['unavailable']['codex-priority-profile'])
 
     def updates_scan(self):
-        return self.native_packages.scan()
+        packages = self.native_packages.scan()
+        if self.system != 'darwin':
+            return packages
+        apple = self.os_updates_scan()
+        package_ready = packages.get('available') is not True or (
+            packages.get('structured') is True and packages.get('complete') is True
+            and packages.get('exitCode') == 0)
+        apple_ready = (apple.get('structured') is True and apple.get('complete') is True
+                       and apple.get('exitCode') == 0)
+        updates = list(packages.get('updates', [])) + list(apple.get('updates', []))
+        return {'available': bool(packages.get('available') or apple_ready),
+                'source': 'macOS native update providers', 'structured': package_ready and apple_ready,
+                'complete': package_ready and apple_ready, 'exitCode': 0 if apple_ready else apple.get('exitCode', 1),
+                'updates': updates, 'excluded': list(packages.get('excluded', [])),
+                'installed_packages_checked': packages.get('installed_packages_checked', 0),
+                'providers': {'packages': packages, 'apple': apple},
+                'note': ('Checked Apple Software Update and ' +
+                         ('Homebrew.' if packages.get('available') else
+                          'found no supported third-party package manager; vendor-managed apps remain inventory-only.'))}
 
     def update_app(self, package_id):
+        if self.system == 'darwin' and isinstance(package_id, str) and package_id.startswith('apple-os:'):
+            return self.install_os_update(package_id, confirmed=True, agreements_accepted=True)
         return self.native_packages.apply(package_id, confirmed=True)
 
     def update_app_unattended(self, package_id, *, cancel_event=None, progress_callback=None):
+        if self.system == 'darwin' and isinstance(package_id, str) and package_id.startswith('apple-os:'):
+            return self.install_os_update(package_id, confirmed=True, agreements_accepted=True,
+                                          cancel_event=cancel_event, progress_callback=progress_callback)
         options = {'progress_callback': progress_callback} if progress_callback is not None else {}
         return self.native_packages.apply(package_id, confirmed=True, cancel_event=cancel_event, **options)
 
@@ -410,13 +497,50 @@ class NativeBackend(Backend):
                 return [{'Name': parts[0], 'Size': int(parts[1]), 'State': parts[4], 'Source': 'Linux kernel module inventory'}
                         for line in modules.read_text(encoding='utf-8', errors='replace').splitlines()
                         if len(parts := line.split()) >= 5 and parts[1].isdigit()]
+        if self.system == 'darwin':
+            records = []
+            profiler = Path('/usr/sbin/system_profiler')
+            if profiler.is_file():
+                result = self.native_runner.run([str(profiler), '-json', '-detailLevel', 'mini',
+                                                 'SPExtensionsDataType'], timeout=180)
+                if result.get('exitCode') == 0:
+                    try:
+                        document = json.loads(result.get('stdout', ''))
+                    except (TypeError, json.JSONDecodeError):
+                        document = {}
+                    pending = list(document.get('SPExtensionsDataType', [])) if isinstance(document, dict) else []
+                    while pending and len(records) < 10000:
+                        item = pending.pop()
+                        if not isinstance(item, dict):
+                            continue
+                        children = item.get('_items', [])
+                        if isinstance(children, list):
+                            pending.extend(children)
+                        name = item.get('_name')
+                        bundle_id = item.get('spext_bundleid')
+                        if not isinstance(name, str) and not isinstance(bundle_id, str):
+                            continue
+                        records.append({'Name': str(name or bundle_id)[:512],
+                                        'BundleIdentifier': str(bundle_id)[:512] if bundle_id else None,
+                                        'Version': str(item.get('spext_version') or 'Unknown')[:256],
+                                        'State': str(item.get('spext_loaded') or item.get('spext_status') or 'Reported')[:256],
+                                        'Vendor': str(item.get('spext_obtained_from') or 'Unknown')[:256],
+                                        'Source': 'macOS System Profiler extension inventory'})
+            if records:
+                unique = {}
+                for record in records:
+                    key = (record.get('BundleIdentifier') or record['Name']).casefold()
+                    unique.setdefault(key, record)
+                return sorted(unique.values(), key=lambda row: row['Name'].casefold())
         return [{'Name': platform.release(), 'Source': platform.system() + ' kernel and vendor hardware support',
                  'note': 'Independent device driver inventory is not provided. Use System Information and the OS/vendor updater.'}]
 
     def driver_devices(self):
-        return {'platform': self.system, 'kernel': platform.release(), 'devices': self.drivers_list(),
+        devices = self.drivers_list()
+        return {'platform': self.system, 'kernel': platform.release(), 'devices': devices,
                 'complete': False, 'read_only': True, 'source': 'Native OS/kernel inventory',
-                'note': 'This is not a complete per-device driver catalog. Kernel, firmware and hardware support are provided by the native OS/vendor updater.'}
+                'inventory_count': len(devices),
+                'note': 'macOS reports installed kernel/system extensions and Apple update offers; Linux reports loaded modules. This is not a universal per-device vendor catalog. Kernel, firmware and hardware support remain controlled by the native OS/vendor updater.'}
 
     def driver_coverage(self, scan=None):
         return self.driver_devices()
@@ -450,18 +574,30 @@ class NativeBackend(Backend):
                 identity = 'apple-os:' + __import__('hashlib').sha256(label.encode()).hexdigest()
                 version = re.search(r'\bVersion:\s*([^,]+)', line)
                 title = re.search(r'\bTitle:\s*(.*?),\s*Version:', line)
-                updates.append({'id': identity, 'name': title[1].strip() if title else label,
-                                'label': label, 'available': version[1].strip() if version else 'Offered by Apple',
+                name = title[1].strip() if title else label
+                offered = version[1].strip() if version else 'Offered by Apple'
+                current = platform.mac_ver()[0] or 'Installed'
+                current_major = int(current.split('.', 1)[0]) if current[:1].isdigit() else 0
+                offered_major = int(offered.split('.', 1)[0]) if offered[:1].isdigit() else 0
+                major_upgrade = name.casefold().startswith('macos ') and offered_major > current_major
+                installed = current if name.casefold().startswith('macos ') else 'Installed'
+                updates.append({'id': identity, 'name': name,
+                                'label': label, 'available': offered,
+                                'version': installed, 'installedVersion': installed,
+                                'availableVersion': offered,
                                 'source': 'Apple Software Update', 'offered_by_manager': True,
                                 'restart_required': 'restart' in line.casefold(),
-                                'review_only': True, 'detail': line.strip()[:2000]})
+                                'major_upgrade': major_upgrade,
+                                'eligible': not major_upgrade, 'review_only': major_upgrade,
+                                'detail': line.strip()[:2000]})
                 label = None
         text = result['stdout'].casefold()
         complete = bool(updates) or 'no new software available' in text or 'no updates are available' in text
         return {'source': 'Apple Software Update', 'structured': complete, 'complete': complete,
                 'exitCode': 0, 'updates': updates, 'note': 'Apple controls OS, firmware and bundled driver compatibility. Installation requires explicit review and native authorization; no automatic restart is requested.'}
 
-    def install_os_update(self, identity, *, confirmed=False, agreements_accepted=False, cancel_event=None):
+    def install_os_update(self, identity, *, confirmed=False, agreements_accepted=False,
+                          cancel_event=None, progress_callback=None):
         if self.system != 'darwin':
             raise UnsupportedOperation('Use the distribution package update controls for Linux OS updates.')
         if confirmed is not True or agreements_accepted is not True:
@@ -470,21 +606,32 @@ class NativeBackend(Backend):
         matches = [row for row in scan.get('updates', []) if row['id'] == identity]
         if scan.get('complete') is not True or len(matches) != 1:
             raise ValueError('This exact Apple update is no longer offered. Refresh before installing.')
+        if matches[0].get('eligible') is not True:
+            raise UnsupportedOperation('Major macOS upgrades stay in Apple Software Update for separate compatibility review.')
         if cancel_event is not None and cancel_event.is_set():
-            return {'exitCode': 0, 'cancelled': True, 'skipped': True}
+            return {'exitCode': 0, 'cancelled': True, 'skipped': True,
+                    'installer_started': False, 'outcomeKnown': True, 'running': False}
         readiness = self.update_disk_readiness()
         if not readiness['ready']:
-            return {'exitCode': 0, 'skipped': True, 'requiresReview': True, 'disk_readiness': readiness}
+            return {'exitCode': 0, 'skipped': True, 'requiresReview': True, 'disk_readiness': readiness,
+                    'installer_started': False, 'outcomeKnown': True, 'running': False}
         item = matches[0]
+        if callable(progress_callback):
+            progress_callback({'key': 'software:update:' + identity, 'label': identity,
+                               'phase': 'install', 'percent': None})
         result = self.native_runner.privileged(['/usr/sbin/softwareupdate', '--install', item['label'], '--agree-to-license'],
                                                timeout=1800, cancel_event=cancel_event)
         result.update(id=identity, restartNeeded=item.get('restart_required', False),
+                      installer_started=not result.get('cancelled', False), outcomeKnown=True, running=False,
                       note='No automatic restart was requested. Apple silicon/volume-owner authorization can require completion in System Settings.')
         if result.get('exitCode') == 0 and not result.get('cancelled'):
             after = self.os_updates_scan()
             result['verified'] = after.get('complete') is True and not any(row['id'] == identity for row in after['updates'])
             result['success'] = result['verified']
             result['requiresReview'] = not result['verified']
+            if result['verified'] and callable(progress_callback):
+                progress_callback({'key': 'software:update:' + identity, 'label': identity,
+                                   'phase': 'install', 'percent': 100.0, 'item_terminal': True})
         return result
 
     def driver_update_apply(self, record):

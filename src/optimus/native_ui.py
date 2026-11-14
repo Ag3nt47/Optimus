@@ -323,7 +323,8 @@ class NativeSetupWizard(QWizard):
         self.check(body, 'software_update_all_approved', 'Approve all-supported native package scope, including future matching packages')
         self.check(body, 'software_update_agreements_accepted', 'Accept selected package-manager agreements and approve installing available newer versions')
         note(body, 'Linux OS repositories may include kernel, firmware and driver packages. macOS driver/security '
-             'updates remain part of Apple Software Update; app updates use installed Homebrew where supported. '
+             'updates use Apple Software Update; app updates use installed Homebrew where supported. The saved '
+             'all-supported scope can install fresh offers from both providers, still using native authorization. '
              'No OS major upgrade, arbitrary unofficial driver, forced restart or invented update offer is used. '
              'OS authorization may still require your password/approval. Missing package managers are reported.')
         self.software_policy.currentIndexChanged.connect(self._revoke_software)
@@ -371,7 +372,7 @@ class NativeSetupWizard(QWizard):
             self.continuation_summary.setText('Automatic post-scan fixes: '
                 + ('enabled within saved package scopes and agreements' if self.controls['auto_continue_fixes_enabled'].isChecked() else 'disabled; results wait for your click')
                 + '. Background app updates: ' + ('enabled for independent steps' if self.controls['parallel_app_updates_enabled'].isChecked() else 'disabled')
-                + '. Native OS/security, process actions and restarts remain manual.')
+                + '. Apple/native update authorization can still require a password; process actions and restarts remain manual.')
         for key in ('auto_continue_fixes_enabled', 'parallel_app_updates_enabled'):
             self.controls[key].toggled.connect(continuation_summary)
         continuation_summary()
@@ -774,14 +775,16 @@ class NativeSettingsWindow(DetailedSettingsWindow):
         body = self.page('Updates')
         self._build_app_rules_controls(body, native=True)
         note(body, 'Use setup questions to approve exact or all-supported package updates for one-click runs. '
-             'Native package managers provide supported application, kernel and driver packages. Manufacturer-only '
-             'and Apple updates are reported separately. No missing offer is described as fully up to date.')
+             'Native package managers provide supported application, kernel and driver packages. On macOS the same '
+             'saved scope also covers eligible exact Apple Software Update offers. Manufacturer-only apps remain '
+             'inventory-only. No missing offer is described as fully up to date.')
         self.action(body, 'Scan offered newer package versions', 'updates_scan')
         self.action(body, 'Inspect native kernel / driver / OS update coverage', 'driver_devices')
         self.action(body, 'Inspect OS security recommendations', 'security_status')
         if sys.platform == 'darwin':
-            note(body, 'Apple OS updates need a separate exact selection, license acceptance and native authorization. '
-                 'They are not part of Homebrew approvals. Review Apple restart requirements before installing.')
+            note(body, 'Apple offers can use the saved native update scope or this separate exact-selection path. '
+                 'Both require license acceptance and native authorization. Major macOS upgrades stay with Apple for '
+                 'separate compatibility review. Review restart requirements before installing.')
             self.apple_updates = DataTable([('Apple update', 'name'), ('Offered version', 'available'), ('Restart required', 'restart_required')])
             def apple_ready(result):
                 self.apple_updates.populate(result.get('updates', []))
