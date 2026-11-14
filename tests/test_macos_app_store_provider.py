@@ -1,6 +1,7 @@
 """The optional Mac App Store provider remains byte- and receipt-pinned."""
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -47,6 +48,7 @@ def test_trusted_provider_requires_exact_owned_bytes_and_receipt(tmp_path, monke
         provider.privileged_update_command(tmp_path, '462054704', architecture=architecture)
 
 
+@pytest.mark.skipif(not hasattr(os, 'getuid'), reason='POSIX ownership and mode enforcement')
 def test_writable_provider_directory_is_not_trusted(tmp_path, monkeypatch):
     payload = b'fixture mas provider'
     license_payload = b'fixture license'

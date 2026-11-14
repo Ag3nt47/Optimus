@@ -1,5 +1,6 @@
 """Public-source packaging boundaries, using only disposable temp files."""
 import importlib.util
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -28,7 +29,8 @@ def test_only_allowed_files_are_packaged(project):
     assert m.package(source, destination) == 3
     assert sorted(str(p.relative_to(destination)).replace('\\','/') for p in destination.rglob('*') if p.is_file()) == [
         'Install-Optimus-macOS-App-Updates.command', 'README.md', 'src/app.py']
-    assert (destination/'Install-Optimus-macOS-App-Updates.command').stat().st_mode & 0o111
+    if os.name != 'nt':
+        assert (destination/'Install-Optimus-macOS-App-Updates.command').stat().st_mode & 0o111
 
 def test_windows_reparse_attribute_is_indirect():
     path = SimpleNamespace(lstat=lambda: SimpleNamespace(st_file_attributes=0x400), is_symlink=lambda: False)

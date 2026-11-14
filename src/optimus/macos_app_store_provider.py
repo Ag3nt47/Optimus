@@ -102,6 +102,16 @@ def trusted_executable(data_dir: Path, *, architecture: str | None = None) -> Pa
         "upstream_package_signed": False,
     }
     identity = os.getuid() if hasattr(os, "getuid") else None
+    posix_permissions_untrusted = identity is not None and (
+        root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or binary_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or license_info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+        or receipt_info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+        or root_info.st_uid != identity
+        or binary_info.st_uid != identity
+        or license_info.st_uid != identity
+        or receipt_info.st_uid != identity
+    )
     if (
         receipt != expected
         or not stat.S_ISDIR(root_info.st_mode)
@@ -112,12 +122,7 @@ def trusted_executable(data_dir: Path, *, architecture: str | None = None) -> Pa
         or license_info.st_nlink != 1
         or receipt_info.st_nlink != 1
         or binary_info.st_size != artifact["binary_size"]
-        or root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-        or binary_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-        or license_info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
-        or receipt_info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
-        or (identity is not None and (root_info.st_uid != identity or binary_info.st_uid != identity
-                                      or license_info.st_uid != identity or receipt_info.st_uid != identity))
+        or posix_permissions_untrusted
         or _digest(binary) != artifact["binary_sha256"]
         or _digest(license_path) != LICENSE_SHA256
     ):
