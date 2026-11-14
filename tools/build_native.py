@@ -55,7 +55,9 @@ def build_command(source, destination, system=None, machine=None):
         command.append('--windowed')
     if system == 'darwin':
         command.extend(['--osx-bundle-identifier', 'io.github.Ag3nt47.Optimus',
-                        '--target-arch', 'arm64' if target.endswith('arm64') else 'x86_64'])
+                        '--target-arch', 'arm64' if target.endswith('arm64') else 'x86_64',
+                        # Without this PyInstaller ships its generic Python icon.
+                        '--icon', str(source / 'src/optimus/assets/optimus.icns')])
     separator = ';' if system == 'win32' else ':'
     for name in ('LICENSE', 'NOTICE'):
         command.extend(['--add-data', str(source / name) + separator + '.'])
@@ -81,6 +83,12 @@ def configure_macos_metadata(bundle, source):
     version = tomllib.loads((Path(source) / 'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
     value.update(CFBundleShortVersionString=version, CFBundleVersion=version,
                  NSAppleEventsUsageDescription='Optimus requests permission to close a browser only after you choose Close and clean.')
+    # Prove the bundle carries the Optimus artwork, not PyInstaller's default.
+    icon_name = value.get('CFBundleIconFile')
+    expected_icon = (Path(source) / 'src/optimus/assets/optimus.icns').read_bytes()
+    if (not isinstance(icon_name, str) or not icon_name.endswith('.icns')
+            or (Path(bundle) / 'Contents/Resources' / icon_name).read_bytes() != expected_icon):
+        raise ValueError('The macOS application icon is not the Optimus artwork.')
     with path.open('wb') as stream:
         plistlib.dump(value, stream)
 

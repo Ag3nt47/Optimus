@@ -49,6 +49,21 @@ def test_artifact_identity_uses_actual_platform_architecture(system, machine, ex
     assert command[command.index('--collect-data') + 1] == 'certifi'
     if system == 'darwin':
         assert command[command.index('--target-arch') + 1] == machine
+        assert command[command.index('--icon') + 1] == str(Path('project/src/optimus/assets/optimus.icns'))
+    else:
+        assert '--icon' not in command
+
+
+def test_macos_icon_is_a_complete_icns_of_the_optimus_artwork():
+    icon = Path(__file__).resolve().parents[1] / 'src/optimus/assets/optimus.icns'
+    raw = icon.read_bytes()
+    assert raw[:4] == b'icns' and int.from_bytes(raw[4:8], 'big') == len(raw)
+    chunks, offset = set(), 8
+    while offset < len(raw):
+        chunks.add(raw[offset:offset + 4])
+        offset += int.from_bytes(raw[offset + 4:offset + 8], 'big')
+    # 16, 32, 128, 256 and 512 pt at 1x and 2x (ic10 is the 1024 px Retina slot).
+    assert {b'ic04', b'ic05', b'ic07', b'ic08', b'ic09', b'ic10', b'ic11', b'ic12', b'ic13', b'ic14'} <= chunks
 
 
 @pytest.mark.parametrize('system,machine', [('win32', 'arm64'), ('linux', 'arm64'), ('freebsd', 'x86_64')])
@@ -197,12 +212,15 @@ def test_packaged_verification_uses_only_read_only_commands_and_real_report(monk
 
 def test_macos_bundle_declares_browser_consent_and_real_release_version(tmp_path):
     bundle = tmp_path / 'Optimus.app'
-    (bundle / 'Contents').mkdir(parents=True)
+    (bundle / 'Contents/Resources').mkdir(parents=True)
     path = bundle / 'Contents/Info.plist'
-    path.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'io.github.Ag3nt47.Optimus'}))
+    path.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'io.github.Ag3nt47.Optimus',
+                                     'CFBundleIconFile': 'optimus.icns'}))
     source = tmp_path / 'source'
-    source.mkdir()
+    (source / 'src/optimus/assets').mkdir(parents=True)
     (source / 'pyproject.toml').write_text('[project]\nversion="0.7.0"\n', encoding='utf-8')
+    for folder in (source / 'src/optimus/assets', bundle / 'Contents/Resources'):
+        (folder / 'optimus.icns').write_bytes(b'icns-fixture')
     build.configure_macos_metadata(bundle, source)
     value = plistlib.loads(path.read_bytes())
     assert value['CFBundleShortVersionString'] == '0.7.0'
@@ -319,3 +337,26 @@ def test_published_matching_release_retry_has_no_mutations(monkeypatch, tmp_path
     commands = fake_github_cli(monkeypatch, directory, existing=sorted(publish.ASSETS))
     assert publish.main(['--tag', 'v0.7.0', '--assets', str(directory)]) == 0
     assert [command[2] for command in commands] == ['view', *(['download'] * len(publish.ASSETS))]
+
+
+def _fake_bundle(tmp_path, icon_bytes, icon_name='optimus.icns'):
+    import plistlib
+    source = Path(__file__).resolve().parents[1]
+    bundle = tmp_path / 'Optimus.app'
+    (bundle / 'Contents/Resources').mkdir(parents=True)
+    (bundle / 'Contents/Resources' / icon_name).write_bytes(icon_bytes)
+    with (bundle / 'Contents/Info.plist').open('wb') as stream:
+        plistlib.dump({'CFBundleIconFile': icon_name}, stream)
+    return bundle, source
+
+
+def test_macos_metadata_accepts_the_optimus_icon(tmp_path):
+    source = Path(__file__).resolve().parents[1]
+    bundle, source = _fake_bundle(tmp_path, (source / 'src/optimus/assets/optimus.icns').read_bytes())
+    build.configure_macos_metadata(bundle, source)
+
+
+def test_macos_metadata_rejects_the_generic_pyinstaller_icon(tmp_path):
+    bundle, source = _fake_bundle(tmp_path, b'icns-generic', 'icon-windowed.icns')
+    with pytest.raises(ValueError, match='Optimus artwork'):
+        build.configure_macos_metadata(bundle, source)
