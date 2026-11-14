@@ -29,7 +29,7 @@ def is_translocated(path):
     ``/private/var/folders/.../AppTranslocation/<UUID>/d/``. That mount is
     removed when the app quits, so a launch entry naming it can never start.
     """
-    return '/AppTranslocation/' in str(path)
+    return '/AppTranslocation/' in str(path).replace('\\', '/')
 
 
 def launch_specification():

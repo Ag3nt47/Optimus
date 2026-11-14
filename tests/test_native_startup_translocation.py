@@ -22,6 +22,8 @@ def _service(tmp_path, command):
 
 def test_translocation_paths_are_recognized():
     assert registration.is_translocated(TRANSLOCATED)
+    assert registration.is_translocated(
+        r'C:\Users\fixture\AppTranslocation\ID\d\Optimus.app\Contents\MacOS\Optimus')
     assert not registration.is_translocated('/Applications/Optimus.app/Contents/MacOS/Optimus')
     assert not registration.is_translocated('/Users/me/Applications/Optimus.app/Contents/MacOS/Optimus')
 
