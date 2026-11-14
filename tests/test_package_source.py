@@ -14,6 +14,9 @@ def project(tmp_path):
     (source/'src').mkdir(parents=True)
     (source/'src/app.py').write_text('VALUE = 1')
     (source/'README.md').write_text('Public fixture')
+    setup = source/'Install-Optimus-macOS-App-Updates.command'
+    setup.write_text('#!/bin/bash\n')
+    setup.chmod(0o755)
     (source/'private').mkdir()
     (source/'private/report.json').write_text('private fixture')
     (source/'src/.env').write_text('secret fixture')
@@ -22,8 +25,10 @@ def project(tmp_path):
 
 def test_only_allowed_files_are_packaged(project):
     source, destination = project
-    assert m.package(source, destination) == 2
-    assert sorted(str(p.relative_to(destination)).replace('\\','/') for p in destination.rglob('*') if p.is_file()) == ['README.md','src/app.py']
+    assert m.package(source, destination) == 3
+    assert sorted(str(p.relative_to(destination)).replace('\\','/') for p in destination.rglob('*') if p.is_file()) == [
+        'Install-Optimus-macOS-App-Updates.command', 'README.md', 'src/app.py']
+    assert (destination/'Install-Optimus-macOS-App-Updates.command').stat().st_mode & 0o111
 
 def test_windows_reparse_attribute_is_indirect():
     path = SimpleNamespace(lstat=lambda: SimpleNamespace(st_file_attributes=0x400), is_symlink=lambda: False)
@@ -37,7 +42,7 @@ def test_indirect_nested_file_and_folder_are_excluded(project, monkeypatch):
     (source/'src/redirect/private.py').write_text('private fixture')
     original = m.indirect
     monkeypatch.setattr(m,'indirect',lambda path: path in (source/'src/redirect', source/'src/app.py') or original(path))
-    assert m.package(source,destination) == 1
+    assert m.package(source,destination) == 2
     assert not (destination/'src/redirect').exists()
     assert not (destination/'src/app.py').exists()
 

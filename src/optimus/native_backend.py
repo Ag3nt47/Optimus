@@ -433,7 +433,10 @@ class NativeBackend(Backend):
         commands = {'apt': ['/usr/bin/apt-get', '--simulate', 'remove', '--', name],
                     'dnf': ['/usr/bin/dnf', '--assumeno', 'remove', name],
                     'pacman': ['/usr/bin/pacman', '-R', '--print', '--', name],
-                    'brew': [self.native_packages.executable, 'uninstall', '--formula' if item.get('kind') == 'formula' else '--cask', '--', name]}
+                    'brew': [self.native_packages.executable, 'uninstall', '--formula' if item.get('kind') == 'formula' else '--cask', '--', name],
+                    'mas': [self.native_packages.mas_executable, 'uninstall', name]}
+        if manager not in commands:
+            raise UnsupportedOperation('This application has no supported native removal provider.')
         return {'review_only': True, 'application': item['Name'], 'id': item['id'],
                 'native_command_for_review': commands[manager],
                 'note': 'Review reverse dependencies and the removal plan in the native package manager before accepting removal. The displayed command was not executed; package removal and user-data deletion are never automatic.'}
@@ -452,15 +455,17 @@ class NativeBackend(Backend):
         apple_ready = (apple.get('structured') is True and apple.get('complete') is True
                        and apple.get('exitCode') == 0)
         updates = list(packages.get('updates', [])) + list(apple.get('updates', []))
+        native_sources = packages.get('source') or 'no third-party provider'
         return {'available': bool(packages.get('available') or apple_ready),
                 'source': 'macOS native update providers', 'structured': package_ready and apple_ready,
                 'complete': package_ready and apple_ready, 'exitCode': 0 if apple_ready else apple.get('exitCode', 1),
                 'updates': updates, 'excluded': list(packages.get('excluded', [])),
                 'installed_packages_checked': packages.get('installed_packages_checked', 0),
                 'providers': {'packages': packages, 'apple': apple},
-                'note': ('Checked Apple Software Update and ' +
-                         ('Homebrew.' if packages.get('available') else
-                          'found no supported third-party package manager; vendor-managed apps remain inventory-only.'))}
+                'note': ('Checked Apple Software Update and ' + native_sources + '. ' +
+                         ('Vendor-only apps without a registered provider remain inventory-only.'
+                          if packages.get('available') else
+                          'No supported third-party package manager is installed; vendor-managed apps remain inventory-only.'))}
 
     def update_app(self, package_id):
         if self.system == 'darwin' and isinstance(package_id, str) and package_id.startswith('apple-os:'):

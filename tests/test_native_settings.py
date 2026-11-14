@@ -30,7 +30,8 @@ def test_native_full_defaults_enable_discovery_without_windows_actions_or_instal
     assert not {'windows-temp', 'canonical-user-temp'} & set(value['cleanup_category_ids'])
 
 
-@pytest.mark.parametrize('package', ['apt:libssl3:amd64', 'brew:homebrew/core/wget', 'dnf:kernel.x86_64', 'pacman:firefox'])
+@pytest.mark.parametrize('package', ['apt:libssl3:amd64', 'brew:homebrew/core/wget', 'dnf:kernel.x86_64',
+                                     'pacman:firefox', 'mas:462054704'])
 def test_native_package_identity_survives_validation(package):
     value = NativePreferences.validate(config(software_update_policy='selected',
         software_update_ids=[package], software_update_agreements_accepted=True))

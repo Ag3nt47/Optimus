@@ -178,6 +178,7 @@ class NativePackages:
         self.system = system or sys.platform
         self.runner = runner or NativeRunner(self.system)
         self.manager, self.executable = self._discover()
+        self.mas_executable = self._discover_mas()
         self._last_scan = None
         self._lock = threading.RLock()
 
@@ -190,12 +191,30 @@ class NativePackages:
                 return manager, executable
         return None, None
 
+    def _discover_mas(self):
+        if self.system != 'darwin':
+            return None
+        from .macos_app_store_provider import trusted_executable
+        private = trusted_executable(self.data_dir)
+        if private is not None:
+            return str(private)
+        return None
+
+    def _verified_mas(self):
+        from .macos_app_store_provider import trusted_executable
+        current = trusted_executable(self.data_dir)
+        if current is None or str(current) != self.mas_executable:
+            raise ValueError('The pinned Mac App Store provider is no longer trusted.')
+        return str(current)
+
     def status(self):
-        return {'available': self.manager is not None, 'source': self.manager,
-                'scope': 'Only packages registered with this native package manager are covered.',
-                'automatic_install_supported': self.manager in ('brew', 'apt', 'dnf'),
+        providers = [value for value in (self.manager, 'mas' if self.mas_executable else None) if value]
+        return {'available': bool(providers), 'source': '+'.join(providers) or None,
+                'providers': providers,
+                'scope': 'Only packages registered with these native package managers are covered.',
+                'automatic_install_supported': self.manager in ('brew', 'apt', 'dnf') or bool(self.mas_executable),
                 'note': ('Arch Linux requires a complete system upgrade; individual package upgrades are review-only to avoid unsupported partial upgrades.'
-                         if self.manager == 'pacman' else 'Signed repository and vendor update policy remains controlled by the native package manager. No unofficial drivers or lifecycle bypasses are downloaded.')}
+                         if self.manager == 'pacman' else 'Repository and App Store policy remains controlled by each native provider. No unofficial drivers or lifecycle bypasses are downloaded.')}
 
     def _command(self, argv, *, allowed=(0,), timeout=120, cancel_event=None, evidence=None):
         options = {'cancel_event': cancel_event} if cancel_event is not None else {}
@@ -233,7 +252,48 @@ class NativePackages:
             record['eligible'] = True
         return dict(record, **extra)
 
-    def installed(self, *, timeout=120, cancel_event=None):
+    @staticmethod
+    def _json_lines(output, *, provider):
+        if len(output.encode('utf-8')) > 16 * 1024 * 1024:
+            raise ValueError(provider + ' returned an oversized inventory.')
+        lines = [line for line in output.splitlines() if line.strip()]
+        if len(lines) > 1000:
+            raise ValueError(provider + ' returned too many inventory rows.')
+        rows = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(provider + ' returned invalid JSON metadata.') from error
+            if not isinstance(row, dict):
+                raise ValueError(provider + ' returned an invalid inventory row.')
+            rows.append(row)
+        return rows
+
+    def _mas_installed(self, *, timeout=120, cancel_event=None):
+        if not self.mas_executable:
+            return []
+        output = self._command([self._verified_mas(), 'list', '--json'],
+                               timeout=timeout, cancel_event=cancel_event)
+        records = []
+        for row in self._json_lines(output, provider='Mac App Store'):
+            identity = str(row.get('adamID', ''))
+            version = str(row.get('version', ''))
+            name = row.get('name') or row.get('displayName')
+            bundle = row.get('bundleID')
+            path = row.get('path')
+            if (not identity.isdigit() or len(identity) > 20 or not isinstance(name, str)
+                    or not 0 < len(name) <= 512 or not isinstance(bundle, str) or len(bundle) > 512
+                    or not isinstance(path, str) or len(path) > 4096):
+                raise ValueError('Mac App Store returned an invalid installed-app identity.')
+            records.append(self._record('mas', identity, version, display_name=name,
+                                        bundle_id=bundle, InstallLocation=path, kind='app-store'))
+            records[-1]['Name'] = records[-1]['name'] = name
+        if len({item['id'] for item in records}) != len(records):
+            raise ValueError('Mac App Store returned ambiguous installed-app identities.')
+        return records
+
+    def _primary_installed(self, *, timeout=120, cancel_event=None):
         options = {'timeout': max(0.1, min(float(timeout), 120)), 'cancel_event': cancel_event}
         if self.manager is None:
             return []
@@ -266,13 +326,22 @@ class NativePackages:
         return [self._record('pacman', parts[0], parts[1]) for line in output.splitlines()
                 if len(parts := line.split()) == 2]
 
-    def scan(self):
-        started = time.time()
+    def installed(self, *, timeout=120, cancel_event=None):
+        records = self._primary_installed(timeout=timeout, cancel_event=cancel_event)
+        if self.system == 'darwin':
+            records.extend(self._mas_installed(timeout=timeout, cancel_event=cancel_event))
+        return records
+
+    def _scan_primary(self, started):
         if self.manager is None:
             return {'available': False, 'source': None, 'updates': [], 'structured': True,
                     'exitCode': 0, 'complete': False, 'discovery': {'started_at': started, 'completed_at': time.time()},
                     'note': 'No supported native package manager was found.'}
-        installed = {item['native_name']: item for item in self.installed()}
+        # Preserve the public installed-inventory seam used by native evidence
+        # consumers. When both macOS providers exist, avoid querying App Store
+        # inventory twice and keep this provider's count/source isolated.
+        inventory = self._primary_installed() if self.mas_executable else self.installed()
+        installed = {item['native_name']: item for item in inventory if item.get('source') == self.manager}
         updates, excluded, query = [], [], {}
         if self.manager == 'brew':
             result = json.loads(self._command([self.executable, 'outdated', '--json=v2'], evidence=query))
@@ -367,6 +436,80 @@ class NativePackages:
         self._last_scan = result
         return result
 
+    def _scan_mas(self, started):
+        if not self.mas_executable:
+            return {'available': False, 'source': 'mas', 'structured': True, 'complete': False,
+                    'exitCode': 0, 'updates': [], 'excluded': [], 'installed_packages_checked': 0,
+                    'discovery': {'started_at': started, 'completed_at': time.time()},
+                    'note': 'The optional Mac App Store provider is not installed.'}
+        installed_rows = self._mas_installed(timeout=120)
+        installed = {item['native_name']: item for item in installed_rows}
+        query = {}
+        output = self._command([self._verified_mas(), 'outdated', '--json', '--inaccurate',
+                                '--check-min-os'], timeout=240, evidence=query)
+        updates, excluded = [], []
+        for row in self._json_lines(output, provider='Mac App Store'):
+            identity = str(row.get('adamID', ''))
+            current = installed.get(identity)
+            reported = str(row.get('version', ''))
+            offered = str(row.get('newVersion', ''))
+            if (not identity.isdigit() or len(identity) > 20 or current is None
+                    or current['version'] != reported):
+                excluded.append('A Mac App Store offer could not be matched to the installed app/version.')
+                continue
+            try:
+                update = self._record('mas', identity, reported, offered, kind='app-store',
+                                      display_name=current['Name'], bundle_id=current.get('bundle_id'))
+            except ValueError:
+                excluded.append('A Mac App Store offer has an unsupported identity or version.')
+                continue
+            update['Name'] = update['name'] = current['Name']
+            updates.append(update)
+        diagnostics = str(query.get('stderr', '')).strip()[:4000]
+        if diagnostics:
+            excluded.append('The Mac App Store provider reported diagnostics; its coverage requires review.')
+        ids = [item['id'] for item in updates]
+        if len(ids) != len(set(ids)):
+            raise ValueError('Mac App Store returned ambiguous update identities.')
+        return {'available': True, 'source': 'mas', 'structured': True,
+                'complete': not excluded, 'exitCode': 0, 'updates': updates,
+                'excluded': excluded[:1000], 'installed_packages_checked': len(installed),
+                'manager_exit_code': query.get('exitCode'), 'stderr': diagnostics,
+                'discovery': {'started_at': started, 'completed_at': time.time()},
+                'note': 'Mac App Store offers use exact ADAM IDs. Fast compatibility-aware discovery avoids account dialogs; installation rechecks the exact offer and may request native authorization.'}
+
+    def scan(self):
+        started = time.time()
+        providers = []
+        if self.manager is not None:
+            providers.append(self._scan_primary(started))
+        if self.system == 'darwin' and self.mas_executable:
+            providers.append(self._scan_mas(started))
+        if not providers:
+            return {'available': False, 'source': None, 'updates': [], 'structured': True,
+                    'exitCode': 0, 'complete': False,
+                    'discovery': {'started_at': started, 'completed_at': time.time()},
+                    'note': 'No supported native package manager was found.'}
+        if len(providers) == 1:
+            self._last_scan = providers[0]
+            return providers[0]
+        updates = [item for provider in providers for item in provider['updates']]
+        excluded = [item for provider in providers for item in provider.get('excluded', [])]
+        identities = [item['id'] for item in updates]
+        if len(identities) != len(set(identities)):
+            raise ValueError('Native providers returned ambiguous update identities.')
+        result = {'available': True, 'source': '+'.join(provider['source'] for provider in providers),
+                  'structured': all(provider.get('structured') is True for provider in providers),
+                  'complete': all(provider.get('complete') is True for provider in providers),
+                  'exitCode': 0, 'updates': updates, 'excluded': excluded[:1000],
+                  'installed_packages_checked': sum(provider.get('installed_packages_checked', 0)
+                                                    for provider in providers),
+                  'providers': {provider['source']: provider for provider in providers},
+                  'discovery': {'started_at': started, 'completed_at': time.time()},
+                  'note': 'Checked every installed supported native provider using exact package/App Store identities.'}
+        self._last_scan = result
+        return result
+
     def apply(self, identity, *, confirmed=False, cancel_event=None, progress_callback=None):
         if confirmed is not True:
             raise ValueError('Explicit package update approval is required.')
@@ -391,7 +534,8 @@ class NativePackages:
                 return {**no_install, 'skipped': True, 'exitCode': 0, 'status': 'no_update',
                         'note': 'This package no longer has an offered update; no installer ran.'}
             item = candidates[0]
-            if self.manager == 'pacman':
+            provider = item.get('source')
+            if provider == 'pacman':
                 raise UnsupportedOperation('Use the native full-system updater (pacman -Syu). Optimus does not create unsupported partial Arch upgrades.')
             if cancel_event is not None and cancel_event.is_set():
                 return dict(no_install, exitCode=0, skipped=True, cancelled=True)
@@ -401,10 +545,15 @@ class NativePackages:
             # Native broker commands expose no authenticated intermediate
             # percentage through this adapter. Keep the install indeterminate.
             observe('install')
-            if self.manager == 'brew':
+            if provider == 'mas':
+                from .macos_app_store_provider import privileged_update_command
+                command = privileged_update_command(self.data_dir, item['native_name'])
+                result = self.runner.privileged(command,
+                                                timeout=1800, cancel_event=cancel_event)
+            elif provider == 'brew':
                 argv = [self.executable, 'upgrade', '--formula' if item['kind'] == 'formula' else '--cask', '--', item['native_name']]
                 result = self.runner.run(argv, timeout=900, cancel_event=cancel_event)
-            elif self.manager == 'apt':
+            elif provider == 'apt':
                 # No removals; upgrade the already-installed requested package
                 # to its exact offer. Native dependency resolution still applies.
                 argv = ['/usr/bin/apt-get', '--assume-yes', '--no-remove', '--only-upgrade', 'install', item['native_name'] + '=' + item['available']]
@@ -416,7 +565,7 @@ class NativePackages:
             result.update(id=identity, from_version=item['version'], offered_version=item['available'])
             from .update_payload_lifecycle import cleanup_enabled, retained_receipt
             payload_cleanup_enabled = cleanup_enabled(self.data_dir)
-            result['payload_cleanup'] = retained_receipt(self.manager, payload_cleanup_enabled,
+            result['payload_cleanup'] = retained_receipt(provider, payload_cleanup_enabled,
                 'This native adapter has no Optimus-owned download workspace with verified descendant quiescence; native package caches are preserved.',
                 status='provider_managed' if payload_cleanup_enabled else 'disabled')
             if result.get('cancelled'):

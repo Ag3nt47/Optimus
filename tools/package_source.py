@@ -7,7 +7,7 @@ from pathlib import Path
 
 SKIP = {'.git','.venv','venv','__pycache__','.pytest_cache','test-artifacts','dist','build','reports','private'}
 ALLOW_DIRS = {'src','tests','tools','docs','scripts','.github'}
-ROOT_FILES = {'pyproject.toml','LICENSE','NOTICE','README.md','.gitignore','.gitattributes','requirements-build.txt','Install-Source.bat','Build-Windows.bat','Start-Optimus.bat','launch.py','SECURITY.md','CONTRIBUTING.md'}
+ROOT_FILES = {'pyproject.toml','LICENSE','NOTICE','README.md','.gitignore','.gitattributes','requirements-build.txt','Install-Source.bat','Build-Windows.bat','Start-Optimus.bat','Install-Optimus-macOS-App-Updates.command','launch.py','SECURITY.md','CONTRIBUTING.md'}
 
 def indirect(path):
     """Reject symlinks and Windows junctions/placeholders without following them."""

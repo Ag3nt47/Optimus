@@ -8,6 +8,11 @@
 - Inventory installed macOS extensions and include exact eligible Apple Software
   Update offers in the existing saved native update scope alongside Homebrew.
   Major macOS upgrades and automatic restarts remain outside that scope.
+- Add an explicit one-click macOS setup for exact Mac App Store updates through
+  the official `mas-cli/mas` 7.0.0 release. The unsigned upstream package and
+  embedded executable are hash-pinned, installed only for the current user and
+  reverified before use; vendor-only apps without a supported provider remain
+  inventory-only.
 - Add an opt-in Windows updater for the explicitly registered twelve-app ArtCraft portable suite, using exact official stable GitHub x64 ZIP releases with SHA-256 and size verification.
 - Defer running Craft apps, stage replacements, preserve portable settings/recovery and non-release files, and retain prior app directories with journaled interrupted-swap recovery.
 - Add a separate Craft-only command for explicitly configured sign-in checks; saved Craft and Software Updater choices control it without launching the interface or other maintenance.

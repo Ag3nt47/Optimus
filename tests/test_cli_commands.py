@@ -58,6 +58,24 @@ def test_cli_commands_are_mutually_exclusive():
         app.parser().parse_args(['--verify-run', RUN, '--startup-mode', 'on'])
 
 
+def test_macos_app_store_provider_cli_returns_before_backend_or_gui(tmp_path, monkeypatch, capsys):
+    from optimus import filesystem, macos_app_store_provider, native_backend
+    executable = tmp_path / 'providers' / 'mas'
+    install = Mock(return_value=executable)
+    monkeypatch.setattr(app.sys, 'platform', 'darwin')
+    monkeypatch.setattr(filesystem, 'default_data_root', lambda: tmp_path)
+    monkeypatch.setattr(macos_app_store_provider, 'install', install)
+    monkeypatch.setattr(native_backend, 'NativeBackend',
+                        Mock(side_effect=AssertionError('Provider setup must not initialize the backend.')))
+    monkeypatch.setattr(app, '_run_gui', Mock(side_effect=AssertionError('Provider setup must not open the GUI.')))
+    assert app.main(['--install-macos-app-store-provider']) == 0
+    install.assert_called_once_with(tmp_path, accepted=True)
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == 'ready'
+    assert result['provider'] == 'mas-cli/mas'
+    assert result['upstream_package_signed'] is False
+
+
 @pytest.mark.parametrize('status,expected', [('completed', 0), ('completed_with_skips', 0),
     ('no_enabled_updates', 0), ('blocked', 2), ('needs_review', 2), ('cancelled', 2)])
 def test_update_continuation_dispatches_only_saved_update_service_and_always_closes(tmp_path, monkeypatch, capsys, status, expected):

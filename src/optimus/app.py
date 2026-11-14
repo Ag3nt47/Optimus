@@ -32,6 +32,8 @@ def parser():
     commands.add_argument('--windows-compatibility-restore', type=_run_identity, metavar='CHANGE_ID', help='Restore one recorded Windows compatibility-policy change.')
     commands.add_argument('--update-recovery', choices=('status', 'reconcile'), help='Inspect one updater journal or reconcile a verified legacy preflight error; never starts an installer.')
     commands.add_argument('--continue-updates', action='store_true', help='Continue saved approved app and driver updates, skipping held packages; no cleanup or debloat.')
+    commands.add_argument('--install-macos-app-store-provider', action='store_true',
+                          help='Install the optional, hash-pinned official Mac App Store update provider for this user.')
     commands.add_argument('--craft-updates-only', action='store_true', help='Check and update only the explicitly registered Craft apps; no interface, cleanup, UAC or other maintenance.')
     commands.add_argument('--enforce-removals', action='store_true', help='Reapply only explicitly saved Windows app-removal and privacy scopes without opening the interface.')
     commands.add_argument('--toolkit', choices=('status', 'check', 'resume', 'integrity-check'), help='Inspect optional maintenance settings, run read-only health checks, resume a saved reboot plan, or check Windows integrity; no automatic repair.')
@@ -250,6 +252,24 @@ def _tls_probe_command(destination=None):
     return payload
 
 
+def _install_macos_app_store_provider_command():
+    """Install only the reviewed user-scoped provider; never start the GUI."""
+    if sys.platform != 'darwin':
+        raise RuntimeError('The Mac App Store update provider is available only on macOS.')
+    from .filesystem import default_data_root
+    from .macos_app_store_provider import VERSION, install
+    executable = install(default_data_root(), accepted=True)
+    return {
+        'status': 'ready',
+        'provider': 'mas-cli/mas',
+        'version': VERSION,
+        'executable': str(executable),
+        'scope': 'current_user',
+        'upstream_package_signed': False,
+        'verification': 'Exact release package and extracted executable SHA-256 hashes verified.',
+    }
+
+
 def main(argv=None):
     actual_arguments = list(sys.argv[1:] if argv is None else argv)
     if actual_arguments and actual_arguments[0] == '--winget-console-monitor':
@@ -264,6 +284,14 @@ def main(argv=None):
         from .winget_console import console_progress_probe
         return console_progress_probe(actual_arguments[1]) if len(actual_arguments) == 2 else 2
     args = parser().parse_args(actual_arguments)
+    if args.install_macos_app_store_provider:
+        try:
+            print(json.dumps(_install_macos_app_store_provider_command()))
+            return 0
+        except (ImportError, OSError, ValueError, RuntimeError) as error:
+            print(json.dumps({'status': 'error', 'command': 'install-macos-app-store-provider',
+                              'error': str(error)[:2048]}), file=sys.stderr)
+            return 2
     if args.tls_probe:
         try:
             print(json.dumps(_tls_probe_command(args.output)))

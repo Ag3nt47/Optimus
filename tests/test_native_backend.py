@@ -252,6 +252,80 @@ class PackageTests(unittest.TestCase):
         self.runner.run.side_effect = command
         self.assertEqual([row['id'] for row in self.packages.scan()['updates']], ['brew:editor'])
 
+    def test_macos_app_store_provider_scans_updates_exact_id_and_verifies_install(self):
+        self.packages.system = 'darwin'
+        self.packages.manager, self.packages.executable = None, None
+        self.packages.mas_executable = '/private/mas'
+        self.packages._verified_mas = Mock(return_value='/private/mas')
+        state = {'version': '16.101.3'}
+        installed = lambda: json.dumps({'adamID': 462054704, 'name': 'Microsoft Word',
+            'bundleID': 'com.microsoft.Word', 'path': '/Applications/Microsoft Word.app',
+            'version': state['version']}) + '\n'
+        def command(argv, **kwargs):
+            if argv[1:3] == ['list', '--json']:
+                return self.result(installed())
+            if argv[1:3] == ['outdated', '--json']:
+                return self.result(json.dumps({'adamID': 462054704, 'name': 'Microsoft Word',
+                    'bundleID': 'com.microsoft.Word', 'version': state['version'],
+                    'newVersion': '16.102.0'}) + '\n')
+            self.fail('Unexpected Mac App Store command: ' + repr(argv))
+        def update(argv, **kwargs):
+            self.assertEqual(argv, ['/private/verified-mas-update', '462054704'])
+            state['version'] = '16.102.0'
+            return self.result()
+        self.runner.run.side_effect = command
+        self.runner.privileged.side_effect = update
+        scan = self.packages.scan()
+        self.assertTrue(scan['complete'])
+        self.assertEqual(scan['source'], 'mas')
+        self.assertEqual(scan['updates'][0]['id'], 'mas:462054704')
+        self.assertEqual(scan['updates'][0]['Name'], 'Microsoft Word')
+        with patch('optimus.native_operations.shutil.disk_usage',
+                   return_value=types.SimpleNamespace(free=10 * 1024 ** 3)), patch(
+                       'optimus.macos_app_store_provider.privileged_update_command',
+                       return_value=['/private/verified-mas-update', '462054704']) as safe_command:
+            result = self.packages.apply('mas:462054704', confirmed=True)
+        safe_command.assert_called_once_with(Path('unused'), '462054704')
+        self.assertTrue(result['verified'])
+        self.assertEqual(result['installed_version'], '16.102.0')
+
+    def test_macos_native_status_reports_brew_and_app_store_providers(self):
+        self.packages.system = 'darwin'
+        self.packages.manager, self.packages.executable = 'brew', '/usr/local/bin/brew'
+        self.packages.mas_executable = '/private/mas'
+        self.packages._verified_mas = Mock(return_value='/private/mas')
+        status = self.packages.status()
+        self.assertEqual(status['source'], 'brew+mas')
+        self.assertEqual(status['providers'], ['brew', 'mas'])
+        self.assertTrue(status['automatic_install_supported'])
+
+    def test_macos_scan_combines_brew_and_app_store_without_mixing_inventories(self):
+        self.packages.system = 'darwin'
+        self.packages.manager, self.packages.executable = 'brew', '/usr/local/bin/brew'
+        self.packages.mas_executable = '/private/mas'
+        self.packages._verified_mas = Mock(return_value='/private/mas')
+        store_row = json.dumps({'adamID': 462054704, 'name': 'Microsoft Word',
+            'bundleID': 'com.microsoft.Word', 'path': '/Applications/Microsoft Word.app',
+            'version': '16.101.3'}) + '\n'
+        def command(argv, **kwargs):
+            if argv[0] == '/usr/local/bin/brew' and argv[1] == 'info':
+                return self.result(json.dumps({'formulae': [{'name': 'wget',
+                    'installed': [{'version': '1.25'}]}], 'casks': []}))
+            if argv[0] == '/usr/local/bin/brew':
+                return self.result(json.dumps({'formulae': [], 'casks': []}))
+            if argv[1:3] == ['list', '--json']:
+                return self.result(store_row)
+            if argv[1:3] == ['outdated', '--json']:
+                return self.result('')
+            self.fail('Unexpected macOS provider command: ' + repr(argv))
+        self.runner.run.side_effect = command
+        scan = self.packages.scan()
+        self.assertTrue(scan['complete'])
+        self.assertEqual(scan['source'], 'brew+mas')
+        self.assertEqual(scan['installed_packages_checked'], 2)
+        self.assertEqual(set(scan['providers']), {'brew', 'mas'})
+        self.assertEqual(self.runner.run.call_count, 4)
+
     def test_dnf_zero_epoch_offer_matches_exact_post_install_rpm_version(self):
         self.packages.manager, self.packages.executable = 'dnf', '/usr/bin/dnf'
         installed = {'version': '0:1.0-1'}
