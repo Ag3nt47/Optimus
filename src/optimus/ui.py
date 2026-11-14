@@ -2205,6 +2205,8 @@ class WorkflowWorkerCard(QFrame):
     """A persistent worker status, with observed item counts and no invented ETA."""
     navigationRequested = Signal(str, object)
     healthDetailsRequested = Signal()
+    reviewRequested = Signal()
+    REVIEW_STATUSES = ('needs_review', 'failed', 'blocked', 'completed_with_errors', 'uncertain')
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -2253,6 +2255,19 @@ class WorkflowWorkerCard(QFrame):
         layout.addWidget(self.status)
         self.details = WorkflowSummaryLabel('Waiting for this run to start.')
         layout.addWidget(self.details)
+        self._review_enabled = False
+        self._last_state = {}
+        self.review_button = QPushButton('Review')
+        self.review_button.setObjectName('WorkerReviewButton')
+        self.review_button.setAccessibleName(title + ': review why this worker stopped')
+        self.review_button.setToolTip('See everything recorded about this stop, then proceed with your approved '
+                                      'updates or deny them.')
+        self.review_button.setAutoDefault(False)
+        self.review_button.setDefault(False)
+        self.review_button.setStyleSheet('padding:3px 8px;font-weight:700;color:#e8b34b;')
+        self.review_button.clicked.connect(self.reviewRequested.emit)
+        layout.addWidget(self.review_button)
+        self.review_button.hide()
         self.progress = WorkflowProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
@@ -2369,6 +2384,7 @@ class WorkflowWorkerCard(QFrame):
         if self._spacious:
             layout.addWidget(self.elapsed)
         layout.addStretch(1)
+        layout.addWidget(self.review_button)
         layout.addLayout(self._navigation_layout)
         self.completion.setVisible(self._spacious)
         self.details.setVisible(self._spacious)
@@ -2671,6 +2687,7 @@ class WorkflowWorkerCard(QFrame):
     def update_state(self, state, *, maintenance=False):
         state = state if isinstance(state, dict) else {}
         self._maintenance = maintenance
+        self._last_state = dict(state)
         self._set_resource_totals(state.get('resource_totals'), maintenance=maintenance,
             scope=state.get('resource_totals_scope'))
         raw_status = str(state.get('status', 'not_started'))
@@ -2821,6 +2838,22 @@ class WorkflowWorkerCard(QFrame):
         self._elapsed_clock.start()
         self.refresh_elapsed()
         self.set_live_metrics(self._live_worker_metrics, self._live_computer_metrics)
+        self._sync_review_button()
+
+    def enable_review(self, enabled=True):
+        """Offer the Review button on this card whenever it stops needing attention."""
+        self._review_enabled = enabled is True
+        self._sync_review_button()
+
+    def needs_review(self):
+        state = self._last_state
+        return (self._raw_status in self.REVIEW_STATUSES
+                or getattr(self, '_finished_with_skips', False)
+                or (state.get('installation_blocked') is True and self._raw_status not in ('running', 'installing'))
+                or (state.get('approval_required') is True and state.get('worker_finished') is True))
+
+    def _sync_review_button(self):
+        self.review_button.setVisible(self._review_enabled and self.needs_review())
 
     def set_live_metrics(self, metrics, computer=None):
         metrics = metrics if isinstance(metrics, dict) else {}
@@ -3092,6 +3125,11 @@ class OptimizationProgressWindow(QDialog):
             self.worker_grid.ensure(identity, title)
         self.worker_cards['maintenance'].healthDetailsRequested.connect(self.show_hardware_health_details)
         self._hardware_health_dialog = None
+        self._update_review_dialogs = {}
+        for identity in ('software_updates', 'driver_updates'):
+            self.worker_cards[identity].enable_review()
+            self.worker_cards[identity].reviewRequested.connect(
+                lambda identity=identity: self.show_update_review(identity))
         self.worker_cards['security_scan'].update_state({'status': 'not_selected',
             'description': 'The virus, malware and spyware scan is disabled for this run.'})
         body_layout.addWidget(self.worker_grid, 1)
@@ -3597,6 +3635,36 @@ class OptimizationProgressWindow(QDialog):
             self._update_scan_card({'stage_status': 'not_started' if selected else 'not_selected',
                 'description': 'Waiting for the saved virus, malware and spyware scan.' if selected else
                     'The virus, malware and spyware scan is disabled for this run.'})
+
+    def show_update_review(self, identity):
+        backend = getattr(self.parentWidget(), 'backend', None)
+        if backend is None or identity not in ('software_updates', 'driver_updates'):
+            return
+        previous = self._update_review_dialogs.get(identity)
+        if previous is not None and previous.isVisible():
+            previous.raise_()
+            previous.activateWindow()
+            return
+        if previous is not None:
+            previous.deleteLater()
+        from .widgets.update_review_dialog import UpdateReviewDialog
+        dialog = UpdateReviewDialog(backend, identity, self.worker_cards[identity]._last_state, self)
+        dialog.proceeded.connect(self._update_review_proceeded)
+        dialog.denied.connect(self._update_review_denied)
+        self._update_review_dialogs[identity] = dialog
+        dialog.show()
+
+    def _update_review_proceeded(self, identity, report):
+        workers = report.get('workers') if isinstance(report, dict) else None
+        state = workers.get(identity) if isinstance(workers, dict) else None
+        if isinstance(state, dict):
+            self.worker_cards[identity].update_state(state)
+
+    def _update_review_denied(self, identity, _entry):
+        self.worker_cards[identity].update_state({
+            'status': 'deferred',
+            'description': 'You denied these updates after review. Nothing was installed; saved approvals '
+                           'and the update record are unchanged.'})
 
     def show_hardware_health_details(self):
         backend = getattr(self.parentWidget(), 'backend', None)
