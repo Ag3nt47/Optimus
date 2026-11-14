@@ -74,7 +74,8 @@ def test_native_observer_error_cannot_abort_or_replay_and_invalid_observer_is_pr
 
 def test_native_backend_forwards_exact_observer_without_changing_other_options():
     callback = Mock()
-    fixture = SimpleNamespace(native_packages=SimpleNamespace(apply=Mock(return_value={'fixture': True})))
+    fixture = SimpleNamespace(system='linux',
+        native_packages=SimpleNamespace(apply=Mock(return_value={'fixture': True})))
     result = NativeBackend.update_app_unattended(fixture, 'apt:editor', progress_callback=callback)
     assert result == {'fixture': True}
     fixture.native_packages.apply.assert_called_once_with('apt:editor', confirmed=True, cancel_event=None, progress_callback=callback)

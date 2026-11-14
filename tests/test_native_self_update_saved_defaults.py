@@ -42,7 +42,8 @@ def saved_choices(p, *, complete=False):
         key: value for key, value in effective.items() if key not in MISSING_DEFAULT_KEYS}
     assert effective.keys() == workflow.DEFAULTS.keys()
     assert MISSING_DEFAULT_KEYS <= effective.keys()
-    assert len(raw_choices) == (len(effective) if complete else 91)
+    expected_keys = set(effective) if complete else set(effective) - MISSING_DEFAULT_KEYS
+    assert set(raw_choices) == expected_keys
     p.preferences = raw_choices
     p.raw = (json.dumps(raw_choices, indent=3) + '\n').encode()
     (p.data / 'preferences.json').write_bytes(p.raw)
@@ -64,7 +65,7 @@ def test_sparse_saved_file_uses_explicit_effective_approval_and_preserves_all_by
     effective = saved_choices(p)
     assert module.canonical_approval_scope(p.preferences) == effective
     assert module.canonical_approval_scope(effective) == effective
-    assert len(p.preferences) == 91
+    assert set(p.preferences) == set(effective) - MISSING_DEFAULT_KEYS
     assert 'app_removal_exclusions' not in p.preferences
     assert effective['app_removal_exclusions'] == []
     identity = handoff(p)
@@ -83,7 +84,7 @@ def test_sparse_saved_file_uses_explicit_effective_approval_and_preserves_all_by
     assert consumed['approved_scope_sha256'] == scope_fingerprint(effective)
     assert consumed['cleanup_approved'] is True and consumed['at_most_once'] is True
     assert (p.data / 'preferences.json').read_bytes() == p.raw
-    assert len(json.loads(p.raw)) == 91
+    assert set(json.loads(p.raw)) == set(effective) - MISSING_DEFAULT_KEYS
     with pytest.raises(FileExistsError):
         new_service(p).consume_resume(identity)
 
