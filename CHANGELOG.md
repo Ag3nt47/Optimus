@@ -2,6 +2,12 @@
 
 ## 0.12.47
 
+- Inventory macOS applications through Spotlight and standard nested application
+  folders, retain malformed bundles as bounded metadata-only rows, and exclude
+  embedded helper apps from the installed-application count.
+- Inventory installed macOS extensions and include exact eligible Apple Software
+  Update offers in the existing saved native update scope alongside Homebrew.
+  Major macOS upgrades and automatic restarts remain outside that scope.
 - Add an opt-in Windows updater for the explicitly registered twelve-app ArtCraft portable suite, using exact official stable GitHub x64 ZIP releases with SHA-256 and size verification.
 - Defer running Craft apps, stage replacements, preserve portable settings/recovery and non-release files, and retain prior app directories with journaled interrupted-swap recovery.
 - Add a separate Craft-only command for explicitly configured sign-in checks; saved Craft and Software Updater choices control it without launching the interface or other maintenance.
