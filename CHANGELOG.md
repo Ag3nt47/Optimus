@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.48
+
+- Fix App updates and Driver updates staying "install blocked" indefinitely after
+  Optimus closed while an approved WinGet package was being prepared. After a
+  verified Windows restart, that orphaned record is reconciled: only its exact
+  package and version are placed on the saved update hold for review (never
+  retried or reported as installed), and all other approved updates continue.
+
 ## 0.12.47
 
 - Add a Review button to the App updates and Driver updates workers when they stop
