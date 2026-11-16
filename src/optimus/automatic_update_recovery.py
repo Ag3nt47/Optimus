@@ -31,6 +31,7 @@ _VERSION = r'[A-Za-z0-9][A-Za-z0-9_.+\-]{0,79}'
 _STAMP = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}'
 RUNTIME_OWNER_KIND = 'optimus-runtime-owner-v1'
 RESTART_RECOVERY_KIND = 'native-winget-console-quiescent-after-reboot-v1'
+ORPHAN_RECOVERY_KIND = 'orphaned-winget-intent-quiescent-after-reboot-v1'
 _RESTART_DIR = 'update-reconciliation-after-boot'
 _CONTINUATION_BOOT_DIR = 'update-continuation-provenance'
 _CONTINUATION_BOOT_KIND = 'native-update-continuation-boot-v1'
@@ -430,9 +431,79 @@ def _captured_console_attempt(record):
             'prepared_at': prepared, 'finished_at': finished}, owner
 
 
+def _offer_version(record, package):
+    from .update_holds import _VERSION as HOLD_VERSION
+    item = record.get('current_item')
+    description = item.get('description') if isinstance(item, dict) else None
+    match = re.fullmatch(r'Updating approved package ([1-9]\d{0,3})/([1-9]\d{0,3}): '
+                         + re.escape(package) + r' \(([^() ]+) to ([^() ]+)\)',
+                         description if isinstance(description, str) and len(description) <= 512 else '')
+    _require(match is not None and 1 <= int(match[1]) <= int(match[2]) <= 1000
+             and all(HOLD_VERSION.fullmatch(version) and not version.endswith('.') and '..' not in version
+                     for version in match.group(3, 4)), 'The exact prepared offer version is unavailable.')
+    from .automated_software import is_newer_version
+    _require(is_newer_version(match[3], match[4], package_id=package, source='winget'),
+             'The prepared offer is not an exact newer release.')
+    return match[4]
+
+
+def _orphaned_running_attempt(record):
+    """Bind a journal whose writer ended before saving any outcome to its exact offer.
+
+    The GUI/console process that owned the record terminated (crash, kill, power
+    loss or sign-out) while one approved package was prepared. Nothing about that
+    package's outcome is known, so it is never treated as completed; it may only
+    be held for review once a later Windows boot proves nothing it started runs.
+    """
+    from .parallel_updates import installer_barrier
+    from .update_holds import _PACKAGE as HOLD_ID
+
+    _require(isinstance(record, dict) and type(record.get('schema')) is int and record['schema'] == 1
+             and record.get('title') == 'Review or update configured software'
+             and record.get('status') == 'running' and record.get('installer_prepared') is True
+             and 'result' not in record and 'finished_at' not in record
+             and isinstance(record.get('id'), str) and _ID.fullmatch(record['id'])
+             and isinstance(record.get('parent_run_id'), str) and _ID.fullmatch(record['parent_run_id']),
+             'The journal is not an orphaned application update intent.')
+    attempt, item = record.get('package_attempt'), record.get('current_item')
+    _require(isinstance(attempt, dict) and attempt.get('kind') == 'terminal-package-attempt-v1'
+             and attempt.get('state') == 'prepared'
+             and isinstance(attempt.get('id'), str) and _ID.fullmatch(attempt['id'])
+             and isinstance(item, dict), 'The exact prepared package attempt is unavailable.')
+    package = attempt.get('item_id')
+    _require(isinstance(package, str) and HOLD_ID.fullmatch(package) and not package.endswith('.')
+             and '..' not in package and item.get('id') == package, 'The exact prepared package identity is unavailable.')
+    version = _offer_version(record, package)
+    started, executed, prepared = (record.get('started_at'), record.get('execution_started_at'),
+                                   attempt.get('prepared_at'))
+    _require(all(map(_epoch_number, (started, executed, prepared))) and started <= executed <= prepared,
+             'The orphaned intent timeline is invalid.')
+    owner = _journal_runtime_owner(record)
+    history = record.get('terminal_items', [])
+    _require(isinstance(history, list) and len(history) < 1000, 'The earlier package receipt inventory is invalid or full.')
+    for previous in history:
+        value = previous.get('result') if isinstance(previous, dict) else None
+        _require(isinstance(previous, dict) and previous.get('id') != package
+                 and isinstance(value, dict) and value.get('outcomeKnown') is True
+                 and value.get('running') is False and type(value.get('installer_started')) is bool
+                 and installer_barrier(previous) is None, 'Another earlier installer remains unresolved.')
+    # No finish was recorded; the prepared boundary is the latest proven event.
+    return {'package_id': package, 'version': version, 'attempt_id': attempt['id'],
+            'prepared_at': prepared, 'finished_at': prepared}, owner
+
+
+def _restart_candidate(record):
+    """Return (attempt, original_owner, receipt kind) for a restart-recoverable journal."""
+    if isinstance(record, dict) and record.get('status') == 'running':
+        attempt, owner = _orphaned_running_attempt(record)
+        return attempt, owner, ORPHAN_RECOVERY_KIND
+    attempt, owner = _captured_console_attempt(record)
+    return attempt, owner, RESTART_RECOVERY_KIND
+
+
 def is_restart_recovery_candidate(record):
     try:
-        _captured_console_attempt(record)
+        _restart_candidate(record)
         return True
     except (ValueError, TypeError, KeyError, OSError, RuntimeError, RecursionError):
         return False
@@ -454,9 +525,17 @@ def _prior_boot(data_dir, record, original_owner):
              'The earlier workflow cannot be bound to this captured installer.')
     audits = [row for row in stages if isinstance(row, dict) and row.get('title') == 'Inspect current resource usage']
     updates = [row for row in stages if isinstance(row, dict) and row.get('title') == record['title']]
-    _require(len(audits) == len(updates) == 1 and audits[0].get('status') == 'completed'
-             and updates[0].get('started_at') == executed and updates[0].get('finished_at') == record['finished_at'],
-             'The earlier native boot audit or exact application stage is unavailable.')
+    if record.get('status') == 'running':
+        # The writer died before saving an outcome, so its parent stage never
+        # finished either. It must still be the one exact unfinished stage.
+        _require(len(audits) == len(updates) == 1 and audits[0].get('status') == 'completed'
+                 and updates[0].get('started_at') in (record['started_at'], executed)
+                 and updates[0].get('finished_at') is None and 'finished_at' not in record,
+                 'The earlier native boot audit or exact unfinished application stage is unavailable.')
+    else:
+        _require(len(audits) == len(updates) == 1 and audits[0].get('status') == 'completed'
+                 and updates[0].get('started_at') == executed and updates[0].get('finished_at') == record['finished_at'],
+                 'The earlier native boot audit or exact application stage is unavailable.')
     audit = audits[0]
     captured = audit.get('result')
     system = captured.get('System') if isinstance(captured, dict) else None
@@ -596,7 +675,14 @@ def _hold_for_console_attempt(data_dir, package, version, owner):
                  if row['id'].casefold() == package.casefold() and row['available_version'] == version), None)
 
 
-def _append_console_hold(data_dir, package, version, owner):
+_HOLD_REASONS = {
+    RESTART_RECOVERY_KIND: 'Windows restarted after this exact offer had an unverified WinGet console outcome. Review the offer before retrying.',
+    ORPHAN_RECOVERY_KIND: ('Optimus closed while this exact offer was being prepared and Windows has since restarted; '
+                           'its outcome was never recorded. Review the offer before retrying.'),
+}
+
+
+def _append_console_hold(data_dir, package, version, owner, kind=RESTART_RECOVERY_KIND):
     from .update_holds import load_update_holds
     path = data_dir / 'update-holds.json'
     before = _ordinary_data_path(path, file=True)
@@ -606,7 +692,7 @@ def _append_console_hold(data_dir, package, version, owner):
         return
     _require(len(holds) < 100, 'The saved automatic update hold list is full.')
     holds.append({'id': package, 'available_version': version,
-                  'reason': 'Windows restarted after this exact offer had an unverified WinGet console outcome. Review the offer before retrying.'})
+                  'reason': _HOLD_REASONS[kind]})
     proposed = {'schema': 1, 'owner': owner, 'holds': holds}
     _require(len(json.dumps(proposed, allow_nan=False).encode('utf-8')) <= _HOLD_BYTES,
              'The saved automatic update hold file would exceed its size limit.')
@@ -636,9 +722,9 @@ def reconciled_console_outcome(data_dir, path, record, *, owner):
         receipt = _decode(_read(marker, _HOLD_BYTES))
         raw = _read(path, _JOURNAL_BYTES)
         _require(_decode(raw) == record, 'The journal changed during validation.')
-        attempt, original_owner = _captured_console_attempt(record)
+        attempt, original_owner, kind = _restart_candidate(record)
         prior = _prior_boot(data_dir, record, original_owner)
-        expected = {'schema': 1, 'kind': RESTART_RECOVERY_KIND, 'owner': owner,
+        expected = {'schema': 1, 'kind': kind, 'owner': owner,
                     'journal_id': path.stem, 'original_sha256': hashlib.sha256(raw).hexdigest(),
                     'prior_boot': prior, 'attempt': attempt, 'historical_outcome_known': False,
                     'installers_started': 0, 'retries_started': 0}
@@ -667,7 +753,7 @@ def reconciled_console_outcome(data_dir, path, record, *, owner):
 def _reconcile_console_after_restart(backend, path, raw, record, *, owner, now, current_console):
     from .update_resume import boot_identity
     data_dir = Path(backend.data_dir)
-    attempt, original_owner = _captured_console_attempt(record)
+    attempt, original_owner, kind = _restart_candidate(record)
     marker = _restart_marker(data_dir, path.stem)
     if _ordinary_data_path(marker, file=True) is not None:
         _require(reconciled_console_outcome(data_dir, path, record, owner=owner),
@@ -683,12 +769,12 @@ def _reconcile_console_after_restart(backend, path, raw, record, *, owner, now, 
     proof.update({key: native[key] for key in ('schema', 'owner', 'complete', 'review_only', 'wua_busy', 'reboot_required')})
     proof['process_count'] = len(native['processes'])
     _require(_read(path, _JOURNAL_BYTES) == raw, 'The updater journal changed before reboot reconciliation.')
-    _append_console_hold(data_dir, attempt['package_id'], attempt['version'], owner)
+    _append_console_hold(data_dir, attempt['package_id'], attempt['version'], owner, kind)
     _require(_read(path, _JOURNAL_BYTES) == raw and _ordinary_data_path(marker, file=True) is None,
              'The updater journal or reboot receipt changed before committing.')
     # Commit atomically under the caller's RunLease. If a crash precedes this
     # write the original remains blocked and the exact hold is idempotent.
-    receipt = {'schema': 1, 'kind': RESTART_RECOVERY_KIND, 'owner': owner, 'journal_id': path.stem,
+    receipt = {'schema': 1, 'kind': kind, 'owner': owner, 'journal_id': path.stem,
                'original_sha256': hashlib.sha256(raw).hexdigest(), 'prior_boot': prior, 'attempt': attempt,
                'historical_outcome_known': False, 'recorded_at': recorded, 'proof': proof,
                'installers_started': 0, 'retries_started': 0}
@@ -738,7 +824,21 @@ def reconcile_completed_updates(backend, *, lease=None, folder=None, now=None):
                     continue
                 _intent(record)
                 current = time.time() if now is None else now
-                evidence = _completed_evidence(Path(folder) if folder is not None else _log_folder(), record, now=current)
+                try:
+                    evidence = _completed_evidence(Path(folder) if folder is not None else _log_folder(), record, now=current)
+                except (OSError, ValueError) as completion_error:
+                    # No exact native success. An orphaned intent from an earlier
+                    # Windows boot is held for review instead of blocking every lane.
+                    if not is_restart_recovery_candidate(record):
+                        raise
+                    try:
+                        recovered = _reconcile_console_after_restart(backend, path, original, record, owner=owner,
+                                                                    now=now, current_console=current_console)
+                    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as restart_error:
+                        raise ValueError(str(completion_error)[:240] + ' / ' + str(restart_error)[:240]) from restart_error
+                    if recovered is not None:
+                        result['reconciled_after_reboot'].append(recovered)
+                    continue
                 original_owner, parent_raw = _recovery_owner(backend.data_dir, record)
                 probe = backend.automatic_update_recovery_probe()
                 current = time.time() if now is None else now

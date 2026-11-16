@@ -1167,7 +1167,7 @@ class ParallelAppUpdates:
                         and (outcome is None or isinstance(outcome, dict)
                              and not _uncertain(outcome) and installer_barrier(outcome) is None)):
                     continue  # Exact native receipt, never a time/PID heuristic.
-                if value.get('status') == 'uncertain':
+                if value.get('status') in ('uncertain', 'running'):
                     from .automatic_update_recovery import is_restart_recovery_candidate, reconciled_console_outcome
                     if reconciled_console_outcome(self.backend.data_dir, path, value, owner=self.owner):
                         continue

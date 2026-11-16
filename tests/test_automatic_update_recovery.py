@@ -694,6 +694,106 @@ def test_changed_prior_boot_audit_invalidates_committed_companion(console_lost):
     f.parent_path.write_bytes(f.parent_path.read_bytes() + b'\n')
     assert pending_updates_barrier(f.backend)
 
+@pytest.fixture
+def orphaned(completed, monkeypatch):
+    """The GUI that owned this journal ended while one package was prepared."""
+    f = completed
+    from datetime import datetime, timezone
+    def utc(stamp):
+        return datetime.fromtimestamp(stamp, timezone.utc).isoformat()
+    prepared = f.record['package_attempt']['prepared_at']
+    executed = f.record['started_at'] + 1
+    parent = json.loads(f.parent_path.read_text())
+    audit = parent['stages'][0]
+    audit.update(started_at=executed, finished_at=executed + 1)
+    audit['result']['System'] = {'LastBootUtc': utc(f.record['started_at'] - 3600)}
+    parent['stages'].append({'title': f.record['title'], 'status': 'running', 'started_at': f.record['started_at']})
+    f.parent_path.write_text(json.dumps(parent))
+    earlier = {'id': 'Google.Chrome', 'status': 'completed', 'uncertain': False, 'binding': {}, 'presence': '',
+               'source': '', 'error': '', 'reason': '',
+               'result': {'exitCode': 0, 'running': False, 'outcomeKnown': True, 'restartNeeded': None,
+                          'installer_started': True, 'verified': True, 'status': 'completed'}}
+    f.record.update(execution_started_at=executed, terminal_items=[earlier],
+        runtime_owner={'schema': 1, 'kind': recovery.RUNTIME_OWNER_KIND, 'owner': f.record['owner'],
+                       'journal_id': f.record['id'], 'parent_run_id': f.record['parent_run_id'],
+                       'pid': 44, 'name': 'Optimus.exe', 'executable': r'D:\Optimus\0.12.44\Optimus.exe',
+                       'created_at': f.record['started_at'] - 30, 'created_utc': utc(f.record['started_at'] - 30),
+                       'captured_at': f.record['started_at'], 'frozen': True})
+    f.path.write_bytes(json.dumps(f.record, indent=2).encode())
+    f.native.unlink()  # The process ended before any native updater command.
+    boot = round(prepared + 3600)
+    f.now = boot + 600
+    f.probe.update(captured_at=f.now, boot_utc=utc(boot), boot_event_utc=utc(boot + 1))
+    f.boot = Mock(return_value=boot)
+    monkeypatch.setattr('optimus.update_resume.boot_identity', f.boot)
+    return f
+
+
+def test_orphaned_intent_after_reboot_holds_only_that_offer_and_releases_other_updates(orphaned):
+    from optimus.update_holds import load_update_holds, matching_update_hold
+    f = orphaned
+    original, parent = f.path.read_bytes(), f.parent_path.read_bytes()
+    assert recovery.is_restart_recovery_candidate(f.record)
+    assert pending_updates_barrier(f.backend)
+    outcome = run(f)
+    assert outcome['reconciled_after_reboot'] == [{'id': f.record['id'], 'package_id': 'Fixture.App', 'version': '2.0'}]
+    assert outcome['reconciled'] == [] and outcome['unresolved'] == []
+    assert outcome['installers_started'] == outcome['retries_started'] == 0
+    assert f.path.read_bytes() == original and f.parent_path.read_bytes() == parent
+    assert not pending_updates_barrier(f.backend)
+    hold, = load_update_holds(f.data)
+    assert matching_update_hold({'id': 'Fixture.App', 'available': '2.0'}, [hold]) == hold
+    assert matching_update_hold({'id': 'Other.App', 'available': '2.0'}, [hold]) is None
+    marker = json.loads(recovery._restart_marker(f.data, f.record['id']).read_text())
+    assert marker['kind'] == recovery.ORPHAN_RECOVERY_KIND and marker['historical_outcome_known'] is False
+    f.backend.automatic_update_recovery_probe.reset_mock()
+    assert run(f)['reconciled_after_reboot'] == []
+    f.backend.automatic_update_recovery_probe.assert_not_called()
+
+
+def test_orphaned_intent_with_exact_native_success_still_reconciles_as_completed(orphaned):
+    f = orphaned
+    f.native.write_text(f.native_text)
+    f.now = recovery._epoch('2026-01-02 03:07:00.000')
+    f.probe['captured_at'] = f.now
+    outcome = run(f)
+    assert outcome['reconciled'] and not outcome['reconciled_after_reboot']
+    assert not (f.data / 'update-holds.json').exists()
+
+
+@pytest.mark.parametrize('failure', ['same_boot', 'old_owner_still_present', 'other_installer',
+    'unresolved_earlier_item', 'saved_result', 'finished_stage', 'no_runtime_owner'])
+def test_orphaned_intent_stays_blocked_without_exact_restart_proof(orphaned, failure):
+    f = orphaned
+    if failure == 'same_boot':
+        prior = json.loads(f.parent_path.read_text())['stages'][0]['result']['System']['LastBootUtc']
+        f.probe.update(boot_utc=prior, boot_event_utc=prior)
+        f.boot.return_value = int(recovery._utc_epoch(prior))
+    elif failure == 'old_owner_still_present':
+        f.probe['processes'].append({'pid': 44, 'name': 'Optimus.exe',
+                                     'started_utc': f.record['runtime_owner']['created_utc']})
+    elif failure == 'other_installer':
+        f.probe['processes'].append({'pid': 99, 'name': 'VendorSetup.exe'})
+    elif failure == 'unresolved_earlier_item':
+        f.record['terminal_items'][0]['result'].update(outcomeKnown=False, running=True)
+    elif failure == 'saved_result':
+        f.record['result'] = {'items': [], 'failed_items': 0}
+    elif failure == 'finished_stage':
+        parent = json.loads(f.parent_path.read_text())
+        parent['stages'][-1]['finished_at'] = f.now
+        f.parent_path.write_text(json.dumps(parent))
+    else:
+        del f.record['runtime_owner']
+    f.path.write_text(json.dumps(f.record))
+    original = f.path.read_bytes()
+    outcome = run(f)
+    assert not outcome['reconciled_after_reboot'] and not outcome['reconciled']
+    assert outcome['unresolved']
+    assert f.path.read_bytes() == original and pending_updates_barrier(f.backend)
+    assert not (f.data / 'update-holds.json').exists()
+    assert not recovery._restart_marker(f.data, f.record['id']).exists()
+
+
 @pytest.fixture(params=['preflight_failed', 'update_timeout'], ids=['legacy-timeout', 'typed-timeout'])
 def timed_out_batch(console_lost, request):
     """Model the saved four-item batch with one captured timeout."""
