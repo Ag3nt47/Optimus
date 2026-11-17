@@ -249,10 +249,14 @@ def _current_console_identity():
 
 
 def _validate_idle_probe(probe, owner, *, finished, now, current_console=None,
-                         native_pid=None, installer_path=None):
+                         native_pid=None, installer_path=None, allow_pending_restart=False):
+    # An orphaned intent is already fenced by a verified newer boot; a Windows
+    # servicing restart pending in that newer boot belongs to later servicing.
+    restart_ok = (isinstance(probe, dict) and (probe.get('reboot_required') is False
+                  or allow_pending_restart and probe.get('reboot_required') is True))
     _require(isinstance(probe, dict) and type(probe.get('schema')) is int and probe.get('schema') == 1 and probe.get('complete') is True
         and probe.get('review_only') is True and probe.get('wua_busy') is False
-        and probe.get('reboot_required') is False and probe.get('owner') == _current_owner(),
+        and restart_ok and probe.get('owner') == _current_owner(),
         'Native installer/restart state is unavailable or busy.')
     captured = probe.get('captured_at')
     _require(type(captured) in (float, int) and 0 <= now - captured <= 30, 'The native census is stale.')
@@ -734,7 +738,9 @@ def reconciled_console_outcome(data_dir, path, record, *, owner):
         proof, recorded = receipt['proof'], receipt['recorded_at']
         _require(isinstance(proof, dict) and proof.get('schema') == 1 and proof.get('owner') == owner
                  and proof.get('complete') is True and proof.get('review_only') is True
-                 and proof.get('wua_busy') is False and proof.get('reboot_required') is False
+                 and proof.get('wua_busy') is False
+                 and (proof.get('reboot_required') is False
+                      or kind == ORPHAN_RECOVERY_KIND and proof.get('reboot_required') is True)
                  and type(proof.get('process_count')) is int and 5 <= proof['process_count'] <= 10000
                  and _epoch_number(recorded) and _epoch_number(proof.get('captured_at'))
                  and 0 <= recorded - proof['captured_at'] <= 30 and recorded <= time.time(),
@@ -763,7 +769,7 @@ def _reconcile_console_after_restart(backend, path, raw, record, *, owner, now, 
     native = backend.automatic_update_recovery_probe()
     recorded = time.time() if now is None else now
     _validate_idle_probe(native, original_owner, finished=attempt['finished_at'], now=recorded,
-                         current_console=current_console)
+                         current_console=current_console, allow_pending_restart=kind == ORPHAN_RECOVERY_KIND)
     proof = _boot_evidence(native, attempt['finished_at'], observed_boot=boot_identity(),
                            previous_boot=prior['previous_boot_utc'])
     proof.update({key: native[key] for key in ('schema', 'owner', 'complete', 'review_only', 'wua_busy', 'reboot_required')})

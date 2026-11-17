@@ -23,11 +23,17 @@ function Get-OptimusEdgeRunningUnder {param($Path)return @($script:Running|Where
 function Get-OptimusCopilotKnownRoots {return @($script:CopilotRoots)}
 function Get-OptimusEdgeAllowUninstall {return $script:Allow}
 function Set-OptimusEdgeAllowUninstall {param($Restore)if($null -eq $Restore){$script:Allow=[pscustomobject]@{keyPresent=$true;present=$true;value=1;kind='DWord'};$null=$script:AllowWrites.Add('set')}else{$script:Allow=$Restore;$null=$script:AllowWrites.Add('restore')}}
+$script:Geo=@{};$script:GeoWrites=New-Object Collections.ArrayList;$script:RemoveWhenEea=$false;$script:GeoDuringLaunch=@()
+function Get-OptimusEdgeGeo {param($Hive)$values=[ordered]@{};if($script:Geo.ContainsKey($Hive)){foreach($k in $script:Geo[$Hive].Keys){$values[$k]=$script:Geo[$Hive][$k]}};return [pscustomobject]@{hive=$Hive;values=$values}}
+function Set-OptimusEdgeGeo {param($Hive,$Values)$copy=[ordered]@{};foreach($k in $Values.Keys){$copy[$k]=$Values[$k]};$script:Geo[$Hive]=$copy;$null=$script:GeoWrites.Add($Hive+'='+(ConvertTo-Json -InputObject $copy -Compress))}
+function Get-OptimusEdgeInstallerLogTail {return 'fixture: uninstall not allowed for region'}
 function Get-OptimusEdgeSignedFile {param($Path)if((Test-Path -LiteralPath $Path -PathType Leaf)-and $script:Signatures.ContainsKey($Path)){return $script:Signatures[$Path]};return $null}
 function Invoke-OptimusEdgeProcess {
  param($Path,$Arguments)
  $null=$script:Launches.Add([pscustomobject]@{path=$Path;arguments=@($Arguments)})
- if(($script:RemoveVendor -or ($script:RemoveWhenAllowed -and $script:Allow.value -eq 1)) -and ($Path -like '*\Installer\setup.exe' -or $Path -like '*\Installer\copilot_setup.exe')){
+ $script:GeoDuringLaunch+=@((ConvertTo-Json -InputObject (Get-OptimusEdgeGeo 'HKEY_CURRENT_USER').values -Compress))
+ $eea=((Get-OptimusEdgeGeo 'HKEY_CURRENT_USER').values['Nation'] -ceq '68')
+ if(($script:RemoveVendor -or ($script:RemoveWhenAllowed -and $script:Allow.value -eq 1) -or ($script:RemoveWhenEea -and $eea)) -and ($Path -like '*\Installer\setup.exe' -or $Path -like '*\Installer\copilot_setup.exe')){
   $root=Split-Path (Split-Path (Split-Path $Path -Parent) -Parent) -Parent
   foreach($leaf in @('msedge.exe','mscopilot.exe')){$browser=Join-Path $root $leaf;if(Test-Path -LiteralPath $browser){Remove-Item -LiteralPath $browser -Force}}
  }
@@ -55,7 +61,7 @@ function Add-EdgeRoot([string]$Name,[string]$Scope,[string]$Version='157.0.0.0',
  if(-not $NoBrowser){[IO.File]::WriteAllText($browser,'inert fixture browser');$script:Signatures[$browser]=[pscustomobject]@{path=$browser;sha256=('b'*64);version=$Version}}
  $script:Roots+=@([pscustomobject]@{root=$root;scope=$Scope});return $root
 }
-function Reset-Calls {$script:RemoveWhenAllowed=$false;$script:Allow=[pscustomobject]@{keyPresent=$false;present=$false;value=$null;kind=$null};$script:AllowWrites.Clear();$script:Launches.Clear();$script:PackageRemovals.Clear();$script:ExitCodes.Clear();$script:Winget=$null;$script:RemoveVendor=$false;$script:RemoveAppxBrowser=$false}
+function Reset-Calls {$script:RemoveWhenAllowed=$false;$script:RemoveWhenEea=$false;$script:GeoWrites.Clear();$script:GeoDuringLaunch=@();$script:Allow=[pscustomobject]@{keyPresent=$false;present=$false;value=$null;kind=$null};$script:AllowWrites.Clear();$script:Launches.Clear();$script:PackageRemovals.Clear();$script:ExitCodes.Clear();$script:Winget=$null;$script:RemoveVendor=$false;$script:RemoveAppxBrowser=$false}
 
 # A higher stale user installer cannot shadow an installed machine browser.
 $machine=Add-EdgeRoot 'machine' 'machine'
@@ -140,12 +146,20 @@ $target=@(Get-OptimusEdgeRemovalTargets)[0];$result=Invoke-OptimusEdgeRemovalTar
 Assert-Edge ($result.removed -and -not $result.remainingDetected -and $result.registrationStubsRemaining -eq 1 -and $script:PackageRemovals.Count -eq 0) 'An OS registration stub was confused with a launchable browser or force-removed.'
 
 # Windows' region refusal (setup exit 93) is retried once with the updater's
-# AllowUninstall value, which is then restored. Region settings are untouched.
+# AllowUninstall value, then once with a temporary EEA region; both are restored.
 [IO.File]::WriteAllText((Join-Path $machine 'msedge.exe'),'inert fixture browser');Reset-Calls;$script:Packages=@()
-$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(93)
+$script:Geo=@{'HKEY_CURRENT_USER'=[ordered]@{Nation='244';Name='US'}}
+$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(93)
 $target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.root -ceq $machine})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
-Assert-Edge (-not $result.removed -and $result.reason -ceq 'edge_uninstall_region_blocked' -and $script:Launches.Count -eq 2 -and ($script:AllowWrites -join ',') -ceq 'set,restore' -and -not $script:Allow.present) 'Region-blocked uninstall was not retried once and restored.'
+Assert-Edge (-not $result.removed -and $result.reason -ceq 'edge_uninstall_region_blocked' -and $script:Launches.Count -eq 3 -and ($script:AllowWrites -join ',') -ceq 'set,restore' -and -not $script:Allow.present) 'Region-blocked uninstall was not retried and restored.'
+Assert-Edge ($script:GeoDuringLaunch[2] -ceq '{"Nation":"68","Name":"IE"}' -and $script:GeoDuringLaunch[0] -ceq '{"Nation":"244","Name":"US"}') 'Only the last retry ran with the temporary EEA region.'
+Assert-Edge ((ConvertTo-Json -InputObject (Get-OptimusEdgeGeo 'HKEY_CURRENT_USER').values -Compress) -ceq '{"Nation":"244","Name":"US"}' -and (Get-OptimusEdgeGeo 'HKEY_USERS\.DEFAULT').values.Count -eq 0 -and $result.attempts[2].regionRestored) 'Exact previous region values were not restored.'
+Assert-Edge ($result.installerLog -match 'not allowed') 'Microsoft installer reason was not attached to the refusal.'
 Assert-Edge ($script:Launches[0].arguments -contains '--channel=stable') 'Registered stable channel was not passed to the Edge uninstaller.'
+Reset-Calls;$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(0);$script:RemoveWhenEea=$true
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.root -ceq $machine})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge ($result.removed -and $result.attempts[2].method -ceq 'microsoft-setup-eea-region' -and (Get-OptimusEdgeGeo 'HKEY_CURRENT_USER').values['Name'] -ceq 'US' -and -not $script:Allow.present) 'Temporary EEA region retry did not complete a verified removal.'
+[IO.File]::WriteAllText((Join-Path $machine 'msedge.exe'),'inert fixture browser');$script:Geo=@{}
 Reset-Calls;$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(0);$script:RemoveWhenAllowed=$true
 $target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.root -ceq $machine})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
 Assert-Edge ($result.removed -and $result.attempts[1].method -ceq 'microsoft-setup-allow-uninstall' -and -not $script:Allow.present) 'AllowUninstall retry did not complete a verified removal.'

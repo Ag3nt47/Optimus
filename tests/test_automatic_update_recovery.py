@@ -751,6 +751,16 @@ def test_orphaned_intent_after_reboot_holds_only_that_offer_and_releases_other_u
     f.backend.automatic_update_recovery_probe.assert_not_called()
 
 
+def test_orphaned_intent_tolerates_servicing_restart_pending_in_newer_boot(orphaned):
+    f = orphaned
+    f.probe['reboot_required'] = True
+    outcome = run(f)
+    assert outcome['reconciled_after_reboot'] == [{'id': f.record['id'], 'package_id': 'Fixture.App', 'version': '2.0'}]
+    assert not pending_updates_barrier(f.backend)
+    f.probe['wua_busy'] = True  # Committed receipt stays valid; probing is not repeated.
+    assert not pending_updates_barrier(f.backend)
+
+
 def test_orphaned_intent_with_exact_native_success_still_reconciles_as_completed(orphaned):
     f = orphaned
     f.native.write_text(f.native_text)

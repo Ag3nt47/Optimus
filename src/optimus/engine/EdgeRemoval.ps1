@@ -66,6 +66,52 @@ function Invoke-OptimusEdgeLeftoverCleanup {
     try{return Remove-OptimusEdgeLeftoverFolder $Path}
     catch{return [pscustomobject]@{path=$Path;removed=$false;reason='cleanup_error';error=$_.Exception.Message}}
 }
+function Get-OptimusEdgeGeo {
+    param([string]$Hive)
+    $key=Get-Item -LiteralPath ('Registry::'+$Hive+'\Control Panel\International\Geo') -ErrorAction SilentlyContinue
+    $values=[ordered]@{}
+    if($key){foreach($name in @('Nation','Name')){if(@($key.GetValueNames()) -ccontains $name){$values[$name]=[string]$key.GetValue($name)}}}
+    return [pscustomobject]@{hive=$Hive;values=$values}
+}
+function Set-OptimusEdgeGeo {
+    param([string]$Hive,$Values)
+    $path='Registry::'+$Hive+'\Control Panel\International\Geo'
+    if(-not(Test-Path -LiteralPath $path)){$null=New-Item -Path $path -Force -ErrorAction Stop}
+    foreach($name in @('Nation','Name')) {
+        if($Values.Contains($name)){$null=New-ItemProperty -LiteralPath $path -Name $name -Value ([string]$Values[$name]) -PropertyType String -Force -ErrorAction Stop}
+        else{Remove-ItemProperty -LiteralPath $path -Name $name -Force -ErrorAction SilentlyContinue}
+    }
+}
+function Invoke-OptimusEdgeWithEeaRegion {
+    # Runs one action while the user and default-profile region read as
+    # Ireland (GeoID 68), then restores the exact previous values.
+    param([scriptblock]$Action)
+    $saved=@(foreach($hive in @('HKEY_CURRENT_USER','HKEY_USERS\.DEFAULT')){Get-OptimusEdgeGeo $hive})
+    $exit=$null
+    try {
+        foreach($row in $saved){Set-OptimusEdgeGeo $row.hive ([ordered]@{Nation='68';Name='IE'})}
+        $exit=& $Action
+    } finally {
+        foreach($row in $saved){try{Set-OptimusEdgeGeo $row.hive $row.values}catch{}}
+    }
+    $restored=$true
+    foreach($row in $saved){
+        $now=Get-OptimusEdgeGeo $row.hive
+        if((ConvertTo-Json -InputObject $now.values -Compress) -cne (ConvertTo-Json -InputObject $row.values -Compress)){$restored=$false}
+    }
+    return [pscustomobject]@{exitCode=$exit;restored=$restored}
+}
+function Get-OptimusEdgeInstallerLogTail {
+    # Microsoft's own reason for a refused uninstall, bounded for the report.
+    $lines=@()
+    foreach($path in @((Join-Path ([Environment]::GetFolderPath('Windows')) 'SystemTemp\msedge_installer.log'),(Join-Path ([IO.Path]::GetTempPath()) 'msedge_installer.log'))) {
+        try{if(Test-Path -LiteralPath $path -PathType Leaf){$lines+=@(Get-Content -LiteralPath $path -Tail 400 -ErrorAction Stop | Where-Object {$_ -match '(?i)error|uninstall|region|not allowed|exit code'} | Select-Object -Last 25)}}catch{}
+    }
+    if(-not $lines.Count){return $null}
+    $text=($lines -join "`n")
+    if($text.Length -gt 4000){$text=$text.Substring($text.Length-4000)}
+    return $text
+}
 function Get-OptimusEdgeAllowUninstall {
     $key=Get-Item -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdateDev' -ErrorAction SilentlyContinue
     $present=($null -ne $key -and @($key.GetValueNames()) -ccontains 'AllowUninstall')
@@ -328,7 +374,7 @@ function Invoke-OptimusEdgeRemovalTarget {
         if($payload.safe -ne $true){throw 'Edge browser path or Microsoft signature could not be verified.'}
         if($target.scope -ceq 'machine' -and -not(Test-OptimusEdgeRemovalAdmin)){throw 'Administrator access is required for this machine Edge installation.'}
         Publish-OptimusEdgeRemovalProgress $ProgressCallback $target 'uninstall' $null
-        $canFallback=$true;$regionBlocked=$false;$exit=$null
+        $canFallback=$true;$regionBlocked=$false;$exit=$null;$installerLog=$null
         if($payload.winget) {
             $manager=Get-OptimusEdgeWinget
             if(-not $manager -or $manager.path -cne $payload.winget.path -or $manager.sha256 -cne $payload.winget.sha256){throw 'The signed package manager changed before Edge removal.'}
@@ -357,7 +403,17 @@ function Invoke-OptimusEdgeRemovalTarget {
                     Set-OptimusEdgeAllowUninstall
                     $exit=Invoke-OptimusEdgeProcess $setup.path $arguments
                     $null=$attempts.Add([pscustomobject]@{method='microsoft-setup-allow-uninstall';exitCode=$exit})
+                    if($exit -eq 93) {
+                        # Microsoft only offers browser uninstall in EEA regions.
+                        # Present an EEA region to this one uninstall, then put
+                        # the exact previous region values back. No system file,
+                        # ownership or permission is changed.
+                        $region=Invoke-OptimusEdgeWithEeaRegion {Invoke-OptimusEdgeProcess $setup.path $arguments}
+                        $exit=$region.exitCode
+                        $null=$attempts.Add([pscustomobject]@{method='microsoft-setup-eea-region';exitCode=$exit;regionRestored=$region.restored})
+                    }
                 } finally { try{Set-OptimusEdgeAllowUninstall -Restore $prior}catch{} }
+                if($exit -ne 0){$installerLog=Get-OptimusEdgeInstallerLogTail}
             }
             $restart=($restart -or $exit -eq 3010)
             $canFallback=($exit -eq 0)
@@ -378,7 +434,7 @@ function Invoke-OptimusEdgeRemovalTarget {
         if($success -and -not $restart -and $target.scope -ceq 'machine'){$folders+=@(Invoke-OptimusEdgeLeftoverCleanup (Split-Path $payload.root -Parent))}
         if($success -and -not $restart){Publish-OptimusEdgeRemovalProgress $ProgressCallback $target 'uninstall' 100}
         $blocked=(-not $success -and $regionBlocked -and $exit -eq 93)
-        return [pscustomobject]@{id=$target.id;name=$target.name;removed=$success;reason=$(if($success){'removal_verified'}elseif($restart){'restart_required'}elseif($blocked){'edge_uninstall_region_blocked'}else{'edge_still_detected'});status=$(if($success){'Edge browser executable absent after native removal'}elseif($restart){'Restart required; Edge removal is not yet confirmed'}elseif($blocked){'Windows blocks Edge browser uninstall in this region (setup exit 93), even with AllowUninstall'}else{'Edge remains installed; native removal did not establish absence'});remainingDetected=$present;registrationStubsRemaining=$registrations.Count;restartNeeded=$restart;requiresReview=(-not $success -or $restart);attempts=$attempts.ToArray();leftoverFolders=$folders;sharedComponentsPreserved=$true;note='Shared WebView2, the Edge updater, browser profiles and region settings are untouched.'}
+        return [pscustomobject]@{id=$target.id;name=$target.name;removed=$success;reason=$(if($success){'removal_verified'}elseif($restart){'restart_required'}elseif($blocked){'edge_uninstall_region_blocked'}else{'edge_still_detected'});status=$(if($success){'Edge browser executable absent after native removal'}elseif($restart){'Restart required; Edge removal is not yet confirmed'}elseif($blocked){'Windows blocks Edge browser uninstall in this region (setup exit 93), even with AllowUninstall and a temporary EEA region'}else{'Edge remains installed; native removal did not establish absence'});remainingDetected=$present;registrationStubsRemaining=$registrations.Count;restartNeeded=$restart;requiresReview=(-not $success -or $restart);attempts=$attempts.ToArray();leftoverFolders=$folders;installerLog=$installerLog;sharedComponentsPreserved=$true;note='Shared WebView2, the Edge updater, browser profiles and region settings are untouched.'}
     } catch {
         Publish-OptimusEdgeRemovalProgress $ProgressCallback $Target 'failed' $null
         return [pscustomobject]@{id=$Target.id;name=$Target.name;removed=$false;reason='edge_removal_refused';status='Edge removal requires review';error=$_.Exception.Message;requiresReview=$true;restartNeeded=$restart;attempts=$attempts.ToArray();sharedComponentsPreserved=$true}

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.50
+
+- When Windows still refuses Edge browser uninstall after AllowUninstall (setup
+  exit 93), retry once while the user and default-profile region read as an EEA
+  country (Ireland), then restore the exact previous region values. No system
+  file, ownership or permission is changed. The end of Microsoft's installer log
+  is attached to a refused result.
+- Release an orphaned app-update record after a verified newer Windows boot even
+  when Windows servicing reports another restart pending in that newer boot. This
+  pending restart kept blocking app, driver and Edge removal stages.
+
 ## 0.12.49
 
 - Edge removal now also removes the Edge-based Copilot app (registered Microsoft
