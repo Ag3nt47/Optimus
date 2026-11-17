@@ -15,13 +15,21 @@ function Get-OptimusEdgePackages {return @($script:Packages)}
 function Get-OptimusEdgeProvisionedPackages {return @($script:Provisioned)}
 function Get-OptimusEdgeWinget {return $script:Winget}
 function Test-OptimusEdgeRemovalAdmin {return $script:Admin}
+$script:MicrosoftRoot=$null;$script:Clients=@();$script:Running=@();$script:CopilotRoots=@();$script:RemoveWhenAllowed=$false
+$script:Allow=[pscustomobject]@{keyPresent=$false;present=$false;value=$null;kind=$null};$script:AllowWrites=New-Object Collections.ArrayList
+function Get-OptimusEdgeMicrosoftRoot {return $script:MicrosoftRoot}
+function Get-OptimusEdgeUpdateClients {return @($script:Clients)}
+function Get-OptimusEdgeRunningUnder {param($Path)return @($script:Running|Where-Object {Test-OptimusEdgePathWithin $_.path $Path})}
+function Get-OptimusCopilotKnownRoots {return @($script:CopilotRoots)}
+function Get-OptimusEdgeAllowUninstall {return $script:Allow}
+function Set-OptimusEdgeAllowUninstall {param($Restore)if($null -eq $Restore){$script:Allow=[pscustomobject]@{keyPresent=$true;present=$true;value=1;kind='DWord'};$null=$script:AllowWrites.Add('set')}else{$script:Allow=$Restore;$null=$script:AllowWrites.Add('restore')}}
 function Get-OptimusEdgeSignedFile {param($Path)if((Test-Path -LiteralPath $Path -PathType Leaf)-and $script:Signatures.ContainsKey($Path)){return $script:Signatures[$Path]};return $null}
 function Invoke-OptimusEdgeProcess {
  param($Path,$Arguments)
  $null=$script:Launches.Add([pscustomobject]@{path=$Path;arguments=@($Arguments)})
- if($script:RemoveVendor -and $Path -like '*\Installer\setup.exe'){
+ if(($script:RemoveVendor -or ($script:RemoveWhenAllowed -and $script:Allow.value -eq 1)) -and ($Path -like '*\Installer\setup.exe' -or $Path -like '*\Installer\copilot_setup.exe')){
   $root=Split-Path (Split-Path (Split-Path $Path -Parent) -Parent) -Parent
-  $browser=Join-Path $root 'msedge.exe';if(Test-Path -LiteralPath $browser){Remove-Item -LiteralPath $browser -Force}
+  foreach($leaf in @('msedge.exe','mscopilot.exe')){$browser=Join-Path $root $leaf;if(Test-Path -LiteralPath $browser){Remove-Item -LiteralPath $browser -Force}}
  }
  if($script:ExitCodes.Count){return [int]$script:ExitCodes.Dequeue()};return 0
 }
@@ -47,7 +55,7 @@ function Add-EdgeRoot([string]$Name,[string]$Scope,[string]$Version='157.0.0.0',
  if(-not $NoBrowser){[IO.File]::WriteAllText($browser,'inert fixture browser');$script:Signatures[$browser]=[pscustomobject]@{path=$browser;sha256=('b'*64);version=$Version}}
  $script:Roots+=@([pscustomobject]@{root=$root;scope=$Scope});return $root
 }
-function Reset-Calls {$script:Launches.Clear();$script:PackageRemovals.Clear();$script:ExitCodes.Clear();$script:Winget=$null;$script:RemoveVendor=$false;$script:RemoveAppxBrowser=$false}
+function Reset-Calls {$script:RemoveWhenAllowed=$false;$script:Allow=[pscustomobject]@{keyPresent=$false;present=$false;value=$null;kind=$null};$script:AllowWrites.Clear();$script:Launches.Clear();$script:PackageRemovals.Clear();$script:ExitCodes.Clear();$script:Winget=$null;$script:RemoveVendor=$false;$script:RemoveAppxBrowser=$false}
 
 # A higher stale user installer cannot shadow an installed machine browser.
 $machine=Add-EdgeRoot 'machine' 'machine'
@@ -131,6 +139,73 @@ $script:Packages=@([pscustomobject]@{name='Microsoft.MicrosoftEdge.Stable';fullN
 $target=@(Get-OptimusEdgeRemovalTargets)[0];$result=Invoke-OptimusEdgeRemovalTarget $target
 Assert-Edge ($result.removed -and -not $result.remainingDetected -and $result.registrationStubsRemaining -eq 1 -and $script:PackageRemovals.Count -eq 0) 'An OS registration stub was confused with a launchable browser or force-removed.'
 
+# Windows' region refusal (setup exit 93) is retried once with the updater's
+# AllowUninstall value, which is then restored. Region settings are untouched.
+[IO.File]::WriteAllText((Join-Path $machine 'msedge.exe'),'inert fixture browser');Reset-Calls;$script:Packages=@()
+$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(93)
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.root -ceq $machine})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge (-not $result.removed -and $result.reason -ceq 'edge_uninstall_region_blocked' -and $script:Launches.Count -eq 2 -and ($script:AllowWrites -join ',') -ceq 'set,restore' -and -not $script:Allow.present) 'Region-blocked uninstall was not retried once and restored.'
+Assert-Edge ($script:Launches[0].arguments -contains '--channel=stable') 'Registered stable channel was not passed to the Edge uninstaller.'
+Reset-Calls;$script:ExitCodes.Enqueue(93);$script:ExitCodes.Enqueue(0);$script:RemoveWhenAllowed=$true
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.root -ceq $machine})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge ($result.removed -and $result.attempts[1].method -ceq 'microsoft-setup-allow-uninstall' -and -not $script:Allow.present) 'AllowUninstall retry did not complete a verified removal.'
+[IO.File]::WriteAllText((Join-Path $user 'msedge.exe'),'inert fixture browser');Reset-Calls;$script:ExitCodes.Enqueue(93)
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.root -ceq $user})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge ($script:AllowWrites.Count -eq 0 -and $script:Launches.Count -eq 1) 'A per-user removal wrote machine updater values.'
+
+# After verified browser removal, only the exact unregistered machine product
+# folder is deleted; a registered product, link or running process keeps it.
+$msRoot=Split-Path (Split-Path $machine -Parent) -Parent;$script:MicrosoftRoot=$msRoot
+$edgeFolder=Split-Path $machine -Parent;[IO.File]::WriteAllText((Join-Path $machine '157.0.0.0\leftover.dat'),'x');[IO.File]::WriteAllText((Join-Path $machine 'msedge.exe'),'inert fixture browser')
+Reset-Calls;$script:RemoveVendor=$true
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.root -ceq $machine})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge ($result.removed -and $result.leftoverFolders[0].removed -and -not(Test-Path -LiteralPath $edgeFolder)) 'Verified Edge removal left its exact product folder.'
+$script:Roots=@($script:Roots|Where-Object {$_.root -cne $machine});$machine=Add-EdgeRoot 'machine' 'machine';$edgeFolder=Split-Path $machine -Parent
+$script:Clients=@([pscustomobject]@{guid='x';name='Microsoft Edge';version='157.0.0.0';location=$machine})
+Assert-Edge ((Get-OptimusEdgeLeftoverBlocker $edgeFolder) -ceq 'registered_product:Microsoft Edge') 'A registered product folder was treated as leftover.'
+$script:Clients=@();$script:Running=@([pscustomobject]@{pid=7;name='msedge.exe';path=(Join-Path $machine 'msedge.exe')})
+Assert-Edge ((Get-OptimusEdgeLeftoverBlocker $edgeFolder) -ceq 'in_use') 'A running product folder was treated as leftover.'
+$script:Running=@()
+$webview=Join-Path $msRoot 'EdgeWebView';$null=New-Item -ItemType Directory -Path $webview -Force
+Assert-Edge ((Get-OptimusEdgeLeftoverBlocker $webview) -ceq 'not_an_exact_product_folder' -and (Get-OptimusEdgeLeftoverBlocker $msRoot) -ceq 'not_an_exact_product_folder') 'WebView2 or the Microsoft folder was eligible for deletion.'
+$deleted=Remove-OptimusEdgeLeftoverFolder $webview
+Assert-Edge (-not $deleted.removed -and (Test-Path -LiteralPath $webview)) 'Shared WebView2 folder was deleted.'
+
+# Copilot uses its exact registered Microsoft uninstaller, then its folder.
+$copilotRoot=Join-Path $msRoot 'Copilot\Application';$copilotSetup=Join-Path $copilotRoot '157.0.0.0\Installer\copilot_setup.exe'
+function New-CopilotFixture {
+ $null=New-Item -ItemType Directory -Path (Split-Path $copilotSetup -Parent) -Force
+ [IO.File]::WriteAllText($copilotSetup,'inert');[IO.File]::WriteAllText((Join-Path $copilotRoot 'mscopilot.exe'),'inert')
+ $script:Signatures[$copilotSetup]=[pscustomobject]@{path=$copilotSetup;sha256=('f'*64);version='157.0.0.0'}
+ $script:Signatures[(Join-Path $copilotRoot 'mscopilot.exe')]=[pscustomobject]@{path=(Join-Path $copilotRoot 'mscopilot.exe');sha256=('9'*64);version='157.0.0.0'}
+}
+New-CopilotFixture
+$script:CopilotRoots=@([pscustomobject]@{root=$copilotRoot;scope='machine'});Reset-Calls;$script:RemoveVendor=$true
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.type -ceq 'copilot'})[0]
+Assert-Edge ($target.name -ceq 'Microsoft Copilot app' -and $target.payload.safe) 'Copilot target was not discovered.'
+$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge ($result.removed -and $script:Launches[0].path -ceq $copilotSetup -and $script:Launches[0].arguments -contains '--mscopilot' -and $script:Launches[0].arguments -contains '--system-level' -and -not(Test-Path -LiteralPath (Split-Path $copilotRoot -Parent))) 'Copilot was not removed through its exact uninstaller with folder cleanup.'
+New-CopilotFixture;Reset-Calls;$script:ExitCodes.Enqueue(1)
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.type -ceq 'copilot'})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge (-not $result.removed -and $result.reason -ceq 'copilot_still_detected' -and (Test-Path -LiteralPath $copilotRoot)) 'A failed Copilot uninstall deleted files.'
+$script:CopilotRoots=@()
+
+# EdgeCore is deleted only while every registered product keeps its own binaries.
+$core=Join-Path $msRoot 'EdgeCore';$null=New-Item -ItemType Directory -Path (Join-Path $core '157.0.0.0') -Force;[IO.File]::WriteAllText((Join-Path $core '157.0.0.0\msedge.dll'),'x')
+$wvApp=Join-Path $webview 'Application';$null=New-Item -ItemType Directory -Path (Join-Path $wvApp '157.0.0.0') -Force
+$script:Clients=@([pscustomobject]@{guid='w';name='Microsoft Edge WebView2 Runtime';version='157.0.0.0';location=$wvApp},[pscustomobject]@{guid='c';name='Copilot';version='158.0.0.0';location=$copilotRoot})
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.type -ceq 'edgecore'})[0]
+Assert-Edge (-not $target.payload.safe -and @($target.payload.dependentProducts) -ccontains 'Copilot') 'A product without its own binaries did not keep EdgeCore.'
+$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge (-not $result.removed -and (Test-Path -LiteralPath $core)) 'EdgeCore was deleted while a product depended on it.'
+$script:Clients=@($script:Clients[0]);$script:Running=@([pscustomobject]@{pid=8;name='x.exe';path=(Join-Path $core '157.0.0.0\x.exe')})
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.type -ceq 'edgecore'})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge (-not $result.removed -and $result.reason -ceq 'edgecore_in_use' -and (Test-Path -LiteralPath $core)) 'EdgeCore in use was deleted.'
+$script:Running=@()
+$target=@(Get-OptimusEdgeRemovalTargets|Where-Object {$_.payload.type -ceq 'edgecore'})[0];$result=Invoke-OptimusEdgeRemovalTarget $target
+Assert-Edge ($result.removed -and -not(Test-Path -LiteralPath $core) -and (Test-Path -LiteralPath $wvApp)) 'Unused EdgeCore was not removed or WebView2 was touched.'
+$script:MicrosoftRoot=$null;$script:Clients=@()
+
 # Exact family validation excludes shared WebView2 and Windows App.
 function RawPackage($name,$publisher='8wekyb3d8bbwe') {return [pscustomobject]@{Name=$name;DisplayName=$name;PackageFullName=($name+'_157.0.0.0_x64__'+$publisher);PackageName=($name+'_157.0.0.0_neutral_~_'+$publisher);PackageFamilyName=($name+'_'+$publisher);NonRemovable=$false;IsFramework=$false;IsResourcePackage=$false}}
 Assert-Edge (Test-OptimusExactEdgePackage (RawPackage 'Microsoft.MicrosoftEdge.Stable')) 'Exact removable Edge package rejected.'
@@ -198,5 +273,6 @@ Assert-Edge (-not $again.changed -and $script:PolicyWrites.Count -eq 1) 'Idempot
 
 # The implementation has no generic folder deletion or shared-updater controls.
 $body=Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\optimus\engine\EdgeRemoval.ps1') -Raw
-Assert-Edge ($body -notmatch '\bRemove-Item\b|\bStop-Service\b|\bSet-Service\b|\btakeown\b|\bicacls\b|InstallDefault|UpdateDefault|IntegratedServicesRegionPolicySet') 'Shared or region-system mutation entered Edge removal module.'
+$withoutLeftover=[regex]::Replace($body,'(?s)function Remove-OptimusEdgeLeftoverFolder \{.*?\r?\n\}\r?\n','')
+Assert-Edge ($withoutLeftover -notmatch '\bRemove-Item\b|\bStop-Service\b|\bSet-Service\b|\btakeown\b|\bicacls\b|InstallDefault|UpdateDefault|IntegratedServicesRegionPolicySet') 'Shared or region-system mutation entered Edge removal module.'
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealBrowserRemovals=0;RealExternalProgramsLaunched=0;PSVersion=$PSVersionTable.PSVersion.ToString();Fixture=$fixture}|ConvertTo-Json -Compress

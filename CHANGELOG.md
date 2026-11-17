@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.49
+
+- Edge removal now also removes the Edge-based Copilot app (registered Microsoft
+  uninstaller) and unused EdgeCore engine files, and deletes the leftover Edge and
+  Copilot folders after a verified uninstall. Folders are deleted only when no
+  updater-registered product uses them and nothing runs from them; WebView2, the
+  Edge updater and browser profiles are kept.
+- When Windows refuses Edge uninstall for the region (setup exit 93), retry once
+  with the Edge updater AllowUninstall value and restore it afterwards. Region
+  settings are never changed. The registered --channel=stable argument is passed.
+
 ## 0.12.48
 
 - Fix App updates and Driver updates staying "install blocked" indefinitely after
