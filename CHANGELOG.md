@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.51
+
+- A finished update record that asked for a restart no longer blocks app
+  updates, driver updates and Edge removal once Windows has booted after it.
+  Windows can keep its own restart-pending flags set across restarts, which held
+  installs back indefinitely ("A previous update requested a restart; its
+  cleared restart state has not been verified").
+- Add `tools/Clear-OptimusUpdateBlock.ps1`, which reports stale update records
+  from before the current Windows boot and, with `-Apply`, archives them (never
+  deletes) and holds the exact package version an unfinished record was
+  installing.
+
 ## 0.12.50
 
 - When Windows still refuses Edge browser uninstall after AllowUninstall (setup

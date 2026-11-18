@@ -804,6 +804,29 @@ def test_historical_cleared_restart_records_share_one_fresh_status_read(tmp_path
     service.security_status.assert_called_once()
 
 
+@pytest.mark.parametrize('finished_offset,boot_offset,blocked', [
+    (-86400, -3600, False),   # finished long before the current boot: restart happened
+    (-600, -3600, True),      # finished during the current boot: restart still owed
+    (None, -3600, True),      # no finish time: not provable
+])
+def test_restart_request_is_met_by_a_later_windows_boot_despite_sticky_flag(
+        tmp_path, monkeypatch, finished_offset, boot_offset, blocked):
+    import time as clock
+    now = clock.time()
+    directory = tmp_path / 'parallel-updates'
+    directory.mkdir()
+    identifier = 'f' * 32
+    record = {'schema': 1, 'id': identifier, 'owner': 'fixture-owner',
+              'status': 'needs_review', 'result': {'restartNeeded': True}}
+    if finished_offset is not None:
+        record['finished_at'] = now + finished_offset
+    (directory / (identifier + '.json')).write_text(json.dumps(record))
+    monkeypatch.setattr('optimus.update_resume.boot_identity', lambda: round(now + boot_offset))
+    service = Backend(tmp_path)
+    service.security_status = Mock(return_value={'reboot_required': True})
+    assert (pending_updates_barrier(service) is not None) is blocked
+
+
 @pytest.mark.parametrize('failed_scan', [False, True])
 def test_known_before_installer_failure_still_allows_independent_driver_channel(tmp_path, failed_scan):
     from optimus.maintenance import UpdatePreflightError

@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import threading
@@ -1090,6 +1091,26 @@ def record_installer_outcome(backend, run_id, title, result):
     evidence._write()
 
 
+_RESTART_BOOT_FENCE = 120
+
+
+def _restart_satisfied_by_boot(record):
+    """A finished record's restart request is met once Windows booted after it finished.
+
+    Windows can keep RebootRequired/RebootPending set across restarts for unrelated
+    servicing, so the live flag alone must not hold this record's request forever.
+    """
+    finished = record.get('finished_at')
+    if type(finished) not in (int, float) or not math.isfinite(finished) or finished <= 0:
+        return False
+    try:
+        from .update_resume import boot_identity
+        boot = boot_identity()
+    except (ImportError, OSError, ValueError):
+        return False
+    return boot > finished + _RESTART_BOOT_FENCE and boot <= time.time() + _RESTART_BOOT_FENCE
+
+
 class ParallelAppUpdates:
     def __init__(self, backend, parent_run_id, title, operation, mux, *, cancel_event=None, isolate_bridge=False):
         if not re.fullmatch('[a-f0-9]{32}', str(parent_run_id)):
@@ -1177,6 +1198,8 @@ class ParallelAppUpdates:
                 return ('A previous update installer has an unresolved outcome; no automatic retry was started. '
                         'Review installer state and the saved record before continuing: ' + str(path))
             if value.get('status') == 'needs_review' and isinstance(value.get('result'), dict) and value['result'].get('restartNeeded'):
+                if _restart_satisfied_by_boot(value):
+                    continue  # The restart this record asked for has happened.
                 if not restart_checked:
                     restart_checked = True
                     try:
