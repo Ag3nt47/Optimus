@@ -56,7 +56,8 @@ def window(request, tmp_path, app, monkeypatch):
     monkeypatch.setenv('OPTIMUS_REDUCE_MOTION', '1')
     settings = dict(copy.deepcopy(DEFAULTS), setup_version=CURRENT_SETUP_VERSION,
         browser_cache_enabled=False, browser_history_enabled=False, browser_cookies_enabled=False,
-        browser_download_history_enabled=False, post_process_review_enabled=True)
+        browser_download_history_enabled=False, post_process_review_enabled=True,
+        keep_running_on_close=False)  # legacy X-cancels path; hiding is tested separately
     original = report()
     backend = SimpleNamespace(data_dir=tmp_path, preferences=lambda: copy.deepcopy(settings),
         optimize=Mock(return_value=original), available_fixes=Mock(return_value=plan()),
@@ -509,3 +510,48 @@ def test_saved_automatic_choice_never_continues_after_cancellation_or_error(wind
     complete_initial(window, app)
     app.processEvents()
     window.backend.apply_available_fixes.assert_not_called()
+
+
+def test_apply_all_fixes_runs_everything_once_with_one_summary_and_no_review(window, app):
+    saved = window.backend.preferences()
+    window.backend.preferences = lambda: dict(saved, apply_all_fixes_without_review=True)
+    fresh = report('fixes-run', parent_run_id='original-run', counts={'completed': 1}, summary='1 action/check completed.',
+        security_review={'recommendations': [{'id': 'enable_firewall', 'title': 'Turn on the firewall'},
+                                             {'id': 'review_security', 'title': 'Open Windows Security'}]})
+    window.backend.apply_available_fixes.return_value = fresh
+    window.backend.apply_security_recommendation = Mock(return_value={'status': 'completed', 'outcomeKnown': True,
+                                                                      'running': False})
+    QTest.mouseClick(window.main_buttons[0], Qt.LeftButton)
+    wait_until(app, lambda: window.backend.apply_security_recommendation.called and not window.busy
+               and not window._post_review_active)
+    progress = window._progress_window
+    window.backend.apply_available_fixes.assert_called_once()
+    window.backend.apply_security_recommendation.assert_called_once()
+    assert window.backend.apply_security_recommendation.call_args.args == ('enable_firewall',)
+    window._offer_post_optimization_reviews.assert_not_called()
+    assert window._pending_post_review is None
+    assert progress.title.text() == 'ALL FIXES APPLIED'
+    assert 'Open Windows Security' in progress.auto_continue_summary.text()
+    assert progress.cancel_button.text() == 'Close results'
+
+
+def test_x_during_a_run_hides_the_progress_window_without_cancelling(window, app):
+    saved = window.backend.preferences()
+    window.backend.preferences = lambda: dict(saved, keep_running_on_close=True)
+    entered, release = threading.Event(), threading.Event()
+    def optimize(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return report()
+    window.backend.optimize.side_effect = optimize
+    window.start_optimization()
+    wait_until(app, entered.is_set)
+    progress = window._progress_window
+    try:
+        progress.close()
+        app.processEvents()
+        assert not progress.isVisible()
+        assert not progress.cancel.is_set() and window.busy
+    finally:
+        release.set()
+    wait_until(app, lambda: not window.busy)

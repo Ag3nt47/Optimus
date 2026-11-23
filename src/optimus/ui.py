@@ -4232,6 +4232,12 @@ class OptimizationProgressWindow(QDialog):
                 'Cancellation requested. The current stage must finish before the workflow stops.')
 
     def closeEvent(self, event):
+        if not self.completed and getattr(self, 'keep_running_on_close', False):
+            # X only hides the progress window; the run keeps going. The
+            # Cancel button is still the explicit way to stop it.
+            event.ignore()
+            self.hide()
+            return
         self.restartCancelled.emit()
         if self.completed:
             self._dismiss_results()
@@ -5234,6 +5240,11 @@ class OptimusWindow(QMainWindow):
             ('parallel_app_updates_enabled','Update apps and Windows drivers in background while independent steps continue'),
             ('python_relocation_repair_enabled','Repair approved Python relocation junctions after native installer error 448\n(exact saved paths only; administrator access required)'),
             ('auto_continue_fixes_enabled','Automatically continue with supported post-scan fixes\n(Defender/firewall and already-approved updates)'),
+            ('apply_all_fixes_without_review','Apply ALL fixes without review windows, then show one summary\n(includes Defender threat removal; processes are never ended)'),
+            ('startup_jobs_enabled','Re-run driver updates, app updates and virus scan every time Optimus starts'),
+            ('zero_breach_enabled','Keep Zero Breach updated and run its spyware-indicator scan at start'),
+            ('tracker_blocking_enabled','Find and block hidden microphone recorders and tracking programs at start'),
+            ('keep_running_on_close','Keep running in the tray when X is pressed while work is in progress'),
             ('post_process_review_enabled','Offer process/program review after completion'),
             ('security_review_enabled','Check Windows security and offer reviewed fixes'),
             ('spyware_scan_enabled','Run a quick virus, malware and spyware scan with Microsoft Defender'),
@@ -5737,6 +5748,12 @@ class OptimusWindow(QMainWindow):
             self.status.setText('Wait for the current task before starting optimization.')
             self.activate_existing_window()
             return
+        jobs = getattr(self, '_startup_jobs', None)
+        if jobs is not None and jobs.running:
+            # Both use the maintenance lease; start Auto Clean once the jobs end.
+            self._start_after_startup_jobs = True
+            self.status.setText('Driver/app updates and scans are running; Auto Clean starts when they finish.')
+            return
         try:
             settings = self._settings()
         except Exception as exc:
@@ -5778,6 +5795,7 @@ class OptimusWindow(QMainWindow):
         self._progress_window = OptimizationProgressWindow(self, self._cancel)
         progress = self._progress_window
         progress.configure_workers(settings)
+        progress.keep_running_on_close = settings.get('keep_running_on_close') is True
         progress.resultsAcknowledged.connect(lambda: self._continue_post_optimization_reviews()
             if progress is self._progress_window else None)
         progress.resultsDismissed.connect(lambda: self._dismiss_post_optimization_reviews()
@@ -5832,7 +5850,7 @@ class OptimusWindow(QMainWindow):
             self._progress_window.set_auto_continue_plan(plan)
             if isinstance(plan.get('actions'), list) and plan['actions']:
                 self._pending_auto_fixes = (result, settings, plan)
-                if settings.get('auto_continue_fixes_enabled') is True:
+                if settings.get('auto_continue_fixes_enabled') is True or settings.get('apply_all_fixes_without_review') is True:
                     self._progress_window.title.setText('CONTINUING OPTIMIZATION')
                     self._progress_window.stage.setText('SCAN COMPLETE — SAVED FOLLOW-UP QUEUED')
                     self._progress_window.description.setText('Your saved automatic fix choice continues with the supported actions listed below. Closing these results skips the queued continuation.')
@@ -5847,9 +5865,18 @@ class OptimusWindow(QMainWindow):
 
     def _prepare_post_reviews(self, result, settings):
         self._pending_post_review = None
+        self._pending_apply_all = None
         from .unattended_configuration import matches_unattended
         if matches_unattended(settings):
             return  # Findings remain in the report; unattended mode opens no questions.
+        from .apply_all_fixes import SETTING
+        if settings.get(SETTING) is True:
+            # Saved choice: apply every supported fix in the background and show
+            # one summary in this progress window; no review dialogs open.
+            security = result.get('security_review') if self._completed_result(result) else None
+            if isinstance(security, dict) and security.get('recommendations'):
+                self._pending_apply_all = (result, settings)
+            return
         if self._completed_result(result):
             security, processes = result.get('security_review'), result.get('process_review')
             if ((isinstance(security, dict) and security.get('recommendations'))
@@ -5891,23 +5918,78 @@ class OptimusWindow(QMainWindow):
             self._pending_auto_fixes = None
             self._post_review_active = False
             return
-        self._post_review_active = self._pending_post_review is not None or self._pending_auto_fixes is not None
+        apply_all = getattr(self, '_pending_apply_all', None)
+        self._post_review_active = (self._pending_post_review is not None or self._pending_auto_fixes is not None
+                                    or apply_all is not None)
         self._progress_window.set_recommendations_available(self._pending_post_review is not None)
         if self._pending_auto_fixes is not None and not self._auto_continue_attempted:
             self._progress_window.set_auto_continue_plan(self._pending_auto_fixes[2], ready=True)
-            if self._pending_auto_fixes[1].get('auto_continue_fixes_enabled') is True:
+            if (self._pending_auto_fixes[1].get('auto_continue_fixes_enabled') is True
+                    or self._pending_auto_fixes[1].get('apply_all_fixes_without_review') is True):
                 progress = self._progress_window
                 generation = self._post_review_generation
                 parent = self._pending_auto_fixes[0]
                 self.status.setText('Scan complete. Continuing with your saved automatic fix choice.')
                 QTimer.singleShot(0, lambda: self._continue_saved_fixes(progress, generation, parent))
+        elif apply_all is not None:
+            progress = self._progress_window
+            QTimer.singleShot(0, lambda: self._start_apply_all(progress))
+
+    def _start_apply_all(self, progress):
+        pending, self._pending_apply_all = getattr(self, '_pending_apply_all', None), None
+        if (pending is None or self._emergency_stopping or self._quitting or self._close_when_idle or self.busy
+                or progress is not self._progress_window):
+            self._post_review_active = False
+            return
+        from .apply_all_fixes import apply_all_recommendations
+        result, settings = pending
+        self.busy = True
+        self._cancel = threading.Event()
+        progress.begin_auto_continue(self._cancel, automatic=True)
+        progress.title.setText('APPLYING ALL FIXES')
+        progress.description.setText('Applying every supported recommendation without review. Manual steps are listed, not opened.')
+        worker = BackendWorker(apply_all_recommendations, (self.backend, result, settings), {'cancel_event': self._cancel})
+        self._worker = worker
+        worker.signals.result.connect(self._apply_all_result)
+        worker.signals.error.connect(lambda error: self._apply_all_result({'status': 'failed', 'text': 'Applying fixes stopped: ' + str(error)}))
+        worker.signals.finished.connect(self._apply_all_finished)
+        self.main_buttons[0].setEnabled(False)
+        self.status.setText('Applying all fixes without review. Cancellation is available in the progress window.')
+        self.pool.start(worker)
+
+    @Slot(object)
+    def _apply_all_result(self, summary):
+        progress = self._progress_window
+        text = str(summary.get('text') if isinstance(summary, dict) else summary)
+        progress.finish_auto_continue({'status': 'completed' if isinstance(summary, dict) and summary.get('status') == 'completed'
+                                       else 'completed_with_errors', 'summary': text.split('\n', 1)[0], 'counts': {}})
+        progress.title.setText('ALL FIXES APPLIED')
+        progress.auto_continue_summary.setText(text)
+        progress.auto_continue_summary.show()
+        progress.log.appendPlainText(text)
+        self.status.setText(text.split('\n', 1)[0] + ' You can close Optimus now.')
+
+    @Slot()
+    def _apply_all_finished(self):
+        self.busy = False
+        self._worker = None
+        self._pending_post_review = None
+        self._pending_apply_all = None
+        self._post_review_active = False
+        self.main_buttons[0].setEnabled(not self._emergency_stopping and self._restart_progress is None)
+        if self._progress_window is not None:
+            self._progress_window.set_recommendations_available(False)
+        if self._close_when_idle:
+            QTimer.singleShot(0, self._finish_emergency_stop if self._emergency_stopping else self.quit_application)
 
     def _continue_saved_fixes(self, progress, generation, parent):
         if (self._emergency_stopping or generation != self._post_review_generation or progress is not self._progress_window
                 or self._pending_auto_fixes is None or self._pending_auto_fixes[0] is not parent):
             return
         try:
-            enabled = self._settings().get('auto_continue_fixes_enabled') is True
+            saved = self._settings()
+            enabled = (saved.get('auto_continue_fixes_enabled') is True
+                       or saved.get('apply_all_fixes_without_review') is True)
         except Exception:
             enabled = False
         if enabled:
@@ -6133,15 +6215,104 @@ class OptimusWindow(QMainWindow):
         QApplication.instance().quit()
         return True
 
+    def begin_startup_jobs(self):
+        """Driver updater, app updater, virus/spyware scan, Zero Breach and
+        tracker blocking re-run on every start/restart, independent of the
+        Auto Clean launch review, once the self-update check is done."""
+        from .startup_jobs import StartupJobs
+        self._startup_jobs = StartupJobs(self.backend, self._settings)
+        self._startup_jobs_state = {'started': False, 'reported': None}
+        self._startup_jobs_gate = QTimer(self)  # GUI thread: start once ready, then report results
+        self._startup_jobs_gate.setInterval(2000)
+        self._startup_jobs_gate.timeout.connect(self._startup_jobs_tick)
+        self._startup_jobs_gate.start()
+
+    def _startup_jobs_tick(self):
+        jobs, state = self._startup_jobs, self._startup_jobs_state
+        if self._quitting or self._close_when_idle or self._emergency_stopping:
+            self._startup_jobs_gate.stop()
+            return
+        if not state['started']:
+            if self._startup_update_pending or self.busy:
+                return
+            state['started'] = True
+            jobs.start()
+            return
+        report = jobs.last
+        if jobs.running or report is None or report is state['reported']:
+            return
+        state['reported'] = report
+        rows = report.get('jobs') or []
+        done = sum(entry.get('status') == 'completed' for entry in rows)
+        self.status.setText(f'Startup jobs {report.get("status")}: {done}/{len(rows)} completed.'
+                            + (' Retrying in 15 minutes.' if report.get('status') in ('busy', 'failed') else ''))
+        if getattr(self, '_start_after_startup_jobs', False):
+            self._start_after_startup_jobs = False
+            self.start_optimization()
+
+    def restart_optimus(self, checked=False):
+        """Fully restart: stop current work safely, relaunch with the same
+        access level, and let the new process re-run the startup jobs."""
+        if self.smoke_test or getattr(self, '_full_restarting', False):
+            return False
+        if self._startup_update_pending:
+            self.status.setText('Finish the Optimus update prompt before restarting.')
+            return False
+        self._full_restarting = True
+        jobs = getattr(self, '_startup_jobs', None)
+        if jobs is not None:
+            jobs.stop()
+        if self.busy:
+            self._cancel.set()
+            self.status.setText('Restarting Optimus: waiting for the current stage to stop safely…')
+        self._restart_poll = QTimer(self)
+        self._restart_poll.setInterval(1000)
+        self._restart_poll.timeout.connect(self._restart_when_idle)
+        self._restart_poll.start()
+        self._restart_when_idle()
+        return True
+
+    def _restart_when_idle(self):
+        jobs = getattr(self, '_startup_jobs', None)
+        if self.busy or self.pool.activeThreadCount() or (jobs is not None and jobs.running):
+            return
+        self._restart_poll.stop()
+        from .elevation import RELAUNCH_FLAG, relaunch_command, request_administrator
+        is_admin = getattr(self.backend, 'is_admin', None)
+        try:
+            if callable(is_admin) and is_admin():
+                # From an elevated process, runas starts an elevated child without
+                # dropping to standard access (admin-only driver/Defender work).
+                started = request_administrator().get('started') is True
+            else:
+                executable, arguments = relaunch_command()
+                arguments = [value for value in arguments if value != RELAUNCH_FLAG]
+                import subprocess
+                subprocess.Popen([executable, *arguments], close_fds=True)
+                started = True
+        except (OSError, ValueError) as error:
+            started = False
+            self.status.setText('Optimus could not restart: ' + str(error))
+        if not started:
+            self._full_restarting = False
+            self.status.setText('Optimus restart was cancelled; it keeps running here.')
+            return
+        self._quitting = True
+        self.shutdown()
+        QApplication.instance().quit()
+
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         self.tray.setToolTip('Optimus: Computer optimization tool')
         menu = QMenu()
         show = QAction('Open Optimus', self)
         show.triggered.connect(self._restore_window)
+        restart_action = QAction('Restart Optimus', self)
+        restart_action.triggered.connect(self.restart_optimus)
         quit_action = QAction('Quit Optimus', self)
         quit_action.triggered.connect(self.quit_application)
         menu.addAction(show)
+        menu.addAction(restart_action)
         menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: self._restore_window() if reason == QSystemTrayIcon.Trigger else None)
@@ -6153,7 +6324,29 @@ class OptimusWindow(QMainWindow):
         if hasattr(self, 'canvas'):
             QTimer.singleShot(0, self.canvas, self.canvas.sync_motion)
 
+    def _keep_running_on_close(self):
+        try:
+            return self._settings().get('keep_running_on_close') is True
+        except Exception:
+            return False
+
+    def _work_in_progress(self):
+        jobs = getattr(self, '_startup_jobs', None)
+        return bool(self.busy or (jobs is not None and jobs.running))
+
     def closeEvent(self, event):
+        if (not self._quitting and not self.smoke_test and self._work_in_progress() and self._keep_running_on_close()
+                and self.tray is not None and QSystemTrayIcon.isSystemTrayAvailable()):
+            # While work runs, X hides to the tray so updates and scans keep
+            # going. Once everything is done, X closes Optimus normally.
+            event.ignore()
+            self.hide()
+            if not getattr(self, '_tray_hint_shown', False):
+                self._tray_hint_shown = True
+                self.tray.showMessage('Optimus is still running',
+                    'Updates and scans continue in the background. Use the tray icon to open, restart or quit.',
+                    QSystemTrayIcon.Information, 5000)
+            return
         self._cancel_optimization_restart()
         if self._quitting or self.smoke_test:
             event.accept()

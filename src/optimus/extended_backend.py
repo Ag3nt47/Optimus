@@ -180,6 +180,58 @@ class ExtendedMaintenanceBackend:
         return self._tool_operation('revert', 'Revert selected changes',
             self._change_history_service().revert, plan_id, selection_ids, **kwargs)
 
+    def _background_apps_service(self):
+        from .background_apps import BackgroundApps
+        return self._optional_service('_background_apps', BackgroundApps)
+
+    def background_apps_scan(self):
+        return self._background_apps_service().scan()
+
+    def background_apps_stop(self, plan_id, selection_ids, **kwargs):
+        return self._tool_operation('background_apps', 'Stop background apps',
+            self._background_apps_service().stop, plan_id, selection_ids, _supports_progress=False, **kwargs)
+
+    def background_apps_history(self):
+        return self._background_apps_service().history()
+
+    def _audio_trackers_service(self):
+        from .audio_trackers import AudioTrackers
+        return self._optional_service('_audio_trackers', AudioTrackers)
+
+    def audio_trackers_scan(self):
+        return self._audio_trackers_service().scan()
+
+    def audio_trackers_block(self, plan_id, selection_ids, **kwargs):
+        return self._tool_operation('audio_trackers', 'Block microphone and tracking programs',
+            self._audio_trackers_service().block, plan_id, selection_ids, _supports_progress=False, **kwargs)
+
+    def audio_trackers_auto_block(self, **kwargs):
+        return self._tool_operation('audio_trackers', 'Find and block hidden recorders and trackers',
+            self._audio_trackers_service().scan_and_block, _supports_progress=False, **kwargs)
+
+    def audio_trackers_history(self):
+        return self._audio_trackers_service().history()
+
+    def audio_trackers_restore(self, receipt_id):
+        return self._audio_trackers_service().restore(receipt_id)
+
+    def _zero_breach_service(self):
+        from .zero_breach import ZeroBreach
+        return self._optional_service('_zero_breach', ZeroBreach)
+
+    def zero_breach_status(self):
+        return self._zero_breach_service().installed()
+
+    def zero_breach_update(self, **kwargs):
+        return self._tool_operation('zero_breach', 'Update Zero Breach', self._zero_breach_service().update, **kwargs)
+
+    def zero_breach_scan(self, **kwargs):
+        return self._tool_operation('zero_breach', 'Zero Breach spyware scan', self._zero_breach_service().scan, **kwargs)
+
+    def zero_breach_update_and_scan(self, **kwargs):
+        return self._tool_operation('zero_breach', 'Update and run Zero Breach',
+            self._zero_breach_service().update_and_scan, **kwargs)
+
     def _system_restore_service(self):
         from .system_restore import SystemRestore
         return self._optional_service('_system_restore', SystemRestore)

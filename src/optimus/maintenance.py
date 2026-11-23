@@ -18,7 +18,7 @@ import tempfile
 import time
 import uuid
 from typing import Any
-from .app_removal_protection import (debloat_target_protected, protected_debloat_result,
+from .app_removal_protection import (debloat_target_protected, exclusions_for_action, protected_debloat_result,
                                      validate_app_removal_exclusions)
 from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING, is_newer_version, valid_update_version
 
@@ -26,6 +26,7 @@ from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING, is_newer_versi
 _ACTIONS = (
     {"id": "consumer-apps", "name": "Optional Windows apps", "description": "Review a curated exact-name list. Store, App Installer, security, frameworks, Xbox and OneDrive are preserved.", "admin": False},
     {"id": "m365", "name": "Microsoft 365 hub and companion apps", "description": "Uninstall selected Microsoft 365 hub/companion Store apps. Full desktop suites have separate controls.", "admin": False},
+    {"id": "windows-app", "name": "Uninstall Windows App (Windows 365 / remote desktop)", "description": "Explicitly uninstall Microsoft Windows App and the Teams VDI media packages it installs. Presets never select it; classic Remote Desktop (mstsc) remains available. Reinstall from Microsoft Store.", "admin": False},
     {"id": "outlook", "name": "New Outlook app", "description": "Review the optional Microsoft.OutlookForWindows Store app separately. Local app data can be removed.", "admin": False},
     {"id": "edge", "name": "Microsoft Edge browser", "description": "Use an installed uninstaller. Windows may restrict removal. Shared WebView2 and update services are preserved.", "admin": False},
     {"id": "office365-desktop", "name": "Fully uninstall Microsoft 365 desktop apps", "description": "Uninstall registered Microsoft 365 desktop suites using their signed Microsoft uninstallers. Personal documents and Windows App are preserved.", "admin": True},
@@ -175,7 +176,7 @@ class Maintenance:
             raise ValueError("includeProvisioned must be true or false.")
         if provisioned and action_id in {"office365-desktop", "office-desktop", "desktop-edge-script"}:
             raise ValueError("Provisioning applies only to optional Store-app actions.")
-        exclusions = self._removal_exclusions()
+        exclusions = exclusions_for_action(self._removal_exclusions(), action_id)
         response = self._request("maintenance_preview", action=action_id, includeProvisioned=provisioned,
                                  removalExclusions=exclusions)
         if not isinstance(response, dict):
@@ -191,7 +192,7 @@ class Maintenance:
                 raise RuntimeError("A maintenance target has an invalid or repeated fingerprint.")
             identifiers.add(target["id"])
             target["selected"] = False
-        protected = [target for target in targets if debloat_target_protected(exclusions, target)]
+        protected = [target for target in targets if debloat_target_protected(exclusions, target, action=action_id)]
         protected_count = response.get("protectedCount", 0)
         if type(protected_count) is not int or not 0 <= protected_count <= 100:
             raise RuntimeError("The maintenance preview returned invalid protection metadata.")
@@ -246,9 +247,9 @@ class Maintenance:
         known = {item["id"]: item for item in saved["targets"]}
         if any(item not in known for item in selected):
             raise ValueError("The selection includes a target outside this preview.")
-        exclusions = self._removal_exclusions()
+        exclusions = exclusions_for_action(self._removal_exclusions(), saved["action"])
         protected = [protected_debloat_result(known[item]) for item in selected
-                     if debloat_target_protected(exclusions, known[item])]
+                     if debloat_target_protected(exclusions, known[item], action=saved["action"])]
         protected_ids = {item['id'] for item in protected}
         eligible = [item for item in selected if item not in protected_ids]
         # Persist the exact reviewed inventory before the first Windows mutation.

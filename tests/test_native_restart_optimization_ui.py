@@ -51,7 +51,7 @@ def window(app, tmp_path, monkeypatch):
     monkeypatch.setattr('optimus.live_metrics.LiveMetrics', lambda _: SimpleNamespace(
         status=lambda: {}, start=lambda: None, stop=lambda **_: None))
     settings = dict(copy.deepcopy(DEFAULTS), setup_version=CURRENT_SETUP_VERSION,
-        reduce_motion=True, auto_continue_fixes_enabled=False, post_process_review_enabled=False,
+        reduce_motion=True, auto_continue_fixes_enabled=False, post_process_review_enabled=False, keep_running_on_close=False,
         browser_cache_enabled=False, browser_history_enabled=False, browser_cookies_enabled=False,
         browser_download_history_enabled=False)
     backend = SimpleNamespace(data_dir=tmp_path, preferences=lambda: copy.deepcopy(settings),

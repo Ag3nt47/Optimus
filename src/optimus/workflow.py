@@ -116,6 +116,17 @@ DEFAULTS = {
     'windows_security_updates_install_approved': False,
     'windows_security_update_agreements_accepted': False,
     'legacy_patch_review_enabled': False,
+    # Re-run the driver updater, app updater and virus/spyware scan (plus Zero
+    # Breach and tracker blocking) every time Optimus starts or restarts.
+    # Each job still uses its own saved approvals and enablement switch.
+    'startup_jobs_enabled': True,
+    'zero_breach_enabled': True,
+    'tracker_blocking_enabled': True,
+    # X hides Optimus to the tray while work runs; Quit in the tray stops it.
+    'keep_running_on_close': True,
+    # After a run: apply every automatic and reviewed fix with no dialogs,
+    # then show one summary. Off by default; set explicitly by the user.
+    'apply_all_fixes_without_review': False,
 }
 DEFAULTS.update(copy.deepcopy(APPROVAL_DEFAULTS))
 DEFAULTS.update(copy.deepcopy(SMART_DEFAULTS))

@@ -29,7 +29,8 @@ _TOKEN = re.compile(r'[a-f0-9]{32}\Z')
 _SUPPORTED = frozenset(('priority', 'affinity', 'startup', 'service', 'powerplan', 'registryentry'))
 _FOLDERS = ('runs', 'MaintenanceHistory', 'parallel-updates', 'process-harness/actions',
             'drive-optimization', 'recovery/driver-backups', 'recovery/system-restore',
-            'file-utilities', 'smart-maintenance', 'system-privacy', 'change-history')
+            'file-utilities', 'smart-maintenance', 'system-privacy', 'change-history',
+            'background-apps')
 LIMIT = 500
 MAX_SELECTION = 2000
 

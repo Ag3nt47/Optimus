@@ -185,6 +185,7 @@ def launch_warning(settings):
         ('codex_priority_enabled', 'Apply the saved Codex process-priority profile.'),
         ('spyware_scan_enabled', 'Run the configured malware scan using Windows Defender\'s existing remediation policy.'),
         ('auto_continue_fixes_enabled', 'Automatically continue supported post-scan security fixes/updates within existing saved approvals.'),
+        ('apply_all_fixes_without_review', 'Apply every supported reviewed fix (including Defender threat removal) without review windows.'),
         ('smart_cleaning_enabled', 'Allow app-open Smart Cleaning at the saved junk-size threshold and cooldown.'),
         ('browser_exit_cleaning_enabled', 'Allow cleanup of selected browser data after an observed browser exit, using saved categories and cookie exceptions.')):
         if settings.get(key) is True:

@@ -101,11 +101,23 @@ def _appx_family(target):
     return ''
 
 
-def debloat_target_protected(rows, target):
+WINDOWS_APP_ACTION = 'windows-app'
+
+
+def exclusions_for_action(rows, action):
+    """The built-in Windows App keep-row yields only to its own explicit uninstall action."""
+    if action != WINDOWS_APP_ACTION:
+        return rows
+    return [row for row in rows if not (row['kind'] == 'store' and row['id'].casefold() == WINDOWS_APP_FAMILY.casefold())]
+
+
+def debloat_target_protected(rows, target, *, action=None):
     kind, name = target.get('kind'), target.get('name')
     family = _appx_family(target)
-    if family.casefold() == WINDOWS_APP_FAMILY.casefold() or not family and name == WINDOWS_APP_NAME:
+    if action != WINDOWS_APP_ACTION and (family.casefold() == WINDOWS_APP_FAMILY.casefold()
+                                         or not family and name == WINDOWS_APP_NAME):
         return True
+    rows = exclusions_for_action(rows, action)
     if kind in ('appx', 'provisioned'):
         return is_removal_protected(rows, identity=_appx_family(target), names=(name,), kind='store')
     if kind in ('edge', 'desktop-edge-script'):

@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.12.52
+
+- Add background app cleanup (`background_apps`). A read-only scan finds
+  non-essential Windows background apps by image name *and* expected install
+  location: Bing Wallpaper and its Temp-folder `UnInstDaemon`, Phone Link,
+  Widgets/Start feed and Cross-device resume. Selected items are stopped only
+  after PID, creation time and executable are rechecked.
+- Hidden PowerShell/WScript watchers that use 150 MB+ or whose parent has
+  exited are reported for review only; Optimus never stops them.
+- Each cleanup writes a private receipt to `Data\background-apps`, which Change
+  History now lists. Receipts record whether Optimus or an outside tool did it.
+  Startup entries (e.g. `BingWallpaperDaemon`) are reported, never edited.
+
+- Restart and startup: the driver updater, app updater and Defender virus/
+  spyware scan now re-run every time Optimus starts or restarts
+  (`startup_jobs`), independent of the Auto Clean launch review. Each job
+  still uses its own saved approvals. Interrupted installer journals are
+  reconciled first, and a busy or failed pass retries after 15 minutes.
+- New tray action **Restart Optimus** stops work safely and relaunches with
+  the same access level, so admin-only driver and Defender work keeps running.
+- Pressing X while work runs hides Optimus to the tray instead of cancelling.
+  The progress window's X only hides it; Cancel still stops the run. Once
+  everything is done, X closes Optimus normally.
+- **Apply all fixes without review** (`apply_all_fixes_without_review`): after
+  a run, every automatic and reviewed fix is applied in the background,
+  including Defender threat removal with a fresh threat-list consent. Then one
+  summary is shown in the progress window. No Security review, process Yes/No
+  or Settings windows open, and the app can close afterwards. Processes are
+  never ended automatically; "Open Windows Security"-style steps are listed.
+- Zero Breach Toolkit (`zero_breach`): Optimus keeps its own copy current from
+  GitHub releases. A download is accepted only when it matches both GitHub's
+  per-file SHA-256 digest and the release's `SHA256SUMS.txt`. It then runs the
+  read-only quick scan at start. Consilium's pinned copy is never modified.
+- Hidden recorder / tracker blocking (`audio_trackers`): reads Windows'
+  microphone-usage records and Run keys. Unsigned programs in user-writable
+  drop folders that used the microphone are blocked automatically: the process
+  is ended, outbound traffic is firewalled, microphone access is denied, its
+  autostart is removed and the file is quarantined. Every step is recorded and
+  can be restored. Script hosts and signed programs in drop folders are
+  review-only.
+- New maintenance action **Uninstall Windows App** removes Windows App
+  (Windows 365 / Remote Desktop client) and its Teams VDI packages on explicit
+  request. Presets still never select it.
+- Edge removal: setup exit 93 ("Browser/WebView is sticky") is now retried
+  once with a temporary empty legacy-Edge stub under `SystemApps`, which is
+  removed afterwards. Setup reads the device region, so the EEA user-region
+  retry alone could not succeed.
 ## 0.12.51
 
 - A finished update record that asked for a restart no longer blocks app

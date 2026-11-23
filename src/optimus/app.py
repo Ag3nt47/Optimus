@@ -553,6 +553,14 @@ def _show_gui(backend, args, elevation, instance, staged_restart, close):
 
             window._session_invalidated_callback = pause_automatic_session
             window._session_approved_callback = resume_approved_session
+
+            # Driver updater, app updater, virus/spyware scan, Zero Breach and
+            # tracker blocking re-run on every start/restart, independent of the
+            # Auto Clean launch review, once the self-update check is done.
+            begin_jobs = getattr(type(window), 'begin_startup_jobs', None)
+            if callable(begin_jobs):
+                window.begin_startup_jobs()
+                app.aboutToQuit.connect(window._startup_jobs.stop)
             def begin_startup_review():
                 if window._quitting or window._close_when_idle or getattr(window, '_emergency_stopping', False) is True:
                     return

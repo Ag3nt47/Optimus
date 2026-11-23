@@ -101,6 +101,24 @@ function Invoke-OptimusEdgeWithEeaRegion {
     }
     return [pscustomobject]@{exitCode=$exit;restored=$restored}
 }
+function Invoke-OptimusEdgeWithLegacyStub {
+    # Runs one action while an empty legacy Edge executable exists under
+    # SystemApps, then removes only what this function created.
+    param([scriptblock]$Action)
+    $dir=Join-Path ([Environment]::GetFolderPath('Windows')) 'SystemApps\Microsoft.MicrosoftEdge_8wekyb3d8bbwe'
+    $file=Join-Path $dir 'MicrosoftEdge.exe'
+    $createdDir=$false;$createdFile=$false;$exit=$null
+    try {
+        if(-not(Test-Path -LiteralPath $dir -PathType Container)){$null=New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop;$createdDir=$true}
+        if(-not(Test-Path -LiteralPath $file)){$null=New-Item -ItemType File -Path $file -Force -ErrorAction Stop;$createdFile=$true}
+        $exit=& $Action
+    } finally {
+        if($createdFile){Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue}
+        if($createdDir -and -not @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue).Count){Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue}
+    }
+    $removed=(-not $createdFile -or -not(Test-Path -LiteralPath $file))
+    return [pscustomobject]@{exitCode=$exit;removed=$removed}
+}
 function Get-OptimusEdgeInstallerLogTail {
     # Microsoft's own reason for a refused uninstall, bounded for the report.
     $lines=@()
@@ -412,6 +430,15 @@ function Invoke-OptimusEdgeRemovalTarget {
                         $exit=$region.exitCode
                         $null=$attempts.Add([pscustomobject]@{method='microsoft-setup-eea-region';exitCode=$exit;regionRestored=$region.restored})
                     }
+                    if($exit -eq 93) {
+                        # Setup reads the device region (not the user Geo) and
+                        # refuses while the browser is "sticky", i.e. no legacy
+                        # fallback browser exists. A temporary empty legacy stub
+                        # satisfies that check; it is removed right after.
+                        $stub=Invoke-OptimusEdgeWithLegacyStub {Invoke-OptimusEdgeProcess $setup.path $arguments}
+                        $exit=$stub.exitCode
+                        $null=$attempts.Add([pscustomobject]@{method='microsoft-setup-legacy-stub';exitCode=$exit;stubRemoved=$stub.removed})
+                    }
                 } finally { try{Set-OptimusEdgeAllowUninstall -Restore $prior}catch{} }
                 if($exit -ne 0){$installerLog=Get-OptimusEdgeInstallerLogTail}
             }
@@ -434,7 +461,7 @@ function Invoke-OptimusEdgeRemovalTarget {
         if($success -and -not $restart -and $target.scope -ceq 'machine'){$folders+=@(Invoke-OptimusEdgeLeftoverCleanup (Split-Path $payload.root -Parent))}
         if($success -and -not $restart){Publish-OptimusEdgeRemovalProgress $ProgressCallback $target 'uninstall' 100}
         $blocked=(-not $success -and $regionBlocked -and $exit -eq 93)
-        return [pscustomobject]@{id=$target.id;name=$target.name;removed=$success;reason=$(if($success){'removal_verified'}elseif($restart){'restart_required'}elseif($blocked){'edge_uninstall_region_blocked'}else{'edge_still_detected'});status=$(if($success){'Edge browser executable absent after native removal'}elseif($restart){'Restart required; Edge removal is not yet confirmed'}elseif($blocked){'Windows blocks Edge browser uninstall in this region (setup exit 93), even with AllowUninstall and a temporary EEA region'}else{'Edge remains installed; native removal did not establish absence'});remainingDetected=$present;registrationStubsRemaining=$registrations.Count;restartNeeded=$restart;requiresReview=(-not $success -or $restart);attempts=$attempts.ToArray();leftoverFolders=$folders;installerLog=$installerLog;sharedComponentsPreserved=$true;note='Shared WebView2, the Edge updater, browser profiles and region settings are untouched.'}
+        return [pscustomobject]@{id=$target.id;name=$target.name;removed=$success;reason=$(if($success){'removal_verified'}elseif($restart){'restart_required'}elseif($blocked){'edge_uninstall_region_blocked'}else{'edge_still_detected'});status=$(if($success){'Edge browser executable absent after native removal'}elseif($restart){'Restart required; Edge removal is not yet confirmed'}elseif($blocked){'Windows blocks Edge browser uninstall (setup exit 93), even with AllowUninstall, a temporary EEA region and the legacy fallback stub'}else{'Edge remains installed; native removal did not establish absence'});remainingDetected=$present;registrationStubsRemaining=$registrations.Count;restartNeeded=$restart;requiresReview=(-not $success -or $restart);attempts=$attempts.ToArray();leftoverFolders=$folders;installerLog=$installerLog;sharedComponentsPreserved=$true;note='Shared WebView2, the Edge updater, browser profiles and region settings are untouched.'}
     } catch {
         Publish-OptimusEdgeRemovalProgress $ProgressCallback $Target 'failed' $null
         return [pscustomobject]@{id=$Target.id;name=$Target.name;removed=$false;reason='edge_removal_refused';status='Edge removal requires review';error=$_.Exception.Message;requiresReview=$true;restartNeeded=$restart;attempts=$attempts.ToArray();sharedComponentsPreserved=$true}

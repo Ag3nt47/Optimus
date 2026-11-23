@@ -12,15 +12,22 @@ function Get-OptimusMaintenanceHash {
     finally { $hash.Dispose() }
 }
 function Test-OptimusPreservedPackage {
-    param([string]$Name)
+    param([string]$Name,[string]$Action='')
     # Bing Wallpaper is explicitly retained, including name/publisher variants.
     # Bing News and Weather remain independent optional selections.
+    # Windows App is preserved everywhere except its own dedicated action.
     return (($Name -replace '[^A-Za-z0-9]','') -match '(?i)BingWallpaper' -or
-        $Name -match '^(?i)MicrosoftCorporationII\.Windows365(?:[|_]|$)')
+        ($Action -cne 'windows-app' -and $Name -match '^(?i)MicrosoftCorporationII\.Windows365(?:[|_]|$)'))
+}
+function Test-OptimusWindowsAppPackage {
+    # Windows App and the Teams VDI media packages it installs alongside itself.
+    param([string]$Name)
+    return ($Name -ceq 'MicrosoftCorporationII.Windows365' -or $Name -cmatch '^Microsoft\.Teams\.SlimCoreVdi(?:Host|Fwk)\.win-x64(?:\.\d{4}\.\d{1,3})?$')
 }
 function Test-OptimusOptionalPackage {
     param([string]$Name,[string]$Action)
-    if ($Name -match '[*?\\/]' -or (Test-OptimusPreservedPackage -Name $Name)) { return $false }
+    if ($Name -match '[*?\\/]' -or (Test-OptimusPreservedPackage -Name $Name -Action $Action)) { return $false }
+    if ($Action -eq 'windows-app') { return (Test-OptimusWindowsAppPackage -Name $Name) }
     if ($Action -eq 'm365') { return ($Name -in @('Microsoft.MicrosoftOfficeHub','Microsoft.M365Companions') -or $Name -like 'Microsoft.Microsoft365*') }
     if ($Action -eq 'outlook') { return $Name -eq 'Microsoft.OutlookForWindows' }
     if ($Action -ne 'consumer-apps') { return $false }
@@ -35,7 +42,7 @@ function Test-OptimusOptionalPackage {
     )
 }
 function Test-OptimusExcludedRemovalTarget {
-    param($Target,[array]$Exclusions)
+    param($Target,[array]$Exclusions,[string]$Action='')
     $kind=[string]$Target.kind
     $identity=[string]$Target.appIdentity
     $recordKind=switch($kind){
@@ -43,7 +50,7 @@ function Test-OptimusExcludedRemovalTarget {
         {$_ -in @('office-dialog','office-clicktorun','office-msi','office-review')} {'desktop'}
         {$_ -in @('edge','desktop-edge-script')} {'edge'}
     }
-    if(Test-OptimusPreservedPackage -Name ([string]$Target.name)){return $true}
+    if(Test-OptimusPreservedPackage -Name ([string]$Target.name) -Action $Action){return $true}
     if(-not $recordKind){return $false}
     if($recordKind -eq 'store' -and -not $identity){
         $parts=([string]$Target.packageFullName).Split('_')
@@ -95,7 +102,7 @@ function Get-OptimusEdgeTarget {
     return [pscustomobject]@{id='edge-browser';name='Microsoft Edge browser';scope=if($chosen.Count -and -not $chosen[0].systemLevel){'current-user'}else{'machine'};kind='edge';fingerprint=$fingerprint;method=$method;payload=$payload;selected=$false;admin=($method -eq 'microsoft-setup' -and $chosen[0].systemLevel);recovery='Reinstall Edge from Microsoft. Browser profile data is not separately backed up by Optimus.'}
 }
 function Get-OptimusMaintenanceTargets {
-    param([Parameter(Mandatory=$true)][ValidateSet('consumer-apps','m365','outlook','edge','office365-desktop','office-desktop','desktop-edge-script')][string]$Action,[bool]$IncludeProvisioned=$false)
+    param([Parameter(Mandatory=$true)][ValidateSet('consumer-apps','m365','outlook','edge','office365-desktop','office-desktop','desktop-edge-script','windows-app')][string]$Action,[bool]$IncludeProvisioned=$false)
     if ($Action -eq 'edge') { return @(Get-OptimusEdgeRemovalTargets -IncludeProvisioned:$IncludeProvisioned) }
     if ($Action -eq 'desktop-edge-script') { return @(Get-OptimusDesktopEdgeIntegration) }
     if ($Action -in @('office365-desktop','office-desktop')) {
@@ -104,17 +111,23 @@ function Get-OptimusMaintenanceTargets {
     }
     $targets=@()
     foreach ($package in @(Get-AppxPackage -ErrorAction Stop)) {
-        if ((Test-OptimusPreservedPackage -Name ($package.Name+'|'+$package.PackageFullName)) -or -not (Test-OptimusOptionalPackage -Name $package.Name -Action $Action) -or $package.NonRemovable -or $package.IsFramework -or $package.IsResourcePackage) { continue }
+        # Frameworks stay shared, except the Teams VDI frameworks that only Windows App uses.
+        $frameworkAllowed=($Action -eq 'windows-app' -and $package.Name -cmatch '^Microsoft\.Teams\.SlimCoreVdiFwk\.')
+        if ((Test-OptimusPreservedPackage -Name ($package.Name+'|'+$package.PackageFullName) -Action $Action) -or -not (Test-OptimusOptionalPackage -Name $package.Name -Action $Action) -or $package.NonRemovable -or ($package.IsFramework -and -not $frameworkAllowed) -or $package.IsResourcePackage) { continue }
         $fingerprint=Get-OptimusMaintenanceHash ($package.Name+'|'+$package.PackageFullName+'|current-user')
         $targets += [pscustomobject]@{id=('appx-'+$fingerprint.Substring(0,20));name=$package.Name;version=[string]$package.Version;scope='current-user';kind='appx';appIdentity=$package.PackageFamilyName;packageFullName=$package.PackageFullName;fingerprint=$fingerprint;selected=$false;admin=$false;recovery='Reinstall this app from Microsoft Store. Removed app-local data is not restored by Optimus.'}
     }
     if ($IncludeProvisioned) {
         if (-not (Test-OptimusMaintenanceAdmin)) { throw 'Administrator rights are required to review and remove provisioning for future new accounts.' }
         foreach ($package in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop)) {
-            if ((Test-OptimusPreservedPackage -Name ($package.DisplayName+'|'+$package.PackageName)) -or -not (Test-OptimusOptionalPackage -Name $package.DisplayName -Action $Action)) { continue }
+            if ((Test-OptimusPreservedPackage -Name ($package.DisplayName+'|'+$package.PackageName) -Action $Action) -or -not (Test-OptimusOptionalPackage -Name $package.DisplayName -Action $Action)) { continue }
             $fingerprint=Get-OptimusMaintenanceHash ($package.DisplayName+'|'+$package.PackageName+'|future-users')
             $targets += [pscustomobject]@{id=('provisioned-'+$fingerprint.Substring(0,20));name=$package.DisplayName;version=[string]$package.Version;scope='future-users';kind='provisioned';packageFullName=$package.PackageName;fingerprint=$fingerprint;selected=$false;admin=$true;recovery='Requires the original signed package, dependencies and license to re-provision; a normal Store reinstall affects the current user only.'}
         }
+    }
+    if ($Action -eq 'windows-app') {
+        # Remove the app before the VDI host, and both before their frameworks.
+        return @($targets | Sort-Object @{e={if($_.name -ceq 'MicrosoftCorporationII.Windows365'){0}elseif($_.name -cmatch 'VdiHost'){1}else{2}}},name,scope)
     }
     return @($targets | Sort-Object name,scope)
 }
@@ -202,14 +215,14 @@ function Invoke-OptimusMaintenanceRequest {
     param([Parameter(Mandatory=$true)][string]$Operation,$Arguments,[scriptblock]$ProgressCallback)
     if ($Operation -notin @('maintenance_preview','maintenance_apply')) { throw 'Unknown maintenance operation.' }
     $action=[string]$Arguments.action
-    if ($action -notin @('consumer-apps','m365','outlook','edge','office365-desktop','office-desktop','desktop-edge-script')) { throw 'Unknown optional-app action.' }
+    if ($action -notin @('consumer-apps','m365','outlook','edge','office365-desktop','office-desktop','desktop-edge-script','windows-app')) { throw 'Unknown optional-app action.' }
     $includeProvisioned=($Arguments.includeProvisioned -eq $true)
     if ($includeProvisioned -and $action -in @('office365-desktop','office-desktop','desktop-edge-script')) { throw 'Provisioned-package removal is only available for optional Store apps.' }
     $fresh=@(Get-OptimusMaintenanceTargets -Action $action -IncludeProvisioned $includeProvisioned)
     $exclusions=@($Arguments.removalExclusions | Where-Object { $null -ne $_ })
     if ($exclusions.Count -gt 500) { throw 'Too many saved application removal exclusions.' }
     if ($Operation -eq 'maintenance_preview') {
-        $available=@($fresh | Where-Object { -not (Test-OptimusExcludedRemovalTarget -Target $_ -Exclusions $exclusions) })
+        $available=@($fresh | Where-Object { -not (Test-OptimusExcludedRemovalTarget -Target $_ -Exclusions $exclusions -Action $action) })
         $protectedCount=$fresh.Count-$available.Count
         $fresh=$available
         if ($action -eq 'desktop-edge-script') {
@@ -230,12 +243,12 @@ function Invoke-OptimusMaintenanceRequest {
         $seen[$id]=$true
         $current=@($fresh | Where-Object { $_.id -ceq $id -and $_.fingerprint -ceq [string]$expected.fingerprint })
         if ($current.Count -ne 1) { throw 'An installed package, publisher, version or uninstall method changed. Preview again; nothing was removed.' }
-        if (Test-OptimusExcludedRemovalTarget -Target $current[0] -Exclusions $exclusions) {
+        if (Test-OptimusExcludedRemovalTarget -Target $current[0] -Exclusions $exclusions -Action $action) {
             $protected+=New-OptimusProtectedRemovalResult -Target $current[0]
             continue
         }
         if ($current[0].admin -and -not (Test-OptimusMaintenanceAdmin)) { throw 'Administrator rights are required for the selected target.' }
-        if (Test-OptimusPreservedPackage -Name ($current[0].name+'|'+$current[0].packageFullName)) { throw 'Bing Wallpaper is protected and will not be removed.' }
+        if (Test-OptimusPreservedPackage -Name ($current[0].name+'|'+$current[0].packageFullName) -Action $action) { throw 'This package is protected and will not be removed.' }
         $selected+=$current[0]
     }
     # Revalidation for every selected target completes before the first mutation.
