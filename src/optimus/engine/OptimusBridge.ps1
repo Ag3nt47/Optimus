@@ -98,8 +98,11 @@ function Test-OptimusBridgeWindowsAppValue {
 function Invoke-OptimusRequest {
     param($Request)
     $arg=$Request.arguments
-    if($Request.operation -in @('startup_set','startup_remove','service_set','duplicate_recycle','restore','maintenance_apply') -and
-        (Test-OptimusBridgeWindowsAppValue $arg)){throw 'Windows App is protected; Optimus will not modify its app, startup entries or data.'}
+    if($Request.operation -in @('startup_set','startup_remove','service_set','duplicate_recycle','restore','maintenance_apply')){
+        # Saved keep-lists are read-only metadata, never mutation targets.
+        $mutation=switch($Request.operation){'maintenance_apply'{$arg.targets};'restore'{$arg.change};default{$arg.record}}
+        if(Test-OptimusBridgeWindowsAppValue $mutation){throw 'Windows App is protected; Optimus will not modify its app, startup entries or data.'}
+    }
     switch ([string]$Request.operation) {
         'update_recovery_probe' { Get-OptimusUpdateRecoveryProbe }
         'system_diagnostics' { Get-OptimusSystemDiagnostics }

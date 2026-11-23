@@ -5,7 +5,7 @@ $engine=Join-Path $PSScriptRoot '..\src\optimus\engine'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $engine 'OptimusBridge.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Bridge syntax failed'}
-foreach($name in @('Invoke-OptimusRequest','Restore-OptimusRegistryChange','Test-OptimusSameExecutableFile')) {
+foreach($name in @('Invoke-OptimusRequest','Restore-OptimusRegistryChange','Test-OptimusSameExecutableFile','Test-OptimusBridgeWindowsAppValue')) {
  $node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$false)
  if(-not $node){throw ('Missing bridge function '+$name)}
  Invoke-Expression $node.Extent.Text
@@ -40,6 +40,7 @@ function Remove-OptimusRegistryAppPathKey([string]$Name){
 function Restore-OptimusRegistryAppPathKey($Snapshot){if($script:FakeRegistry.ContainsKey($Snapshot.Name)){throw 'Fake conflict'};$script:FakeRegistry[$Snapshot.Name]=Copy-RegistryIntegrationFixture $Snapshot;$script:Restored++}
 try {
  Check 'Bridge PS5 syntax and dispatch definitions' $true
+ Check 'Actual Windows App mutation guard is loaded with dispatch' (Test-OptimusBridgeWindowsAppValue @{Identity='MicrosoftCorporationII.Windows365_8wekyb3d8bbwe'})
  $selfPath=(Get-Process -Id $PID).Path
  Check 'Native file identity helper accepts same path' (Test-OptimusSameExecutableFile $selfPath $selfPath)
  Check 'Native file identity helper rejects another executable' (-not(Test-OptimusSameExecutableFile $selfPath (Join-Path $env:SystemRoot 'System32/notepad.exe')))

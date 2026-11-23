@@ -129,7 +129,8 @@ Assert-OptimusTest (Test-OptimusBridgeWindowsAppValue ('explorer.exe shell:AppsF
 Assert-OptimusTest (-not(Test-OptimusBridgeWindowsAppValue @{record=@{Path='C:\Program Files\WindowsApps\Microsoft.WindowsAppRuntime.1.8_x64__8wekyb3d8bbwe\x.dll'}})) 'Windows App protection never matches shared Windows App runtimes'
 foreach($operation in @('startup_set','startup_remove','service_set','duplicate_recycle','restore','maintenance_apply')){
     $before=$script:Calls.Count;$blocked=$false
-    try{Invoke-OptimusRequest @{operation=$operation;arguments=@{record=@{Path=$windowsAppData}}}|Out-Null}catch{$blocked=$_.Exception.Message -like 'Windows App is protected;*'}
+    $guardArguments=@{record=@{Path=$windowsAppData};change=@{Undo=@{Path=$windowsAppData}};targets=@(@{Path=$windowsAppData})}
+    try{Invoke-OptimusRequest @{operation=$operation;arguments=$guardArguments}|Out-Null}catch{$blocked=$_.Exception.Message -like 'Windows App is protected;*'}
     Assert-OptimusTest ($blocked -and $script:Calls.Count -eq $before) ('native bridge refuses protected app data before mutation '+$operation)
 }
 
@@ -161,5 +162,15 @@ Assert-OptimusTest ($script:OfficeCalls.Count -eq 2 -and -not $officeResult.resu
 $officeExclusion=[pscustomobject]@{kind='desktop';id='Office.Second';name='Microsoft Office Fixture';label='Keep Office Fixture'}
 $officeProtected=Invoke-OptimusMaintenanceRequest maintenance_preview @{action='office-desktop';removalExclusions=@($officeExclusion)}
 Assert-OptimusTest ($script:OfficeFamily -ceq 'office' -and $officeProtected.targets.Count -eq 1 -and $officeProtected.protectedCount -eq 1) 'desktop Office uses exact saved removal protections'
+$before=$script:EdgeCalls.Count
+$bridgeEdge=Invoke-OptimusRequest @{operation='maintenance_apply';arguments=@{action='edge';targets=@($script:EdgeFixture);removalExclusions=@($exclusion);confirmation='REMOVE'}}
+Assert-OptimusTest ($script:EdgeCalls.Count -eq $before+1 -and $bridgeEdge.results[0].removed) 'real caller keep-list metadata does not block an unrelated reviewed Edge removal'
+$before=$script:OfficeCalls.Count
+$bridgeOffice=Invoke-OptimusRequest @{operation='maintenance_apply';arguments=@{action='office365-desktop';targets=@($script:OfficeFixture[1]);removalExclusions=@($exclusion);confirmation='REMOVE'}}
+Assert-OptimusTest ($script:OfficeCalls.Count -eq $before+1 -and $bridgeOffice.results[0].removed) 'real caller keep-list metadata does not block an unrelated reviewed Office removal'
+$before=$script:EdgeCalls.Count;$blocked=$false
+$protectedBridgeTarget=[pscustomobject]@{id='forged-windows-app';name='Renamed fixture';kind='edge';appIdentity=$windowsApp.PackageFamilyName;fingerprint=('e'*64)}
+try{Invoke-OptimusRequest @{operation='maintenance_apply';arguments=@{action='edge';targets=@($protectedBridgeTarget);removalExclusions=@();confirmation='REMOVE'}}|Out-Null}catch{$blocked=$_.Exception.Message -like 'Windows App is protected;*'}
+Assert-OptimusTest ($blocked -and $script:EdgeCalls.Count -eq $before) 'direct native Windows App mutation target is refused independently of the keep-list'
 [pscustomobject]@{Result='PASS';Assertions=$script:Assertions;RealAppRemovals=0;RealExternalProgramsLaunched=0;PSVersion=$PSVersionTable.PSVersion.ToString()}|ConvertTo-Json -Compress
 
