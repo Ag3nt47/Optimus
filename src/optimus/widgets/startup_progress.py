@@ -142,7 +142,7 @@ class StartupProgressDialog(QDialog):
         self.table.horizontalHeaderItem(3).setText('Item %' if narrow else 'Progress')
         self.table.resizeRowsToContents()
         for row in range(self.table.rowCount()):
-            self.table.setRowHeight(row, max(66, self.table.rowHeight(row)))
+            self.table.setRowHeight(row, max(66, min(100, self.table.rowHeight(row))))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -193,10 +193,11 @@ class StartupProgressDialog(QDialog):
         percent = item.get('percent') if item is not None else None
         estimated = item is not None and item.get('estimated') is True
         health = ('working' if active else 'complete' if status == 'completed' else
-                  'error' if status in ('failed', 'error', 'uncertain', 'blocked', 'needs_review', 'completed_with_errors') else
-                  'waiting' if status in ('running', 'cancelled', 'skipped', 'deferred') else 'unverified')
+                  'error' if status in ('failed', 'error', 'uncertain', 'blocked', 'completed_with_errors') else
+                  'waiting' if status in ('running', 'cancelled', 'skipped', 'deferred', 'needs_review') else 'unverified')
         phase = item.get('phase', '') if item is not None else (
-            'scan' if active and key == 'defender' else 'working' if active else 'waiting' if status == 'pending' else '')
+            'scan' if active and key == 'defender' else 'working' if active else
+            'waiting' if status in ('pending', 'needs_review', 'deferred') else '')
         description = state.get('description', '')
         if item is not None:
             description = item['label'] + ' · ' + item['phase'].replace('_', ' ') + '. ' + description
@@ -211,7 +212,9 @@ class StartupProgressDialog(QDialog):
         for state in self._states.values():
             counts[state] = counts.get(state, 0) + 1
         terminal = sum(count for state, count in counts.items() if state not in ('pending', 'running'))
-        details = ', '.join(f'{count} {state.replace("_", " ")}' for state, count in counts.items()
+        details = ', '.join(f'{count} ' + (('needs review' if count == 1 else 'need review')
+                                        if state == 'needs_review' else state.replace('_', ' '))
+                            for state, count in counts.items()
                             if state not in ('pending', 'running'))
         self.summary.setText(f'{terminal} of {len(self._jobs)} jobs finished' + (': ' + details if details else '.'))
         if not self.running:
@@ -248,9 +251,72 @@ class StartupProgressDialog(QDialog):
             for key in ('note', 'summary', 'description', 'error', 'reason', 'status'):
                 if value.get(key):
                     return str(value[key])[:2000]
+            scan = value.get('scan')
+            if isinstance(scan, dict):
+                for key in ('detail', 'summary', 'note', 'error', 'reason', 'status'):
+                    if scan.get(key):
+                        return str(scan[key])[:2000]
         if isinstance(value, str):
             return value[:2000]
         return str(event.get('description') or '')[:2000]
+
+    @staticmethod
+    def _app_details(event):
+        """Summarize outcomes, keeping policy and per-offer reasons available."""
+        result = event.get('result')
+        if event.get('job') != 'apps' or event.get('error') or not isinstance(result, dict):
+            return None
+        scan = result.get('app_scan')
+        if not isinstance(scan, dict):
+            return None
+        counts = []
+        for key, label in (('completed_count', 'updated'), ('failed_count', 'failed'),
+                           ('skipped_count', 'skipped'), ('deferred_count', 'deferred')):
+            value = scan.get(key)
+            if type(value) is int and value >= 0 and (value or key == 'completed_count'):
+                counts.append(f'{value} {label}')
+        parts = [', '.join(counts) + '.'] if counts else []
+        reason = result.get('stop_reason')
+        if reason:
+            parts.append(str(reason)[:500])
+        for item in result.get('items') or []:
+            if isinstance(item, dict) and item.get('status') in ('failed', 'error'):
+                outcome = item.get('result')
+                outcome = outcome if isinstance(outcome, dict) else {}
+                error = item.get('error') or outcome.get('error') or outcome.get('note')
+                if error:
+                    parts.append(str(error)[:500])
+                    break
+        held = result.get('held_ids')
+        if isinstance(held, list) and held:
+            names = [str(value) for value in held[:3]]
+            parts.append('Held for review: ' + ', '.join(names) + (' and more.' if len(held) > 3 else '.'))
+        if scan.get('complete') is False:
+            parts.append('Update search incomplete; review its details.')
+        return ' '.join(parts) if parts else None
+
+    @classmethod
+    def _full_details(cls, event):
+        parts = [cls._details(event)]
+        result = event.get('result')
+        if event.get('job') == 'apps' and isinstance(result, dict):
+            scan = result.get('app_scan')
+            scan = scan if isinstance(scan, dict) else {}
+            for value in (result.get('stop_reason'), scan.get('summary')):
+                if value and str(value) not in parts[0]:
+                    parts.append(str(value))
+            for error in scan.get('errors') or []:
+                if isinstance(error, dict) and error.get('error'):
+                    parts.append(str(error['error']))
+            for item in result.get('items') or []:
+                if not isinstance(item, dict):
+                    continue
+                outcome = item.get('result')
+                outcome = outcome if isinstance(outcome, dict) else {}
+                for note in (item.get('error'), outcome.get('note') or outcome.get('error')):
+                    if note:
+                        parts.append(str(item.get('name') or item.get('id') or 'Update') + ': ' + str(note))
+        return '\n\n'.join(part for part in parts if part)
 
     def update_progress(self, event):
         if not isinstance(event, dict):
@@ -270,14 +336,17 @@ class StartupProgressDialog(QDialog):
                                           else status.replace('_', ' ').capitalize())
             self.skip_buttons[key].setEnabled(self.running and not self.stopping
                 and status in ('pending', 'running') and key not in self._skip_requested)
-            detail = self._details(event)
+            detail = self._app_details(event) or self._details(event)
+            full_detail = self._full_details(event)
             if event.get('seconds') is not None:
                 detail += f' ({event["seconds"]} seconds)'
+                full_detail += f' ({event["seconds"]} seconds)'
             self.table.item(row, 2).setText(detail)
-            self.table.item(row, 2).setToolTip(detail)
+            self.table.item(row, 2).setToolTip(full_detail)
+            self.table.item(row, 2).setData(Qt.AccessibleDescriptionRole, full_detail)
             self._update_ring(key, status, event)
             self.table.resizeRowToContents(row)
-            self.table.setRowHeight(row, max(66, self.table.rowHeight(row)))
+            self.table.setRowHeight(row, max(66, min(100, self.table.rowHeight(row))))
             if status == 'running' and not self.stopping:
                 self.status.setText('Running: ' + str(event.get('description') or event.get('title') or key))
         elif key is None and status != 'running':
@@ -303,6 +372,8 @@ class StartupProgressDialog(QDialog):
         messages = {
             'completed': 'Startup jobs finished. Review each job’s result below.',
             'failed': 'Some startup jobs failed. Review their results below.',
+            'needs_review': 'Startup jobs finished. Some updates need review; see their results below.',
+            'deferred': 'Startup jobs finished with deferred work. Review the reasons below.',
             'cancelled': 'Startup jobs stopped. Review completed and cancelled items below.',
             'busy': 'Startup jobs are waiting for another maintenance run.',
             'disabled': 'Startup jobs are disabled in your saved choices.',

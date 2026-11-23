@@ -38,28 +38,89 @@ def _utc() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def _coverage_needs_review(result: dict) -> bool:
+    """Recognize the one successful-scan coverage advisory, not a scan error."""
+    from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING
+    from .update_scan_evidence import app_scan_evidence
+
+    scan, evidence = result.get('scan'), result.get('app_scan')
+    if not isinstance(scan, dict) or not isinstance(evidence, dict):
+        return False
+    rows = scan.get('updates', scan.get('packages'))
+    if (scan.get('source') != 'winget' or scan.get('structured') is not True
+            or type(scan.get('exitCode')) is not int or scan['exitCode'] != 0
+            or scan.get('complete', True) is not True or scan.get('error') or scan.get('errors')
+            or scan.get('excluded') != [UNKNOWN_VERSION_COVERAGE_WARNING]
+            or not isinstance(rows, list) or len(rows) > 1000
+            or any(not isinstance(row, dict) for row in rows)):
+        return False
+    expected = [{'source': 'winget', 'error': UNKNOWN_VERSION_COVERAGE_WARNING}]
+    derived = app_scan_evidence(scan)
+    return (derived['status'] == evidence.get('status') == 'incomplete'
+            and evidence.get('complete') is False
+            and derived['errors'] == evidence.get('errors') == expected)
+
+
+def _review_failure_count(result: dict) -> int:
+    """Account for review bookkeeping only when the actual rows explain it."""
+    items = result.get('items')
+    if (not isinstance(items, list) or len(items) > 1000
+            or not any(key in result for key in ('app_scan', 'scan_failed_items', 'requires_review_items'))
+            or result.get('error') or result.get('errors')):
+        return 0
+    review = 0
+    for item in items:
+        if (not isinstance(item, dict) or item.get('error')
+                or item.get('status') not in ('completed', 'skipped', 'needs_review', 'deferred')):
+            return 0
+        outcome = item.get('result')
+        if (item.get('status') in ('skipped', 'needs_review', 'deferred')
+                and isinstance(outcome, dict) and outcome.get('requiresReview') is True
+                and not outcome.get('error') and not outcome.get('errors')
+                and _status(outcome) == 'needs_review'):
+            review += 1
+    scan_failed = result.get('scan_failed_items', 0)
+    if scan_failed:
+        if type(scan_failed) is not int or scan_failed != 1 or not _coverage_needs_review(result):
+            return 0
+        review += 1
+    return review
+
+
+def _failed_count(result: dict) -> bool:
+    failed = result.get('failed_items')
+    return (isinstance(failed, (int, float)) and failed > 0
+            and (type(failed) is not int or failed != _review_failure_count(result)))
+
+
 def _status(result: Any) -> str:
     if not isinstance(result, dict):
         return 'completed'
     if (result.get('uncertain') is True or result.get('outcomeKnown') is False
             or result.get('running') is True or result.get('status') == 'uncertain'):
         return 'uncertain'
-    if result.get('cancelled') or result.get('status') in ('cancelled', 'canceled'):
-        return 'cancelled'
-    failed = result.get('failed_items')
-    if (isinstance(failed, (int, float)) and failed > 0
-            or result.get('status') in ('failed', 'error', 'check_failed', 'update_failed',
-                'blocked', 'partial', 'uncertain', 'requires_admin', 'not_installed', 'python_missing')):
-        return 'failed'
     # Zero Breach and tracker blocking return their component outcomes together.
-    components = [result[key] for key in ('update', 'scan', 'blocked') if isinstance(result.get(key), dict)]
+    # Updaters also retain each actual package receipt beneath its item row.
+    components = [result[key] for key in ('update', 'scan', 'blocked', 'result')
+                  if isinstance(result.get(key), dict)]
+    if (isinstance(result.get('items'), list)
+            and any(key in result for key in ('app_scan', 'scan_failed_items', 'requires_review_items'))):
+        components.extend(item for item in result['items'] if isinstance(item, dict))
+    if isinstance(result.get('app_scan'), dict):
+        components.append(result['app_scan'])
     statuses = {_status(component) for component in components}
     if 'uncertain' in statuses:
         return 'uncertain'
-    if 'cancelled' in statuses:
+    if result.get('cancelled') or result.get('status') in ('cancelled', 'canceled') or 'cancelled' in statuses:
         return 'cancelled'
-    if 'failed' in statuses:
+    if (_failed_count(result) or 'failed' in statuses
+            or result.get('status') in ('failed', 'error', 'check_failed', 'update_failed',
+                'blocked', 'partial', 'requires_admin', 'not_installed', 'python_missing')):
         return 'failed'
+    if (result.get('requiresReview') is True or result.get('status') in ('needs_review', 'deferred')
+            or 'needs_review' in statuses or _review_failure_count(result) > 0
+            or isinstance(result.get('deferred_ids'), list) and result['deferred_ids']):
+        return 'needs_review'
     if result.get('skipped') or result.get('status') in ('skipped', 'unsupported', 'not_applicable'):
         return 'skipped'
     return 'completed'
@@ -118,8 +179,7 @@ def _skip_status(result, status):
                     or value.get('running') is True or value.get('may_continue') is True
                     or value.get('status') == 'uncertain'):
                 return 'uncertain'
-            failed = value.get('failed_items')
-            failure = failure or (isinstance(failed, (int, float)) and failed > 0
+            failure = failure or (_failed_count(value)
                 or value.get('status') in ('failed', 'error', 'check_failed', 'update_failed', 'partial'))
             pending.extend(value.values())
         elif isinstance(value, list):
@@ -285,7 +345,8 @@ def run_startup_jobs(backend: Any, settings: dict, *, cancel_event: Any = None,
             release()
     statuses = {entry['status'] for entry in report['jobs']}
     report['status'] = ('uncertain' if 'uncertain' in statuses else
-                        'cancelled' if 'cancelled' in statuses else 'failed' if 'failed' in statuses else 'completed')
+                        'cancelled' if 'cancelled' in statuses else 'failed' if 'failed' in statuses else
+                        'needs_review' if 'needs_review' in statuses else 'completed')
     report['finished_at'] = _utc()
     try:
         atomic_json(path, report)

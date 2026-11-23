@@ -298,8 +298,13 @@ def test_dashboard_columns_and_controls_fit_normal_and_narrow_windows(size):
     try:
         dialog.update_progress(dict(job='drivers', title='Driver updater', status='completed',
                                     result={'note': 'Driver discovery completed. No approved installations were needed.'}))
-        dialog.update_progress(dict(job='apps', title='App updater', status='running',
-                                    description='Checking approved application updates.'))
+        dialog.update_progress(dict(job='apps', title='App updater', status='needs_review',
+                                    result={'note': 'A long saved update policy. ' * 70,
+                                            'stop_reason': 'A Windows restart is pending or could not be verified.',
+                                            'held_ids': ['Logitech.GHUB'],
+                                            'app_scan': {'complete': False, 'completed_count': 0,
+                                                         'failed_count': 0, 'skipped_count': 2,
+                                                         'deferred_count': 19}}))
         dialog.resize(*size)
         dialog.show()
         app.processEvents()
@@ -550,3 +555,61 @@ def test_late_skip_ack_cannot_revive_finished_job_while_next_job_runs(ring_dialo
     dialog.begin(JOBS)  # A genuine new pass explicitly resets the terminal gate.
     dialog.update_progress(dict(job='drivers', status='running'))
     assert dialog.rings['drivers'].active and dialog.rings['drivers'].timer.isActive()
+
+
+def test_held_update_review_is_amber_and_shows_outcomes_with_full_reasons_available(ring_dialog):
+    dialog = ring_dialog.value
+    result = {'note': 'Full saved update policy; hash and signature checks remain enabled.',
+              'stop_reason': 'Update deferred: a Windows restart is pending or could not be verified.',
+              'held_ids': ['Logitech.GHUB'],
+              'app_scan': {'complete': False, 'completed_count': 0, 'failed_count': 0,
+                           'skipped_count': 2, 'deferred_count': 19,
+                           'summary': '21 recognized offers; available update count unknown.',
+                           'errors': [{'error': 'Installed versions need publisher review.'}]},
+              'items': [{'id': 'Logitech.GHUB', 'result': {'note': 'Saved exact-offer hold remains active.'}}]}
+    dialog.update_progress(dict(job='apps', status='running', detail={'item_progress': item_progress()}))
+    dialog.update_progress(dict(job='apps', status='needs_review', result=result, seconds=24.2))
+    dialog.finish('needs_review')
+    cell = dialog.table.item(1, 2)
+    assert dialog.table.item(1, 1).text() == 'Needs review'
+    assert '0 updated, 2 skipped, 19 deferred' in cell.text()
+    assert 'restart is pending or could not be verified' in cell.text()
+    assert 'Logitech.GHUB' in cell.text() and 'search incomplete' in cell.text()
+    assert 'Full saved update policy' not in cell.text()
+    for text in ('Full saved update policy', '21 recognized offers',
+                 'Installed versions need publisher review', 'Saved exact-offer hold remains active'):
+        assert text in cell.toolTip()
+    assert dialog.rings['apps'].health == 'waiting'
+    assert not dialog.rings['apps'].active and not dialog.rings['apps'].timer.isActive()
+    assert not dialog.skip_buttons['apps'].isEnabled()
+    assert 'needs review' in dialog.summary.text() and 'failed' not in dialog.status.text()
+    assert 'need review' in dialog.status.text()
+
+
+@pytest.mark.parametrize('error_location', ['event', 'item'])
+def test_genuine_update_error_keeps_red_status_and_error_text_instead_of_policy_summary(ring_dialog, error_location):
+    dialog = ring_dialog.value
+    event = dict(job='apps', status='failed', result={'note': 'Generic update policy.',
+                                                    'app_scan': {'complete': True, 'failed_count': 1}})
+    if error_location == 'event':
+        event['error'] = 'Installer verification failed.'
+    else:
+        event['result']['items'] = [{'id': 'Fixture.App', 'status': 'failed',
+                                     'error': 'Installer verification failed.'}]
+    dialog.update_progress(event)
+    dialog.finish('failed')
+    assert 'Installer verification failed.' in dialog.table.item(1, 2).text()
+    assert dialog.rings['apps'].health == 'error'
+    assert 'failed' in dialog.status.text()
+
+
+@pytest.mark.parametrize('job,field,message', [
+    ('zero_breach', 'detail', 'Zero Breach reported actionable matches. Review the report.'),
+    ('trackers', 'note', 'Nothing was changed. Review the findings before selecting an action.'),
+])
+def test_completed_scan_keeps_its_nested_findings_visible(ring_dialog, job, field, message):
+    dialog = ring_dialog.value
+    dialog.update_progress(dict(job=job, status='completed', result={'scan': {field: message}}, seconds=3.1))
+    cell = dialog.table.item(dialog._rows[job], 2)
+    assert message in cell.text() and message in cell.toolTip()
+    assert '3.1 seconds' in cell.text()

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.55
+
+- Show startup app updates held for review or deferred before installation as
+  Needs review, preserving real failures and uncertain installer outcomes.
+- Summarize startup update outcomes and deferral reasons instead of filling
+  the dashboard with update policy text. Full reasons remain available on hover.
+- Keep startup rows compact so long reports do not hide other jobs and Skip controls.
+
 ## 0.12.54
 
 - Restore a spinning progress wheel for each startup update and scan job,

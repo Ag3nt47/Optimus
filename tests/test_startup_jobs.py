@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 import sys
@@ -36,6 +37,31 @@ def settings(**changes):
     value.update(driver_updates_enabled=True, software_updates_enabled=True, spyware_scan_enabled=True)
     value.update(changes)
     return value
+
+
+def held_app_updates():
+    """The real producer shape: two review refusals plus a coverage advisory."""
+    from optimus.automated_software import UNKNOWN_VERSION_COVERAGE_WARNING
+    from optimus.update_holds import held_update_result
+    from optimus.update_scan_evidence import with_app_scan
+
+    packages = [{'id': identity, 'source': 'winget', 'version': '1.0', 'available': '2.0'}
+                for identity in ('Logitech.GHUB', 'Azul.Zulu.11.JRE', 'Git.Git')]
+    held = held_update_result(packages[0], {'reason': 'Previous exact-offer outcome needs review.'})
+    deferred = {'status': 'deferred', 'skipped': True, 'requiresReview': True, 'exitCode': None,
+                'installer_started': False, 'outcomeKnown': True, 'running': False,
+                'shared_barrier': True, 'note': 'A Windows restart is pending or could not be verified.'}
+    return with_app_scan({'review_only': False,
+        'scan': {'updates': packages, 'source': 'winget', 'structured': True, 'exitCode': 0,
+                 'stderr': '', 'source_reported_offers_count': len(packages),
+                 'excluded': [UNKNOWN_VERSION_COVERAGE_WARNING]},
+        'items': [{'id': packages[0]['id'], 'status': 'skipped', 'result': held},
+                  {'id': packages[1]['id'], 'status': 'skipped', 'result': deferred}],
+        'failed_items': 3, 'scan_failed_items': 1, 'requires_review_items': 2,
+        'skipped_items': 2, 'held_count': 1, 'held_ids': [packages[0]['id']],
+        'deferred_ids': [packages[2]['id']], 'cancelled': False,
+        'installer_started': False, 'outcomeKnown': True, 'running': False,
+        'stop_reason': 'Update deferred: ' + deferred['note']})
 
 
 class StartupJobTests(unittest.TestCase):
@@ -231,6 +257,94 @@ class StartupJobTests(unittest.TestCase):
             with self.subTest(result=result):
                 self.assertEqual(sj._status(result), 'failed')
         self.assertEqual(sj._status({'update': {'status': 'updated'}, 'scan': {'status': 'clean'}}), 'completed')
+
+    def test_held_update_outcomes_need_review_without_mutating_evidence(self):
+        outcome = held_app_updates()
+        original = copy.deepcopy(outcome)
+        self.assertEqual(sj._status(outcome), 'needs_review')
+        self.assertEqual(sj._skip_status(outcome, sj._status(outcome)), 'needs_review')
+        self.assertEqual(outcome, original)
+
+    def test_held_update_pass_preserves_review_status_and_does_not_retry(self):
+        outcome, events, timers = held_app_updates(), [], []
+        configuration = settings(driver_updates_enabled=False, spyware_scan_enabled=False,
+                                 zero_breach_enabled=False, tracker_blocking_enabled=False)
+
+        def run(backend, saved, **arguments):
+            return sj.run_startup_jobs(backend, saved, lease_factory=lambda root: Lease(), **arguments)
+
+        jobs = sj.StartupJobs(self.backend, lambda: configuration, runner=run,
+            on_progress=events.append, timer_factory=lambda *arguments: timers.append(arguments))
+        with patch('optimus.automated_software.run_software', return_value=outcome) as updater:
+            self.assertTrue(jobs.start())
+            jobs.thread.join(5)
+        self.assertFalse(jobs.running)
+        updater.assert_called_once()
+        self.assertEqual(jobs.last['status'], 'needs_review')
+        self.assertEqual(jobs.last['jobs'][0]['status'], 'needs_review')
+        self.assertEqual(jobs.last['jobs'][0]['result'], outcome)
+        self.assertEqual(timers, [])
+        self.assertIsNone(jobs.timer)
+        saved = json.loads((self.backend.data_dir / 'startup-jobs' / 'last.json').read_text())
+        self.assertEqual(saved, jobs.last)
+        self.assertEqual(events[-1]['status'], 'needs_review')
+        self.assertEqual(events[-1]['jobs'][0]['status'], 'needs_review')
+
+    def test_review_bookkeeping_never_hides_a_real_item_failure_or_uncertainty(self):
+        for status, receipt, expected in (
+                ('failed', {'status': 'failed', 'requiresReview': True, 'exitCode': 1,
+                            'installer_started': False, 'outcomeKnown': True, 'running': False}, 'failed'),
+                ('skipped', {'status': 'error', 'requiresReview': True,
+                             'outcomeKnown': True, 'running': False}, 'failed'),
+                ('skipped', {'status': 'uncertain', 'requiresReview': True,
+                             'outcomeKnown': False, 'running': True}, 'uncertain')):
+            with self.subTest(expected=expected, status=receipt['status']):
+                outcome = held_app_updates()
+                outcome['items'].append({'id': 'Fixture.Failed', 'status': status, 'result': receipt})
+                outcome['failed_items'] += 1
+                outcome['requires_review_items'] += 1
+                self.assertEqual(sj._status(outcome), expected)
+                self.assertEqual(sj._skip_status(outcome, sj._status(outcome)), expected)
+
+    def test_other_scan_problems_and_unexplained_counters_remain_failed(self):
+        from optimus.update_scan_evidence import with_app_scan
+        changes = ({'exitCode': 1}, {'structured': False}, {'complete': False},
+                   {'stderr': 'Source refresh failed.'}, {'source_reported_offers_count': 4},
+                   {'excluded': ['Unrecognized source response.']}, {'error': 'Discovery failed.'})
+        for change in changes:
+            with self.subTest(change=change):
+                outcome = held_app_updates()
+                outcome['scan'].update(change)
+                with_app_scan(outcome)
+                self.assertEqual(sj._status(outcome), 'failed')
+                self.assertEqual(sj._skip_status(outcome, 'cancelled'), 'failed')
+        outcome = held_app_updates()
+        outcome['failed_items'] += 1
+        self.assertEqual(sj._status(outcome), 'failed')
+        for invalid in (3.0, True):
+            with self.subTest(invalid_counter=invalid):
+                outcome = held_app_updates()
+                outcome['failed_items'] = invalid
+                if invalid is True:
+                    outcome['items'] = outcome['items'][:1]
+                    outcome['scan_failed_items'] = 0
+                self.assertEqual(sj._status(outcome), 'failed')
+        outcome = held_app_updates()
+        outcome['app_scan']['errors'].append({'source': 'winget', 'error': 'Other source error.'})
+        self.assertEqual(sj._status(outcome), 'failed')
+
+    def test_cancelled_review_pass_preserves_cancellation_and_skip_safety(self):
+        outcome = held_app_updates()
+        outcome['cancelled'] = True
+        self.assertEqual(sj._status(outcome), 'cancelled')
+        self.assertEqual(sj._skip_status(outcome, sj._status(outcome)), 'skipped')
+        outcome['items'].append({'id': 'Fixture.Failed', 'status': 'failed',
+                                 'result': {'status': 'failed', 'outcomeKnown': True, 'running': False}})
+        outcome['failed_items'] += 1
+        self.assertEqual(sj._skip_status(outcome, sj._status(outcome)), 'failed')
+        outcome['items'][-1]['result']['outcomeKnown'] = False
+        self.assertEqual(sj._status(outcome), 'uncertain')
+        self.assertEqual(sj._skip_status(outcome, sj._status(outcome)), 'uncertain')
 
     def test_unresolved_provider_lifecycle_is_never_labelled_finished_or_skipped(self):
         for result in ({'skipped': True, 'uncertain': True, 'running': True, 'outcomeKnown': False},
@@ -622,7 +736,8 @@ class StartupJobSkipTests(unittest.TestCase):
                 lease_factory=lambda root: Lease())
         drivers.assert_not_called()
         apps.assert_not_called()
-        self.assertEqual([row['status'] for row in report['jobs']], ['skipped', 'skipped'])
+        self.assertEqual([row['status'] for row in report['jobs']], ['needs_review', 'needs_review'])
+        self.assertEqual(report['status'], 'needs_review')
         for row in report['jobs']:
             self.assertTrue(row['result']['requiresReview'])
             self.assertTrue(row['result']['installation_blocked'])

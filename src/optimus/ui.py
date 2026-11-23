@@ -6327,7 +6327,10 @@ class OptimusWindow(QMainWindow):
         rows = report.get('jobs') or []
         done = sum(entry.get('status') == 'completed' for entry in rows)
         retry = report.get('status') in ('busy', 'failed') and not jobs.cancel.is_set()
-        self.status.setText(f'Startup jobs {report.get("status")}: {done}/{len(rows)} completed.'
+        label = str(report.get('status') or 'unknown').replace('_', ' ')
+        if label == 'needs review':
+            label = 'need review'
+        self.status.setText(f'Startup jobs {label}: {done}/{len(rows)} completed.'
                             + (' Retrying in 15 minutes.' if retry else ''))
         if self._startup_progress_window is not None:
             self._startup_progress_window.set_report(report)
