@@ -16,6 +16,7 @@ from typing import Iterable
 import psutil
 from .browser_paths import browser_definitions, native_locations, process_matcher
 from .wallpaper_preservation import protected_wallpaper_path, current_wallpaper_paths
+from .app_removal_protection import is_windows_app_path
 
 _PLATFORM = sys.platform
 
@@ -287,7 +288,8 @@ class Cleaner:
         try:
             full = Path(os.path.abspath(path))
             base = Path(os.path.abspath(root))
-            if protected_wallpaper_path(full) or protected_wallpaper_path(base):
+            if (is_windows_app_path(full) or is_windows_app_path(base)
+                    or protected_wallpaper_path(full) or protected_wallpaper_path(base)):
                 return False
             if full == base or os.path.normcase(os.path.commonpath([str(full), str(base)])) != os.path.normcase(str(base)):
                 return False
@@ -348,6 +350,9 @@ class Cleaner:
                 break
             category = choices[category_id]
             root = Path(os.path.abspath(category.path))
+            if is_windows_app_path(root):
+                plan['skipped'].append(f'{category.name}: Windows App remote-access files and settings are protected.')
+                continue
             if protected_wallpaper_path(root):
                 plan['skipped'].append(f'{category.name}: wallpaper and Store-managed state is preserved.')
                 continue
@@ -497,6 +502,8 @@ class Cleaner:
     def _delete_exact(record: dict) -> None:
         current_wallpaper_paths(refresh=True)
         path = Path(record['path'])
+        if is_windows_app_path(path) or is_windows_app_path(record.get('root', '')):
+            raise ValueError('Windows App remote-access files and settings are protected from cleanup.')
         info = path.lstat()
         if not Cleaner._safe_path(path, Path(record['root'])):
             raise ValueError('File moved outside its approved ordinary folder.')
@@ -568,6 +575,8 @@ class Cleaner:
         and the original basename is restored when it remains free.
         """
         path = Path(record['path'])
+        if is_windows_app_path(path) or is_windows_app_path(record.get('root', '')):
+            raise ValueError('Windows App remote-access files and settings are protected from cleanup.')
         descriptors = []
         staged = None
         parent_fd = None

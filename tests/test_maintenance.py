@@ -44,9 +44,9 @@ class Tests(unittest.TestCase):
         self.temp.cleanup()
     def test_01_actions_and_preview(self):
         actions = self.tool.debloat_actions()
-        self.assertEqual(len(actions), 8)
+        self.assertEqual(len(actions), 7)
         self.assertEqual({row['id'] for row in actions}, {'consumer-apps', 'm365', 'outlook', 'edge',
-                         'office365-desktop', 'office-desktop', 'desktop-edge-script', 'windows-app'})
+                         'office365-desktop', 'office-desktop', 'desktop-edge-script'})
         self.assertFalse((Path(self.temp.name) / 'MaintenancePlans').exists())
         plan = self.tool.debloat_preview('consumer-apps')
         self.assertFalse(plan['targets'][0]['selected'])
@@ -61,7 +61,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(plan['includeProvisioned'])
         self.assertEqual(self.bridge.calls, [('maintenance_preview', {'action': 'edge',
                          'includeProvisioned': True, 'removalExclusions': []})])
-    def test_02b_windows_app_only_via_its_own_action(self):
+    def test_02b_windows_app_has_no_removal_action_or_protection_bypass(self):
         keep = {'kind': 'store', 'id': 'MicrosoftCorporationII.Windows365_8wekyb3d8bbwe',
                 'name': 'MicrosoftCorporationII.Windows365', 'label': 'Microsoft Windows App'}
         self.tool._removal_exclusions_reader = lambda: [keep]
@@ -71,10 +71,13 @@ class Tests(unittest.TestCase):
         plan = self.tool.debloat_preview('consumer-apps')
         self.assertEqual(plan['targets'], [])
         self.assertEqual(self.bridge.calls[-1][1]['removalExclusions'], [keep])
-        # The dedicated action drops only the built-in keep-row and offers it.
-        plan = self.tool.debloat_preview('windows-app')
-        self.assertEqual([t['id'] for t in plan['targets']], ['appx-winapp'])
-        self.assertEqual(self.bridge.calls[-1][1]['removalExclusions'], [])
+        # A direct request cannot revive the removed dedicated action.
+        calls = list(self.bridge.calls)
+        with self.assertRaises(ValueError):
+            self.tool.debloat_preview('windows-app')
+        self.assertEqual(self.bridge.calls, calls)
+        self.tool._removal_exclusions_reader = lambda: []
+        self.assertEqual(self.tool.debloat_preview('consumer-apps')['targets'], [])
     def test_03_confirmation_required(self):
         plan = self.tool.debloat_preview('consumer-apps')
         with self.assertRaises(ValueError): self.tool.debloat_apply({'planId': plan['planId'], 'selectedIds': ['appx-fixture']})

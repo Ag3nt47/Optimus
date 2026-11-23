@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.54
+
+- Restore a spinning progress wheel for each startup update and scan job,
+  using the same rings as the regular optimization dashboard. Reported item
+  percentages remain visible; jobs without a reported percentage keep spinning.
+- Add Skip to each startup job. Queued jobs are skipped without running;
+  an active job stops cooperatively before the remaining jobs continue.
+  Skips apply to this startup session without changing saved choices.
+- Permanently protect Windows App (Windows 365 / Remote Desktop) from
+  Optimus removal, app-update rules, process actions and app-data cleanup.
+- Keep Windows removal-guard tasks within the Task Scheduler command limit.
+- Wait for active maintenance to finish before enabling Proceed in an update
+  review, preserving installer locks and saved update holds.
+- Fix the startup App updater stopping with a 'stages' error before its update
+  check could run.
+
 ## 0.12.53
 
 - Show a live startup scan window for driver updates, app updates, the Defender

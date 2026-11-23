@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any
 
+from .app_removal_protection import is_windows_app_identity
 from .item_progress import BoundItemProgress, accepts_progress_callback, normalize_item_progress
 from .update_scan_evidence import app_scan_evidence, attach_app_scan_error, with_app_scan
 from .update_holds import load_update_holds, matching_update_hold, held_update_result, is_known_update_hold
@@ -121,6 +122,8 @@ def fresh_candidates(scan: Any) -> dict[str, dict[str, Any]]:
         seen.add(folded)
         if item.get('package_id', identity) != identity or item.get('source') != 'winget':
             continue
+        if is_windows_app_identity(identity):
+            continue  # The remote-access Windows App is never an Optimus update target.
         version, available = item.get('version'), item.get('available')
         if not valid_update_version(version, installed=True) or not valid_update_version(available):
             continue

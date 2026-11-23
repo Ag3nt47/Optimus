@@ -6239,6 +6239,7 @@ class OptimusWindow(QMainWindow):
             from .widgets.startup_progress import StartupProgressDialog
             dashboard = self._startup_progress_window = StartupProgressDialog(selected, self)
             dashboard.cancelRequested.connect(self._cancel_startup_jobs)
+            dashboard.skipRequested.connect(self._skip_startup_job)
         dashboard.showNormal() if dashboard.isMinimized() else dashboard.show()
         if activate:
             dashboard.raise_()
@@ -6271,6 +6272,13 @@ class OptimusWindow(QMainWindow):
             if event.get('status') == 'running' and not dashboard.stopping:
                 self.status.setText('Startup jobs: ' + str(event.get('description') or event.get('title') or 'running'))
 
+    @Slot(str)
+    def _skip_startup_job(self, key):
+        jobs = self._startup_jobs
+        accepted = jobs is not None and jobs.skip(key)
+        if self._startup_progress_window is not None:
+            self._startup_progress_window.skip_response(key, accepted)
+
     @Slot()
     def _cancel_startup_jobs(self):
         jobs = self._startup_jobs
@@ -6300,6 +6308,10 @@ class OptimusWindow(QMainWindow):
             jobs.stop()
             self._startup_jobs_gate.stop()
             return
+        if self._startup_progress_window is not None:
+            # Settings can change motion while a provider is quiet. Reuse this
+            # GUI poll to pause/resume its rings without an additional timer.
+            self._startup_progress_window._sync_rings()
         if not state['started']:
             if self._startup_update_pending or self.busy:
                 return

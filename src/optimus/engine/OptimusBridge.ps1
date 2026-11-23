@@ -76,9 +76,30 @@ function New-OptimusCancellationCallback {
     $marker=Join-Path (Join-Path (Join-Path $DataRoot 'request-cancellation') ([string]$Request.id)) 'cancel.request'
     return { Test-Path -LiteralPath $marker -PathType Leaf }.GetNewClosure()
 }
+function Test-OptimusBridgeWindowsAppValue {
+    param($Value)
+    if($null -eq $Value){return $false}
+    if($Value -is [string]){
+        if($Value.Trim() -iin @('MicrosoftCorporationII.Windows365','MicrosoftCorporationII.Windows365_8wekyb3d8bbwe','Microsoft.WindowsApp','9N1F85V9T8BN','Windows App','Microsoft Windows App')){return $true}
+        $full='MicrosoftCorporationII\.Windows365_\d+(?:\.\d+){3}_(?:x86|x64|arm|arm64|neutral)_[A-Za-z0-9.~]*_8wekyb3d8bbwe'
+        if($Value -imatch ('^'+$full+'$')){return $true}
+        if($Value -imatch ('(?:^|[\\/])(?:WindowsApps[\\/]'+$full+'|Packages[\\/]MicrosoftCorporationII\.Windows365_8wekyb3d8bbwe)(?:[\\/]|$)')){return $true}
+        return $Value -imatch 'shell:AppsFolder[\\/]MicrosoftCorporationII\.Windows365_8wekyb3d8bbwe(?:![A-Za-z0-9.]+)?(?:$|[\s"''])'
+    }
+    if($Value -is [Collections.IDictionary]){
+        foreach($item in $Value.Values){if(Test-OptimusBridgeWindowsAppValue $item){return $true}}
+    }elseif($Value -is [Collections.IEnumerable]){
+        foreach($item in $Value){if(Test-OptimusBridgeWindowsAppValue $item){return $true}}
+    }elseif($Value -is [pscustomobject]){
+        foreach($property in $Value.PSObject.Properties){if(Test-OptimusBridgeWindowsAppValue $property.Value){return $true}}
+    }
+    return $false
+}
 function Invoke-OptimusRequest {
     param($Request)
     $arg=$Request.arguments
+    if($Request.operation -in @('startup_set','startup_remove','service_set','duplicate_recycle','restore','maintenance_apply') -and
+        (Test-OptimusBridgeWindowsAppValue $arg)){throw 'Windows App is protected; Optimus will not modify its app, startup entries or data.'}
     switch ([string]$Request.operation) {
         'update_recovery_probe' { Get-OptimusUpdateRecoveryProbe }
         'system_diagnostics' { Get-OptimusSystemDiagnostics }

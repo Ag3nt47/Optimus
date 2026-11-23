@@ -25,6 +25,7 @@ import uuid
 
 from .automation import RunLease
 from .filesystem import _ordinary_data_path
+from .app_removal_protection import is_windows_app_path
 from .parallel_updates import pending_updates_barrier
 from .speed_enhancements import _current_owner, _private_json
 
@@ -159,6 +160,8 @@ def _private_windows(path):
 class _Output:
     def __init__(self, destination):
         self.path = _path(destination)
+        if is_windows_app_path(self.path):
+            raise ValueError('Windows App remote-access files and settings cannot be modified by Optimus.')
         self.parent = _directory(self.path.parent)
         self.parent_identity = self.parent.stat().st_dev, self.parent.stat().st_ino
         if _ordinary_data_path(self.path, file=True) is not None:
@@ -470,6 +473,8 @@ class FileUtilities:
         from .wallpaper_preservation import protected_wallpaper_path, current_wallpaper_paths
         current_wallpaper_paths(refresh=True)
         path = _path(path)
+        if is_windows_app_path(path):
+            raise ValueError('Windows App remote-access files and settings are protected from overwriting.')
         if protected_wallpaper_path(path):
             raise ValueError('Wallpaper and Store-managed state is preserved from overwriting.')
         home = Path.home()

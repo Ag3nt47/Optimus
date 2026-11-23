@@ -18,6 +18,7 @@ import uuid
 from .automated_system import startup_descriptor
 from .workflow import atomic_json
 from . import performance
+from .app_removal_protection import is_windows_app_path
 
 TTL_SECONDS = 900
 MAX_ACTIONS = 25
@@ -51,6 +52,8 @@ def _identity(record):
 
 
 def _protected_executable(executable, name=''):
+    if is_windows_app_path(executable):
+        return 'Windows App remote access is protected from process and startup changes.'
     combined = re.sub('[^a-z0-9]', '', (str(name) + str(executable)).casefold())
     basename = ntpath.basename(str(executable)).casefold()
     if 'bingwallpaper' in combined:

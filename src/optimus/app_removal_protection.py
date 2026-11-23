@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from pathlib import PureWindowsPath
 
 EXCLUSIONS_KEY = 'app_removal_exclusions'
 WINDOWS_APP_NAME = 'MicrosoftCorporationII.Windows365'
@@ -16,6 +17,58 @@ _STORE_NAME = re.compile(r'[A-Za-z0-9.-]{3,50}\Z')
 _PUBLISHER_ID = re.compile(r'[A-Za-z0-9]{13}\Z')
 _EDGE_DESKTOP = ('Microsoft Edge', 'Microsoft Edge browser')
 _EDGE_STORE = 'Microsoft.MicrosoftEdge.Stable'
+_WINDOWS_APP_ALIASES = frozenset(value.casefold() for value in (
+    WINDOWS_APP_NAME, WINDOWS_APP_FAMILY, WINDOWS_APP_STORE_ID, 'Microsoft.WindowsApp',
+    'Windows App', WINDOWS_APP_RECORD['label']))
+
+
+def _windows_app_exact_identity(value):
+    if not isinstance(value, str):
+        return False
+    value = value.strip().casefold()
+    if value in _WINDOWS_APP_ALIASES:
+        return True
+    parts = value.split('_')
+    return (len(parts) == 5 and parts[0] == WINDOWS_APP_NAME.casefold()
+            and parts[-1] == WINDOWS_APP_FAMILY.rsplit('_', 1)[-1].casefold()
+            and bool(re.fullmatch(r'\d+(?:\.\d+){3}', parts[1]))
+            and parts[2] in ('x86', 'x64', 'arm', 'arm64', 'neutral')
+            and bool(re.fullmatch(r'[a-z0-9.~]*', parts[3])))
+
+
+def is_windows_app_identity(value):
+    """Recognize only the reserved remote-access app's existing exact identities."""
+    if not isinstance(value, dict):
+        return _windows_app_exact_identity(value)
+    strong_fields = ('appIdentity', 'identity', 'Identity', 'PackageFamilyName', 'packageFamilyName',
+                     'package_family_name', 'PackageFullName', 'packageFullName', 'package_full_name',
+                     'PackageName', 'packageName', 'package_name')
+    fields = strong_fields + ('id', 'Id', 'package_id', 'winget_id')
+    if any(_windows_app_exact_identity(value.get(key)) for key in fields):
+        return True
+    # A complete package identity takes priority over a misleading display name.
+    if any(isinstance(value.get(key), str) and value[key] for key in fields):
+        return False
+    return any(_windows_app_exact_identity(value.get(key)) for key in ('name', 'Name', 'DisplayName', 'label'))
+
+
+def is_windows_app_path(path):
+    """Preserve the exact installed package and its per-user package data tree."""
+    if not isinstance(path, (str, PureWindowsPath)):
+        try:
+            path = path.__fspath__()
+        except (AttributeError, TypeError):
+            return False
+    if not isinstance(path, (str, PureWindowsPath)):
+        return False
+    parts = PureWindowsPath(path).parts
+    for index, parent in enumerate(parts[:-1]):
+        package = parts[index + 1]
+        if parent.casefold() == 'packages' and package.casefold() == WINDOWS_APP_FAMILY.casefold():
+            return True
+        if parent.casefold() == 'windowsapps' and len(package.split('_')) == 5 and _windows_app_exact_identity(package):
+            return True
+    return False
 
 
 def _text(value):
@@ -66,6 +119,8 @@ def removal_app_record(inventory_row):
 
 def is_removal_protected(rows, *, identity='', names=(), kind=None):
     """Match trusted aliases exactly. With an AppX family use it exclusively."""
+    if is_windows_app_identity(identity) or not identity and any(is_windows_app_identity(name) for name in names):
+        return True
     identity = identity.casefold() if isinstance(identity, str) else ''
     aliases = {name.casefold() for name in names if isinstance(name, str) and name}
     for row in rows:
@@ -101,21 +156,14 @@ def _appx_family(target):
     return ''
 
 
-WINDOWS_APP_ACTION = 'windows-app'
-
-
 def exclusions_for_action(rows, action):
-    """The built-in Windows App keep-row yields only to its own explicit uninstall action."""
-    if action != WINDOWS_APP_ACTION:
-        return rows
-    return [row for row in rows if not (row['kind'] == 'store' and row['id'].casefold() == WINDOWS_APP_FAMILY.casefold())]
+    """Every removal action retains the complete saved protection list."""
+    return rows
 
 
 def debloat_target_protected(rows, target, *, action=None):
     kind, name = target.get('kind'), target.get('name')
-    family = _appx_family(target)
-    if action != WINDOWS_APP_ACTION and (family.casefold() == WINDOWS_APP_FAMILY.casefold()
-                                         or not family and name == WINDOWS_APP_NAME):
+    if is_windows_app_identity(target) or not _appx_family(target) and is_windows_app_identity(name):
         return True
     rows = exclusions_for_action(rows, action)
     if kind in ('appx', 'provisioned'):

@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
 pytest.importorskip('PySide6')
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QEvent  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
+from shiboken6 import isValid  # noqa: E402
 
 from optimus.parallel_updates import NATIVE_SOFTWARE, WINDOWS_DRIVERS  # noqa: E402
 from optimus.ui import WorkflowWorkerCard  # noqa: E402
@@ -97,6 +102,140 @@ def test_running_worker_cannot_be_decided(app, tmp_path):
     dialog = review.UpdateReviewDialog(object(), 'software_updates', {'status': 'installing'},
                                        data_dir=tmp_path)
     assert not dialog.proceed_button.isEnabled() and not dialog.deny_button.isEnabled()
+
+
+def test_proceed_waits_for_the_other_lanes_and_never_starts_a_second_worker(app, tmp_path):
+    parent = QDialog()
+    owner = SimpleNamespace(busy=True)
+    parent.owner = owner
+    dialog = review.UpdateReviewDialog(object(), 'software_updates', {'status': 'needs_review'},
+                                       parent, data_dir=tmp_path)
+    try:
+        assert not dialog.proceed_button.isEnabled()
+        assert dialog.deny_button.isEnabled()
+        assert 'Maintenance is still running' in dialog.status.text()
+        with patch('optimus.ui.BackendWorker') as worker:
+            dialog.proceed()
+        worker.assert_not_called()
+        assert not (tmp_path / review.DECISIONS_FILE).exists()
+    finally:
+        dialog.deleteLater()
+        parent.deleteLater()
+        app.processEvents()
+
+
+def test_finishing_maintenance_enables_proceed_without_automatically_installing(app, tmp_path):
+    parent = QDialog()
+    owner = SimpleNamespace(busy=True)
+    parent.owner = owner
+    dialog = review.UpdateReviewDialog(object(), 'software_updates', {'status': 'needs_review'},
+                                       parent, data_dir=tmp_path)
+    dialog._run_continuation = Mock()
+    try:
+        dialog.show()
+        app.processEvents()
+        assert not dialog.proceed_button.isEnabled()
+        owner.busy = False
+        QTest.qWait(650)
+        app.processEvents()
+        assert dialog.proceed_button.isEnabled()
+        assert 'Maintenance has finished' in dialog.status.text()
+        dialog._run_continuation.assert_not_called()
+        assert not (tmp_path / review.DECISIONS_FILE).exists()
+        dialog.hide()
+        assert not dialog._maintenance_timer.isActive()
+    finally:
+        dialog.deleteLater()
+        parent.deleteLater()
+        app.processEvents()
+
+
+def test_backend_active_workflow_also_blocks_proceed(app, tmp_path):
+    backend = SimpleNamespace(workflow=SimpleNamespace(active=True))
+    dialog = review.UpdateReviewDialog(backend, 'driver_updates', {'status': 'needs_review'},
+                                       data_dir=tmp_path)
+    try:
+        with patch('optimus.ui.BackendWorker') as worker:
+            dialog.proceed()
+        worker.assert_not_called()
+        assert not dialog.proceed_button.isEnabled()
+        backend.workflow.active = False
+        dialog._refresh_maintenance_state()
+        assert dialog.proceed_button.isEnabled()
+    finally:
+        dialog.deleteLater()
+        app.processEvents()
+
+
+def test_review_dialogs_share_one_in_flight_continuation(app, tmp_path, monkeypatch):
+    backend = SimpleNamespace(workflow=SimpleNamespace(active=False))
+    first = review.UpdateReviewDialog(backend, 'software_updates', {'status': 'needs_review'},
+                                      data_dir=tmp_path)
+    second = review.UpdateReviewDialog(backend, 'driver_updates', {'status': 'needs_review'},
+                                       data_dir=tmp_path)
+    queued = []
+    pool = SimpleNamespace(start=lambda worker: queued.append(worker))
+    monkeypatch.setattr(review.QThreadPool, 'globalInstance', lambda: pool)
+    try:
+        first.proceed()
+        second.proceed()
+        assert len(queued) == 1
+        assert not second.proceed_button.isEnabled()
+        assert 'Maintenance is still running' in second.status.text()
+        queued[0].signals.result.emit({'status': 'completed_with_skips'})
+        queued[0].signals.finished.emit()
+        app.processEvents()
+        second._refresh_maintenance_state()
+        assert second.proceed_button.isEnabled()
+        assert not review._CONTINUATIONS
+    finally:
+        for worker in queued:
+            worker.signals.finished.emit()
+        first.deleteLater()
+        second.deleteLater()
+        app.processEvents()
+
+
+def test_continuation_reservation_releases_even_after_dialog_deletion(app, tmp_path, monkeypatch):
+    backend = SimpleNamespace(workflow=SimpleNamespace(active=False))
+    first = review.UpdateReviewDialog(backend, 'software_updates', {'status': 'needs_review'},
+                                      data_dir=tmp_path)
+    queued = []
+    monkeypatch.setattr(review.QThreadPool, 'globalInstance',
+                        lambda: SimpleNamespace(start=lambda worker: queued.append(worker)))
+    first.proceed()
+    first.deleteLater()
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    assert not isValid(first)
+    second = review.UpdateReviewDialog(backend, 'driver_updates', {'status': 'needs_review'},
+                                       data_dir=tmp_path)
+    try:
+        assert not second.proceed_button.isEnabled()
+        queued[0].signals.finished.emit()
+        app.processEvents()
+        second._refresh_maintenance_state()
+        assert second.proceed_button.isEnabled()
+        assert not review._CONTINUATIONS
+    finally:
+        queued[0].signals.finished.emit()
+        second.deleteLater()
+        app.processEvents()
+
+
+def test_worker_start_failure_does_not_leave_continuation_reserved(app, tmp_path):
+    backend = SimpleNamespace(workflow=SimpleNamespace(active=False))
+    dialog = review.UpdateReviewDialog(backend, 'software_updates', {'status': 'needs_review'},
+                                       data_dir=tmp_path)
+    try:
+        with patch('optimus.ui.BackendWorker', side_effect=RuntimeError('Fixture construction failure')):
+            dialog.proceed()
+        assert not dialog._continuation_active and not review._CONTINUATIONS
+        assert 'Fixture construction failure' in dialog.status.text()
+        assert dialog.proceed_button.isEnabled()
+    finally:
+        dialog.deleteLater()
+        app.processEvents()
 
 
 @pytest.mark.parametrize('state,visible', [

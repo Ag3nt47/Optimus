@@ -105,6 +105,33 @@ Assert-OptimusTest (Test-OptimusExcludedRemovalTarget $provisioned @($exclusion)
 Assert-OptimusTest (Test-OptimusExcludedRemovalTarget $provisioned @()) 'mandatory Windows App preservation does not depend on saved configuration'
 $provisioned.packageFullName='MicrosoftCorporationII.Windows365_8.0.0.0_neutral_~_otherpub00000'
 Assert-OptimusTest (Test-OptimusExcludedRemovalTarget $provisioned @()) 'Windows App name is conservatively preserved for any publisher metadata'
+foreach($action in @('consumer-apps','m365','outlook','edge','office365-desktop','office-desktop','desktop-edge-script','windows-app')){
+    Assert-OptimusTest (Test-OptimusPreservedPackage -Name $windowsApp.Name -Action $action) ('Windows App remains mandatory for '+$action)
+    Assert-OptimusTest (Test-OptimusExcludedRemovalTarget ([pscustomobject]@{kind='office-msi';name='Renamed fixture';appIdentity=$windowsApp.PackageFamilyName}) @() -Action $action) ('exact Windows App identity cannot be disguised as another removal kind '+$action)
+}
+foreach($operation in @('maintenance_preview','maintenance_apply')){
+    $before=$script:Calls.Count;$blocked=$false
+    try{Invoke-OptimusMaintenanceRequest $operation @{action='windows-app';targets=@();confirmation='REMOVE'}|Out-Null}catch{$blocked=$_.Exception.Message -ceq 'Unknown optional-app action.'}
+    Assert-OptimusTest ($blocked -and $script:Calls.Count -eq $before) ('removed dedicated Windows App action is refused by direct native '+$operation)
+}
+$bridgeErrors=$null;$bridgeAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\src\optimus\engine\OptimusBridge.ps1'),[ref]$null,[ref]$bridgeErrors)
+Assert-OptimusTest (@($bridgeErrors).Count -eq 0) 'native bridge parses on Windows PowerShell 5'
+foreach($functionName in @('Test-OptimusBridgeWindowsAppValue','Invoke-OptimusRequest')){
+    $functionAst=@($bridgeAst.EndBlock.Statements|Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq $functionName})
+    Assert-OptimusTest ($functionAst.Count -eq 1) ('one parsed native bridge function '+$functionName)
+    . ([scriptblock]::Create($functionAst[0].Extent.Text))
+}
+$windowsAppExe='C:\Program Files\WindowsApps\'+$windowsApp.PackageFullName+'\WindowsApp.exe'
+$windowsAppData='C:\Users\fixture\AppData\Local\Packages\'+$windowsApp.PackageFamilyName+'\LocalCache\token.dat'
+Assert-OptimusTest (Test-OptimusBridgeWindowsAppValue @{record=@{Path=$windowsAppExe}}) 'native bridge recognizes exact installed package paths'
+Assert-OptimusTest (Test-OptimusBridgeWindowsAppValue @{record=@{Path=$windowsAppData}}) 'native bridge recognizes exact package data paths'
+Assert-OptimusTest (Test-OptimusBridgeWindowsAppValue ('explorer.exe shell:AppsFolder\'+$windowsApp.PackageFamilyName+'!App')) 'native bridge recognizes Windows App shell startup identity'
+Assert-OptimusTest (-not(Test-OptimusBridgeWindowsAppValue @{record=@{Path='C:\Program Files\WindowsApps\Microsoft.WindowsAppRuntime.1.8_x64__8wekyb3d8bbwe\x.dll'}})) 'Windows App protection never matches shared Windows App runtimes'
+foreach($operation in @('startup_set','startup_remove','service_set','duplicate_recycle','restore','maintenance_apply')){
+    $before=$script:Calls.Count;$blocked=$false
+    try{Invoke-OptimusRequest @{operation=$operation;arguments=@{record=@{Path=$windowsAppData}}}|Out-Null}catch{$blocked=$_.Exception.Message -like 'Windows App is protected;*'}
+    Assert-OptimusTest ($blocked -and $script:Calls.Count -eq $before) ('native bridge refuses protected app data before mutation '+$operation)
+}
 
 # New module dispatch is exercised with strict fixture signatures: unknown
 # parameters, accidental direct launches or changed selections cannot pass.

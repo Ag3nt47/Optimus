@@ -5,6 +5,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
@@ -94,6 +95,56 @@ class StartupJobTests(unittest.TestCase):
         self.assertEqual(report['status'], 'cancelled')
         self.assertEqual(sum(row['status'] == 'cancelled' for row in report['jobs']), 4)
 
+    def test_default_app_dispatch_runs_and_reports_provider_progress(self):
+        cancel, events, lease = threading.Event(), [], Lease()
+        configuration = settings(driver_updates_enabled=False, spyware_scan_enabled=False,
+                                 zero_breach_enabled=False, tracker_blocking_enabled=False)
+        outcome = {'items': [], 'failed_items': 0, 'review_only': True}
+
+        def update(backend, saved, *, cancel_event, item_callback):
+            self.assertIs(backend, self.backend)
+            self.assertEqual(saved['software_update_policy'], configuration['software_update_policy'])
+            self.assertIs(cancel_event, cancel)
+            self.assertFalse(lease.released)
+            item_callback({'description': 'Fixture application discovery',
+                           'item_progress': {'phase': 'scan', 'percent': None}})
+            return outcome
+
+        # Exercise the actual default dispatcher and report-based safety helper.
+        # Only the application updater is replaced; no host update can run.
+        with patch('optimus.automated_software.run_software', side_effect=update) as updater:
+            report = sj.run_startup_jobs(self.backend, configuration, cancel_event=cancel,
+                                        lease_factory=lambda root: lease, progress=events.append)
+        updater.assert_called_once()
+        self.assertEqual(report['status'], 'completed')
+        self.assertEqual(report['jobs'][0]['job'], 'apps')
+        self.assertEqual(report['jobs'][0]['status'], 'completed')
+        self.assertEqual(report['jobs'][0]['result'], outcome)
+        observed = [event for event in events if event.get('detail')]
+        self.assertEqual(observed[0]['description'], 'Fixture application discovery')
+        self.assertEqual(observed[0]['detail']['item_progress']['phase'], 'scan')
+        self.assertTrue(lease.released)
+
+    def test_default_app_dispatch_keeps_explicit_installer_refusal(self):
+        reason = 'Fixture previous installer outcome requires review.'
+        with patch('optimus.post_run_fixes._prior_installer_barrier', return_value=reason), \
+             patch('optimus.automated_software.run_software') as updater:
+            result = sj._run_job('apps', self.backend, settings(), None, lambda event: None)
+        updater.assert_not_called()
+        self.assertTrue(result['skipped'])
+        self.assertTrue(result['requiresReview'])
+        self.assertEqual(result['note'], reason)
+
+    def test_default_app_dispatch_reports_the_actual_provider_failure(self):
+        configuration = settings(driver_updates_enabled=False, spyware_scan_enabled=False,
+                                 zero_breach_enabled=False, tracker_blocking_enabled=False)
+        with patch('optimus.automated_software.run_software',
+                   side_effect=RuntimeError('Fixture application discovery failed.')) as updater:
+            report = sj.run_startup_jobs(self.backend, configuration, lease_factory=lambda root: Lease())
+        updater.assert_called_once()
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['jobs'][0]['error'], 'Fixture application discovery failed.')
+
     def test_live_progress_keeps_job_counts_separate_from_provider_counts(self):
         events, callbacks, lease = [], [], Lease()
 
@@ -181,6 +232,13 @@ class StartupJobTests(unittest.TestCase):
                 self.assertEqual(sj._status(result), 'failed')
         self.assertEqual(sj._status({'update': {'status': 'updated'}, 'scan': {'status': 'clean'}}), 'completed')
 
+    def test_unresolved_provider_lifecycle_is_never_labelled_finished_or_skipped(self):
+        for result in ({'skipped': True, 'uncertain': True, 'running': True, 'outcomeKnown': False},
+                       {'cancelled': True, 'running': True},
+                       {'update': {'status': 'completed'}, 'scan': {'outcomeKnown': False}}):
+            with self.subTest(result=result):
+                self.assertEqual(sj._status(result), 'uncertain')
+
     def test_backend_scan_progress_is_optional_for_native_backends(self):
         events, calls = [], []
 
@@ -259,6 +317,318 @@ class StartupJobTests(unittest.TestCase):
         jobs.thread.join(5)
         self.assertFalse(jobs.running)
         self.assertIsNone(jobs.timer)
+
+
+class StartupJobSkipTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.backend = Backend(self.temp.name)
+        self.timers = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def controller(self, provider, *, configuration=None, events=None):
+        configuration = configuration or settings(spyware_scan_enabled=False,
+            zero_breach_enabled=False, tracker_blocking_enabled=False)
+        recorded = events if events is not None else []
+        timers = self.timers
+
+        class Timer:
+            def __init__(self, delay, callback):
+                self.delay, self.callback = delay, callback
+                self.cancelled, self.daemon = False, False
+                timers.append(self)
+
+            def start(self):
+                pass  # A fixture explicitly advances any retry.
+
+            def cancel(self):
+                self.cancelled = True
+
+        def run(backend, saved, **arguments):
+            return sj.run_startup_jobs(backend, saved, lease_factory=lambda root: Lease(),
+                                       job_runner=provider, **arguments)
+
+        jobs = sj.StartupJobs(self.backend, lambda: dict(configuration), runner=run,
+                              timer_factory=Timer, on_progress=recorded.append)
+
+        def cleanup():
+            jobs.stop()
+            if jobs.thread is not None:
+                jobs.thread.join(5)
+        self.addCleanup(cleanup)
+        return jobs
+
+    def test_queued_skip_never_dispatches_and_does_not_change_saved_choices(self):
+        entered, release, calls, events = threading.Event(), threading.Event(), [], []
+        configuration = settings(zero_breach_enabled=False, tracker_blocking_enabled=False)
+        saved_choices = json.dumps(configuration, sort_keys=True)
+
+        def provider(key, backend, config, cancel, progress):
+            calls.append(key)
+            if key == 'drivers':
+                entered.set()
+                self.assertTrue(release.wait(4))
+            return {'status': 'clean'}
+
+        jobs = self.controller(provider, configuration=configuration, events=events)
+        self.assertFalse(jobs.skip('apps'))
+        self.assertTrue(jobs.start())
+        try:
+            self.assertTrue(entered.wait(4))
+            self.assertTrue(jobs.skip('apps'))
+            self.assertFalse(jobs.skip('apps'))
+            self.assertFalse(jobs.cancel.is_set())
+            accepted = [event for event in events if event.get('job') == 'apps']
+            self.assertEqual(accepted[-1]['status'], 'skipped')
+            self.assertTrue(accepted[-1]['skip_requested'])
+        finally:
+            release.set()
+            jobs.thread.join(5)
+        self.assertFalse(jobs.running)
+        self.assertEqual(calls, ['drivers', 'defender'])
+        row = next(row for row in jobs.last['jobs'] if row['job'] == 'apps')
+        self.assertEqual(row['status'], 'skipped')
+        self.assertIs(row['result']['installer_started'], False)
+        self.assertTrue(row['skip_requested'])
+        self.assertEqual(json.dumps(configuration, sort_keys=True), saved_choices)
+        self.assertFalse((self.backend.data_dir / 'preferences.json').exists())
+
+    def test_active_skip_waits_for_saved_outcome_then_continues_next_job(self):
+        entered, cancelled, receipt_release = threading.Event(), threading.Event(), threading.Event()
+        next_entered, receipt_saved, events = threading.Event(), threading.Event(), []
+
+        def provider(key, backend, config, cancel, progress):
+            if key == 'drivers':
+                entered.set()
+                self.assertTrue(cancel.wait(4))
+                cancelled.set()
+                self.assertTrue(receipt_release.wait(4))
+                receipt_saved.set()
+                return {'cancelled': True, 'installer_started': True, 'outcomeKnown': True,
+                        'running': False, 'receipt_saved': True}
+            self.assertTrue(receipt_saved.is_set())
+            next_entered.set()
+            return {'status': 'completed'}
+
+        jobs = self.controller(provider, events=events)
+        jobs.start()
+        try:
+            self.assertTrue(entered.wait(4))
+            self.assertTrue(jobs.skip('drivers'))
+            self.assertTrue(cancelled.wait(4))
+            self.assertTrue(jobs.running)
+            self.assertFalse(jobs.cancel.is_set())
+            self.assertFalse(next_entered.is_set())
+            driver_events = [event for event in events if event.get('job') == 'drivers']
+            self.assertEqual(driver_events[-1]['status'], 'running')
+            self.assertTrue(driver_events[-1]['skip_requested'])
+        finally:
+            receipt_release.set()
+            jobs.thread.join(5)
+        self.assertTrue(next_entered.is_set())
+        self.assertEqual(jobs.last['status'], 'completed')
+        first = jobs.last['jobs'][0]
+        self.assertEqual(first['status'], 'skipped')
+        self.assertTrue(first['result']['receipt_saved'])
+        self.assertTrue(first['skip_requested'])
+        self.assertEqual(jobs.last['jobs'][1]['status'], 'completed')
+
+    def test_skip_acknowledgement_cannot_arrive_after_the_terminal_result(self):
+        entered, next_entered, events, tokens = threading.Event(), threading.Event(), [], {}
+
+        def observe(event):
+            if (event.get('job') == 'drivers' and event.get('skip_requested')
+                    and event.get('status') == 'running'
+                    and event.get('description', '').startswith('Skipping safely;')):
+                # Force the formerly unsafe interleaving if cancellation was
+                # signalled before this acknowledgement could be delivered.
+                if tokens['driver'].is_set():
+                    next_entered.wait(3)
+            events.append(event)
+
+        def provider(key, backend, config, cancel, progress):
+            if key == 'drivers':
+                tokens['driver'] = cancel
+                entered.set()
+                self.assertTrue(cancel.wait(4))
+                return {'cancelled': True, 'outcomeKnown': True, 'running': False}
+            next_entered.set()
+            return {'status': 'completed'}
+
+        jobs = self.controller(provider)
+        jobs.on_progress = observe
+        jobs.start()
+        self.assertTrue(entered.wait(4))
+        self.assertTrue(jobs.skip('drivers'))
+        jobs.thread.join(5)
+        self.assertFalse(jobs.running)
+        self.assertTrue(next_entered.is_set())
+        driver_events = [event for event in events if event.get('job') == 'drivers']
+        self.assertEqual(driver_events[-1]['status'], 'skipped')
+        requested = next(index for index, event in enumerate(driver_events)
+                         if event.get('skip_requested') and event['status'] == 'running')
+        terminal = next(index for index, event in enumerate(driver_events) if event['status'] == 'skipped')
+        self.assertLess(requested, terminal)
+
+    def test_skip_request_keeps_natural_completion_authoritative(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def provider(key, backend, config, cancel, progress):
+            if key == 'drivers':
+                entered.set()
+                self.assertTrue(release.wait(4))
+            return {'status': 'completed', 'verified': True}
+
+        jobs = self.controller(provider)
+        jobs.start()
+        try:
+            self.assertTrue(entered.wait(4))
+            self.assertTrue(jobs.skip('drivers'))
+        finally:
+            release.set()
+            jobs.thread.join(5)
+        self.assertEqual(jobs.last['jobs'][0]['status'], 'completed')
+        self.assertTrue(jobs.last['jobs'][0]['skip_requested'])
+        self.assertTrue(jobs.last['jobs'][0]['result']['verified'])
+
+    def test_active_skip_does_not_hide_failed_or_uncertain_native_results(self):
+        for expected, outcome in (
+                ('failed', {'cancelled': True, 'failed_items': 1, 'status': 'failed'}),
+                ('uncertain', {'cancelled': True, 'uncertain': True, 'outcomeKnown': False})):
+            with self.subTest(expected=expected):
+                entered, release = threading.Event(), threading.Event()
+
+                def provider(key, backend, config, cancel, progress):
+                    if key == 'drivers':
+                        entered.set()
+                        self.assertTrue(release.wait(4))
+                        return outcome
+                    return {'status': 'completed'}
+
+                jobs = self.controller(provider)
+                jobs.start()
+                try:
+                    self.assertTrue(entered.wait(4))
+                    self.assertTrue(jobs.skip('drivers'))
+                finally:
+                    release.set()
+                    jobs.thread.join(5)
+                self.assertEqual(jobs.last['jobs'][0]['status'], expected)
+                self.assertEqual(jobs.last['jobs'][0]['result'], outcome)
+                self.assertEqual(jobs.last['status'], 'uncertain' if expected == 'uncertain' else 'failed')
+                self.assertEqual(jobs.last['jobs'][1]['status'],
+                                 'skipped' if expected == 'uncertain' else 'completed')
+                if expected == 'uncertain':
+                    self.assertTrue(jobs.last['jobs'][1]['result']['requiresReview'])
+                    self.assertIn('unresolved native outcome', jobs.last['detail'])
+                    self.assertIsNone(jobs.timer)
+                jobs.stop()
+
+    def test_global_stop_still_cancels_all_remaining_jobs(self):
+        entered, calls = threading.Event(), []
+
+        def provider(key, backend, config, cancel, progress):
+            calls.append(key)
+            entered.set()
+            self.assertTrue(cancel.wait(4))
+            return {'cancelled': True, 'outcomeKnown': True, 'running': False}
+
+        jobs = self.controller(provider)
+        jobs.start()
+        self.assertTrue(entered.wait(4))
+        jobs.stop()
+        jobs.thread.join(5)
+        self.assertTrue(jobs.cancel.is_set())
+        self.assertEqual(calls, ['drivers'])
+        self.assertEqual([row['status'] for row in jobs.last['jobs']], ['cancelled', 'cancelled'])
+        self.assertEqual(jobs.last['status'], 'cancelled')
+        self.assertFalse(jobs.skip('apps'))
+
+    def test_skip_requests_survive_automatic_retry_and_clear_old_report(self):
+        first, second = threading.Event(), threading.Event()
+        release_first, release_second = threading.Event(), threading.Event()
+        calls = []
+
+        def provider(key, backend, config, cancel, progress):
+            calls.append(key)
+            if len(calls) == 1:
+                first.set()
+                self.assertTrue(release_first.wait(4))
+            else:
+                second.set()
+                self.assertTrue(release_second.wait(4))
+            return {'status': 'failed', 'failed_items': 1}
+
+        jobs = self.controller(provider)
+        jobs.start()
+        try:
+            self.assertTrue(first.wait(4))
+            self.assertTrue(jobs.skip('apps'))
+            release_first.set()
+            jobs.thread.join(5)
+            first_report = jobs.last
+            self.assertEqual(len(self.timers), 1)
+            self.timers[0].callback()
+            self.assertTrue(second.wait(4))
+            self.assertIsNone(jobs.last)
+            self.assertFalse(jobs.cancel.is_set())
+            release_second.set()
+            jobs.thread.join(5)
+        finally:
+            release_first.set()
+            release_second.set()
+        self.assertEqual(calls, ['drivers', 'drivers'])
+        self.assertEqual(first_report['jobs'][1]['status'], 'skipped')
+        self.assertEqual(jobs.last['jobs'][1]['status'], 'skipped')
+        self.assertTrue(jobs.last['jobs'][1]['skip_requested'])
+
+    def test_unknown_disabled_and_completed_job_requests_are_rejected(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def provider(key, backend, config, cancel, progress):
+            if key == 'apps':
+                entered.set()
+                self.assertTrue(release.wait(4))
+            return {'status': 'completed'}
+
+        jobs = self.controller(provider)
+        jobs.start()
+        try:
+            self.assertTrue(entered.wait(4))
+            self.assertFalse(jobs.skip('drivers'))
+            self.assertFalse(jobs.skip('unknown'))
+            self.assertFalse(jobs.skip('trackers'))
+            self.assertFalse(jobs.skip(None))
+        finally:
+            release.set()
+            jobs.thread.join(5)
+        self.assertFalse(jobs.skip('apps'))
+
+    def test_owned_unresolved_journal_blocks_both_updaters_without_dispatch(self):
+        from optimus.speed_enhancements import _current_owner
+        directory = self.backend.data_dir / 'parallel-updates'
+        directory.mkdir()
+        identifier = 'a' * 32
+        path = directory / (identifier + '.json')
+        original = json.dumps({'schema': 1, 'id': identifier, 'owner': _current_owner(),
+                               'status': 'prepared', 'installer_prepared': True})
+        path.write_text(original)
+        with patch('optimus.automated_system.run_drivers') as drivers, \
+             patch('optimus.automated_software.run_software') as apps:
+            report = sj.run_startup_jobs(self.backend,
+                settings(spyware_scan_enabled=False, zero_breach_enabled=False, tracker_blocking_enabled=False),
+                lease_factory=lambda root: Lease())
+        drivers.assert_not_called()
+        apps.assert_not_called()
+        self.assertEqual([row['status'] for row in report['jobs']], ['skipped', 'skipped'])
+        for row in report['jobs']:
+            self.assertTrue(row['result']['requiresReview'])
+            self.assertTrue(row['result']['installation_blocked'])
+            self.assertIn('unresolved outcome', row['result']['note'])
+            self.assertIs(row['result']['installer_started'], False)
+        self.assertEqual(path.read_text(), original)
 
 
 if __name__ == '__main__':

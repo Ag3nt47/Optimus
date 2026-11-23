@@ -41,6 +41,9 @@ def _utc() -> str:
 def _status(result: Any) -> str:
     if not isinstance(result, dict):
         return 'completed'
+    if (result.get('uncertain') is True or result.get('outcomeKnown') is False
+            or result.get('running') is True or result.get('status') == 'uncertain'):
+        return 'uncertain'
     if result.get('cancelled') or result.get('status') in ('cancelled', 'canceled'):
         return 'cancelled'
     failed = result.get('failed_items')
@@ -51,6 +54,8 @@ def _status(result: Any) -> str:
     # Zero Breach and tracker blocking return their component outcomes together.
     components = [result[key] for key in ('update', 'scan', 'blocked') if isinstance(result.get(key), dict)]
     statuses = {_status(component) for component in components}
+    if 'uncertain' in statuses:
+        return 'uncertain'
     if 'cancelled' in statuses:
         return 'cancelled'
     if 'failed' in statuses:
@@ -80,14 +85,75 @@ def _accepts_keyword(function: Callable, name: str) -> bool:
                for parameter in parameters)
 
 
+class _JobCancellation:
+    """Combine Stop with one job's Skip without letting Skip stop the pass."""
+
+    def __init__(self, master, local):
+        self.master, self.local = master, local
+
+    def is_set(self):
+        return self.local.is_set() or self.master is not None and self.master.is_set()
+
+    def set(self):
+        self.local.set()
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        while not self.is_set():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return self.is_set()
+            self.local.wait(.025 if remaining is None else min(.025, remaining))
+        return True
+
+
+def _skip_status(result, status):
+    """A skip request cannot erase a failed or still-uncertain native outcome."""
+    pending = [result]
+    failure = False
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if (value.get('uncertain') is True or value.get('outcomeKnown') is False
+                    or value.get('running') is True or value.get('may_continue') is True
+                    or value.get('status') == 'uncertain'):
+                return 'uncertain'
+            failed = value.get('failed_items')
+            failure = failure or (isinstance(failed, (int, float)) and failed > 0
+                or value.get('status') in ('failed', 'error', 'check_failed', 'update_failed', 'partial'))
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    if failure:
+        return 'failed'
+    return 'skipped' if status == 'cancelled' else status
+
+
+def _not_started_cancelled():
+    return {'status': 'cancelled', 'cancelled': True, 'skipped': True,
+            'installer_started': False, 'outcomeKnown': True, 'running': False,
+            'note': 'Cancelled before this startup operation started.'}
+
+
 def _run_job(key: str, backend: Any, configuration: dict, cancel_event: Any, progress: Callable) -> Any:
+    if cancel_event is not None and cancel_event.is_set():
+        return _not_started_cancelled()
+    if key in ('drivers', 'apps'):
+        from .parallel_updates import pending_updates_barrier
+        barrier = pending_updates_barrier(backend)
+        if barrier:
+            return {'status': 'skipped', 'skipped': True, 'requiresReview': True,
+                    'installation_blocked': True, 'note': str(barrier),
+                    'installer_started': False, 'outcomeKnown': True, 'running': False}
+        if cancel_event is not None and cancel_event.is_set():
+            return _not_started_cancelled()
     if key == 'drivers':
         from .automated_system import run_drivers
         return run_drivers(backend, configuration, cancel_event=cancel_event, item_callback=progress)
     if key == 'apps':
         from .automated_software import run_software
         from .post_run_fixes import _prior_installer_barrier
-        barrier = _prior_installer_barrier(backend, {})
+        barrier = _prior_installer_barrier(backend, {'stages': []})
         if barrier:
             return {'skipped': True, 'requiresReview': True, 'note': barrier}
         return run_software(backend, configuration, cancel_event=cancel_event, item_callback=progress)
@@ -114,7 +180,8 @@ def _run_job(key: str, backend: Any, configuration: dict, cancel_event: Any, pro
 def run_startup_jobs(backend: Any, settings: dict, *, cancel_event: Any = None,
                      progress: Callable[[dict], None] | None = None,
                      lease_factory: Callable[[Path], Any] | None = None,
-                     job_runner: Callable[..., Any] = _run_job) -> dict[str, Any]:
+                     job_runner: Callable[..., Any] = _run_job,
+                     job_control: Any = None) -> dict[str, Any]:
     from .workflow import Preferences, atomic_json
     configuration = Preferences.validate(settings)
     report = {'started_at': _utc(), 'jobs': [], 'status': 'completed'}
@@ -144,11 +211,34 @@ def run_startup_jobs(backend: Any, settings: dict, *, cancel_event: Any = None,
                 report['reconciliation'] = reconcile(lease=lease)
             except Exception as error:
                 report['reconciliation'] = {'status': 'unavailable', 'error': str(error)[:300]}
+        unresolved = None
         for index, (key, title, _setting) in enumerate(enabled):
             if cancel_event is not None and cancel_event.is_set():
                 entry = {'job': key, 'title': title, 'status': 'cancelled'}
+                if job_control is not None:
+                    job_control._finish_job(key, 'cancelled')
                 report['jobs'].append(entry)
                 _notify(progress, dict(entry, current=index + 1, total=total, description=title + ': cancelled'))
+                continue
+            if unresolved is not None:
+                entry = {'job': key, 'title': title, 'status': 'skipped',
+                         'result': {'status': 'skipped', 'skipped': True, 'requiresReview': True,
+                                    'installer_started': False, 'outcomeKnown': True, 'running': False,
+                                    'note': unresolved}}
+                if job_control is not None and job_control._finish_job(key, 'skipped'):
+                    entry['skip_requested'] = True
+                report['jobs'].append(entry)
+                _notify(progress, dict(entry, current=index + 1, total=total, description=unresolved))
+                continue
+            if job_control is not None and not job_control._begin_job(key, index, total):
+                entry = {'job': key, 'title': title, 'status': 'skipped', 'skip_requested': True,
+                         'result': {'status': 'skipped', 'skipped': True, 'user_skipped': True,
+                                    'installer_started': False, 'outcomeKnown': True, 'running': False,
+                                    'note': 'Skipped at your request before this startup job started.'}}
+                job_control._finish_job(key, 'skipped')
+                report['jobs'].append(entry)
+                _notify(progress, dict(entry, current=index + 1, total=total,
+                                       description=title + ': skipped at your request'))
                 continue
             _notify(progress, {'job': key, 'title': title, 'status': 'running',
                                'current': index, 'total': total, 'description': title})
@@ -161,16 +251,30 @@ def run_startup_jobs(backend: Any, settings: dict, *, cancel_event: Any = None,
                 _notify(progress, {'job': job, 'title': label, 'status': 'running',
                                    'current': current, 'total': total,
                                    'description': event.get('description') or event.get('stage') or label,
+                                   **({'skip_requested': True} if job_control is not None
+                                      and job_control._skip_requested(job) else {}),
                                    'detail': event})
 
             started = time.monotonic()
             try:
-                result = job_runner(key, backend, configuration, cancel_event, notify)
-                entry = {'job': key, 'title': title, 'status': _status(result), 'result': result}
+                local_cancel = (job_control._cancellation(key, cancel_event)
+                                if job_control is not None else cancel_event)
+                result = job_runner(key, backend, configuration, local_cancel, notify)
+                status = _status(result)
+                if (job_control is not None and job_control._skip_requested(key)
+                        and not (cancel_event is not None and cancel_event.is_set())):
+                    status = _skip_status(result, status)
+                entry = {'job': key, 'title': title, 'status': status, 'result': result}
             except Exception as error:  # one job never stops the others
                 entry = {'job': key, 'title': title, 'status': 'failed', 'error': str(error)[:500]}
             finally:
                 active.clear()
+            if job_control is not None and job_control._finish_job(key, entry['status']):
+                entry['skip_requested'] = True
+            if entry['status'] == 'uncertain':
+                unresolved = (title + ' has an unresolved native outcome. Remaining startup jobs were not started; '
+                              'review the saved outcome before retrying.')
+                report['detail'] = unresolved
             entry['seconds'] = round(time.monotonic() - started, 1)
             report['jobs'].append(entry)
             _notify(progress, dict(entry, current=index + 1, total=total,
@@ -180,7 +284,8 @@ def run_startup_jobs(backend: Any, settings: dict, *, cancel_event: Any = None,
         if callable(release):
             release()
     statuses = {entry['status'] for entry in report['jobs']}
-    report['status'] = ('cancelled' if 'cancelled' in statuses else 'failed' if 'failed' in statuses else 'completed')
+    report['status'] = ('uncertain' if 'uncertain' in statuses else
+                        'cancelled' if 'cancelled' in statuses else 'failed' if 'failed' in statuses else 'completed')
     report['finished_at'] = _utc()
     try:
         atomic_json(path, report)
@@ -202,11 +307,16 @@ class StartupJobs:
         self.timer_factory, self.on_finished = timer_factory, on_finished
         self.on_progress = on_progress
         self.cancel = threading.Event()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.thread: threading.Thread | None = None
         self.timer = None
         self.last: dict | None = None
         self._generation = 0
+        self._skips: set[str] = set()
+        self._job_states: dict[str, str] = {}
+        self._job_events: dict[str, threading.Event] = {}
+        self._job_current = 0
+        self._job_total = 0
 
     @property
     def running(self) -> bool:
@@ -219,6 +329,9 @@ class StartupJobs:
             self.cancel.clear()
             self._generation += 1
             generation = self._generation
+            self.last = None
+            self._job_states = {}
+            self._job_events = {}
             if self.timer is not None:
                 self.timer.cancel()
                 self.timer = None
@@ -230,15 +343,36 @@ class StartupJobs:
     def _work(self, generation: int) -> None:
         def progress(event):
             if generation == self._generation and not self.cancel.is_set():
+                if isinstance(event, dict) and event.get('job') in self._job_states:
+                    with self.lock:
+                        self._job_states[event['job']] = str(event.get('status') or 'running')
+                        self._job_current = event.get('current', self._job_current)
                 _notify(self.on_progress, event)
         try:
+            configuration = self.settings_reader()
+            from .workflow import Preferences
+            selected = Preferences.validate(configuration)
+            keys = [key for key, _title, setting in JOBS
+                    if selected.get('startup_jobs_enabled') and selected.get(setting)]
+            with self.lock:
+                self._job_states = {key: 'pending' for key in keys}
+                self._job_events = {key: threading.Event() for key in keys}
+                self._job_current, self._job_total = 0, len(keys)
+                for key in self._skips.intersection(keys):
+                    self._job_events[key].set()
             arguments = {'cancel_event': self.cancel}
             if self.on_progress is not None and _accepts_keyword(self.runner, 'progress'):
                 arguments['progress'] = progress
-            report = self.runner(self.backend, self.settings_reader(), **arguments)
+            if _accepts_keyword(self.runner, 'job_control'):
+                arguments['job_control'] = self
+            report = self.runner(self.backend, configuration, **arguments)
         except Exception as error:
             report = {'status': 'failed', 'error': str(error)[:500], 'jobs': []}
-        self.last = report
+        with self.lock:
+            for key, status in self._job_states.items():
+                if status in ('pending', 'running'):
+                    self._job_states[key] = 'not_run'
+            self.last = report
         if self.on_finished is not None:
             try:
                 self.on_finished(report)
@@ -251,6 +385,50 @@ class StartupJobs:
                 self.timer = self.timer_factory(RETRY_SECONDS, self.start)
                 self.timer.daemon = True
                 self.timer.start()
+
+    def _begin_job(self, key, current, total):
+        with self.lock:
+            self._job_current, self._job_total = current, total
+            if key in self._skips:
+                self._job_states[key] = 'skipped'
+                return False
+            self._job_states[key] = 'running'
+            return True
+
+    def _cancellation(self, key, master):
+        with self.lock:
+            return _JobCancellation(master, self._job_events[key])
+
+    def _skip_requested(self, key):
+        with self.lock:
+            return key in self._skips
+
+    def _finish_job(self, key, status):
+        with self.lock:
+            self._job_states[key] = status
+            return key in self._skips
+
+    def skip(self, key: str) -> bool:
+        """Skip one pending/active job for this app session, without Stop."""
+        with self.lock:
+            if (not isinstance(key, str) or not self.running or self.cancel.is_set()
+                    or self._job_states.get(key) not in ('pending', 'running') or key in self._skips):
+                return False
+            active = self._job_states[key] == 'running'
+            self._skips.add(key)
+            if not active:
+                self._job_states[key] = 'skipped'
+            title = next(title for name, title, _setting in JOBS if name == key)
+            event = {'job': key, 'title': title, 'status': 'running' if active else 'skipped',
+                     'skip_requested': True, 'current': self._job_current, 'total': self._job_total,
+                     'description': ('Skipping safely; waiting for the active operation to return.' if active
+                                     else 'Skipped at your request before this startup job started.')}
+            # Publish the request before waking the native cancellation token.
+            # The worker finishes jobs under this same lock, so a late request
+            # can never arrive after its actual terminal progress notification.
+            _notify(self.on_progress, event)
+            self._job_events[key].set()
+            return True
 
     def stop(self) -> None:
         self.cancel.set()

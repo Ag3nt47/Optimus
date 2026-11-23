@@ -33,6 +33,8 @@ import time
 import uuid
 from typing import Any, Callable, Iterable
 
+from .app_removal_protection import is_windows_app_identity, is_windows_app_path
+
 FOLDER = 'tracker-blocking'
 QUARANTINE = 'quarantine'
 PLAN_TTL_SECONDS = 15 * 60
@@ -87,6 +89,8 @@ def _in_trusted_location(path: str) -> bool:
 
 def classify(path: str, *, signed: bool | None, exists: bool) -> tuple[str, str]:
     """(verdict, reason) for one executable that used the microphone."""
+    if is_windows_app_path(path) or is_windows_app_identity(path):
+        return 'ok', 'Windows App remote access is always protected by Optimus.'
     name = ntpath.basename(_norm(path))
     if not exists:
         return 'ok', 'The file no longer exists; only a stale Windows usage record remains.'
@@ -195,6 +199,8 @@ def _powershell(script: str, *args: str) -> subprocess.CompletedProcess:
 
 
 def add_firewall_block(path: str, name: str) -> None:
+    if is_windows_app_path(path) or is_windows_app_identity(path):
+        raise ValueError('Windows App remote access cannot be blocked by Optimus.')
     script = ('param($p,$n) if(-not (Get-NetFirewallRule -DisplayName $n -ErrorAction SilentlyContinue)){'
               'New-NetFirewallRule -DisplayName $n -Direction Outbound -Program $p -Action Block -Profile Any | Out-Null}')
     result = _powershell('& {' + script + '}', path, name)
@@ -304,6 +310,9 @@ class AudioTrackers:
     def _block_one(self, row: dict[str, Any], receipt_id: str) -> dict[str, Any]:
         path, steps = row['app'], {}
         outcome = {'app': path, 'verdict': row['verdict'], 'reason': row['reason'], 'steps': steps}
+        if is_windows_app_path(path) or is_windows_app_identity(path):
+            return dict(outcome, status='skipped', protected=True,
+                        detail='Windows App remote access is protected; nothing was changed.')
         try:
             steps['stopped_processes'] = self._stop_processes(path)
             rule = RULE_PREFIX + receipt_id[:8] + ' ' + ntpath.basename(path)
@@ -395,6 +404,9 @@ class AudioTrackers:
             return {'status': 'already_restored'}
         reg, errors = self._registry(), []
         for item in receipt.get('items') or []:
+            if is_windows_app_path(item.get('app')) or is_windows_app_identity(item.get('app')):
+                errors.append('Windows App remote access is protected; its files and settings were not changed.')
+                continue
             steps = item.get('steps') or {}
             try:
                 if steps.get('quarantined_to') and os.path.isfile(steps['quarantined_to']) and not os.path.exists(item['app']):

@@ -5,7 +5,8 @@ import json
 import pytest
 
 from optimus.app_removal_protection import (WINDOWS_APP_FAMILY, WINDOWS_APP_NAME, WINDOWS_APP_RECORD,
-    debloat_target_protected, is_removal_protected, removal_app_record, validate_app_removal_exclusions)
+    debloat_target_protected, exclusions_for_action, is_removal_protected, is_windows_app_identity,
+    is_windows_app_path, removal_app_record, validate_app_removal_exclusions)
 from optimus.launch_review import launch_warning
 from optimus.maintenance import Maintenance
 from optimus.unattended_configuration import approve_unattended_settings, matches_unattended
@@ -110,6 +111,59 @@ def test_windows_app_is_hard_preserved_without_saved_exclusions(tmp_path):
     result = tool.debloat_apply({'planId': plan['planId'], 'selectedIds': ['weather'], 'confirmed': True})
     assert result['results'] == [{'id': 'weather', 'removed': True}]
     assert [row['id'] for row in bridge.applied[0]['targets']] == ['weather']
+
+
+@pytest.mark.parametrize('identity', [WINDOWS_APP_NAME, WINDOWS_APP_FAMILY, '9N1F85V9T8BN',
+    'Microsoft.WindowsApp', 'Windows App', 'Microsoft Windows App',
+    WINDOWS_APP_NAME + '_99.0.0.0_x64__8wekyb3d8bbwe',
+    WINDOWS_APP_NAME + '_99.0.0.0_neutral_~_8wekyb3d8bbwe'])
+def test_windows_app_reserved_identities_are_protected_without_saved_rows(identity):
+    assert is_windows_app_identity(identity)
+    assert is_windows_app_identity({'id': identity})
+    assert is_removal_protected([], identity=identity)
+
+
+@pytest.mark.parametrize('action', ['consumer-apps', 'm365', 'outlook', 'edge', 'office365-desktop',
+                                   'office-desktop', 'desktop-edge-script', 'windows-app'])
+def test_no_action_can_bypass_windows_app_protection(action):
+    target = package(WINDOWS_APP_NAME, 'remote-access')
+    assert debloat_target_protected([], target, action=action)
+    assert exclusions_for_action([WINDOWS_APP_RECORD], action) == [WINDOWS_APP_RECORD]
+
+
+def test_windows_app_paths_protect_package_data_and_versions_without_matching_other_runtimes():
+    for path in (
+        'C:\\Program Files\\WindowsApps\\' + WINDOWS_APP_NAME + r'_99.0.0.0_x64__8wekyb3d8bbwe\WindowsApp.exe',
+        'C:\\Users\\fixture\\AppData\\Local\\Packages\\' + WINDOWS_APP_FAMILY + r'\LocalCache\token.dat',
+        'C:\\Users\\fixture\\AppData\\Local\\Packages\\' + WINDOWS_APP_FAMILY,
+    ):
+        assert is_windows_app_path(path)
+    for path in (r'C:\Program Files\WindowsApps\Microsoft.WindowsAppRuntime.1.8_x64__8wekyb3d8bbwe\a.dll',
+                 'C:\\Users\\fixture\\AppData\\Local\\Packages\\' + WINDOWS_APP_FAMILY + r'.Preview\LocalCache',
+                 'C:\\Program Files\\WindowsApps\\' + WINDOWS_APP_NAME + r'_99.0.0.0_x64__otherpub00000\x.exe'):
+        assert not is_windows_app_path(path)
+    assert not is_windows_app_identity({'id': 'Fixture.OtherApp', 'name': 'Windows App'})
+
+
+def test_removed_windows_app_action_cannot_replay_a_stale_saved_plan(tmp_path):
+    bridge = Bridge(package('Microsoft.BingWeather', 'weather'))
+    tool = Maintenance(bridge, tmp_path, removal_exclusions_reader=lambda: [])
+    plan = tool.debloat_preview('consumer-apps')
+    path = tool.plan_dir / (plan['planId'] + '.json')
+    saved = json.loads(path.read_text())
+    saved['action'] = 'windows-app'
+    path.write_text(json.dumps(saved))
+    with pytest.raises(ValueError, match='saved maintenance plan is invalid'):
+        tool.debloat_apply({'planId': plan['planId'], 'selectedIds': ['weather'], 'confirmed': True})
+    assert bridge.applied == []
+
+
+@pytest.mark.parametrize('identity', ['Microsoft.WindowsApp', '9N1F85V9T8BN', WINDOWS_APP_FAMILY])
+def test_windows_app_direct_update_never_starts_a_provider(tmp_path, identity):
+    from optimus.maintenance import UpdatePreflightError
+    tool = Maintenance(Bridge(), tmp_path)
+    with pytest.raises(UpdatePreflightError, match='Windows App is protected'):
+        tool.updates_apply(identity, confirmed=True)
 
 
 @pytest.mark.parametrize('kind', ['edge', 'desktop-edge-script', 'office-dialog'])

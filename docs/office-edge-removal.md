@@ -24,7 +24,7 @@ Desktop suite removal validates the exact product registration, installed produc
 
 ## Windows App stays installed
 
-**Keep Windows App — remote access (protected)** is always checked and cannot be cleared. Its exact package family is `MicrosoftCorporationII.Windows365_8wekyb3d8bbwe`. Consumer-app Select all, Office removal and returning-app checks cannot select it for removal. Older saved selections that included its package name are filtered out without resetting unrelated choices.
+**Keep Windows App — remote access (protected)** is always checked and cannot be cleared. Its exact package family is `MicrosoftCorporationII.Windows365_8wekyb3d8bbwe`. Consumer-app Select all, Office removal and returning-app checks cannot select it for removal. Older saved selections that included its package name are filtered out without resetting unrelated choices. Windows App is also excluded from Optimus app-update rules, process actions and package-data cleanup. Direct or stale uninstall requests are refused.
 
 Frameworks and shared Windows runtimes are also preserved. WebView2 has a [separate runtime distribution and update lifecycle](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution); browser removal does not authorize deleting that runtime. Bing Wallpaper stays protected. **Settings → Protected apps** lets you keep additional supported apps from curated debloat and per-app removal.
 

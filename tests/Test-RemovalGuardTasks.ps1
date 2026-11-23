@@ -3,6 +3,25 @@ $ErrorActionPreference='Stop'
 $script:Assertions=0
 function Assert-GuardFixture {param([bool]$Condition,[string]$Message)if(-not $Condition){throw ('FAIL: '+$Message)};$script:Assertions++}
 function Assert-GuardRefused {param([scriptblock]$Action,[string]$Message)$blocked=$false;try{$null=& $Action}catch{$blocked=$true};Assert-GuardFixture $blocked $Message}
+$compactFixture=@'
+#requires -Version 5.1
+# Discard this fixture line comment.
+function Get-GuardCompactFixture {
+    $literal='literal # and <# keep this #>'
+    $here=@"
+literal here-string # and <# keep this too #>
+"@
+    $literal; <# Discard this fixture block comment.
+    Its newline is inside the comment token. #> $here
+}
+'@
+$compactFixtureResult=ConvertTo-OptimusRemovalGuardEmbeddedCode $compactFixture
+Assert-GuardFixture ($compactFixtureResult -notmatch 'Discard this fixture' -and $compactFixtureResult -notmatch 'Its newline') 'only parsed comment extents are removed from embedded code'
+Assert-GuardFixture ($compactFixtureResult -match '#requires -Version 5.1' -and $compactFixtureResult -match 'literal # and <# keep this #>' -and $compactFixtureResult -match 'literal here-string # and <# keep this too #>') 'directives and literal comment markers survive compression preparation'
+$originalFixtureValues=@(& ([scriptblock]::Create($compactFixture+"`nGet-GuardCompactFixture")))
+$compactFixtureValues=@(& ([scriptblock]::Create($compactFixtureResult+"`nGet-GuardCompactFixture")))
+Assert-GuardFixture ($originalFixtureValues.Count -eq 2 -and ($originalFixtureValues -join "`n") -ceq ($compactFixtureValues -join "`n")) 'PS5 parses and executes compact fixture with the same literal results'
+Assert-GuardRefused {ConvertTo-OptimusRemovalGuardEmbeddedCode 'function Broken {'} 'invalid code is refused before embedding'
 function New-GuardFixtureCollection {
  param([string]$Kind)
  $value=[pscustomobject]@{Rows=(New-Object Collections.Generic.List[object]);Kind=$Kind}

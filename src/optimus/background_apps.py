@@ -24,6 +24,8 @@ from typing import Any, Callable, Iterable
 
 import psutil
 
+from .app_removal_protection import is_windows_app_path
+
 RECEIPT_FOLDER = 'background-apps'
 PLAN_TTL_SECONDS = 15 * 60
 WATCHER_REVIEW_BYTES = 150 * 1024 * 1024
@@ -223,10 +225,14 @@ class BackgroundApps:
                 'note': 'Nothing was changed. Select stoppable items to end them; startup entries are only reported.'}
 
     def _verify(self, row: dict[str, Any]) -> Any:
+        if is_windows_app_path(row.get('exe')):
+            raise ValueError('Windows App remote access is protected from process changes.')
         process = self.process_factory(int(row['pid']))
         created = float(process.create_time())
         if row.get('create_time') is None or abs(created - float(row['create_time'])) > 0.01:
             raise ValueError('The process ended and its PID was reused.')
+        if is_windows_app_path(process.exe()):
+            raise ValueError('Windows App remote access is protected from process changes.')
         if _norm(process.exe()) != _norm(row['exe']) or _match_rule(process.name(), process.exe()) is None:
             raise ValueError('The process no longer matches a reviewed non-essential app.')
         return process

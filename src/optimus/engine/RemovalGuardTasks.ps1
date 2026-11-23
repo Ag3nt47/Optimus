@@ -248,6 +248,30 @@ try{
 if($issues){exit 3};exit 0
 '@
 }
+function ConvertTo-OptimusRemovalGuardEmbeddedCode {
+    param([string]$Code)
+    # Parser extents distinguish comments from literal # characters and here-strings.
+    # Preserve tokenized newlines and directives; require every other token to match.
+    $tokens=$null;$errors=$null
+    $null=[Management.Automation.Language.Parser]::ParseInput($Code,[ref]$tokens,[ref]$errors)
+    if(@($errors).Count){throw 'The embedded removal code is invalid.'}
+    $text=[Text.StringBuilder]::new($Code)
+    foreach($token in @($tokens|Where-Object {$_.Kind -eq [Management.Automation.Language.TokenKind]::Comment}|Sort-Object {$_.Extent.StartOffset} -Descending)){
+        if($token.Text -match '^#requires(?:\s|$)' -or ($token.Extent.StartOffset -eq 0 -and $token.Text -ceq '# Optimus embedded removal guard v2')){continue}
+        [void]$text.Remove($token.Extent.StartOffset,$token.Extent.EndOffset-$token.Extent.StartOffset)
+        [void]$text.Insert($token.Extent.StartOffset,' ')
+    }
+    $compact=$text.ToString();$actualTokens=$null;$actualErrors=$null
+    $null=[Management.Automation.Language.Parser]::ParseInput($compact,[ref]$actualTokens,[ref]$actualErrors)
+    if(@($actualErrors).Count){throw 'The compact embedded removal code is invalid.'}
+    $expected=@($tokens|Where-Object {$_.Kind -ne [Management.Automation.Language.TokenKind]::Comment})
+    $actual=@($actualTokens|Where-Object {$_.Kind -ne [Management.Automation.Language.TokenKind]::Comment})
+    if($expected.Count -ne $actual.Count){throw 'Compacting the embedded removal code changed its tokens.'}
+    for($i=0;$i -lt $expected.Count;$i++){
+        if($expected[$i].Kind -ne $actual[$i].Kind -or $expected[$i].Text -cne $actual[$i].Text){throw 'Compacting the embedded removal code changed its tokens.'}
+    }
+    $compact
+}
 function New-OptimusRemovalGuardBundle {
     param([string]$DataRoot,[string]$Sid,$ApprovedScope,[string]$ScopeHash)
     $scopeJson=ConvertTo-OptimusGuardCanonicalJson $ApprovedScope
@@ -278,7 +302,7 @@ function New-OptimusRemovalGuardBundle {
         $parts+=@($selected|ForEach-Object {$_.Extent.Text})
     }
     $parts+=Get-OptimusRemovalGuardRuntimeText
-    $body=$parts -join "`n";$raw=[Text.Encoding]::UTF8.GetBytes($body)
+    $body=ConvertTo-OptimusRemovalGuardEmbeddedCode ($parts -join "`n");$raw=[Text.Encoding]::UTF8.GetBytes($body)
     if($raw.Length -gt 262144){throw 'The native guard exceeds its uncompressed size limit.'}
     $memory=[IO.MemoryStream]::new();$gzip=[IO.Compression.GZipStream]::new($memory,[IO.Compression.CompressionMode]::Compress,$true)
     try{$gzip.Write($raw,0,$raw.Length)}finally{$gzip.Dispose()}

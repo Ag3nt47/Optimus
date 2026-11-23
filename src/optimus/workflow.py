@@ -313,7 +313,8 @@ class Preferences:
         # Earlier saved consumer lists included the remote-access client.
         # Remove only that legacy selection, retaining all other saved choices.
         if type(packages) is list:
-            packages = [name for name in packages if name != 'MicrosoftCorporationII.Windows365']
+            from .app_removal_protection import is_windows_app_identity
+            packages = [name for name in packages if not is_windows_app_identity(name)]
             result['consumer_debloat_package_names'] = packages
         if (type(packages) is not list or len(packages) > len(CONSUMER_PACKAGE_NAMES)
                 or any(not isinstance(item, str) or item not in CONSUMER_PACKAGE_NAMES for item in packages)

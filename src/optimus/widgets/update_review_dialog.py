@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import threading
 import time
 
-from PySide6.QtCore import Qt, QThreadPool, Signal
+from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout,
 )
@@ -29,6 +30,17 @@ ATTENTION = ('needs_review', 'failed', 'blocked', 'uncertain', 'completed_with_e
 DECISIONS_FILE = 'update-review-decisions.json'
 MAX_JOURNAL_BYTES = 2 * 1024 * 1024
 _WORKERS = {}  # Keep runnables alive until the global pool finishes them.
+_CONTINUATIONS = {}
+_CONTINUATION_LOCK = threading.RLock()
+
+
+def _release_continuation(backend_key, token, worker_key=None):
+    # This callback must survive a review dialog being closed or replaced.
+    with _CONTINUATION_LOCK:
+        if _CONTINUATIONS.get(backend_key) is token:
+            _CONTINUATIONS.pop(backend_key, None)
+    if worker_key is not None:
+        _WORKERS.pop(worker_key, None)
 
 
 def journal_lane(record):
@@ -153,6 +165,11 @@ class UpdateReviewDialog(QDialog):
     def __init__(self, backend, lane, state, parent=None, *, data_dir=None):
         super().__init__(parent)
         self.backend, self.lane, self.state = backend, lane, dict(state or {})
+        self._continuation_active = False
+        self._continuation_complete = False
+        self._waiting_for_maintenance = False
+        self._worker_review_ready = str(self.state.get('status')) not in (
+            'running', 'installing', 'scanning', 'preparing', 'pending')
         self.data_dir = Path(data_dir if data_dir is not None else backend.data_dir)
         self.record, self.record_path = latest_journal(self.data_dir, lane)
         self.setWindowTitle('Optimus — review ' + LANES.get(lane, 'updates').lower())
@@ -196,8 +213,48 @@ class UpdateReviewDialog(QDialog):
         buttons.addStretch(1)
         buttons.addWidget(self.close_button)
         layout.addLayout(buttons)
-        if str(self.state.get('status')) in ('running', 'installing', 'scanning', 'preparing', 'pending'):
+        self._maintenance_timer = QTimer(self)
+        self._maintenance_timer.setInterval(500)
+        self._maintenance_timer.timeout.connect(self._refresh_maintenance_state)
+        if not self._worker_review_ready:
             self._set_busy('This worker is still running. Review again when it stops.')
+        else:
+            self._refresh_maintenance_state()
+
+    def _maintenance_running(self):
+        with _CONTINUATION_LOCK:
+            if id(self.backend) in _CONTINUATIONS:
+                return True
+        progress = self.parentWidget()
+        owner = getattr(progress, 'owner', None)
+        in_progress = getattr(owner, '_work_in_progress', None)
+        if callable(in_progress) and in_progress():
+            return True
+        if bool(getattr(owner, 'busy', False)):
+            return True
+        return bool(getattr(getattr(self.backend, 'workflow', None), 'active', False))
+
+    def _refresh_maintenance_state(self):
+        if not self._worker_review_ready or self._continuation_active or self._continuation_complete:
+            return
+        if self._maintenance_running():
+            self._waiting_for_maintenance = True
+            self.proceed_button.setEnabled(False)
+            self.status.setText('Maintenance is still running. Proceed becomes available when it finishes; '
+                                'your saved update approvals and holds still apply.')
+        elif self._waiting_for_maintenance:
+            self._waiting_for_maintenance = False
+            self.proceed_button.setEnabled(True)
+            self.status.setText('Maintenance has finished. Proceed searches again using your saved approvals.')
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh_maintenance_state()
+        self._maintenance_timer.start()
+
+    def hideEvent(self, event):
+        self._maintenance_timer.stop()
+        super().hideEvent(event)
 
     def _set_busy(self, message):
         self.proceed_button.setEnabled(False)
@@ -210,18 +267,44 @@ class UpdateReviewDialog(QDialog):
 
     def proceed(self):
         from ..ui import BackendWorker
+        if not self._worker_review_ready or self._continuation_active or self._continuation_complete:
+            return
+        if self._maintenance_running():
+            self._refresh_maintenance_state()
+            return
+        token = object()
+        backend_key = id(self.backend)
+        with _CONTINUATION_LOCK:
+            if backend_key in _CONTINUATIONS:
+                self._refresh_maintenance_state()
+                return
+            _CONTINUATIONS[backend_key] = token
+        self._continuation_active = True
         self._set_busy('Continuing your approved updates… This window can stay open; installers keep '
                        'their own safeguards.')
-        worker = BackendWorker(self._run_continuation, (), {})
-        _WORKERS[id(worker)] = worker
-        worker.signals.result.connect(self._proceed_finished)
-        worker.signals.error.connect(self._proceed_failed)
-        worker.signals.finished.connect(lambda key=id(worker): _WORKERS.pop(key, None))
-        QThreadPool.globalInstance().start(worker)
+        worker = None
+        try:
+            worker = BackendWorker(self._run_continuation, (), {})
+            _WORKERS[id(worker)] = worker
+            worker.signals.result.connect(self._proceed_finished)
+            worker.signals.error.connect(self._proceed_failed)
+            worker.signals.finished.connect(lambda key=id(worker), backend_key=backend_key, claim=token:
+                _release_continuation(backend_key, claim, key))
+            worker.signals.finished.connect(self._continuation_finished)
+            QThreadPool.globalInstance().start(worker)
+        except Exception as error:
+            _release_continuation(backend_key, token, id(worker) if worker is not None else None)
+            self._continuation_active = False
+            self._proceed_failed(error)
+
+    def _continuation_finished(self):
+        self._continuation_active = False
+        self._refresh_maintenance_state()
 
     def _proceed_finished(self, report):
         report = report if isinstance(report, dict) else {}
         status = str(report.get('status') or 'unknown')
+        self._continuation_complete = status in ('completed', 'no_enabled_updates')
         messages = {
             'completed': 'Approved updates finished.',
             'completed_with_skips': 'Approved updates finished; some individual offers were skipped.',
@@ -239,11 +322,13 @@ class UpdateReviewDialog(QDialog):
         self.proceed_button.setEnabled(status not in ('completed', 'no_enabled_updates'))
         self.deny_button.setEnabled(True)
         self.proceeded.emit(self.lane, report)
+        self._refresh_maintenance_state()
 
     def _proceed_failed(self, error):
         self.status.setText('Could not continue updates: ' + _text(error, 1000))
         self.proceed_button.setEnabled(True)
         self.deny_button.setEnabled(True)
+        self._refresh_maintenance_state()
 
     def deny(self):
         try:

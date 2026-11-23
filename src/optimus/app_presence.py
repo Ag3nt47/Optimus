@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 
-from .app_removal_protection import is_removal_protected, validate_app_removal_exclusions
+from .app_removal_protection import is_removal_protected, is_windows_app_identity, validate_app_removal_exclusions
 from .automation import CURRENT_SETUP_VERSION
 from .filesystem import _ordinary_data_path
 from .speed_enhancements import _current_owner, _private_json
@@ -91,6 +91,8 @@ def _text(result):
 
 def protected_application(identity, name=''):
     """Preserve system/framework, security and the user's explicitly kept apps."""
+    if is_windows_app_identity(identity):
+        return True
     value = re.sub(r'[^a-z0-9]', '', identity.casefold() + ' ' + name.casefold())
     protected = ('bingwallpaper', 'optimus', 'codex', 'angerona', 'windowsdefender',
         'microsoftdefender', 'antivirus', 'antimalware', 'crowdstrike', 'sentinelone',
@@ -256,6 +258,10 @@ class WindowsAppPresence:
                  failure_kind='app_removal_excluded', failure_scope='package')
 
     def readiness(self, snapshot, action, *, removal_exclusions=()):
+        _require(not any(is_windows_app_identity(value) for value in
+                         (snapshot, snapshot.get('catalog'), snapshot.get('installed'))),
+                 'Windows App remote access is protected; Optimus never installs, updates or removes it.',
+                 failure_kind='protected_application', failure_scope='package')
         self._check_removal_exclusions(snapshot, action, removal_exclusions)
         _require(snapshot.get('protected') is False, 'Windows, security, frameworks, Bing Wallpaper, Codex and Optimus are preserved.',
                  failure_kind='protected_application', failure_scope='package')
@@ -281,6 +287,10 @@ class WindowsAppPresence:
                 progress_callback=None, removal_exclusions=()):
         """Internal: caller saved durable intent and still owns the installer lane."""
         _require(action in ('install', 'uninstall'), 'Unsupported application presence action.')
+        _require(not any(is_windows_app_identity(value) for value in
+                         (snapshot, snapshot.get('catalog'), snapshot.get('installed'))),
+                 'Windows App remote access is protected; no application operation was started.',
+                 failure_kind='protected_application', failure_scope='package')
         if progress_callback is not None and not callable(progress_callback):
             raise PresencePreflightError('An optional application progress observer must be callable.')
         if cancel_event is not None and cancel_event.is_set():
@@ -421,8 +431,13 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
     rules = validate_app_rules(settings.get('software_app_rules', []), native=getattr(backend, 'system', 'win32') != 'win32')
     rules = [rule for rule in rules if rule['presence'] != 'keep_current']
     removal_exclusions = validate_app_removal_exclusions(settings.get('app_removal_exclusions', []))
+    protected_items = [{'id': rule['id'], 'source': rule['source'], 'presence': rule['presence'],
+        'status': 'skipped', 'result': _known('Windows App remote access is always protected by Optimus.',
+            skipped=True, protected=True, failureKind='protected_application', failure_scope='package')}
+        for rule in rules if rule['source'] == 'winget' and is_windows_app_identity(rule['id'])]
+    rules = [rule for rule in rules if rule['source'] != 'winget' or not is_windows_app_identity(rule['id'])]
     if not rules:
-        return _finish([], skipped=True, note='No application presence rule requested a change.')
+        return _finish(protected_items, skipped=True, note='No mutable application presence rule requested a change.')
     cancelled = lambda: cancel_event is not None and cancel_event.is_set()
     if cancelled():
         return _finish([], cancelled=True, skipped=True)
@@ -438,7 +453,7 @@ def run_app_presence(backend, settings, cancel_event=None, item_callback=None, b
     provider = WindowsAppPresence(backend)
     scope_keys = ('setup_version', 'software_updates_enabled', 'software_update_agreements_accepted', 'software_app_rules')
     approved_scope = copy.deepcopy({key: settings.get(key) for key in scope_keys})
-    items = []
+    items = list(protected_items)
     gate_open = False
     journal = None
     shared_reason = ''

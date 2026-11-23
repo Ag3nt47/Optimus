@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 import re
 
+from .app_removal_protection import is_windows_app_identity
+
 APP_RULE_DEFAULTS = {'software_app_rules': []}
 SOURCES = ('winget', 'brew', 'apt', 'dnf', 'pacman')
 UPDATE_POLICIES = ('follow_global', 'always_update', 'always_ignore')
@@ -60,7 +62,9 @@ def apply_update_rules(settings, rules=None):
     This does not enable the stage or grant agreement/all-supported approvals.
     """
     result = copy.deepcopy(settings)
-    rows = validate_app_rules(settings.get('software_app_rules', []) if rules is None else rules, native=True)
+    rows = [row for row in validate_app_rules(
+        settings.get('software_app_rules', []) if rules is None else rules, native=True)
+        if row['source'] != 'winget' or not is_windows_app_identity(row['id'])]
     exclusions = list(result.get('software_update_exclude_ids', []))
     from .removal_enforcement import blocked_package_ids
     for identity in sorted(blocked_package_ids(settings)):
@@ -73,7 +77,8 @@ def apply_update_rules(settings, rules=None):
     always = [row['id'] for row in rows if row['update_policy'] == 'always_update'
               and row['presence'] != 'keep_uninstalled' and row['id'].casefold() not in excluded]
     policy = result.get('software_update_policy', 'review')
-    selected = list(result.get('software_update_ids', [])) if policy != 'review' else []
+    selected = [identity for identity in result.get('software_update_ids', [])
+                if not is_windows_app_identity(identity)] if policy != 'review' else []
     selected_keys = {value.casefold() for value in selected}
     for identity in always if policy != 'all_supported' else []:
         if identity.casefold() not in selected_keys:
@@ -88,7 +93,8 @@ def apply_update_rules(settings, rules=None):
 
 def app_rules_summary(settings):
     """Exact saved rule scopes for approval text; this performs no host lookup."""
-    rows = validate_app_rules(settings.get('software_app_rules', []), native=True)
+    rows = [row for row in validate_app_rules(settings.get('software_app_rules', []), native=True)
+        if row['source'] != 'winget' or not is_windows_app_identity(row['id'])]
     scope = {key: [] for key in ('always_update', 'always_ignore', 'keep_installed', 'keep_uninstalled')}
     for row in rows:
         label = row['id'] + ' [' + row['source'] + ']'

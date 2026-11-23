@@ -19,14 +19,13 @@ import time
 import uuid
 from typing import Any
 from .app_removal_protection import (debloat_target_protected, exclusions_for_action, protected_debloat_result,
-                                     validate_app_removal_exclusions)
+                                     is_windows_app_identity, validate_app_removal_exclusions)
 from .automated_software import UNKNOWN_VERSION_COVERAGE_WARNING, is_newer_version, valid_update_version
 
 
 _ACTIONS = (
     {"id": "consumer-apps", "name": "Optional Windows apps", "description": "Review a curated exact-name list. Store, App Installer, security, frameworks, Xbox and OneDrive are preserved.", "admin": False},
     {"id": "m365", "name": "Microsoft 365 hub and companion apps", "description": "Uninstall selected Microsoft 365 hub/companion Store apps. Full desktop suites have separate controls.", "admin": False},
-    {"id": "windows-app", "name": "Uninstall Windows App (Windows 365 / remote desktop)", "description": "Explicitly uninstall Microsoft Windows App and the Teams VDI media packages it installs. Presets never select it; classic Remote Desktop (mstsc) remains available. Reinstall from Microsoft Store.", "admin": False},
     {"id": "outlook", "name": "New Outlook app", "description": "Review the optional Microsoft.OutlookForWindows Store app separately. Local app data can be removed.", "admin": False},
     {"id": "edge", "name": "Microsoft Edge browser", "description": "Use an installed uninstaller. Windows may restrict removal. Shared WebView2 and update services are preserved.", "admin": False},
     {"id": "office365-desktop", "name": "Fully uninstall Microsoft 365 desktop apps", "description": "Uninstall registered Microsoft 365 desktop suites using their signed Microsoft uninstallers. Personal documents and Windows App are preserved.", "admin": True},
@@ -615,6 +614,9 @@ class Maintenance:
             raise ValueError('An optional update progress callback must be callable.')
         if not isinstance(package_id, str) or not _PACKAGE_ID.fullmatch(package_id):
             raise UpdatePreflightError("Select an exact package ID from a fresh update scan.", failure_scope='package', failureKind='package_unavailable')
+        if is_windows_app_identity(package_id):
+            raise UpdatePreflightError("Windows App is protected; Optimus does not update or modify it.",
+                                       failure_scope='package', failureKind='protected_app')
         current = self._last_update_packages.get(package_id)
         age = time.time() - self._last_update_scan
         if self._last_update_scan <= 0 or age < 0:

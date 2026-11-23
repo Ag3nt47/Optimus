@@ -23,6 +23,7 @@ from typing import Any
 
 import psutil
 from .filesystem import replace_with_retry
+from .app_removal_protection import is_windows_app_path
 
 _PLATFORM = sys.platform
 
@@ -247,6 +248,8 @@ def _base_protection(process: Any, *, for_sleep: bool = True,
             return "Core Windows process."
         if not executable or not username:
             return "Executable or process ownership is inaccessible."
+        if is_windows_app_path(executable):
+            return "Windows App remote access is protected from process changes."
         if 'bingwallpaper' in re.sub(r'[^a-z0-9]', '', name + ' ' + executable.casefold()):
             return "Bing Wallpaper is preserved."
         current_user = inventory_context.current_user if inventory_context is not None else _current_user()
