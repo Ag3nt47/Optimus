@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.53
+
+- Show a live startup scan window for driver updates, app updates, the Defender
+  scan, Zero Breach and tracker checks. Each selected job shows its current
+  status and result; closing the window hides it while work continues.
+- Reopening Optimus from its tray icon, shortcut or Optimize button restores
+  the running startup scan instead of leaving it invisible in the background.
+- Stop, quit and restart wait for startup operations to save their outcomes.
+  Failed, skipped and cancelled checks remain visible in the results.
+
 ## 0.12.52
 
 - Add background app cleanup (`background_apps`). A read-only scan finds

@@ -1865,7 +1865,7 @@ class StarfieldCanvas(QWidget):
         owner = self.window()
         if not self.motion or not self.isVisible() or owner.isMinimized() or getattr(owner, 'busy', False):
             return False
-        for name in ('_settings_window', '_sandbox_window', '_setup_wizard', '_progress_window', '_security_review_dialog'):
+        for name in ('_settings_window', '_sandbox_window', '_setup_wizard', '_progress_window', '_startup_progress_window', '_security_review_dialog'):
             child = getattr(owner, name, None)
             visible = getattr(child, 'isVisible', None)
             if callable(visible):
@@ -4709,6 +4709,8 @@ class SecurityReviewDialog(QDialog):
 
 
 class OptimusWindow(QMainWindow):
+    _startup_job_progress = Signal(object)
+
     def __init__(self, backend, *, smoke_test=False, defer_activation=False, require_launch_review=False):
         super().__init__()
         self._surface_scale = 1.0
@@ -4724,6 +4726,9 @@ class OptimusWindow(QMainWindow):
         self._self_update_controller = None
         self._self_update_dialog = None
         self._self_update_notice = ''
+        self._startup_jobs = None
+        self._startup_progress_window = None
+        self._startup_job_progress.connect(self._startup_progress_received, Qt.QueuedConnection)
         self.busy = False
         self._quitting = False
         self._emergency_stopping = False
@@ -5753,6 +5758,7 @@ class OptimusWindow(QMainWindow):
             # Both use the maintenance lease; start Auto Clean once the jobs end.
             self._start_after_startup_jobs = True
             self.status.setText('Driver/app updates and scans are running; Auto Clean starts when they finish.')
+            self._show_startup_progress(activate=True)
             return
         try:
             settings = self._settings()
@@ -6151,9 +6157,11 @@ class OptimusWindow(QMainWindow):
             return False
         target = QApplication.activeModalWidget()
         if target is None:
-            for candidate in (self._setup_wizard, self._security_review_dialog,
-                              self._progress_window, self._settings_window):
-                if candidate is not None and (candidate.isVisible() or
+            jobs = getattr(self, '_startup_jobs', None)
+            startup = self._startup_progress_window if jobs is not None and jobs.running else None
+            for candidate in (self._setup_wizard, self._security_review_dialog, startup,
+                              self._progress_window, self._settings_window, self._startup_progress_window):
+                if candidate is not None and (candidate.isVisible() or candidate is startup or
                         candidate is self._progress_window and self.busy):
                     target = candidate
                     break
@@ -6186,6 +6194,7 @@ class OptimusWindow(QMainWindow):
             return False
         bridge = getattr(self.backend, 'bridge', None)
         if (self.busy or self._post_review_active or self._setup_wizard is not None
+                or self._startup_jobs is not None and self._startup_jobs.running
                 or self._settings_window is not None and self._settings_window.busy
                 or bool(getattr(getattr(self.backend, 'workflow', None), 'active', False))
                 or bool(getattr(bridge, '_busy', False)) or bool(getattr(bridge, 'busy', False))
@@ -6215,14 +6224,72 @@ class OptimusWindow(QMainWindow):
         QApplication.instance().quit()
         return True
 
+    def _selected_startup_jobs(self):
+        from .startup_jobs import JOBS
+        from .workflow import Preferences
+        settings = Preferences.validate(self._settings())
+        return [job for job in JOBS if settings.get(job[2])] if settings.get('startup_jobs_enabled') else []
+
+    def _show_startup_progress(self, *, activate=False):
+        dashboard = self._startup_progress_window
+        if dashboard is None:
+            selected = self._selected_startup_jobs()
+            if not selected:
+                return None
+            from .widgets.startup_progress import StartupProgressDialog
+            dashboard = self._startup_progress_window = StartupProgressDialog(selected, self)
+            dashboard.cancelRequested.connect(self._cancel_startup_jobs)
+        dashboard.showNormal() if dashboard.isMinimized() else dashboard.show()
+        if activate:
+            dashboard.raise_()
+            dashboard.activateWindow()
+        self.canvas.sync_motion()
+        return dashboard
+
+    @Slot(object)
+    def _startup_progress_received(self, event):
+        if self._quitting or getattr(self, '_presentation_shutdown', False):
+            return
+        if not isinstance(event, dict):
+            return
+        dashboard = self._startup_progress_window
+        jobs = self._startup_jobs
+        if jobs is not None and not jobs.running and jobs.last is not None:
+            # Signals emitted before cancellation can still be queued when the
+            # final report is polled. They must never revive a finished pass.
+            if dashboard is not None:
+                dashboard.set_report(jobs.last)
+            return
+        if dashboard is None:
+            # No widget is ever created from the worker thread. This slot is
+            # explicitly queued onto the QApplication thread.
+            dashboard = self._show_startup_progress()
+        if dashboard is not None:
+            if not dashboard.running and event.get('status') == 'running':
+                dashboard.begin(self._selected_startup_jobs())
+            dashboard.update_progress(event)
+            if event.get('status') == 'running' and not dashboard.stopping:
+                self.status.setText('Startup jobs: ' + str(event.get('description') or event.get('title') or 'running'))
+
+    @Slot()
+    def _cancel_startup_jobs(self):
+        jobs = self._startup_jobs
+        if jobs is not None:
+            jobs.stop()
+        if self._startup_progress_window is not None:
+            self._startup_progress_window.mark_stopping()
+        self._start_after_startup_jobs = False
+        self.status.setText('Stopping startup jobs safely; waiting for the active operation to return.')
+
     def begin_startup_jobs(self):
-        """Driver updater, app updater, virus/spyware scan, Zero Breach and
-        tracker blocking re-run on every start/restart, independent of the
-        Auto Clean launch review, once the self-update check is done."""
+        """Start saved jobs after self-update, with a live nonmodal dashboard."""
+        if self._startup_jobs is not None:
+            return
         from .startup_jobs import StartupJobs
-        self._startup_jobs = StartupJobs(self.backend, self._settings)
+        self._startup_jobs = StartupJobs(self.backend, self._settings,
+                                        on_progress=self._startup_job_progress.emit)
         self._startup_jobs_state = {'started': False, 'reported': None}
-        self._startup_jobs_gate = QTimer(self)  # GUI thread: start once ready, then report results
+        self._startup_jobs_gate = QTimer(self)
         self._startup_jobs_gate.setInterval(2000)
         self._startup_jobs_gate.timeout.connect(self._startup_jobs_tick)
         self._startup_jobs_gate.start()
@@ -6230,12 +6297,15 @@ class OptimusWindow(QMainWindow):
     def _startup_jobs_tick(self):
         jobs, state = self._startup_jobs, self._startup_jobs_state
         if self._quitting or self._close_when_idle or self._emergency_stopping:
+            jobs.stop()
             self._startup_jobs_gate.stop()
             return
         if not state['started']:
             if self._startup_update_pending or self.busy:
                 return
             state['started'] = True
+            if self._selected_startup_jobs():
+                self._show_startup_progress()
             jobs.start()
             return
         report = jobs.last
@@ -6244,8 +6314,11 @@ class OptimusWindow(QMainWindow):
         state['reported'] = report
         rows = report.get('jobs') or []
         done = sum(entry.get('status') == 'completed' for entry in rows)
+        retry = report.get('status') in ('busy', 'failed') and not jobs.cancel.is_set()
         self.status.setText(f'Startup jobs {report.get("status")}: {done}/{len(rows)} completed.'
-                            + (' Retrying in 15 minutes.' if report.get('status') in ('busy', 'failed') else ''))
+                            + (' Retrying in 15 minutes.' if retry else ''))
+        if self._startup_progress_window is not None:
+            self._startup_progress_window.set_report(report)
         if getattr(self, '_start_after_startup_jobs', False):
             self._start_after_startup_jobs = False
             self.start_optimization()
@@ -6371,7 +6444,7 @@ class OptimusWindow(QMainWindow):
         if self._startup_update_pending and self._self_update_controller is not None:
             self._self_update_controller.request_safe_stop()
             return False
-        if self.busy:
+        if self._work_in_progress():
             self.request_safe_stop()
             return False
         if self._post_review_active:
@@ -6413,6 +6486,10 @@ class OptimusWindow(QMainWindow):
         self._cancel_optimization_restart()
         self._close_when_idle = True
         self._cancel.set()
+        if self._startup_jobs is not None:
+            self._startup_jobs.stop()
+        if self._startup_progress_window is not None:
+            self._startup_progress_window.mark_stopping()
         from .emergency_stop import controller_for
         self._emergency_stop = controller_for(self.backend)
         self._emergency_stop.request_stop()
@@ -6461,7 +6538,8 @@ class OptimusWindow(QMainWindow):
         settings_busy = self._settings_window is not None and self._settings_window.busy
         update_busy = self._self_update_controller is not None and self._self_update_controller.pending
         if (not self.busy and not settings_busy and not security_busy and not revert_busy
-                and not update_busy and self.pool.activeThreadCount() == 0 and state.get('drained') is True):
+                and not update_busy and not bool(self._startup_jobs and self._startup_jobs.running)
+                and self.pool.activeThreadCount() == 0 and state.get('drained') is True):
             if self._security_review_dialog is not None:
                 self._security_review_dialog.close()
             self.quit_application()
@@ -6484,6 +6562,15 @@ class OptimusWindow(QMainWindow):
             return False
         self._close_when_idle = True
         self._cancel.set()
+        jobs = self._startup_jobs
+        if jobs is not None:
+            jobs.stop()
+        gate = getattr(self, '_startup_jobs_gate', None)
+        if gate is not None:
+            gate.stop()
+        if self._startup_progress_window is not None:
+            self._startup_progress_window.mark_stopping()
+        self._start_after_startup_jobs = False
         self._pending_post_review = None
         self._pending_auto_fixes = None
         self._post_review_generation += 1
@@ -6521,8 +6608,8 @@ class OptimusWindow(QMainWindow):
                 progress.description.setText('Stopping safely. No further work will start. Active operations are allowed to finish and save their outcomes before Optimus closes.')
                 progress.show()
             self.status.setText('Stopping safely. Waiting for the current operations and saved outcomes before exiting.')
-        elif settings_busy:
-            self.status.setText('Stopping safely. Waiting for the current settings operation to save its outcome.')
+        elif settings_busy or jobs is not None and jobs.running:
+            self.status.setText('Stopping safely. Waiting for the current operation to save its outcome.')
             QTimer.singleShot(100, self._finish_optional_stop)
         else:
             if not self._emergency_stopping:
@@ -6534,7 +6621,8 @@ class OptimusWindow(QMainWindow):
             return
         if self._emergency_stopping:
             return  # The emergency poll also waits for native receipt observers.
-        if self.busy or self._settings_window is not None and self._settings_window.busy:
+        if (self.busy or self._settings_window is not None and self._settings_window.busy
+                or self._startup_jobs is not None and self._startup_jobs.running):
             QTimer.singleShot(200, self._finish_optional_stop)
             return
         self.quit_application()
@@ -6543,6 +6631,19 @@ class OptimusWindow(QMainWindow):
         if getattr(self, '_presentation_shutdown', False):
             return
         self._presentation_shutdown = True
+        gate = getattr(self, '_startup_jobs_gate', None)
+        if gate is not None:
+            gate.stop()
+        jobs = self._startup_jobs
+        if jobs is not None:
+            jobs.stop()
+            # Normal exits poll before reaching shutdown. An external Qt quit
+            # still drains this thread before app.py closes the shared backend.
+            thread = getattr(jobs, 'thread', None)
+            if thread is not None and thread is not threading.current_thread():
+                thread.join()
+        if self._startup_progress_window is not None:
+            self._startup_progress_window.hide()
         self._cancel_optimization_restart()
         if self._self_update_controller is not None:
             self._self_update_controller.shutdown()
